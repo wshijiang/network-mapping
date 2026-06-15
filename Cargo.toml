@@ -14,7 +14,7 @@ toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter", "json"] }
 tracing-appender = "0.2"
-rand = "0.9"
+rand = "0.10"
 tokio-postgres = { version = "0.7", features = ["array-impls", "with-cidr-0_3", "with-chrono-0_4"]}
 cidr = { version = "0.3", features = ["serde"]}
 deadpool-postgres = { version = "0.14"}

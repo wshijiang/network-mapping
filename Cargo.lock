@@ -2391,7 +2391,7 @@ dependencies = [
  "password-hash",
  "postgres-from-row",
  "postgres-types",
- "rand 0.9.4",
+ "rand 0.10.1",
  "regex",
  "serde",
  "serde_json",
