@@ -2122,7 +2122,7 @@ dependencies = [
  "png",
  "postgres-from-row",
  "postgres-types",
- "rand 0.9.5",
+ "rand 0.10.2",
  "regex",
  "reqwest",
  "rpassword",
