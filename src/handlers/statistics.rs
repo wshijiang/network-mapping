@@ -1,6 +1,6 @@
 //! Interactive statistics: all rows and exports share one query result.
 use crate::statistics::{Failure, StatisticsService};
-use actix_web::{HttpResponse, get, post, web};
+use actix_web::{HttpRequest, HttpResponse, get, post, web};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use deadpool_postgres::{GenericClient, Pool};
 use serde::{Deserialize, Serialize};
@@ -155,6 +155,7 @@ pub(crate) async fn clear_cache(
 
 #[post("/api/analysis/statistics/query")]
 pub(crate) async fn query(
+    req: HttpRequest,
     body: web::Json<StatisticsQuery>,
     pool: web::Data<Pool>,
     elasticsearch: web::Data<ElasticsearchService>,
@@ -214,8 +215,14 @@ pub(crate) async fn query(
         return HttpResponse::Conflict()
             .json(json!({"success":false,"message":"系统时区已改变，请重新生成统计"}));
     }
-    if service.refresh(&pool).await.is_err() {
-        return failure("统计配置暂不可用");
+    if let Err(error) = service.refresh(&pool).await {
+        tracing::warn!(event = "StatisticsConfigurationReadFailed", request_id = %crate::logs::write::request_id(&req), error_message = %error);
+        return error_response(
+            &req,
+            Failure("statistics_config_unavailable", "统计配置暂不可用"),
+            &body.data_type,
+            Some(&body.group_by),
+        );
     }
     let settings = config.get().await;
     let is_scan = matches!(body.data_type.as_str(), "discovery" | "port" | "service");
@@ -230,6 +237,8 @@ pub(crate) async fn query(
     let key=json!({"user":user.id,"role":user.role,"type":body.data_type,"group":body.group_by,"metrics":body.metrics,
         "comparison":body.comparison,"start":filters.start_at,"end":filters.end_at,"timezone":filters.timezone,
         "scanner":filters.scanner_id,"source":filters.task_source,"mode":mode,"mode_revision":settings.revision,"version":2}).to_string();
+    let data_type = body.data_type.clone();
+    let group_by = body.group_by.clone();
     let result=service.execute(key,user.id,mode.to_owned(),move |deadline| async move {
         let mut cluster_slot=crate::statistics::ClusterSlot::acquire(&pool).await?;
         let output=async {
@@ -251,16 +260,32 @@ pub(crate) async fn query(
             .insert_header(("X-Statistics-Cache", cache))
             .content_type("application/json; charset=utf-8")
             .body(bytes),
-        Err(e) => error_response(e),
+        Err(e) => error_response(&req, e, &data_type, Some(&group_by)),
     }
 }
-pub(super) fn error_response(error: Failure) -> HttpResponse {
-    let mut response = if error.0 == "statistics_busy" {
-        HttpResponse::TooManyRequests()
+pub(super) fn error_response(
+    req: &HttpRequest,
+    error: Failure,
+    data_type: &str,
+    group_by: Option<&str>,
+) -> HttpResponse {
+    let status = if error.0 == "statistics_busy" {
+        actix_web::http::StatusCode::TOO_MANY_REQUESTS
     } else {
-        HttpResponse::ServiceUnavailable()
+        actix_web::http::StatusCode::SERVICE_UNAVAILABLE
     };
-    response
+    crate::request_log::set_reason(req, error.0);
+    tracing::warn!(
+        event = "StatisticsRequestRejected",
+        request_id = %crate::logs::write::request_id(req),
+        path = req.path(),
+        data_type,
+        group_by = ?group_by,
+        error_code = error.0,
+        error_message = error.1,
+        http_status = status.as_u16(),
+    );
+    HttpResponse::build(status)
         .insert_header(("Retry-After", "5"))
         .json(json!({"success":false,"code":error.0,"message":error.1}))
 }
@@ -729,6 +754,59 @@ fn fill_dates(rows: &mut Vec<Value>, f: &AnalysisFilters, group: &str, kind: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[actix_web::test]
+    async fn statistics_failures_reach_client_with_reason_and_retry_contract() {
+        use crate::api_response::ApiErrorMiddleware;
+        use actix_web::{App, HttpMessage, HttpRequest, http::StatusCode, test::TestRequest};
+        use std::sync::{Arc, Mutex};
+        use uuid::Uuid;
+
+        for path in [
+            "/api/analysis/statistics/query",
+            "/api/analysis/statistics/details",
+        ] {
+            for code in [
+                "statistics_timeout",
+                "statistics_budget_exceeded",
+                "statistics_snapshot_pending",
+                "statistics_config_unavailable",
+                "statistics_failed",
+            ] {
+                let request_id = Uuid::new_v4();
+                let reason = Arc::new(Mutex::new(None));
+                let slot = crate::request_log::RequestReason(reason.clone());
+                let app = actix_web::test::init_service(App::new().wrap(ApiErrorMiddleware).route(
+                    path,
+                    web::post().to(move |req: HttpRequest| {
+                        req.extensions_mut()
+                            .insert(crate::audit::RequestId(request_id));
+                        req.extensions_mut().insert(slot.clone());
+                        std::future::ready(crate::handlers::statistics::error_response(
+                            &req,
+                            crate::statistics::Failure(code, "password=secret"),
+                            "port",
+                            Some("port"),
+                        ))
+                    }),
+                ))
+                .await;
+                let response =
+                    actix_web::test::call_service(&app, TestRequest::post().uri(path).to_request())
+                        .await;
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(response.headers().get("Retry-After").unwrap(), "5");
+                assert_eq!(response.headers().get("Cache-Control").unwrap(), "no-store");
+                let value: Value = actix_web::test::read_body_json(response).await;
+                assert_eq!(value["code"], code);
+                assert_eq!(value["request_id"], request_id.to_string());
+                assert_eq!(value["success"], false);
+                assert_ne!(value["message"], "服务暂时不可用，请稍后重试");
+                assert!(!value.to_string().contains("secret"));
+                assert_eq!(reason.lock().unwrap().as_deref(), Some(code));
+            }
+        }
+    }
+
     #[test]
     fn success_rate_excludes_cancellations_and_empty_denominators() {
         assert_eq!(rate(2, 1, 1), Some(50.0));

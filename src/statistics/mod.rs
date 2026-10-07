@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{Semaphore, watch};
+use tracing::Instrument;
 
 pub const NAMESPACE: &str = "statistics_cache";
 pub const CONCURRENCY: usize = 2;
@@ -342,7 +343,7 @@ impl StatisticsService {
         };
         if leader {
             let service = self.clone();
-            tokio::spawn(async move {
+            let worker = async move {
                 let mut guard = FlightGuard {
                     service: service.clone(),
                     key: key.clone(),
@@ -401,7 +402,8 @@ impl StatisticsService {
                 guard.armed = false;
                 drop(s);
                 drop(guard);
-            });
+            };
+            tokio::spawn(worker.in_current_span());
         }
         let wait = async {
             loop {
