@@ -8,6 +8,7 @@
 
 | 文档 | 内容 |
 | --- | --- |
+| [Docker 构建与部署](DOCKER.md) | 多架构镜像、GitHub CI、配置、持久化与发布门禁 |
 | [服务端部署指南](DEPLOYMENT.md) | 启动配置、TLS、前端托管与 IP 情报 |
 | [服务端功能指南](FEATURES.md) | 功能入口、交互约束与配置示例 |
 | [用户管理 CLI](USER_MANAGEMENT_CLI.md) | 用户、凭据、会话和登录限制的本地管理 |
