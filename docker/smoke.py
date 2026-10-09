@@ -15,19 +15,31 @@ PG_IMAGE = 'postgres:18.6-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4
 ES_IMAGE = 'docker.elastic.co/elasticsearch/elasticsearch:9.5.0@sha256:8818ab9af72d7482e38a9d6f0454d5ee667564a25bbdc42360c0f9b8f8f72fc5'
 
 
-def command(*args, check=True, input=None):
-    return subprocess.run(args, input=input, text=True, check=check, capture_output=True, timeout=120)
+def command(*args, check=True, input=None, timeout=120):
+    return subprocess.run(args, input=input, text=True, check=check, capture_output=True, timeout=timeout)
 
 
 def docker(*args, **kwargs):
     return command('docker', *args, **kwargs)
 
 
-def wait_until(probe, message, attempts=90):
-    for _ in range(attempts):
+def require_running(container):
+    state = json.loads(docker('inspect', '--format', '{{json .State}}', container, timeout=10).stdout)
+    if not state.get('Running') or state.get('OOMKilled'):
+        raise RuntimeError(f'{container} stopped before readiness: status={state.get("Status")}, '
+                           f'exit_code={state.get("ExitCode")}, oom_killed={state.get("OOMKilled")}')
+
+
+def wait_until(probe, message, *, containers=(), timeout=180):
+    deadline = time.monotonic()+timeout
+    while time.monotonic() < deadline:
+        for container in containers:
+            require_running(container)
         if probe():
             return
-        time.sleep(2)
+        remaining = deadline-time.monotonic()
+        if remaining > 0:
+            time.sleep(min(2, remaining))
     raise RuntimeError(message)
 
 
@@ -35,7 +47,7 @@ def elasticsearch_ready(container):
     result = docker('exec', container, 'curl', '--fail', '--silent', '--show-error',
                     '--max-time', '5',
                     'http://localhost:9200/_cluster/health?wait_for_status=yellow&'
-                    'wait_for_no_initializing_shards=true&timeout=1s', check=False)
+                    'wait_for_no_initializing_shards=true&timeout=1s', check=False, timeout=10)
     if result.returncode != 0:
         return False
     try:
@@ -44,6 +56,45 @@ def elasticsearch_ready(container):
         return False
     return (isinstance(health, dict) and health.get('timed_out') is False
             and health.get('status') in ('green', 'yellow'))
+
+
+def postgres_ready(container):
+    # The image's initialization server listens only on a Unix socket.
+    return docker('exec', container, 'pg_isready', '-h', '127.0.0.1', '-t', '3',
+                  '-U', 'network_mapping', '-d', 'network_mapping',
+                  check=False, timeout=10).returncode == 0
+
+
+def https_request(container, path, *, body=False):
+    options = ['curl', '--silent', '--show-error', '--max-time', '5', '--cacert',
+               '/etc/network-mapping/tls/ca.pem', '--resolve', 'localhost:9999:127.0.0.1']
+    if body:
+        options.append('--fail')
+    else:
+        options.extend(['--output', '/dev/null', '--write-out', '%{http_code}'])
+    return docker('exec', container, *options, 'https://localhost:9999'+path,
+                  check=False, timeout=10)
+
+
+def https_status(container, path):
+    result = https_request(container, path)
+    return result.stdout if result.returncode == 0 else None
+
+
+def https_ready(container):
+    return https_status(container, '/login') == '200'
+
+
+def best_effort_docker(*args):
+    """Continue diagnostics/cleanup even if the daemon times out or disappears."""
+    try:
+        result = docker(*args, check=False, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f'Docker {args[0]} failed during diagnostics/cleanup: {type(error).__name__}', file=sys.stderr)
+        return None
+    if result.returncode != 0:
+        print(f'Docker {args[0]} failed during diagnostics/cleanup: {result.stderr}', file=sys.stderr)
+    return result
 
 
 def main():
@@ -71,7 +122,8 @@ def main():
         start(es_name, ES_IMAGE, '--network-alias', 'elasticsearch', '-e', 'discovery.type=single-node',
               '-e', 'xpack.security.enabled=false', '-e', 'ES_JAVA_OPTS=-Xms512m -Xmx512m',
               '--tmpfs', '/usr/share/elasticsearch/data:rw,uid=1000,gid=0,mode=0770,size=1g')
-        wait_until(lambda: elasticsearch_ready(es_name), 'Elasticsearch did not become ready')
+        wait_until(lambda: elasticsearch_ready(es_name), 'Elasticsearch did not become ready',
+                   containers=(es_name,))
 
         if metadata['component'] == 'scanner':
             # Version/help validation does not require raw-network privileges.
@@ -118,8 +170,8 @@ def main():
             pg_name = namespace+'-pg'
             start(pg_name, PG_IMAGE, '--network-alias', 'postgres', '-e', 'POSTGRES_USER=network_mapping',
                   '-e', 'POSTGRES_DB=network_mapping', '-e', 'POSTGRES_PASSWORD='+password)
-            wait_until(lambda: docker('exec', pg_name, 'pg_isready', '-U', 'network_mapping',
-                                      '-d', 'network_mapping', check=False).returncode == 0, 'PostgreSQL did not become ready')
+            wait_until(lambda: postgres_ready(pg_name), 'PostgreSQL did not become ready',
+                       containers=(es_name, pg_name))
             server = namespace+'-server'
             start(server, image, '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
                   '-e', 'SERVER_TLS_NAME=localhost', '--mount', f'type=bind,src={directory},dst=/etc/network-mapping,readonly',
@@ -127,36 +179,38 @@ def main():
                   '--tmpfs', '/var/lib/network-mapping:rw,uid=10001,gid=10001,mode=0700',
                   '--tmpfs', '/var/log/network-mapping:rw,uid=10001,gid=10001,mode=0700')
 
-            def request(path):
-                return docker('exec', server, 'curl', '--silent', '--show-error', '--cacert',
-                              '/etc/network-mapping/tls/ca.pem', '--resolve', 'localhost:9999:127.0.0.1',
-                              '--output', '/dev/null', '--write-out', '%{http_code}', 'https://localhost:9999'+path,
-                              check=False)
-
-            wait_until(lambda: request('/login').stdout == '200', 'HTTPS login did not become ready')
-            assert request('/this-route-does-not-exist').stdout == '404'
-            assert request('/assets/this-file-does-not-exist.js').stdout == '404'
-            page = docker('exec', server, 'curl', '--fail', '--silent', '--cacert',
-                          '/etc/network-mapping/tls/ca.pem', 'https://localhost:9999/login').stdout
-            assets = re.findall(r'(?:src|href)="(/assets/[^"?#]+)', page)
+            wait_until(lambda: https_ready(server), 'HTTPS login did not become ready',
+                       containers=(es_name, pg_name, server))
+            assert https_status(server, '/this-route-does-not-exist') == '404'
+            assert https_status(server, '/assets/this-file-does-not-exist.js') == '404'
+            page = https_request(server, '/login', body=True)
+            assert page.returncode == 0, 'HTTPS login request failed: '+page.stderr
+            assets = re.findall(r'(?:src|href)="(/assets/[^"?#]+)', page.stdout)
             assert assets, 'Frontend assets were not referenced by the login page'
             for asset in assets:
-                assert request(asset).stdout == '200', 'Missing frontend asset: '+asset
+                assert https_status(server, asset) == '200', 'Missing frontend asset: '+asset
             docker('stop', '--time', '60', server)
             assert json.loads(docker('inspect', server).stdout)[0]['State']['ExitCode'] == 0
             docker('start', server)
-            wait_until(lambda: request('/login').stdout == '200', 'Server did not recover after restart')
+            wait_until(lambda: https_ready(server), 'Server did not recover after restart',
+                       containers=(es_name, pg_name, server))
             print('Server initialization, verified HTTPS, frontend assets, 404s and database-preserving restart passed.')
     except Exception:
         for name in containers:
-            logs = docker('logs', '--tail', '50', name, check=False)
-            print(name, logs.stdout, logs.stderr, file=sys.stderr)
+            state = best_effort_docker('inspect', '--format',
+                                      'status={{.State.Status}} exit_code={{.State.ExitCode}} '
+                                      'oom_killed={{.State.OOMKilled}}', name)
+            if state:
+                print(name, state.stdout, file=sys.stderr)
+            logs = best_effort_docker('logs', '--tail', '50', name)
+            if logs:
+                print(name, logs.stdout, logs.stderr, file=sys.stderr)
         raise
     finally:
         for name in reversed(containers):
-            docker('rm', '--force', '--volumes', name, check=False)
+            best_effort_docker('rm', '--force', '--volumes', name)
         if network_created:
-            docker('network', 'rm', namespace, check=False)
+            best_effort_docker('network', 'rm', namespace)
 
 
 if __name__ == '__main__':

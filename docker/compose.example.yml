@@ -37,7 +37,7 @@ services:
     secrets: [postgres_password]
     volumes: ["postgres-data:/var/lib/postgresql"]
     healthcheck:
-      test: [CMD-SHELL, "pg_isready -U network_mapping -d network_mapping"]
+      test: [CMD, pg_isready, -h, 127.0.0.1, -t, "3", -U, network_mapping, -d, network_mapping]
       interval: 10s
       timeout: 5s
       retries: 20
@@ -52,7 +52,13 @@ services:
       ES_JAVA_OPTS: "-Xms1g -Xmx1g"
     volumes: ["elasticsearch-data:/usr/share/elasticsearch/data"]
     healthcheck:
-      test: [CMD-SHELL, "curl --fail --silent 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' > /dev/null"]
+      test:
+        - CMD-SHELL
+        - >-
+          health="$$(curl --fail --silent --show-error --max-time 7
+          'http://localhost:9200/_cluster/health?wait_for_status=yellow&wait_for_no_initializing_shards=true&timeout=5s&filter_path=status,timed_out')"
+          && printf '%s\n' "$$health" | grep -Eq '"timed_out"[[:space:]]*:[[:space:]]*false'
+          && printf '%s\n' "$$health" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"(green|yellow)"'
       interval: 10s
       timeout: 10s
       retries: 30
