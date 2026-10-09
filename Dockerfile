@@ -15,6 +15,7 @@ RUN test -f dist/index.html && test -f dist/login.html && test -f dist/search.ht
 FROM rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS rust-builder
 WORKDIR /build
 ENV CARGO_BUILD_JOBS=2
+RUN rustup component add rustfmt clippy
 RUN apt-get update && apt-get install -y --no-install-recommends cmake libssl-dev pkg-config && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && printf 'fn main() {}\n' > src/main.rs && cargo fetch --locked
@@ -28,7 +29,9 @@ COPY assets/fonts ./assets/fonts
 
 # Keep dependency downloads in cached build layers. Cache mounts alone are not
 # persisted by cache-to=gha; correctness never depends on a warm cache.
-RUN cargo fmt --check && cargo clippy --locked --all-targets && cargo test --locked -- --test-threads=4
+RUN cargo fmt --check
+RUN cargo clippy --locked --all-targets
+RUN cargo test --locked -- --test-threads=4
 RUN cargo build --locked --release && mkdir /out && install -m 0755 target/release/network_mapping_server /out/network_mapping_server
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
