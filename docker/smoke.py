@@ -31,6 +31,21 @@ def wait_until(probe, message, attempts=90):
     raise RuntimeError(message)
 
 
+def elasticsearch_ready(container):
+    result = docker('exec', container, 'curl', '--fail', '--silent', '--show-error',
+                    '--max-time', '5',
+                    'http://localhost:9200/_cluster/health?wait_for_status=yellow&'
+                    'wait_for_no_initializing_shards=true&timeout=1s', check=False)
+    if result.returncode != 0:
+        return False
+    try:
+        health = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return False
+    return (isinstance(health, dict) and health.get('timed_out') is False
+            and health.get('status') in ('green', 'yellow'))
+
+
 def main():
     image, metadata_path = sys.argv[1:]
     metadata = json.loads(Path(metadata_path).read_text())
@@ -51,11 +66,12 @@ def main():
         docker('network', 'create', '--internal', namespace)
         network_created = True
         es_name = namespace+'-es'
+        # Build caches and OCI exports can push the runner above ES disk watermarks.
+        # Only disposable smoke-test data uses this bounded, separate filesystem.
         start(es_name, ES_IMAGE, '--network-alias', 'elasticsearch', '-e', 'discovery.type=single-node',
-              '-e', 'xpack.security.enabled=false', '-e', 'ES_JAVA_OPTS=-Xms512m -Xmx512m')
-        wait_until(lambda: docker('exec', es_name, 'curl', '--fail', '--silent',
-                                  'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=1s',
-                                  check=False).returncode == 0, 'Elasticsearch did not become ready')
+              '-e', 'xpack.security.enabled=false', '-e', 'ES_JAVA_OPTS=-Xms512m -Xmx512m',
+              '--tmpfs', '/usr/share/elasticsearch/data:rw,uid=1000,gid=0,mode=0770,size=1g')
+        wait_until(lambda: elasticsearch_ready(es_name), 'Elasticsearch did not become ready')
 
         if metadata['component'] == 'scanner':
             # Version/help validation does not require raw-network privileges.
