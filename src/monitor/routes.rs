@@ -48,6 +48,7 @@ pub const WEB_OPERATIONS: &[(&str, &str)] = &[
         "读取可信代理配置",
     ),
     ("GET /api/config/server", "读取服务端监听配置"),
+    ("GET /api/config/check", "读取启动配置检查结果"),
     ("GET /api/dashboard/overview", "仪表盘概览"),
     ("GET /api/data/database-size-history", "读取数据库容量历史"),
     ("GET /api/data/system-data", "读取系统统计"),

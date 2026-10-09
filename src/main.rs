@@ -57,7 +57,7 @@ async fn main() -> io::Result<()> {
         ));
     }
 
-    let config = config::Config::from_file(&args.config);
+    let (config, config_check) = config::Config::from_file_with_check(&args.config)?;
 
     let log_file_rolling = match config.log.file_rolling {
         0 => LogRollingMode::Daily,
@@ -79,6 +79,7 @@ async fn main() -> io::Result<()> {
         terminal_mode = if args.terminal_verbose { "详细" } else { "精简" },
         "日志系统已启动"
     );
+    config_check.emit_startup();
     config.check();
     let request_log_config = config.requests.clone();
     let monitor_config = config.monitor.clone();
@@ -511,6 +512,7 @@ async fn main() -> io::Result<()> {
         system_maintenance_state.clone(),
     ));
     let scanner_diagnostics_data = web::Data::new(scanner_diagnostics);
+    let config_check = web::Data::new(config_check);
 
     HttpServer::new(move || {
         let request_log_tx = request_log_tx.clone();
@@ -542,6 +544,7 @@ async fn main() -> io::Result<()> {
             .app_data(web::Data::new(scanner_latency_history.clone()))
             .app_data(frontend_assets.clone())
             .app_data(scanner_diagnostics_data.clone())
+            .app_data(config_check.clone())
             .app_data(web::JsonConfig::default().limit(server_max_body))
             .wrap(CsrfMiddleware)
             .wrap(SHeaderM)

@@ -7,7 +7,7 @@ mod tests;
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use protocol::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{io, path::PathBuf, sync::Arc};
 use tokio::sync::{Mutex, Semaphore};
@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DiagnosticsConfig {
     pub enabled: bool,

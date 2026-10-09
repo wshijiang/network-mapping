@@ -31,6 +31,8 @@ docker buildx build --build-context frontend=../network-mapping-vue \
 本地默认 VERSION 为 development，不作正式版本发布。镜像 `/opt/network-mapping/BUILD-INFO`
 和 OCI labels 记录后端/前端版本、提交和架构。前端构建使用明确 COPY 清单，不复制开发证书或环境文件。
 
+启动配置检查同时适用于文件和 Docker 部署，不修改只读挂载文件；Web 提示和升级后的处理方式见 [启动配置检查](CONFIG_CHECK.md)。
+
 ## 准备运行配置
 
 从 `network-mapping/` 运行：

@@ -530,6 +530,7 @@ ALTER TABLE scanner_info ADD COLUMN IF NOT EXISTS applied_config_revision BIGINT
 ALTER TABLE scanner_info ADD COLUMN IF NOT EXISTS config_status TEXT;
 ALTER TABLE scanner_info ADD COLUMN IF NOT EXISTS config_error TEXT;
 ALTER TABLE scanner_info ADD COLUMN IF NOT EXISTS config_reported_at TIMESTAMPTZ;
+ALTER TABLE scanner_info ADD COLUMN IF NOT EXISTS local_config_check JSONB;
 
 CREATE TABLE IF NOT EXISTS scanner_runtime_configuration (
 	scanner_id VARCHAR(36) PRIMARY KEY REFERENCES scanner_info(scanner_id) ON DELETE CASCADE,
