@@ -20,6 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends cmake libssl-de
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && printf 'fn main() {}\n' > src/main.rs && cargo fetch --locked
 COPY src ./src
+COPY build.rs ./
+ENV NM_PUBLIC_CONFIG_FIELDS_FILE=src/public_config_fields.txt
 COPY docker/config.example.toml ./config.toml
 
 COPY source/database ./source/database

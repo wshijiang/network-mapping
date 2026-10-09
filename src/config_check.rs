@@ -3,6 +3,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+include!(concat!(env!("OUT_DIR"), "/public_config_fields.rs"));
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigIssueKind {
@@ -26,6 +28,8 @@ pub struct ConfigCheck {
     pub version: String,
     pub checked_at: DateTime<Utc>,
     pub items: Vec<ConfigIssue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_fields: Vec<String>,
 }
 
 impl ConfigCheck {
@@ -35,6 +39,7 @@ impl ConfigCheck {
             version: env!("CARGO_PKG_VERSION").into(),
             checked_at: Utc::now(),
             items: Vec::new(),
+            public_fields: Vec::new(),
         };
         for field in required {
             if lookup(raw, field).is_none() {
@@ -66,13 +71,18 @@ impl ConfigCheck {
             }
             return;
         }
-        // Null means an intentionally unconfigured Option, not a missing requirement.
-        // Legacy identity is stored in SQLite and is never a configuration notice.
-        if value.is_null() || lookup(raw, prefix).is_some() || sensitive(prefix) {
+        // None describes the unset default; it does not suppress a missing
+        // public field. Public-schema and source filters decide eligibility.
+        if lookup(raw, prefix).is_some() || sensitive(prefix) {
             return;
         }
         let section = prefix.split('.').next().unwrap_or_default();
         let source = source_for(section);
+        // These fields are managed in Web and persisted in the database. TOML
+        // supplies only bootstrap defaults, so an omitted field is not a notice.
+        if source == "database_seed" {
+            return;
+        }
         let enabled_path = match section {
             "report_mail" => "report_mail.remote_images_enabled".into(),
             _ => format!("{section}.enabled"),
@@ -82,10 +92,18 @@ impl ConfigCheck {
             .and_then(Value::as_bool)
             == Some(false);
         let optional = inactive && prefix != enabled_path;
-        let description = if source == "database_seed" {
-            "仅作为数据库首次初始化的种子；已有运行策略请在 Web 管理页面调整。"
-        } else if optional {
+        let description = if optional {
             "本地功能未启用，此参数无需补齐；启用时请检查相关配置。"
+        } else if value.is_null() {
+            match prefix {
+                "backup.run_as_user" => {
+                    "未配置运行账户，pgBackRest 当前以服务进程的操作系统用户执行，不使用 sudo 切换用户；如需指定账户，请配置此项并重启。"
+                }
+                "backup.config_file" => {
+                    "未配置文件路径，使用 pgBackRest 自身的默认配置文件查找规则；如需指定文件，请配置此项并重启。"
+                }
+                _ => "此参数未显式配置，当前保持未设置；如需调整，请修改启动配置并重启。",
+            }
         } else if source == "local_limit" {
             "采用本地默认值；远程配置仍受本地开关和速率限制约束。"
         } else if source == "remote_override" {
@@ -95,7 +113,14 @@ impl ConfigCheck {
         } else {
             "采用内置默认值；如需调整，请修改启动配置并重启。"
         };
-        let rendered = value.to_string();
+        let default_value = (!value.is_null()).then(|| {
+            let rendered = value.to_string();
+            if rendered.chars().count() > 480 {
+                "内置规则（详情见对应运行时设置）".into()
+            } else {
+                rendered
+            }
+        });
         self.items.push(ConfigIssue {
             field: prefix.into(),
             kind: if optional {
@@ -104,11 +129,7 @@ impl ConfigCheck {
                 ConfigIssueKind::Default
             },
             source: source.into(),
-            default_value: Some(if rendered.chars().count() > 480 {
-                "内置规则（详情见对应运行时设置）".into()
-            } else {
-                rendered
-            }),
+            default_value,
             description: description.into(),
         });
     }
@@ -154,6 +175,14 @@ impl ConfigCheck {
         self.component == "scanner"
             && self.version.len() <= 64
             && self.items.len() <= 256
+            && self.public_fields.len() <= 256
+            && self.public_fields.iter().all(|field| {
+                !field.is_empty()
+                    && field.len() <= 128
+                    && field
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+            })
             && self.items.iter().all(|item| {
                 !item.field.is_empty()
                     && item.field.len() <= 128
@@ -219,7 +248,7 @@ pub fn inspect_server(raw: &Value) -> ConfigCheck {
         "analytics_snapshot": AnalyticsSnapshotConfig::default(),
         "report_mail": crate::reports::mail_config::ReportMailConfig::default(),
     });
-    ConfigCheck::inspect(
+    let mut report = ConfigCheck::inspect(
         raw,
         &defaults,
         &[
@@ -249,12 +278,119 @@ pub fn inspect_server(raw: &Value) -> ConfigCheck {
             "security.scanner_token_pepper",
         ],
         "server",
-    )
+    );
+    report
+        .items
+        .retain(|item| PUBLIC_CONFIG_FIELDS.contains(&item.field.as_str()));
+    report.public_fields = PUBLIC_CONFIG_FIELDS
+        .iter()
+        .map(|field| (*field).into())
+        .collect();
+    report
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commented_backup_user_reports_the_unset_execution_identity() {
+        let raw: Value = toml::from_str(
+            r#"[backup]
+enabled = true
+binary = "/usr/bin/pgbackrest"
+stanza = "network_mapping"
+config_file = "/etc/pgbackrest.conf"
+#run_as_user = "postgres"
+sudo_binary = "/usr/bin/sudo"
+command_timeout_seconds = 21600
+max_output_bytes = 1048576
+"#,
+        )
+        .unwrap();
+        let report = inspect_server(&raw);
+        let issues: Vec<_> = report
+            .items
+            .iter()
+            .filter(|item| item.field.starts_with("backup."))
+            .collect();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].field, "backup.run_as_user");
+        assert_eq!(issues[0].kind, ConfigIssueKind::Default);
+        assert_eq!(issues[0].source, "startup");
+        assert!(issues[0].default_value.is_none());
+        assert!(issues[0].description.contains("服务进程的操作系统用户"));
+        assert!(issues[0].description.contains("不使用 sudo"));
+        let config: crate::config::BackupConfig =
+            serde_json::from_value(raw["backup"].clone()).unwrap();
+        assert!(config.run_as_user.is_none());
+        assert_eq!(
+            config.config_file.unwrap(),
+            std::path::PathBuf::from("/etc/pgbackrest.conf")
+        );
+    }
+
+    #[test]
+    fn unset_backup_options_are_not_required_and_are_optional_when_disabled() {
+        for enabled in [true, false] {
+            let report = inspect_server(&json!({"backup": {"enabled": enabled}}));
+            for field in ["backup.run_as_user", "backup.config_file"] {
+                let issue = report
+                    .items
+                    .iter()
+                    .find(|item| item.field == field)
+                    .unwrap();
+                assert_eq!(
+                    issue.kind,
+                    if enabled {
+                        ConfigIssueKind::Default
+                    } else {
+                        ConfigIssueKind::Optional
+                    }
+                );
+                assert!(issue.default_value.is_none());
+                if enabled && field == "backup.config_file" {
+                    assert!(issue.description.contains("默认配置文件查找规则"));
+                }
+            }
+            let explicit = inspect_server(&json!({"backup": {"enabled": enabled,
+                "run_as_user": "postgres", "config_file": "/etc/pgbackrest.conf"}}));
+            assert!(!explicit.items.iter().any(|item| matches!(
+                item.field.as_str(),
+                "backup.run_as_user" | "backup.config_file"
+            )));
+        }
+    }
+
+    #[test]
+    fn unpublished_defaults_never_generate_notices() {
+        let report = inspect_server(&json!({}));
+        assert!(
+            report
+                .items
+                .iter()
+                .all(|item| PUBLIC_CONFIG_FIELDS.contains(&item.field.as_str()))
+        );
+        assert!(
+            !report
+                .items
+                .iter()
+                .any(|item| item.field.starts_with("scanner_diagnostics.")
+                    || item.field.starts_with("elasticsearch.projection_"))
+        );
+    }
+
+    #[test]
+    fn tracked_public_configuration_has_no_notices() {
+        // Docker deliberately replaces this file with a smaller, sanitized example.
+        if option_env!("NM_PUBLIC_CONFIG_FIELDS_FILE").is_some() {
+            return;
+        }
+        let content =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/config.toml")).unwrap();
+        let raw: Value = toml::from_str(&content).unwrap();
+        assert!(inspect_server(&raw).items.is_empty());
+    }
 
     #[test]
     fn compares_paths_not_counts_and_never_echoes_config_values() {
@@ -272,15 +408,44 @@ mod tests {
     }
 
     #[test]
-    fn disabled_features_and_database_seeds_have_distinct_sources() {
+    fn disabled_deployment_features_remain_optional_and_database_seeds_are_excluded() {
         let report = ConfigCheck::inspect(
             &json!({"backup":{"enabled":false}}),
             &json!({"backup":{"enabled":false,"timeout":30},"requests":{"enabled":true}}),
             &[],
             "server",
         );
+        assert_eq!(report.items.len(), 1);
+        assert_eq!(report.items[0].field, "backup.timeout");
         assert_eq!(report.items[0].kind, ConfigIssueKind::Optional);
-        assert_eq!(report.items[1].source, "database_seed");
+        assert_eq!(report.items[0].source, "startup");
+    }
+
+    #[test]
+    fn server_catalog_excludes_all_database_managed_sections() {
+        let report = inspect_server(&json!({}));
+        for section in [
+            "requests",
+            "monitor",
+            "automatic_target",
+            "dns_follow_up",
+            "analytics_snapshot",
+            "report_mail",
+        ] {
+            assert!(
+                !report
+                    .items
+                    .iter()
+                    .any(|item| item.field.starts_with(&format!("{section}."))),
+                "database-managed section {section} must not generate file notices"
+            );
+        }
+        assert!(report.items.iter().any(|item| {
+            item.field == "server.max_body_size" && item.kind == ConfigIssueKind::Default
+        }));
+        assert!(report.items.iter().any(|item| {
+            item.field == "database.pool_wait_timeout_ms" && item.kind == ConfigIssueKind::Default
+        }));
     }
 
     #[test]
@@ -297,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn server_catalog_uses_real_defaults_and_omits_unconfigured_options() {
+    fn server_catalog_uses_real_defaults_and_excludes_sensitive_and_unpublished_options() {
         let report = inspect_server(&json!({}));
         let item = report
             .items
@@ -305,12 +470,10 @@ mod tests {
             .find(|item| item.field == "database.pool_wait_timeout_ms")
             .unwrap();
         assert_eq!(item.default_value.as_deref(), Some("2000"));
-        assert!(
-            !report
-                .items
-                .iter()
-                .any(|item| item.field == "elasticsearch.password")
-        );
+        assert!(!report.items.iter().any(|item| matches!(
+            item.field.as_str(),
+            "elasticsearch.password" | "elasticsearch.username"
+        )));
         assert!(report.items.iter().any(
             |item| item.field == "server.encrypt_key" && item.kind == ConfigIssueKind::Required
         ));
@@ -336,6 +499,12 @@ mod deployment_tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let mut raw: toml::Value = toml::from_str(&content).unwrap();
+        let backup = raw.get_mut("backup").unwrap().as_table_mut().unwrap();
+        backup.insert("enabled".into(), toml::Value::Boolean(true));
+        backup.remove("run_as_user");
+        backup.remove("config_file");
+        let content = toml::to_string(&raw).unwrap();
         fs::write(&path, &content).unwrap();
         let mut permissions = fs::metadata(&path).unwrap().permissions();
         permissions.set_readonly(true);
@@ -345,6 +514,17 @@ mod deployment_tests {
         assert_eq!(config.server.max_body_size, 67_108_864);
         assert_eq!(config.database.pool_wait_timeout_ms, 2000);
         assert_eq!(report.error_count(), 0);
+        assert!(config.backup.run_as_user.is_none());
+        assert!(config.backup.config_file.is_none());
+        for field in ["backup.run_as_user", "backup.config_file"] {
+            let issue = report
+                .items
+                .iter()
+                .find(|item| item.field == field)
+                .unwrap();
+            assert_eq!(issue.kind, ConfigIssueKind::Default);
+            assert!(issue.default_value.is_none());
+        }
         assert!(
             report
                 .items
@@ -381,6 +561,11 @@ mod deployment_tests {
             "scanner",
         );
         assert!(report.valid_scanner_report());
+        report.public_fields = vec!["scanner.connect_timeout_seconds".into()];
+        assert!(report.valid_scanner_report());
+        report.public_fields.push("invalid field name".into());
+        assert!(!report.valid_scanner_report());
+        report.public_fields.clear();
         report.items[0].default_value = Some("x".repeat(1025));
         assert!(!report.valid_scanner_report());
         report.items[0].default_value = None;
