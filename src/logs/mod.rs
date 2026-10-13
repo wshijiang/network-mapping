@@ -37,10 +37,10 @@ pub struct LogTime;
 /// 使用毫秒级unix时间戳
 impl FormatTime for LogTime {
     fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
-        // use crate::get_unix_epoch_ms;
+        // use crate::clock::get_unix_epoch_ms;
         // let unix_epoch = get_unix_epoch();
 
-        write!(w, "{}", crate::get_unix_epoch_ms())
+        write!(w, "{}", crate::clock::get_unix_epoch_ms())
     }
 }
 

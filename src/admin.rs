@@ -27,8 +27,11 @@ use crate::config::{
     ScanSettingsRequest, ScanSettingsResponse, SessionSettingsRequest, SessionSettingsResponse,
     SystemConfig, session_ttl_seconds_from_minutes,
 };
-use crate::{decrypt_data, encrypt_data};
-use crate::{generate_hash_password, generate_scanner_token, hash_scanner_token};
+use crate::{identity::decrypt_data, identity::encrypt_data};
+use crate::{
+    identity::generate_hash_password, identity::generate_scanner_token,
+    identity::hash_scanner_token,
+};
 
 const DEFAULT_ADMIN_USERNAME: &str = "admin";
 const DEFAULT_ADMIN_USERNAME_ENV: &str = "NM_DEFAULT_ADMIN_USERNAME";
@@ -1360,7 +1363,7 @@ pub async fn get_default_scan_profile_from_database(
         .await?;
     Ok(row
         .map(|row| row.get::<_, String>("value").trim().to_lowercase())
-        .filter(|profile| crate::is_ip_scan_profile(profile))
+        .filter(|profile| crate::scan_control::creation::is_ip_scan_profile(profile))
         .unwrap_or_else(|| FALLBACK_SCAN_PROFILE.to_owned()))
 }
 
@@ -1377,7 +1380,7 @@ pub async fn write_scan_settings_to_database(
     settings: &ScanSettingsRequest,
 ) -> Result<ScanSettingsResponse, Box<dyn std::error::Error>> {
     let profile = settings.default_scan_profile.trim().to_lowercase();
-    if !crate::is_ip_scan_profile(&profile) {
+    if !crate::scan_control::creation::is_ip_scan_profile(&profile) {
         return Err("unsupported default IP scan profile".into());
     }
     let conn = pool.get().await?;

@@ -46,8 +46,8 @@ async fn authenticated_transfer_deduplicates_errors_and_checks_ownership() {
     let pepper = "test-only-pepper-at-least-thirty-two-bytes".to_owned();
     let token = format!("nm_run_diagnostics_test_{scanner}");
     let other_token = format!("nm_run_other_test_{other}");
-    let hash = crate::hash_scanner_token(&token, &pepper).unwrap();
-    let other_hash = crate::hash_scanner_token(&other_token, &pepper).unwrap();
+    let hash = crate::identity::hash_scanner_token(&token, &pepper).unwrap();
+    let other_hash = crate::identity::hash_scanner_token(&other_token, &pepper).unwrap();
     for (id, hash) in [(scanner, &hash), (other, &other_hash)] {
         client.execute("INSERT INTO scanner_info(scanner_id,create_user,is_enable,runtime_token_hash,diagnostics_capabilities) VALUES($1,7,true,$2,$3)", &[&id.to_string(),hash,&json!({"supported_versions":[1],"can_list_logs":true,"can_collect_logs":true,"can_report_errors":true})]).await.unwrap();
     }

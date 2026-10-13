@@ -14,7 +14,9 @@ use crate::system_maintenance::{
     DEFAULT_RETRY_AFTER_SECONDS, MaintenanceSnapshot, RESULT_UPLOAD_GRACE_HOURS,
     SystemMaintenanceState, active_task_count, held_task_count,
 };
-use crate::{ApplyTaskError, validate_scanner_credentials};
+use crate::{
+    scan_control::dispatch::ApplyTaskError, scan_control::dispatch::validate_scanner_credentials,
+};
 
 const DEFAULT_HISTORY_LIMIT: i64 = 20;
 const MAX_HISTORY_LIMIT: i64 = 100;

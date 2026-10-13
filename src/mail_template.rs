@@ -1,11 +1,17 @@
-use std::collections::HashSet;
+#[cfg(test)]
+use nm_report_renderer::sanitize_email_html;
+pub use nm_report_renderer::{
+    HEALTH_ALERT_TEMPLATE_KEY, LOGIN_SUCCESS_TEMPLATE_KEY, MailTemplateSource,
+    REPORT_MONTHLY_TEMPLATE_KEY, REPORT_WEEKLY_TEMPLATE_KEY, RenderedMailTemplate,
+    SCANNER_OUTAGE_TEMPLATE_KEY, render_template,
+};
 
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use lettre::{Message, message::Mailbox, message::MultiPart};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
-use tera::{Context, Tera};
+use tera::Context;
 
 use crate::admin::{
     MailRetryPolicy, get_mail_sender_key_from_database, get_mail_settings_from_database,
@@ -14,13 +20,6 @@ use crate::admin::{
 use crate::config::EmailConfig;
 use crate::monitor::HealthEvent;
 
-pub const LOGIN_SUCCESS_TEMPLATE_KEY: &str = "login_success";
-pub const HEALTH_ALERT_TEMPLATE_KEY: &str = "health_alert";
-pub const SCANNER_OUTAGE_TEMPLATE_KEY: &str = "scanner_outage";
-pub const REPORT_WEEKLY_TEMPLATE_KEY: &str = "report_weekly";
-pub const REPORT_MONTHLY_TEMPLATE_KEY: &str = "report_monthly";
-const MAX_SUBJECT_TEMPLATE_CHARS: usize = 500;
-const MAX_BODY_TEMPLATE_BYTES: usize = 256 * 1024;
 const DEFAULT_LOGIN_SUBJECT: &str = "{{ system_name }} 登录成功提醒";
 const DEFAULT_LOGIN_HTML: &str = include_str!("../templates/mail/login_success.html");
 const DEFAULT_LOGIN_TEXT: &str = include_str!("../templates/mail/login_success.txt");
@@ -31,14 +30,6 @@ const DEFAULT_SCANNER_OUTAGE_SUBJECT: &str =
     "{{ system_name }} 扫描器{{ event_label }}：{{ scanner_name }}";
 const DEFAULT_SCANNER_OUTAGE_HTML: &str = include_str!("../templates/mail/scanner_outage.html");
 const DEFAULT_SCANNER_OUTAGE_TEXT: &str = include_str!("../templates/mail/scanner_outage.txt");
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MailTemplateSource {
-    pub subject_template: String,
-    pub html_template: String,
-    pub text_template: String,
-}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,14 +73,6 @@ pub struct MailTemplateVersion {
     pub create_at: DateTime<Utc>,
     pub update_at: Option<DateTime<Utc>>,
     pub published_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RenderedMailTemplate {
-    pub subject: String,
-    pub html_body: String,
-    pub text_body: String,
 }
 
 #[derive(Clone, Copy)]
@@ -416,120 +399,6 @@ pub fn login_context(username: &str, source_ip: &str) -> Result<Context, tera::E
         "login_time": crate::system_time::format_now(),
         "source_ip": source_ip
     }))
-}
-
-fn validate_source_size(source: &MailTemplateSource) -> Result<(), Box<dyn std::error::Error>> {
-    if source.subject_template.trim().is_empty() {
-        return Err("邮件主题模板不能为空".into());
-    }
-    if source.subject_template.chars().count() > MAX_SUBJECT_TEMPLATE_CHARS {
-        return Err("邮件主题模板不能超过 500 个字符".into());
-    }
-    if source.html_template.trim().is_empty() || source.text_template.trim().is_empty() {
-        return Err("HTML 和纯文本模板均不能为空".into());
-    }
-    if source.html_template.len() > MAX_BODY_TEMPLATE_BYTES
-        || source.text_template.len() > MAX_BODY_TEMPLATE_BYTES
-    {
-        return Err("邮件正文模板不能超过 256 KiB".into());
-    }
-    Ok(())
-}
-
-fn sanitize_email_html(html: &str) -> String {
-    let mut sanitizer = ammonia::Builder::default();
-    sanitizer
-        .add_generic_attributes(&[
-            "style",
-            "width",
-            "height",
-            "align",
-            "valign",
-            "role",
-            "aria-label",
-        ])
-        .filter_style_properties(HashSet::from([
-            "background",
-            "background-color",
-            "border",
-            "border-bottom",
-            "border-color",
-            "border-left",
-            "border-radius",
-            "border-right",
-            "border-style",
-            "border-top",
-            "border-width",
-            "color",
-            "display",
-            "font-family",
-            "font-size",
-            "font-style",
-            "font-weight",
-            "height",
-            "letter-spacing",
-            "line-height",
-            "margin",
-            "margin-bottom",
-            "margin-left",
-            "margin-right",
-            "margin-top",
-            "max-width",
-            "min-width",
-            "padding",
-            "padding-bottom",
-            "padding-left",
-            "padding-right",
-            "padding-top",
-            "text-align",
-            "text-decoration",
-            "vertical-align",
-            "white-space",
-            "width",
-        ]));
-    sanitizer.clean(html).to_string()
-}
-
-pub fn render_template(
-    template_key: &str,
-    source: &MailTemplateSource,
-    context: &Context,
-) -> Result<RenderedMailTemplate, Box<dyn std::error::Error>> {
-    if template_definition(template_key).is_none() {
-        return Err("未知邮件模板".into());
-    }
-    validate_source_size(source)?;
-
-    let mut tera = Tera::default();
-    tera.add_raw_templates(vec![
-        ("subject.txt", source.subject_template.as_str()),
-        ("body.html", source.html_template.as_str()),
-        ("body.txt", source.text_template.as_str()),
-    ])?;
-
-    let subject = tera.render("subject.txt", context)?.trim().to_owned();
-    if subject.is_empty() || subject.chars().count() > 200 {
-        return Err("渲染后的邮件主题必须为 1 到 200 个字符".into());
-    }
-    if subject.contains(['\r', '\n']) {
-        return Err("渲染后的邮件主题不能包含换行符".into());
-    }
-
-    let html = tera.render("body.html", context)?;
-    let inliner = css_inline::CSSInliner::options()
-        .load_remote_stylesheets(false)
-        .build();
-    let html_body = sanitize_email_html(&inliner.inline(&html)?);
-    let text_body = tera.render("body.txt", context)?;
-    if html_body.trim().is_empty() || text_body.trim().is_empty() {
-        return Err("渲染后的邮件正文不能为空".into());
-    }
-
-    Ok(RenderedMailTemplate {
-        subject,
-        html_body,
-        text_body,
-    })
 }
 
 pub fn validate_template(
@@ -1162,12 +1031,11 @@ pub fn audit_source_metadata(source: &MailTemplateSource) -> Value {
     })
 }
 
-/// Render and freeze the published report template using the statistics transaction.
-pub(crate) async fn render_report<C: deadpool_postgres::GenericClient + Sync>(
+/// Capture the published source inside the report input transaction.
+pub(crate) async fn load_report_template<C: deadpool_postgres::GenericClient + Sync>(
     client: &C,
     key: &str,
-    context: &Context,
-) -> Result<(Option<RenderedMailTemplate>, i32), String> {
+) -> Result<Option<(MailTemplateSource, i32)>, String> {
     let definition = template_definition(key).ok_or("未知报告模板")?;
     let row = client.query_opt("SELECT t.enabled, t.active_version, v.subject_template, v.html_template, v.text_template \
         FROM mail_template t LEFT JOIN mail_template_version v ON v.template_key = t.template_key AND v.version = t.active_version \
@@ -1176,7 +1044,7 @@ pub(crate) async fn render_report<C: deadpool_postgres::GenericClient + Sync>(
     let mut source = default_source(definition);
     if let Some(row) = row {
         if !row.get::<_, bool>("enabled") {
-            return Ok((None, 0));
+            return Ok(None);
         }
         if let Some(subject) = row.get::<_, Option<String>>("subject_template") {
             version = row.get::<_, Option<i32>>("active_version").unwrap_or(0);
@@ -1187,8 +1055,7 @@ pub(crate) async fn render_report<C: deadpool_postgres::GenericClient + Sync>(
             };
         }
     }
-    let rendered = render_template(key, &source, context).map_err(|e| e.to_string())?;
-    Ok((Some(rendered), version))
+    Ok(Some((source, version)))
 }
 
 pub(crate) async fn send_archived_report(

@@ -11,13 +11,20 @@ use crate::scanner_latency::{ScannerLatencyHistory, ScannerLatencyHistoryEntry};
 use crate::system_maintenance::{
     MaintenanceSnapshot, SystemMaintenanceState, maintenance_response,
 };
+use crate::{identity::Permission, web_support::TEXT_HTML_UTF_8};
 use crate::{
-    ApplyTaskError, ApplyTaskQuery, CreateTask, CurrentTaskQuery, ReceiveTaskItemQueryInfo, STask,
-    TargetIP, TaskItemJson, TaskListFilters, apply_task, build_scan_plan, get_filtered_task_page,
-    validate_scanner_credentials,
+    result_ingest::model::SaveScannerResultsError, result_ingest::model::ScannerResultUpload,
+    result_ingest::storage::save_scanner_results,
 };
-use crate::{Permission, TEXT_HTML_UTF_8};
-use crate::{SaveScannerResultsError, ScannerResultUpload, save_scanner_results};
+use crate::{
+    scan_control::creation::CreateTask, scan_control::creation::STask,
+    scan_control::creation::build_scan_plan, scan_control::dispatch::ApplyTaskError,
+    scan_control::dispatch::ApplyTaskQuery, scan_control::dispatch::CurrentTaskQuery,
+    scan_control::dispatch::apply_task, scan_control::dispatch::validate_scanner_credentials,
+    scan_control::query::ReceiveTaskItemQueryInfo, scan_control::query::TaskItemJson,
+    scan_control::query::TaskListFilters, scan_control::query::get_filtered_task_page,
+    scan_control::target::TargetIP,
+};
 use actix_web::{HttpRequest, HttpResponse, Responder, get, http::header, post, web};
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
@@ -40,10 +47,12 @@ fn log_scanner_result_error(
     let mut vulnerability_count = 0usize;
     for observation in &upload.observations {
         match observation {
-            crate::ScannerObservation::Port { .. } => port_count += 1,
-            crate::ScannerObservation::Service { .. } => service_count += 1,
-            crate::ScannerObservation::Dns { .. } => dns_count += 1,
-            crate::ScannerObservation::Vulnerability { .. } => vulnerability_count += 1,
+            crate::result_ingest::model::ScannerObservation::Port { .. } => port_count += 1,
+            crate::result_ingest::model::ScannerObservation::Service { .. } => service_count += 1,
+            crate::result_ingest::model::ScannerObservation::Dns { .. } => dns_count += 1,
+            crate::result_ingest::model::ScannerObservation::Vulnerability { .. } => {
+                vulnerability_count += 1
+            }
         }
     }
     let outcome = match error_value {
@@ -76,9 +85,9 @@ fn log_scanner_result_error(
         retryable = error_value.retryable(),
         outcome,
         http_status = error_value.http_status(),
-        client_ip = crate::get_conn_ip(req),
+        client_ip = crate::web_support::get_conn_ip(req),
         method = %req.method(),
-        user_agent = crate::get_user_agent(req),
+        user_agent = crate::web_support::get_user_agent(req),
         path = req.path(),
         scanner_id = %upload.scanner_id,
         task_id = %upload.task_id,
@@ -119,7 +128,7 @@ struct CreateDnsTask {
     remark: Option<String>,
     #[serde(default = "default_dns_scan_profile")]
     scan_profile: String,
-    #[serde(default = "crate::default_dispatch_mode")]
+    #[serde(default = "crate::scan_control::creation::default_dispatch_mode")]
     dispatch_mode: String,
     #[serde(default)]
     scanner_ids: Vec<Uuid>,
@@ -213,7 +222,7 @@ fn resolve_dns_task_port(
         .map(str::trim)
         .filter(|port| !port.is_empty())
         .unwrap_or("1-65535");
-    if !crate::check_port(port) {
+    if !crate::scan_control::target::check_port(port) {
         return Err("invalid port range");
     }
     Ok(port.to_owned())
@@ -232,7 +241,7 @@ fn resolve_dns_scan_request(
 ) -> Result<ResolvedDnsScanRequest, &'static str> {
     match scan_profile {
         "dns_records" if legacy_follow_up_enabled => {
-            if !crate::is_ip_scan_profile(legacy_follow_up_profile) {
+            if !crate::scan_control::creation::is_ip_scan_profile(legacy_follow_up_profile) {
                 return Err("invalid DNS follow-up scan profile");
             }
             Ok(ResolvedDnsScanRequest {
@@ -875,18 +884,19 @@ pub(crate) async fn scanner_heartbeat_handler(
     {
         return HttpResponse::BadRequest().body("invalid diagnostics capabilities");
     }
-    let token_hash = match crate::hash_scanner_token(token, &security.scanner_token_pepper) {
-        Ok(value) => value,
-        Err(error) => {
-            error_logs_error(
-                &req,
-                "ScannerHeartbeatCredentialHashError",
-                "hash_scanner_token",
-                &error,
-            );
-            return HttpResponse::InternalServerError().finish();
-        }
-    };
+    let token_hash =
+        match crate::identity::hash_scanner_token(token, &security.scanner_token_pepper) {
+            Ok(value) => value,
+            Err(error) => {
+                error_logs_error(
+                    &req,
+                    "ScannerHeartbeatCredentialHashError",
+                    "hash_scanner_token",
+                    &error,
+                );
+                return HttpResponse::InternalServerError().finish();
+            }
+        };
 
     let ip_address = request_ip(&req).map(|address| address.to_string());
     let mut connection = match pool.get().await {
@@ -1154,7 +1164,8 @@ pub(crate) async fn scanner_heartbeat_handler(
             );
             return HttpResponse::ServiceUnavailable().finish();
         }
-        let lease_expires_at = crate::get_unix_epoch_ms() + crate::TASK_LEASE_MS;
+        let lease_expires_at =
+            crate::clock::get_unix_epoch_ms() + crate::scan_control::dispatch::TASK_LEASE_MS;
         let renewed = match transaction
             .query_opt(
                 "UPDATE scan_task_execution e SET lease_expires_at = CASE \
@@ -1180,7 +1191,7 @@ pub(crate) async fn scanner_heartbeat_handler(
                 ttl_ms: if maintenance_hold {
                     crate::system_maintenance::RESULT_UPLOAD_GRACE_TTL_MS
                 } else {
-                    crate::TASK_LEASE_MS
+                    crate::scan_control::dispatch::TASK_LEASE_MS
                 },
                 maintenance_hold,
             });
@@ -1210,7 +1221,7 @@ pub(crate) async fn scanner_heartbeat_handler(
                 task_id,
                 status: "lost",
                 expires_at_ms: None,
-                ttl_ms: crate::TASK_LEASE_MS,
+                ttl_ms: crate::scan_control::dispatch::TASK_LEASE_MS,
                 maintenance_hold: false,
             });
         }
@@ -1286,18 +1297,19 @@ pub(crate) async fn scanner_task_failure_handler(
     {
         return response;
     }
-    let token_hash = match crate::hash_scanner_token(token, &security.scanner_token_pepper) {
-        Ok(value) => value,
-        Err(error) => {
-            error_logs_error(
-                &req,
-                "ScannerTaskFailureCredentialHashError",
-                "hash_scanner_token",
-                &error,
-            );
-            return HttpResponse::InternalServerError().finish();
-        }
-    };
+    let token_hash =
+        match crate::identity::hash_scanner_token(token, &security.scanner_token_pepper) {
+            Ok(value) => value,
+            Err(error) => {
+                error_logs_error(
+                    &req,
+                    "ScannerTaskFailureCredentialHashError",
+                    "hash_scanner_token",
+                    &error,
+                );
+                return HttpResponse::InternalServerError().finish();
+            }
+        };
     let mut connection = match pool.get().await {
         Ok(connection) => connection,
         Err(error) => {
@@ -1326,7 +1338,7 @@ pub(crate) async fn scanner_task_failure_handler(
             return HttpResponse::InternalServerError().finish();
         }
     };
-    match crate::validate_scanner_credentials_with_client(
+    match crate::scan_control::dispatch::validate_scanner_credentials_with_client(
         &transaction,
         failure.scanner_id,
         &token_hash,
@@ -1358,7 +1370,7 @@ pub(crate) async fn scanner_task_failure_handler(
              AND execution_status = 'running' RETURNING execution_status, task_id;",
             &[
                 &force_terminal,
-                &crate::get_unix_epoch_ms(),
+                &crate::clock::get_unix_epoch_ms(),
                 &reason,
                 &task_id,
                 &scanner_id,
@@ -1382,7 +1394,10 @@ pub(crate) async fn scanner_task_failure_handler(
                     ),
                 );
             }
-            if let Err(error) = crate::refresh_task_aggregate(&transaction, task_db_id).await {
+            if let Err(error) =
+                crate::scan_control::dispatch::refresh_task_aggregate(&transaction, task_db_id)
+                    .await
+            {
                 error_logs_error(
                     &req,
                     "ScannerTaskFailureAggregateError",
@@ -1443,18 +1458,19 @@ pub(crate) async fn scanner_task_cancelled_handler(
     {
         return response;
     }
-    let token_hash = match crate::hash_scanner_token(token, &security.scanner_token_pepper) {
-        Ok(value) => value,
-        Err(error) => {
-            error_logs_error(
-                &req,
-                "ScannerTaskCancelledCredentialHashError",
-                "hash_scanner_token",
-                &error,
-            );
-            return HttpResponse::InternalServerError().finish();
-        }
-    };
+    let token_hash =
+        match crate::identity::hash_scanner_token(token, &security.scanner_token_pepper) {
+            Ok(value) => value,
+            Err(error) => {
+                error_logs_error(
+                    &req,
+                    "ScannerTaskCancelledCredentialHashError",
+                    "hash_scanner_token",
+                    &error,
+                );
+                return HttpResponse::InternalServerError().finish();
+            }
+        };
     let mut connection = match pool.get().await {
         Ok(connection) => connection,
         Err(error) => {
@@ -1479,7 +1495,7 @@ pub(crate) async fn scanner_task_cancelled_handler(
             return HttpResponse::InternalServerError().finish();
         }
     };
-    match crate::validate_scanner_credentials_with_client(
+    match crate::scan_control::dispatch::validate_scanner_credentials_with_client(
         &transaction,
         cancelled.scanner_id,
         &token_hash,
@@ -1508,7 +1524,7 @@ pub(crate) async fn scanner_task_cancelled_handler(
              WHERE e.task_id = t.id AND t.task_id = $2 AND e.assigned_scanner_id = $3 \
              AND e.execution_status = 'running' AND e.cancel_requested = true RETURNING e.task_id;",
             &[
-                &crate::get_unix_epoch_ms(),
+                &crate::clock::get_unix_epoch_ms(),
                 &cancelled.task_id.to_string(),
                 &cancelled.scanner_id.to_string(),
             ],
@@ -1516,8 +1532,11 @@ pub(crate) async fn scanner_task_cancelled_handler(
         .await;
     match changed {
         Ok(rows) if !rows.is_empty() => {
-            if let Err(error) =
-                crate::refresh_task_aggregate(&transaction, rows[0].get("task_id")).await
+            if let Err(error) = crate::scan_control::dispatch::refresh_task_aggregate(
+                &transaction,
+                rows[0].get("task_id"),
+            )
+            .await
             {
                 error_logs_error(
                     &req,
@@ -1699,8 +1718,10 @@ async fn get_task(
         } else {
             (Vec::new(), Some(0), true)
         };
-    let display_scan_profile =
-        crate::display_scan_profile(&stored_scan_profile, generation_metadata.as_ref());
+    let display_scan_profile = crate::scan_control::creation::display_scan_profile(
+        &stored_scan_profile,
+        generation_metadata.as_ref(),
+    );
     HttpResponse::Ok().json(serde_json::json!({
         "success": true,
         "data": {
@@ -2006,7 +2027,7 @@ async fn create_task(
             }
         },
     };
-    if !crate::is_ip_scan_profile(&scan_profile) {
+    if !crate::scan_control::creation::is_ip_scan_profile(&scan_profile) {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "success": false,
             "message": "DNS scan profiles require the domain task endpoint"
@@ -2445,14 +2466,14 @@ async fn current_task_handler(
     let recovery_failure = match (query.failure_taskid, query.failure_count) {
         (None, None) => None,
         (Some(task_id), Some(count)) if (1..=3).contains(&count) => {
-            Some(crate::RecoveryFailureReport { task_id, count })
+            Some(crate::scan_control::dispatch::RecoveryFailureReport { task_id, count })
         }
         _ => {
             return HttpResponse::BadRequest()
                 .body("failure_taskid and failure_count (1..=3) must be supplied together");
         }
     };
-    match crate::recover_scanner_task_with_failure(
+    match crate::scan_control::dispatch::recover_scanner_task_with_failure(
         pool.get_ref(),
         query.scannerid,
         query.taskid,
@@ -2848,7 +2869,7 @@ mod tests {
         should_load_vulnerabilities, task_result_pagination, validate_latency_report,
         validate_public_ip, vulnerability_search_body,
     };
-    use crate::ReceiveTaskItemQueryInfo;
+    use crate::scan_control::query::ReceiveTaskItemQueryInfo;
     use actix_web::web;
     use chrono::Utc;
     use serde_json::json;
@@ -3148,7 +3169,7 @@ mod tests {
                 task_id,
                 status: "lost",
                 expires_at_ms: None,
-                ttl_ms: crate::TASK_LEASE_MS,
+                ttl_ms: crate::scan_control::dispatch::TASK_LEASE_MS,
                 maintenance_hold: false,
             }),
             command: None,
@@ -3160,7 +3181,10 @@ mod tests {
         assert_eq!(body["lease"]["task_id"], task_id.to_string());
         assert_eq!(body["lease"]["status"], "lost");
         assert!(body["lease"]["expires_at_ms"].is_null());
-        assert_eq!(body["lease"]["ttl_ms"], crate::TASK_LEASE_MS);
+        assert_eq!(
+            body["lease"]["ttl_ms"],
+            crate::scan_control::dispatch::TASK_LEASE_MS
+        );
         assert_eq!(body["lease"]["maintenance_hold"], false);
     }
 }

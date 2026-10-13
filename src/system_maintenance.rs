@@ -214,7 +214,7 @@ async fn release_expired_maintenance_holds(
     let task_ids: std::collections::HashSet<i32> =
         rows.iter().map(|row| row.get("task_id")).collect();
     for task_id in &task_ids {
-        crate::refresh_task_aggregate(&transaction, *task_id).await?;
+        crate::scan_control::dispatch::refresh_task_aggregate(&transaction, *task_id).await?;
     }
     transaction.commit().await?;
     Ok(task_ids.len())

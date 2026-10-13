@@ -12,9 +12,9 @@ use uuid::Uuid;
 
 use crate::admin::get_default_scan_profile_from_database;
 use crate::audit::{AuditContext, AuditEvent, write as write_audit};
-use crate::build_scan_plan;
 use crate::config::AutomaticTargetConfig;
 use crate::runtime_config::RuntimeConfig;
+use crate::scan_control::creation::build_scan_plan;
 
 const STRATEGY: &str = "sequential_subnet";
 const SYSTEM_REQUEST_PATH: &str = "system://automatic-target-generator";

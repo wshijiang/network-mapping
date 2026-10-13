@@ -133,3 +133,9 @@ log_format report_safe '$remote_addr [$time_local] "$request_method $report_safe
 验证覆盖周／月图像、空数据、完整邮件内容、匿名图片访问、HEAD／ETag、过期与撤销、
 续期、扫描历史删除后的归档一致性、普通用户不能撤销图片及旧报告兼容。
 集成测试只使用一次性 PostgreSQL；没有向真实收件人发送 SMTP 邮件。
+
+## 模块化渲染
+
+生产报表现在将统计/模板捕获、邮件渲染和归档提交分为三个阶段。图表与邮件渲染不持有统计事务或数据库连接，归档前重新验证任务 token、租约和报告版本。邮件渲染支持默认内置实现或独立进程，管理员可切换已安装制品；图表计算仍在服务端。
+
+归档 `quality.renderer` 记录渲染制品、代际和本次输入 checksum。模块切换只影响后续渲染，不改写已有报告和邮件。启用方法与当前部署边界见[报表渲染热更新](MODULE_RUNTIME_IMPLEMENTATION.md)。

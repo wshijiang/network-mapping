@@ -3,7 +3,6 @@ use lettre::{Message, message::Mailbox, message::header::ContentType};
 use serde_json::json;
 use tracing::error;
 
-use crate::TEXT_HTML_UTF_8;
 use crate::admin::{
     MailRetryPolicy, UserBaseI, UserSession, get_config_from_database,
     get_mail_sender_key_from_database, get_mail_settings_from_database,
@@ -32,16 +31,18 @@ use crate::trusted_proxy::{
     MAX_CLIENT_IP_HEADER_LENGTH, MAX_TRUSTED_PROXY_CIDRS, TrustedProxySettings, TrustedProxyState,
     validate_settings, write_settings_to_database,
 };
+use crate::web_support::TEXT_HTML_UTF_8;
 use crate::{
-    FrontEndErrorInfo, TemplatesInit, front_end_error_page,
+    FrontEndErrorInfo, front_end_error_page,
     logs::write::{info_logs, request_id},
+    web_support::TemplatesInit,
 };
 
 #[cfg(feature = "rir")]
 use crate::rir::get_rir_data;
 
 //基准测试
-use crate::{Systems, benchmark};
+use crate::{system_resources::Systems, system_resources::benchmark};
 
 ///获取系统信息基准测试
 #[get("/benchmark")]
@@ -856,7 +857,7 @@ async fn save_scan_settings_h(
         }));
     }
     let requested_profile = settings.default_scan_profile.trim().to_lowercase();
-    if !crate::is_ip_scan_profile(&requested_profile) {
+    if !crate::scan_control::creation::is_ip_scan_profile(&requested_profile) {
         return HttpResponse::BadRequest().json(json!({
             "success": false,
             "message": "不支持的默认扫描模式"

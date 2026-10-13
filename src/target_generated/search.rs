@@ -160,7 +160,7 @@ async fn admit(
     } else {
         profile
     };
-    let plan = crate::build_scan_plan(task_profile)?;
+    let plan = crate::scan_control::creation::build_scan_plan(task_profile)?;
     let mut client = pool.get().await?;
     let tx = client.transaction().await?;
     tx.batch_execute("SET LOCAL lock_timeout = '1500ms'; SET LOCAL statement_timeout = '2000ms';")
@@ -560,7 +560,7 @@ mod tests {
     #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
     async fn quotas_rollback_observation_and_live_expiry_configuration() {
         let mut f = Fixture::new().await;
-        let now = crate::get_unix_epoch_ms();
+        let now = crate::clock::get_unix_epoch_ms();
         assert_eq!(
             f.request("ip", "192.0.2.1", Some(now - 6 * 86400000))
                 .await

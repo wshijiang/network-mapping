@@ -1,5 +1,7 @@
 //! Method + route-template identifiers. Keep in sync with registered HTTP routes.
 pub const WEB_OPERATIONS: &[(&str, &str)] = &[
+    ("GET /api/modules/report-render", "读取报表渲染模块状态"),
+    ("POST /api/modules/report-render", "发布报表渲染模块版本"),
     ("DELETE /api/admin/users/{user_id}", "删除用户"),
     ("DELETE /api/assets/tags/{tag_id}", "删除资产标签关联"),
     ("DELETE /api/scanner/{scanner_id}", "删除扫描器详情"),

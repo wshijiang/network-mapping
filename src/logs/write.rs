@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::admin::UserBaseI;
 use crate::audit::RequestId;
 use crate::request_log::set_reason_if_absent;
-use crate::{get_conn_ip, get_user_agent, logs::LoginLog};
+use crate::{logs::LoginLog, web_support::get_conn_ip, web_support::get_user_agent};
 
 const MAX_ERROR_DIAGNOSTIC_CHARS: usize = 4096;
 

@@ -2116,6 +2116,8 @@ dependencies = [
  "ipnet",
  "lettre",
  "maxminddb",
+ "nm-module-runtime",
+ "nm-report-renderer",
  "openssl",
  "password-hash",
  "plotters",
@@ -2146,6 +2148,28 @@ name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
+
+[[package]]
+name = "nm-module-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "nm-report-renderer"
+version = "0.1.0"
+dependencies = [
+ "ammonia",
+ "css-inline",
+ "nm-module-runtime",
+ "serde",
+ "serde_json",
+ "tera",
+ "tokio",
+]
 
 [[package]]
 name = "nom"

@@ -30,25 +30,46 @@ pub fn token_hash(token: &str) -> Option<String> {
     digest(token.as_bytes()).ok()
 }
 
-pub async fn create<C: GenericClient + Sync>(
-    client: &C,
-    id: Uuid,
-    png: &[u8],
-    config: &ReportMailConfig,
-    at: DateTime<Utc>,
-) -> Result<String, String> {
-    if png.len() > chart::MAX_PNG_BYTES {
-        return Err("趋势图片超过大小限制".into());
+pub(crate) struct PreparedAsset {
+    pub url: String,
+    png: Vec<u8>,
+    hash: String,
+    sha256: String,
+    lifetime_days: i32,
+    expires: DateTime<Utc>,
+}
+
+impl PreparedAsset {
+    pub fn prepare(
+        png: Vec<u8>,
+        config: &ReportMailConfig,
+        at: DateTime<Utc>,
+    ) -> Result<Self, String> {
+        if png.len() > chart::MAX_PNG_BYTES {
+            return Err("趋势图片超过大小限制".into());
+        }
+        let mut secret = [0u8; 32];
+        openssl::rand::rand_bytes(&mut secret).map_err(|e| e.to_string())?;
+        let token: String = secret.iter().map(|b| format!("{b:02x}")).collect();
+        Ok(Self {
+            url: config.url(&format!("{IMAGE_PREFIX}{token}/trend.png")),
+            hash: digest(token.as_bytes())?,
+            sha256: digest(&png)?,
+            png,
+            lifetime_days: config.image_lifetime_days,
+            expires: at + chrono::Duration::days(i64::from(config.image_lifetime_days)),
+        })
     }
-    let mut secret = [0_u8; 32];
-    openssl::rand::rand_bytes(&mut secret).map_err(|e| e.to_string())?;
-    let token: String = secret.iter().map(|b| format!("{b:02x}")).collect();
-    let hash = digest(token.as_bytes())?;
-    let sha256 = digest(png)?;
-    let expires = at + chrono::Duration::days(i64::from(config.image_lifetime_days));
-    client.execute("INSERT INTO report_mail_asset(report_id,renderer_version,width,height,png_bytes,sha256,token_hash,lifetime_days,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-        &[&id, &chart::RENDERER_VERSION, &(chart::WIDTH as i32), &(chart::HEIGHT as i32), &png, &sha256, &hash, &config.image_lifetime_days, &expires]).await.map_err(|e| e.to_string())?;
-    Ok(config.url(&format!("{IMAGE_PREFIX}{token}/trend.png")))
+
+    pub async fn commit<C: GenericClient + Sync>(
+        &self,
+        client: &C,
+        id: Uuid,
+    ) -> Result<(), String> {
+        client.execute("INSERT INTO report_mail_asset(report_id,renderer_version,width,height,png_bytes,sha256,token_hash,lifetime_days,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+            &[&id, &chart::RENDERER_VERSION, &(chart::WIDTH as i32), &(chart::HEIGHT as i32), &self.png, &self.sha256, &self.hash, &self.lifetime_days, &self.expires]).await.map_err(|e|e.to_string())?;
+        Ok(())
+    }
 }
 
 /// Re-sending extends access without changing any archived bytes or reviving revocation.

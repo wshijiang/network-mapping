@@ -7,11 +7,14 @@ use std::time::{Duration, Instant};
 use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::UserLoginInfo;
 use crate::admin::{UserBaseI, get_session_ttl_seconds_from_database};
+use crate::identity::UserLoginInfo;
 use crate::login_allowlist::login_ip_is_allowed;
 use crate::logs::write::error_diagnostics;
-use crate::{get_password_and_id_from_database, get_unix_epoch_ms, verify_password};
+use crate::{
+    clock::get_unix_epoch_ms, identity::get_password_and_id_from_database,
+    identity::verify_password,
+};
 
 const SESSION_EXPIRATION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SESSION_EXPIRATION_BATCH_SIZE: i64 = 5_000;

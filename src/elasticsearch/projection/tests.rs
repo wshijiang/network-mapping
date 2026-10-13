@@ -307,7 +307,7 @@ async fn final_upload_and_duplicate_do_not_wait_for_current_projection() {
     for expected in [1, 0] {
         let saved = timeout(
             Duration::from_secs(5),
-            crate::save_scanner_results(
+            crate::result_ingest::storage::save_scanner_results(
                 &pool,
                 &maxmind,
                 &service,
