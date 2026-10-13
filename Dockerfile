@@ -14,6 +14,8 @@ RUN test -f dist/index.html && test -f dist/login.html && test -f dist/search.ht
 
 FROM rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS rust-chef
 WORKDIR /build
+# Keep checks/tests runnable without large debug and incremental caches.
+ENV CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
 RUN rustup component add rustfmt clippy
 RUN apt-get update && apt-get install -y --no-install-recommends cmake libssl-dev pkg-config && rm -rf /var/lib/apt/lists/*
 RUN cargo install --locked --version 0.1.78 cargo-chef
