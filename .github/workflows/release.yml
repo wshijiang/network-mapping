@@ -104,7 +104,7 @@ jobs:
             echo 'CC=musl-gcc' >> "$GITHUB_ENV"
             echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
             echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
-            echo 'BUILD_FEATURES=openssl/vendored' >> "$GITHUB_ENV"
+            echo 'BUILD_FEATURES=vendored-openssl' >> "$GITHUB_ENV"
           fi
 
       - name: Restore Cargo dependencies and build artifacts
@@ -119,8 +119,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$BUILD_TARGET" == *-musl ]]; then
-            # Resolve the optional OpenSSL source dependency in CI for musl only.
-            cargo build --release --target "$BUILD_TARGET" --features "$BUILD_FEATURES"
+            cargo build --locked --release --target "$BUILD_TARGET" --features "$BUILD_FEATURES"
           else
             cargo build --locked --release --target "$BUILD_TARGET"
           fi

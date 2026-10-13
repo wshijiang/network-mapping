@@ -55,6 +55,7 @@ png = "0.18"
 [features]
 default = []
 rir = []
+vendored-openssl = ["openssl/vendored"]
 
 [build-dependencies]
 toml = "1.1"
