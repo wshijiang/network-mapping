@@ -84,7 +84,9 @@ async fn business_validation_error_does_not_kill_the_worker() {
     .unwrap();
     let mut invalid = input();
     invalid["templateKey"] = serde_json::json!("login_success");
-    assert!(worker.invoke("render", invalid).await.is_err());
+    let error = worker.invoke("render", invalid).await.unwrap_err();
+    assert!(matches!(error, ModuleError::Execution(_)));
+    assert!(!error.is_retryable());
     assert!(worker.is_available());
     assert!(worker.invoke("render", input()).await.is_ok());
     worker.shutdown().await.unwrap();
@@ -122,6 +124,9 @@ async fn failed_worker_recovers_at_the_same_revision_then_rolls_back_at_a_new_re
     registry.apply_prepared(7, initial).await.unwrap();
     failed.shutdown().await.unwrap();
     assert!(!registry.acquire(MODULE_ID).await.unwrap().is_available());
+    let error = failed.invoke("render", input()).await.unwrap_err();
+    assert!(matches!(error, ModuleError::Unavailable(_)));
+    assert!(error.is_retryable());
 
     let recovered = Arc::new(ProcessModule::spawn(executable, "release-b").await.unwrap());
     let candidate = registry.prepare(recovered.clone()).await.unwrap();

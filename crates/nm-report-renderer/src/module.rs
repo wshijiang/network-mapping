@@ -83,7 +83,7 @@ impl Module for LocalReportRenderModule {
                 Ok(())
             })
             .await
-            .map_err(|e| ModuleError::Execution(e.to_string()))?
+            .map_err(|e| ModuleError::Unavailable(e.to_string()))?
         })
     }
 
@@ -99,7 +99,7 @@ impl Module for LocalReportRenderModule {
                     .map_err(|e| ModuleError::Execution(e.to_string()))
             })
             .await
-            .map_err(|e| ModuleError::Execution(e.to_string()))?
+            .map_err(|e| ModuleError::Unavailable(e.to_string()))?
         })
     }
 }

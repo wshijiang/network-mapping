@@ -74,7 +74,7 @@ async fn write_encoded_frame<W: AsyncWrite + Unpin>(
 }
 
 fn wire_error(error: impl std::fmt::Display) -> ModuleError {
-    ModuleError::Execution(format!("module IPC error: {error}"))
+    ModuleError::Unavailable(format!("module IPC error: {error}"))
 }
 
 pub struct ProcessModule {

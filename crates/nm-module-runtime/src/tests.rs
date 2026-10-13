@@ -5,6 +5,7 @@ struct TestModule {
     release: &'static str,
     factor: u64,
     fail_prepare: bool,
+    panic_on_invoke: bool,
     prepare_gate: Option<(Arc<Notify>, Arc<Notify>)>,
     invocation_gate: Option<(Arc<Notify>, Arc<Notify>)>,
 }
@@ -15,6 +16,7 @@ impl TestModule {
             release,
             factor,
             fail_prepare: false,
+            panic_on_invoke: false,
             prepare_gate: None,
             invocation_gate: None,
         }
@@ -48,6 +50,7 @@ impl Module for TestModule {
 
     fn invoke<'a>(&'a self, _method: &'a str, input: Value) -> ModuleFuture<'a, Value> {
         Box::pin(async move {
+            assert!(!self.panic_on_invoke, "simulated execution task panic");
             if let Some((entered, release)) = &self.invocation_gate {
                 entered.notify_one();
                 release.notified().await;
@@ -58,6 +61,22 @@ impl Module for TestModule {
             Ok(json!(input * self.factor))
         })
     }
+}
+
+#[tokio::test]
+async fn failed_execution_task_returns_a_retryable_error_and_releases_capacity() {
+    let registry = registry();
+    let mut module = TestModule::new("panicking", 1);
+    module.panic_on_invoke = true;
+    registry.publish(0, Arc::new(module)).await.unwrap();
+    let lease = registry.acquire("test").await.unwrap();
+    for _ in 0..2 {
+        let error = lease.invoke("compute", json!(2)).await.unwrap_err();
+        assert!(matches!(error, ModuleError::Unavailable(_)));
+        assert!(error.is_retryable());
+    }
+    drop(lease);
+    registry.shutdown(Duration::from_secs(1)).await.unwrap();
 }
 
 fn slot() -> ModuleSlot {

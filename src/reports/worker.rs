@@ -127,7 +127,7 @@ pub(crate) async fn process_one(
     process_one_with_renderer(pool, analytics, &renderer).await
 }
 
-async fn process_one_with_renderer(
+pub(super) async fn process_one_with_renderer(
     pool: &Pool,
     analytics: &RuntimeConfig<AnalyticsSnapshotConfig>,
     renderer: &super::service::ReportRenderService,
@@ -280,15 +280,13 @@ async fn capture(
         generated_at,
         cutoff_at: row.get("cutoff_at"),
     };
-    let template = mail_template::load_report_template(&tx, key).await;
+    // Loading only reads the template source; content errors are handled by
+    // rendering later. Database failures must reach the job's retry path.
+    let template = mail_template::load_report_template(&tx, key).await?;
     let (source, version) = match template {
-        Ok(Some((source, version))) => (Some(source), version),
-        Ok(None) => {
+        Some((source, version)) => (Some(source), version),
+        None => {
             quality["mail_error"] = serde_json::json!("报告邮件模板已停用");
-            (None, 0)
-        }
-        Err(error) => {
-            quality["mail_error"] = serde_json::json!(error);
             (None, 0)
         }
     };
@@ -309,6 +307,46 @@ async fn capture(
     }))
 }
 
+struct MailRenderAttempt {
+    lease: crate::module_runtime::ModuleLease,
+    rendered: Result<crate::mail_template::RenderedMailTemplate, String>,
+}
+
+/// Outer errors retry the job before archival. Inner errors describe permanent
+/// template/output validation failures and allow statistics-only archival.
+async fn render_mail(
+    registry: &crate::module_runtime::ModuleRegistry,
+    document: Value,
+    template_version: i32,
+) -> Result<MailRenderAttempt, String> {
+    use super::render_module::{MODULE_ID, ReportRenderOutput};
+    let lease = registry
+        .acquire(MODULE_ID)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !lease.is_available() {
+        return Err("报告渲染器暂不可用，等待恢复后重试".into());
+    }
+    let result = match lease.invoke("render", document).await {
+        Ok(value) => Ok(value),
+        Err(error) if error.is_retryable() || !lease.is_available() => {
+            return Err(format!("报告渲染暂时失败：{error}"));
+        }
+        Err(error) => Err(error.to_string()),
+    };
+    let rendered = result.and_then(|value| {
+        let output: ReportRenderOutput =
+            serde_json::from_value(value).map_err(|e| e.to_string())?;
+        if output.template_version != template_version {
+            return Err("渲染器返回了不匹配的模板版本".into());
+        }
+        let mut mail = output.rendered;
+        nm_report_renderer::validate_rendered_mail(&mut mail).map_err(|e| e.to_string())?;
+        Ok(mail)
+    });
+    Ok(MailRenderAttempt { lease, rendered })
+}
+
 async fn generate(
     pool: &Pool,
     id: Uuid,
@@ -316,7 +354,8 @@ async fn generate(
     mode_ready: bool,
     renderer: &super::service::ReportRenderService,
 ) -> Result<(), String> {
-    use super::render_module::{ReportRenderInput, ReportRenderOutput};
+    use super::render_module::ReportRenderInput;
+    use crate::module_runtime::ModuleError;
     let Some(mut input) = capture(pool, id, token, mode_ready).await? else {
         return Ok(());
     };
@@ -324,8 +363,8 @@ async fn generate(
     let image = if input.mail_settings.remote_images_enabled {
         match serde_json::from_value::<Vec<super::chart::TrendDay>>(input.payload["trend"].clone())
         {
-            Ok(trend) => super::chart::render_async(trend).await,
-            Err(error) => Err(error.to_string()),
+            Ok(trend) => super::chart::render_async_checked(trend).await,
+            Err(error) => Err(ModuleError::Execution(error.to_string())),
         }
     } else {
         Ok(Vec::new())
@@ -337,16 +376,14 @@ async fn generate(
             input.metadata.generated_at,
         )?),
         Ok(_) => None,
+        Err(error) if error.is_retryable() => return Err(error.to_string()),
         Err(error) => {
-            input.quality["mail_error"] = serde_json::json!(error);
+            input.quality["mail_error"] = serde_json::json!(error.to_string());
             None
         }
     };
     let image_url = asset.as_ref().map(|asset| asset.url.as_str()).unwrap_or("");
-    let lease = renderer
-        .registry()
-        .acquire(super::render_module::MODULE_ID)
-        .await;
+    let mut lease = None;
     let mut rendered = None;
     if input.quality.get("mail_error").is_none() {
         let context = super::mail_context::build(
@@ -367,32 +404,17 @@ async fn generate(
             .map_err(|e| e.to_string())?;
             let input_checksum =
                 super::assets::digest(&serde_json::to_vec(&document).map_err(|e| e.to_string())?)?;
-            let result = match &lease {
-                Ok(lease) => lease
-                    .invoke("render", document)
-                    .await
-                    .map_err(|e| e.to_string()),
-                Err(error) => Err(error.to_string()),
-            };
-            match result.and_then(|value| {
-                serde_json::from_value::<ReportRenderOutput>(value).map_err(|e| e.to_string())
-            }) {
-                Ok(output) if output.template_version == input.version => {
-                    let mut mail = output.rendered;
-                    if let Err(error) = nm_report_renderer::validate_rendered_mail(&mut mail) {
-                        input.quality["mail_error"] = serde_json::json!(error.to_string());
-                    } else {
-                        if let Ok(lease) = &lease {
-                            input.quality["renderer"] = serde_json::json!({"release_id":lease.release_id(),"generation":lease.generation(),"input_checksum":input_checksum});
-                        }
-                        rendered = Some(mail);
-                    }
-                }
-                Ok(_) => {
-                    input.quality["mail_error"] = serde_json::json!("渲染器返回了不匹配的模板版本")
+            // Propagate infrastructure failure before opening the archival
+            // transaction, so neither ready/succeeded nor delivery is saved.
+            let attempt = render_mail(renderer.registry(), document, input.version).await?;
+            match attempt.rendered {
+                Ok(mail) => {
+                    input.quality["renderer"] = serde_json::json!({"release_id":attempt.lease.release_id(),"generation":attempt.lease.generation(),"input_checksum":input_checksum});
+                    rendered = Some(mail);
                 }
                 Err(error) => input.quality["mail_error"] = serde_json::json!(error),
             }
+            lease = Some(attempt.lease);
         }
     }
     let keep_asset = rendered.as_ref().is_some_and(|mail| {
@@ -534,3 +556,7 @@ pub(crate) async fn send_one(pool: &Pool, encryption_key: &str) -> Result<bool, 
     }
     Ok(true)
 }
+
+#[cfg(test)]
+#[path = "worker_tests.rs"]
+mod tests;

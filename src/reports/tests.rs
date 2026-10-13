@@ -1009,6 +1009,133 @@ async fn older_executions_without_result_counters_use_batch_receipts() {
 
 #[tokio::test]
 #[ignore = "requires disposable REPORT_TEST_DATABASE_URL"]
+async fn temporary_renderer_outage_retries_without_archival_and_enqueues_mail_after_recovery() {
+    use super::render_module::LocalReportRenderModule;
+    use super::service::ReportRenderService;
+    use std::{sync::Arc, time::Duration};
+    let (pool, schema) = isolated_pool().await;
+    let calendar = crate::system_time::refresh(&pool).await.unwrap();
+    let timezone: chrono_tz::Tz = calendar.document.timezone.parse().unwrap();
+    let period = Period::containing_in(
+        PeriodType::Weekly,
+        Utc::now().with_timezone(&timezone).date_naive(),
+        &calendar.document.timezone,
+        calendar.revision,
+    )
+    .unwrap()
+    .previous()
+    .unwrap();
+    pool.get().await.unwrap().execute(
+        "UPDATE report_schedule SET enabled=TRUE, enabled_at=$1, recipient_ids=ARRAY[1] WHERE period_type='weekly'",
+        &[&period.start],
+    ).await.unwrap();
+    let id = storage::create(&pool, &period, None, "automatic", None)
+        .await
+        .unwrap();
+    let renderer = ReportRenderService::builtin().await;
+    renderer
+        .registry()
+        .shutdown(Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    assert!(
+        worker::process_one_with_renderer(&pool, &config(), &renderer)
+            .await
+            .unwrap()
+    );
+    let waiting = report(&pool, id).await;
+    assert_eq!(waiting.get::<_, String>("status"), "queued");
+    assert!(waiting.get::<_, Option<Value>>("payload").is_none());
+    assert!(waiting.get::<_, Option<Value>>("rendered_mail").is_none());
+    let client = pool.get().await.unwrap();
+    let job = client
+        .query_one(
+            "SELECT status,attempts,claim_token FROM report_job WHERE report_id=$1",
+            &[&id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(job.get::<_, String>("status"), "retry_wait");
+    assert_eq!(job.get::<_, i32>("attempts"), 1);
+    assert!(job.get::<_, Option<Uuid>>("claim_token").is_none());
+    assert_eq!(
+        client
+            .query_one(
+                "SELECT COUNT(*) FROM report_delivery WHERE report_id=$1",
+                &[&id]
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        client
+            .query_one(
+                "SELECT COUNT(*) FROM report_mail_asset WHERE report_id=$1",
+                &[&id]
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    client
+        .execute(
+            "UPDATE report_job SET available_at=NOW() WHERE report_id=$1",
+            &[&id],
+        )
+        .await
+        .unwrap();
+    drop(client);
+
+    renderer
+        .registry()
+        .publish(1, Arc::new(LocalReportRenderModule))
+        .await
+        .unwrap();
+    assert!(
+        worker::process_one_with_renderer(&pool, &config(), &renderer)
+            .await
+            .unwrap()
+    );
+    let archived = report(&pool, id).await;
+    assert_eq!(archived.get::<_, String>("status"), "ready");
+    assert!(archived.get::<_, Option<Value>>("rendered_mail").is_some());
+    assert!(
+        archived
+            .get::<_, Value>("quality")
+            .get("mail_error")
+            .is_none()
+    );
+    let client = pool.get().await.unwrap();
+    let job = client
+        .query_one(
+            "SELECT status,attempts FROM report_job WHERE report_id=$1",
+            &[&id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(job.get::<_, String>("status"), "succeeded");
+    assert_eq!(job.get::<_, i32>("attempts"), 2);
+    assert_eq!(client.query_one("SELECT COUNT(*) FROM report_delivery WHERE report_id=$1 AND status='pending' AND automatic", &[&id]).await.unwrap().get::<_, i64>(0), 1);
+    drop(client);
+    assert!(
+        !worker::process_one_with_renderer(&pool, &config(), &renderer)
+            .await
+            .unwrap()
+    );
+    renderer
+        .registry()
+        .shutdown(Duration::from_secs(1))
+        .await
+        .unwrap();
+    cleanup(&pool, schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable REPORT_TEST_DATABASE_URL"]
 async fn bad_report_template_cannot_block_valid_statistics_archival() {
     let (pool, schema) = isolated_pool().await;
     let client = pool.get().await.expect("client");

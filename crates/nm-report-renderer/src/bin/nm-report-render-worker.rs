@@ -27,6 +27,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let (output_value, error) = match result {
             Ok(value) => (value, None),
+            // RPC v1 error strings represent business failures. A failed local
+            // execution task must not be sent as a permanent template error;
+            // exit so the host observes transport failure and reconciles us.
+            Err(error) if error.is_retryable() => return Err(error.into()),
             Err(error) => (serde_json::Value::Null, Some(error.to_string())),
         };
         write_frame(

@@ -57,7 +57,10 @@ pub struct ModuleSlot {
 pub enum ModuleError {
     InvalidSlot,
     IncompatibleContract,
-    RevisionConflict { expected: u64, actual: u64 },
+    RevisionConflict {
+        expected: u64,
+        actual: u64,
+    },
     RevisionExhausted,
     NotReady,
     UnsupportedMethod,
@@ -65,7 +68,19 @@ pub enum ModuleError {
     Busy,
     DeadlineExceeded,
     DrainTimeout,
+    /// Infrastructure failure; retry after the capability becomes available.
+    Unavailable(String),
+    /// The implementation rejected an input or failed its business validation.
     Execution(String),
+}
+
+impl ModuleError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::NotReady | Self::Busy | Self::DeadlineExceeded | Self::Unavailable(_)
+        )
+    }
 }
 
 impl std::fmt::Display for ModuleError {
@@ -77,7 +92,7 @@ impl std::fmt::Display for ModuleError {
                     "module revision conflict: expected {expected}, actual {actual}"
                 )
             }
-            Self::Execution(message) => f.write_str(message),
+            Self::Execution(message) | Self::Unavailable(message) => f.write_str(message),
             other => write!(f, "{other:?}"),
         }
     }
@@ -223,7 +238,7 @@ impl ModuleLease {
         tokio::time::timeout(self.0.slot.request_timeout, result)
             .await
             .map_err(|_| ModuleError::DeadlineExceeded)?
-            .map_err(|_| ModuleError::Execution("module execution task stopped".into()))?
+            .map_err(|_| ModuleError::Unavailable("module execution task stopped".into()))?
     }
 }
 

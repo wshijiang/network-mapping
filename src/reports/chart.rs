@@ -173,19 +173,58 @@ pub fn render_trend_png(items: &[TrendDay]) -> Result<Vec<u8>, String> {
 
 /// The permit lives inside the blocking closure even if its async caller times out.
 pub async fn render_async(items: Vec<TrendDay>) -> Result<Vec<u8>, String> {
+    render_async_checked(items).await.map_err(|e| e.to_string())
+}
+
+pub(crate) async fn render_async_checked(
+    items: Vec<TrendDay>,
+) -> Result<Vec<u8>, crate::module_runtime::ModuleError> {
+    run_render_job(move || render_trend_png(&items)).await
+}
+
+async fn run_render_job<F>(render: F) -> Result<Vec<u8>, crate::module_runtime::ModuleError>
+where
+    F: FnOnce() -> Result<Vec<u8>, String> + Send + 'static,
+{
+    use crate::module_runtime::ModuleError;
     static RENDER_LOCK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
-    let permit = RENDER_LOCK.acquire().await.map_err(|e| e.to_string())?;
+    let permit = RENDER_LOCK
+        .acquire()
+        .await
+        .map_err(|e| ModuleError::Unavailable(e.to_string()))?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        render_trend_png(&items)
+        render()
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| ModuleError::Unavailable(e.to_string()))?
+    .map_err(ModuleError::Execution)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn failed_chart_task_is_retryable_and_releases_the_render_permit() {
+        let error = run_render_job(|| panic!("simulated chart task failure"))
+            .await
+            .unwrap_err();
+        assert!(error.is_retryable());
+        let recovered = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            run_render_job(|| Ok(vec![1, 2, 3])),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(recovered, [1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn invalid_chart_input_remains_a_permanent_content_error() {
+        let error = render_async_checked(Vec::new()).await.unwrap_err();
+        assert!(!error.is_retryable());
+    }
     #[test]
     fn renders_month_and_empty_week_as_valid_png() {
         for days in [7, 28, 29, 30, 31] {
