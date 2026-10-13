@@ -631,11 +631,14 @@ async fn dns_reconciliation_rejects_duplicate_id_across_backing_indices() {
     assert!(error.contains("跨 backing index 重复"));
 }
 
-pub(super) async fn seed_dns_upload(pool: &Pool) -> crate::ScannerResultUpload {
+pub(super) async fn seed_dns_upload(
+    pool: &Pool,
+) -> crate::result_ingest::model::ScannerResultUpload {
     seed_execution(pool).await;
     let scanner = "00000000-0000-0000-0000-000000000001";
     let task = "00000000-0000-0000-0000-000000000002";
-    let token_hash = crate::hash_scanner_token("fixture-token", "fixture-pepper").unwrap();
+    let token_hash =
+        crate::identity::hash_scanner_token("fixture-token", "fixture-pepper").unwrap();
     let client = pool.get().await.unwrap();
     client.execute("INSERT INTO scanner_info(scanner_id,create_user,runtime_token_hash,is_enable) VALUES($1,1,$2,true)", &[&scanner,&token_hash]).await.unwrap();
     client
@@ -687,7 +690,7 @@ async fn dns_batch_write_lease_blocks_overlap_and_recovers_after_expiry() {
     let follow_up = crate::dns_follow_up::DnsFollowUpConfig::default();
 
     fixture.state.lock().unwrap().fail_path = Some("_bulk".into());
-    let failed_write = crate::save_scanner_results(
+    let failed_write = crate::result_ingest::storage::save_scanner_results(
         &pool,
         &maxmind,
         &service,
@@ -700,12 +703,12 @@ async fn dns_batch_write_lease_blocks_overlap_and_recovers_after_expiry() {
     assert!(
         matches!(
             &failed_write,
-            Err(crate::SaveScannerResultsError::Storage(_))
+            Err(crate::result_ingest::model::SaveScannerResultsError::Storage(_))
         ),
         "unexpected first write result: {failed_write:?}"
     );
     assert!(matches!(
-        crate::save_scanner_results(
+        crate::result_ingest::storage::save_scanner_results(
             &pool,
             &maxmind,
             &service,
@@ -715,7 +718,7 @@ async fn dns_batch_write_lease_blocks_overlap_and_recovers_after_expiry() {
             "fixture-pepper"
         )
         .await,
-        Err(crate::SaveScannerResultsError::BatchBusy { .. })
+        Err(crate::result_ingest::model::SaveScannerResultsError::BatchBusy { .. })
     ));
 
     fixture.state.lock().unwrap().fail_path = None;
@@ -729,7 +732,7 @@ async fn dns_batch_write_lease_blocks_overlap_and_recovers_after_expiry() {
         .await
         .unwrap();
     assert_eq!(
-        crate::save_scanner_results(
+        crate::result_ingest::storage::save_scanner_results(
             &pool,
             &maxmind,
             &service,
@@ -779,7 +782,7 @@ async fn dns_elasticsearch_wait_does_not_hold_the_postgres_connection() {
         state.delay_ms = 750;
     }
 
-    let write = crate::save_scanner_results(
+    let write = crate::result_ingest::storage::save_scanner_results(
         &pool,
         &maxmind,
         &service,
@@ -885,9 +888,10 @@ async fn task_claim_keeps_selected_priority_then_uses_public_queue() {
     let second_scanner = Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap();
     let selected_task = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let public_task = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
-    let token_hash = crate::hash_scanner_token("fixture-token", "fixture-pepper").unwrap();
+    let token_hash =
+        crate::identity::hash_scanner_token("fixture-token", "fixture-pepper").unwrap();
     let second_token_hash =
-        crate::hash_scanner_token("second-fixture-token", "fixture-pepper").unwrap();
+        crate::identity::hash_scanner_token("second-fixture-token", "fixture-pepper").unwrap();
     let client = pool.get().await.unwrap();
     client
         .execute(
@@ -902,9 +906,14 @@ async fn task_claim_keeps_selected_priority_then_uses_public_queue() {
     client.execute("INSERT INTO scan_task_execution(id,execution_id,task_id,requested_scanner_id) VALUES(1,'selected-execution',1,$1),(2,'public-execution',2,NULL)", &[&scanner.to_string()]).await.unwrap();
     drop(client);
 
-    let selected = crate::apply_task(&pool, scanner, "fixture-token", "fixture-pepper")
-        .await
-        .unwrap();
+    let selected = crate::scan_control::dispatch::apply_task(
+        &pool,
+        scanner,
+        "fixture-token",
+        "fixture-pepper",
+    )
+    .await
+    .unwrap();
     assert_eq!(selected.task_id, selected_task);
 
     let mut client = pool.get().await.unwrap();
@@ -916,14 +925,19 @@ async fn task_claim_keeps_selected_priority_then_uses_public_queue() {
         )
         .await
         .unwrap();
-    crate::refresh_task_aggregate(&transaction, 1)
+    crate::scan_control::dispatch::refresh_task_aggregate(&transaction, 1)
         .await
         .unwrap();
     transaction.commit().await.unwrap();
 
-    let public = crate::apply_task(&pool, scanner, "fixture-token", "fixture-pepper")
-        .await
-        .unwrap();
+    let public = crate::scan_control::dispatch::apply_task(
+        &pool,
+        scanner,
+        "fixture-token",
+        "fixture-pepper",
+    )
+    .await
+    .unwrap();
     assert_eq!(public.task_id, public_task);
 
     pool.get()
@@ -931,11 +945,11 @@ async fn task_claim_keeps_selected_priority_then_uses_public_queue() {
         .unwrap()
         .execute(
             "UPDATE scan_task_execution SET lease_expires_at = $1 WHERE id=2",
-            &[&(crate::get_unix_epoch_ms() - 1)],
+            &[&(crate::clock::get_unix_epoch_ms() - 1)],
         )
         .await
         .unwrap();
-    let reclaimed = crate::apply_task(
+    let reclaimed = crate::scan_control::dispatch::apply_task(
         &pool,
         second_scanner,
         "second-fixture-token",
@@ -960,7 +974,8 @@ async fn durable_upload_recovery_rotates_an_execution_with_a_different_upload_id
     let scanner = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let task_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let cached_upload_id = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
-    let token_hash = crate::hash_scanner_token("fixture-token", "fixture-pepper").unwrap();
+    let token_hash =
+        crate::identity::hash_scanner_token("fixture-token", "fixture-pepper").unwrap();
     let client = pool.get().await.unwrap();
     client
         .batch_execute("INSERT INTO users(id,username,password) VALUES(1,'fixture','unused')")
@@ -973,7 +988,7 @@ async fn durable_upload_recovery_rotates_an_execution_with_a_different_upload_id
     client.batch_execute("SELECT setval(pg_get_serial_sequence('scan_task_execution','id'),(SELECT MAX(id) FROM scan_task_execution),true)").await.unwrap();
     drop(client);
 
-    let recovered = crate::recover_scanner_task(
+    let recovered = crate::scan_control::dispatch::recover_scanner_task(
         &pool,
         scanner,
         Some(task_id),
@@ -1028,7 +1043,8 @@ async fn fresh_recovery_rotates_an_execution_that_already_has_batches() {
     let (pool, schema) = isolated_pool().await;
     let scanner = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let task_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
-    let token_hash = crate::hash_scanner_token("fixture-token", "fixture-pepper").unwrap();
+    let token_hash =
+        crate::identity::hash_scanner_token("fixture-token", "fixture-pepper").unwrap();
     let client = pool.get().await.unwrap();
     client
         .batch_execute("INSERT INTO users(id,username,password) VALUES(1,'fixture','unused')")
@@ -1041,7 +1057,7 @@ async fn fresh_recovery_rotates_an_execution_that_already_has_batches() {
     client.batch_execute("SELECT setval(pg_get_serial_sequence('scan_task_execution','id'),(SELECT MAX(id) FROM scan_task_execution),true)").await.unwrap();
     drop(client);
 
-    let recovered = crate::recover_scanner_task(
+    let recovered = crate::scan_control::dispatch::recover_scanner_task(
         &pool,
         scanner,
         None,
@@ -1094,7 +1110,7 @@ async fn expired_execution_claim_rotates_existing_batches_for_the_next_scanner()
     let second_scanner = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let task_id = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
     let second_token_hash =
-        crate::hash_scanner_token("second-fixture-token", "fixture-pepper").unwrap();
+        crate::identity::hash_scanner_token("second-fixture-token", "fixture-pepper").unwrap();
     let client = pool.get().await.unwrap();
     client
         .batch_execute("INSERT INTO users(id,username,password) VALUES(1,'fixture','unused')")
@@ -1107,7 +1123,7 @@ async fn expired_execution_claim_rotates_existing_batches_for_the_next_scanner()
     client.batch_execute("SELECT setval(pg_get_serial_sequence('scan_task_execution','id'),(SELECT MAX(id) FROM scan_task_execution),true)").await.unwrap();
     drop(client);
 
-    let claimed = crate::apply_task(
+    let claimed = crate::scan_control::dispatch::apply_task(
         &pool,
         second_scanner,
         "second-fixture-token",
@@ -1149,8 +1165,9 @@ async fn concurrent_task_claims_do_not_assign_one_execution_twice() {
     let first_scanner = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let second_scanner = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let task_id = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
-    let first_hash = crate::hash_scanner_token("first-token", "fixture-pepper").unwrap();
-    let second_hash = crate::hash_scanner_token("second-token", "fixture-pepper").unwrap();
+    let first_hash = crate::identity::hash_scanner_token("first-token", "fixture-pepper").unwrap();
+    let second_hash =
+        crate::identity::hash_scanner_token("second-token", "fixture-pepper").unwrap();
     let client = pool.get().await.unwrap();
     client
         .batch_execute("INSERT INTO users(id,username,password) VALUES(1,'fixture','unused')")
@@ -1167,16 +1184,32 @@ async fn concurrent_task_claims_do_not_assign_one_execution_twice() {
     drop(client);
 
     let (first, second) = tokio::join!(
-        crate::apply_task(&pool, first_scanner, "first-token", "fixture-pepper"),
-        crate::apply_task(&pool, second_scanner, "second-token", "fixture-pepper")
+        crate::scan_control::dispatch::apply_task(
+            &pool,
+            first_scanner,
+            "first-token",
+            "fixture-pepper"
+        ),
+        crate::scan_control::dispatch::apply_task(
+            &pool,
+            second_scanner,
+            "second-token",
+            "fixture-pepper"
+        )
     );
     let successes = [&first, &second]
         .into_iter()
         .filter(|result| result.is_ok())
         .count();
     assert_eq!(successes, 1);
-    assert!(matches!(first, Ok(_) | Err(crate::ApplyTaskError::NoTask)));
-    assert!(matches!(second, Ok(_) | Err(crate::ApplyTaskError::NoTask)));
+    assert!(matches!(
+        first,
+        Ok(_) | Err(crate::scan_control::dispatch::ApplyTaskError::NoTask)
+    ));
+    assert!(matches!(
+        second,
+        Ok(_) | Err(crate::scan_control::dispatch::ApplyTaskError::NoTask)
+    ));
 
     let execution = pool
         .get()
@@ -1208,7 +1241,8 @@ async fn no_task_result_commits_bounded_cancel_reaping() {
     let (pool, schema) = isolated_pool().await;
     let scanner = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let task_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
-    let token_hash = crate::hash_scanner_token("fixture-token", "fixture-pepper").unwrap();
+    let token_hash =
+        crate::identity::hash_scanner_token("fixture-token", "fixture-pepper").unwrap();
     let client = pool.get().await.unwrap();
     client
         .batch_execute("INSERT INTO users(id,username,password) VALUES(1,'fixture','unused')")
@@ -1216,12 +1250,18 @@ async fn no_task_result_commits_bounded_cancel_reaping() {
         .unwrap();
     client.execute("INSERT INTO scanner_info(scanner_id,create_user,runtime_token_hash,is_enable) VALUES($1,1,$2,true)", &[&scanner.to_string(), &token_hash]).await.unwrap();
     client.execute("INSERT INTO scan_task(id,user_id,task_id,task_initiator,task_target,task_status) VALUES(1,1,$1,'fixture',ARRAY['192.0.2.1'::inet],'running')", &[&task_id.to_string()]).await.unwrap();
-    client.execute("INSERT INTO scan_task_execution(id,execution_id,task_id,execution_status,assigned_scanner_id,lease_expires_at,cancel_requested) VALUES(1,'execution',1,'running','other-scanner',$1,true)", &[&(crate::get_unix_epoch_ms() - 1)]).await.unwrap();
+    client.execute("INSERT INTO scan_task_execution(id,execution_id,task_id,execution_status,assigned_scanner_id,lease_expires_at,cancel_requested) VALUES(1,'execution',1,'running','other-scanner',$1,true)", &[&(crate::clock::get_unix_epoch_ms() - 1)]).await.unwrap();
     drop(client);
 
     assert!(matches!(
-        crate::apply_task(&pool, scanner, "fixture-token", "fixture-pepper").await,
-        Err(crate::ApplyTaskError::NoTask)
+        crate::scan_control::dispatch::apply_task(
+            &pool,
+            scanner,
+            "fixture-token",
+            "fixture-pepper"
+        )
+        .await,
+        Err(crate::scan_control::dispatch::ApplyTaskError::NoTask)
     ));
     let status: String = pool
         .get()
@@ -1332,7 +1372,7 @@ async fn task_claim_plan_avoids_global_scans_and_disk_sort_at_scale() {
                  OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
              ORDER BY t.task_level DESC, t.task_create_time, t.id, e.execution_pk \
              LIMIT 1;",
-            &[&crate::get_unix_epoch_ms(), &scanner],
+            &[&crate::clock::get_unix_epoch_ms(), &scanner],
         )
         .await
         .unwrap()
@@ -1384,7 +1424,8 @@ async fn uploads_recover_without_pg_facts_and_reject_changed_completed_batches()
     service.validate_scan_cutover(&pool).await.unwrap();
     let scanner = "00000000-0000-0000-0000-000000000001";
     let task = "00000000-0000-0000-0000-000000000002";
-    let token_hash = crate::hash_scanner_token("fixture-token", "fixture-pepper").unwrap();
+    let token_hash =
+        crate::identity::hash_scanner_token("fixture-token", "fixture-pepper").unwrap();
     let client = pool.get().await.unwrap();
     client.execute("INSERT INTO scanner_info(scanner_id,create_user,runtime_token_hash,is_enable) VALUES($1,1,$2,true)", &[&scanner,&token_hash]).await.unwrap();
     client
@@ -1396,12 +1437,13 @@ async fn uploads_recover_without_pg_facts_and_reject_changed_completed_batches()
     let payload = json!({"protocol_version":2, "scanner_id":scanner, "task_id":task,
         "upload_id":"00000000-0000-0000-0000-000000000003", "batch_index":0,"is_final":false,
         "observations":[{"kind":"port","ip":"192.0.2.1","port":443,"protocol":"tcp","state":"open","source":"fixture","observed_at":1785542400000_i64}]});
-    let upload: crate::ScannerResultUpload = serde_json::from_value(payload.clone()).unwrap();
+    let upload: crate::result_ingest::model::ScannerResultUpload =
+        serde_json::from_value(payload.clone()).unwrap();
     let maxmind = crate::maxmind::MaxMindState::from_directory("/tmp/nm-es-no-maxmind");
     let follow_up = crate::dns_follow_up::DnsFollowUpConfig::default();
     fixture.state.lock().unwrap().fail_path = Some("_bulk".into());
     assert!(
-        crate::save_scanner_results(
+        crate::result_ingest::storage::save_scanner_results(
             &pool,
             &maxmind,
             &service,
@@ -1425,7 +1467,7 @@ async fn uploads_recover_without_pg_facts_and_reject_changed_completed_batches()
     fixture.state.lock().unwrap().fail_path = None;
     service.validate_scan_cutover(&pool).await.unwrap();
     assert_eq!(
-        crate::save_scanner_results(
+        crate::result_ingest::storage::save_scanner_results(
             &pool,
             &maxmind,
             &service,
@@ -1445,7 +1487,7 @@ async fn uploads_recover_without_pg_facts_and_reject_changed_completed_batches()
         .batch_execute("UPDATE scan_result_batch SET storage_backend='pending'")
         .await
         .unwrap();
-    crate::save_scanner_results(
+    crate::result_ingest::storage::save_scanner_results(
         &pool,
         &maxmind,
         &service,
@@ -1471,7 +1513,7 @@ async fn uploads_recover_without_pg_facts_and_reject_changed_completed_batches()
     final_upload.batch_index = Some(1);
     final_upload.is_final = Some(true);
     final_upload.observations.clear();
-    crate::save_scanner_results(
+    crate::result_ingest::storage::save_scanner_results(
         &pool,
         &maxmind,
         &service,
@@ -1495,7 +1537,7 @@ async fn uploads_recover_without_pg_facts_and_reject_changed_completed_batches()
     assert_eq!(row.get::<_, String>(0), "succeeded");
     assert_eq!(row.get::<_, i64>(1), 1);
     assert_eq!(
-        crate::save_scanner_results(
+        crate::result_ingest::storage::save_scanner_results(
             &pool,
             &maxmind,
             &service,
@@ -1510,9 +1552,10 @@ async fn uploads_recover_without_pg_facts_and_reject_changed_completed_batches()
     );
     let mut changed = payload;
     changed["observations"][0]["port"] = json!(80);
-    let changed: crate::ScannerResultUpload = serde_json::from_value(changed).unwrap();
+    let changed: crate::result_ingest::model::ScannerResultUpload =
+        serde_json::from_value(changed).unwrap();
     assert!(
-        crate::save_scanner_results(
+        crate::result_ingest::storage::save_scanner_results(
             &pool,
             &maxmind,
             &service,
@@ -1662,9 +1705,9 @@ async fn live_elasticsearch_preserves_successful_web_evidence_after_failed_probe
 async fn save_upload_fixture(
     pool: &Pool,
     service: &ElasticsearchService,
-    upload: &crate::ScannerResultUpload,
-) -> Result<usize, crate::SaveScannerResultsError> {
-    crate::save_scanner_results(
+    upload: &crate::result_ingest::model::ScannerResultUpload,
+) -> Result<usize, crate::result_ingest::model::SaveScannerResultsError> {
+    crate::result_ingest::storage::save_scanner_results(
         pool,
         &crate::maxmind::MaxMindState::from_directory("/tmp/nm-es-no-maxmind"),
         service,
@@ -1676,7 +1719,7 @@ async fn save_upload_fixture(
     .await
 }
 
-pub(super) fn port_observation() -> crate::ScannerObservation {
+pub(super) fn port_observation() -> crate::result_ingest::model::ScannerObservation {
     serde_json::from_value(json!({
         "kind": "port", "ip": "192.0.2.1", "port": 443,
         "protocol": "tcp", "state": "open", "source": "masscan",
@@ -1685,7 +1728,7 @@ pub(super) fn port_observation() -> crate::ScannerObservation {
     .unwrap()
 }
 
-async fn seed_mixed_upload(pool: &Pool) -> crate::ScannerResultUpload {
+async fn seed_mixed_upload(pool: &Pool) -> crate::result_ingest::model::ScannerResultUpload {
     let mut upload = seed_dns_upload(pool).await;
     pool.get()
         .await
@@ -1775,7 +1818,9 @@ async fn mixed_upload_keeps_dns_only_and_endpoint_only_batches_in_one_sequence()
         };
         assert!(matches!(
             save_upload_fixture(&pool, &service, &upload).await,
-            Err(crate::SaveScannerResultsError::NonContiguousFinalBatch { .. })
+            Err(
+                crate::result_ingest::model::SaveScannerResultsError::NonContiguousFinalBatch { .. }
+            )
         ));
         upload.batch_index = Some(1);
         assert_eq!(
@@ -1806,7 +1851,7 @@ async fn mixed_upload_recovers_after_dns_commit_and_rejects_changed_payload_or_i
     fixture.state.lock().unwrap().fail_path = Some("network-mapping-execution-endpoints".into());
     assert!(matches!(
         save_upload_fixture(&pool, &service, &upload).await,
-        Err(crate::SaveScannerResultsError::Storage(_))
+        Err(crate::result_ingest::model::SaveScannerResultsError::Storage(_))
     ));
     let client = pool.get().await.unwrap();
     let receipts = client.query_one(
@@ -1830,21 +1875,23 @@ async fn mixed_upload_recovers_after_dns_commit_and_rejects_changed_payload_or_i
     changed.observations.remove(0);
     assert!(matches!(
         save_upload_fixture(&pool, &service, &changed).await,
-        Err(crate::SaveScannerResultsError::BatchPayloadConflict { .. })
+        Err(crate::result_ingest::model::SaveScannerResultsError::BatchPayloadConflict { .. })
     ));
     changed = upload.clone();
-    if let crate::ScannerObservation::Dns { observation } = &mut changed.observations[0] {
+    if let crate::result_ingest::model::ScannerObservation::Dns { observation } =
+        &mut changed.observations[0]
+    {
         observation.question.name = "changed.example.com".into();
     }
     assert!(matches!(
         save_upload_fixture(&pool, &service, &changed).await,
-        Err(crate::SaveScannerResultsError::BatchPayloadConflict { .. })
+        Err(crate::result_ingest::model::SaveScannerResultsError::BatchPayloadConflict { .. })
     ));
     changed = upload.clone();
     changed.upload_id = Some(Uuid::new_v4());
     assert!(matches!(
         save_upload_fixture(&pool, &service, &changed).await,
-        Err(crate::SaveScannerResultsError::UploadIdentityConflict { .. })
+        Err(crate::result_ingest::model::SaveScannerResultsError::UploadIdentityConflict { .. })
     ));
     assert_eq!(fixture.state.lock().unwrap().documents.len(), documents);
     fixture.state.lock().unwrap().fail_path = None;
@@ -1881,9 +1928,11 @@ async fn mixed_upload_resumes_dns_sidecar_left_by_previous_server() {
     let service = fixture.service();
     let mut upload = seed_mixed_upload(&pool).await;
     let mut sidecar = upload.clone();
-    sidecar.upload_id = upload.upload_id.map(crate::dns_sidecar_upload_id);
+    sidecar.upload_id = upload
+        .upload_id
+        .map(crate::result_ingest::storage::dns_sidecar_upload_id);
     sidecar.observations.truncate(1);
-    crate::save_dns_scanner_results(
+    crate::result_ingest::dns::save_dns_scanner_results(
         &pool,
         &service,
         &crate::dns_follow_up::DnsFollowUpConfig::default(),
@@ -1898,15 +1947,17 @@ async fn mixed_upload_resumes_dns_sidecar_left_by_previous_server() {
     changed.observations.remove(0);
     assert!(matches!(
         save_upload_fixture(&pool, &service, &changed).await,
-        Err(crate::SaveScannerResultsError::BatchPayloadConflict { .. })
+        Err(crate::result_ingest::model::SaveScannerResultsError::BatchPayloadConflict { .. })
     ));
     changed = upload.clone();
-    if let crate::ScannerObservation::Dns { observation } = &mut changed.observations[0] {
+    if let crate::result_ingest::model::ScannerObservation::Dns { observation } =
+        &mut changed.observations[0]
+    {
         observation.question.name = "changed.example.com".into();
     }
     assert!(matches!(
         save_upload_fixture(&pool, &service, &changed).await,
-        Err(crate::SaveScannerResultsError::BatchPayloadConflict { .. })
+        Err(crate::result_ingest::model::SaveScannerResultsError::BatchPayloadConflict { .. })
     ));
     assert_eq!(
         pool.get()
@@ -1966,7 +2017,9 @@ async fn mixed_upload_dns_only_results_and_empty_final_preserve_task_completion(
         unrelated.upload_id = Some(Uuid::new_v4());
         assert!(matches!(
             save_upload_fixture(&pool, &service, &unrelated).await,
-            Err(crate::SaveScannerResultsError::UploadIdentityConflict { .. })
+            Err(
+                crate::result_ingest::model::SaveScannerResultsError::UploadIdentityConflict { .. }
+            )
         ));
         upload.batch_index = Some(1);
         upload.is_final = Some(true);
@@ -2001,10 +2054,12 @@ async fn mixed_upload_cannot_finish_with_an_unmatched_dns_child() {
     let service = fixture.service();
     let mut upload = seed_mixed_upload(&pool).await;
     let mut child = upload.clone();
-    child.upload_id = upload.upload_id.map(crate::dns_sidecar_upload_id);
+    child.upload_id = upload
+        .upload_id
+        .map(crate::result_ingest::storage::dns_sidecar_upload_id);
     child.batch_index = Some(1);
     child.observations.truncate(1);
-    crate::save_dns_scanner_results(
+    crate::result_ingest::dns::save_dns_scanner_results(
         &pool,
         &service,
         &crate::dns_follow_up::DnsFollowUpConfig::default(),
@@ -2019,7 +2074,7 @@ async fn mixed_upload_cannot_finish_with_an_unmatched_dns_child() {
     upload.is_final = Some(true);
     assert!(matches!(
         save_upload_fixture(&pool, &service, &upload).await,
-        Err(crate::SaveScannerResultsError::InvalidUpload(_))
+        Err(crate::result_ingest::model::SaveScannerResultsError::InvalidUpload(_))
     ));
     let client = pool.get().await.unwrap();
     assert_eq!(
@@ -2045,7 +2100,7 @@ async fn recovery_failure_reports_are_idempotent_and_stop_after_three_failures()
     let (pool, schema) = isolated_pool().await;
     let scanner = Uuid::now_v7();
     let task = Uuid::now_v7();
-    let hash = crate::hash_scanner_token("fixture-token", "fixture-pepper").unwrap();
+    let hash = crate::identity::hash_scanner_token("fixture-token", "fixture-pepper").unwrap();
     let client = pool.get().await.unwrap();
     client
         .batch_execute("INSERT INTO users(id,username,password) VALUES(1,'fixture','unused')")
@@ -2056,12 +2111,12 @@ async fn recovery_failure_reports_are_idempotent_and_stop_after_three_failures()
     client.execute("INSERT INTO scan_task_execution(id,execution_id,task_id,assigned_scanner_id,execution_status,attempt_count,lease_expires_at) VALUES(1,'execution',1,$1,'running',1,1)",&[&scanner.to_string()]).await.unwrap();
     drop(client);
     for count in [1, 1, 2, 2] {
-        let recovered = crate::recover_scanner_task_with_failure(
+        let recovered = crate::scan_control::dispatch::recover_scanner_task_with_failure(
             &pool,
             scanner,
             None,
             None,
-            Some(crate::RecoveryFailureReport {
+            Some(crate::scan_control::dispatch::RecoveryFailureReport {
                 task_id: task,
                 count,
             }),
@@ -2075,12 +2130,12 @@ async fn recovery_failure_reports_are_idempotent_and_stop_after_three_failures()
         assert_eq!(row.get::<_, i32>(0), count as i32);
         assert_eq!(row.get::<_, String>(1), "running");
     }
-    let outcome = crate::recover_scanner_task_with_failure(
+    let outcome = crate::scan_control::dispatch::recover_scanner_task_with_failure(
         &pool,
         scanner,
         None,
         None,
-        Some(crate::RecoveryFailureReport {
+        Some(crate::scan_control::dispatch::RecoveryFailureReport {
             task_id: task,
             count: 3,
         }),
@@ -2088,7 +2143,10 @@ async fn recovery_failure_reports_are_idempotent_and_stop_after_three_failures()
         "fixture-pepper",
     )
     .await;
-    assert!(matches!(outcome, Err(crate::ApplyTaskError::NoTask)));
+    assert!(matches!(
+        outcome,
+        Err(crate::scan_control::dispatch::ApplyTaskError::NoTask)
+    ));
     let client = pool.get().await.unwrap();
     let row = client.query_one("SELECT recovery_failure_count,execution_status,lease_expires_at FROM scan_task_execution WHERE id=1",&[]).await.unwrap();
     assert_eq!(row.get::<_, i32>(0), 3);

@@ -6,7 +6,6 @@ use std::ops::Deref;
 use std::time::Instant;
 use tracing::{error, warn};
 
-use crate::TemplatesInit;
 use crate::admin::{
     AddScanner, GetUserInfoH, ScannerRegisterData, ScannerRegistrationUnauthorized, Unbind2FAH,
     UserBaseI, UserBaseInfo, UserSession, VerifyTotp, bind_twofa, check_twofa_bind,
@@ -25,7 +24,11 @@ use crate::mail_template::send_login_notification;
 use crate::middlewares::render_500;
 use crate::request_log::set_reason;
 use crate::system_maintenance::{SystemMaintenanceState, maintenance_response};
-use crate::{generate_hash_password, get_conn_ip, log_out, verify_password};
+use crate::web_support::TemplatesInit;
+use crate::{
+    identity::generate_hash_password, identity::log_out, identity::verify_password,
+    web_support::get_conn_ip,
+};
 use uuid::Uuid;
 
 fn expired_auth_cookies(session: &str, csrf_token: &str) -> (Cookie<'static>, Cookie<'static>) {
@@ -1116,20 +1119,22 @@ async fn scanner_register_h(
 
     let maintenance_snapshot = maintenance.snapshot().await;
     if maintenance_snapshot.blocks_new_work() {
-        let token_hash =
-            match crate::hash_scanner_token(registration_token, &security.scanner_token_pepper) {
-                Ok(value) => value,
-                Err(error_value) => {
-                    set_reason(&req, "registration_token_hash_failed");
-                    error_logs_error(
-                        &req,
-                        "ScannerRegistrationTokenHashError",
-                        "hash_scanner_token",
-                        &error_value,
-                    );
-                    return HttpResponse::InternalServerError().finish();
-                }
-            };
+        let token_hash = match crate::identity::hash_scanner_token(
+            registration_token,
+            &security.scanner_token_pepper,
+        ) {
+            Ok(value) => value,
+            Err(error_value) => {
+                set_reason(&req, "registration_token_hash_failed");
+                error_logs_error(
+                    &req,
+                    "ScannerRegistrationTokenHashError",
+                    "hash_scanner_token",
+                    &error_value,
+                );
+                return HttpResponse::InternalServerError().finish();
+            }
+        };
         let client = match pool.get().await {
             Ok(client) => client,
             Err(error_value) => {

@@ -71,3 +71,7 @@
 前端入口是 `/scanner/{id}/configuration`。本地部署开关、速率限制和任务边界应用规则见扫描器仓库的 `docs/MAINTENANCE.md`“本地部署配置与远程运行配置”。
 
 `report_mail` 在每次报告生成时读取数据库权威文档，读取该配置接口也刷新本实例快照；多实例无需重启即可在新报告中使用已发布配置。归档邮件与图片不会随配置变化而改写。详见 [报告邮件](reports.md#完整邮件与远程趋势图片)。
+
+## 报表渲染模块选择
+
+`report_renderer` 是模块管理服务使用的独立 namespace，复用 `runtime_configuration` 和修订表。它通过 `GET/POST /api/modules/report-render` 管理，不属于通用运行配置保存接口。默认使用 `builtin`，已发布选择在启动时恢复，并每五秒刷新；制品缺失或校验失败不会替换活跃实现。完整制品部署与版本切换见[模块实现](MODULE_RUNTIME_IMPLEMENTATION.md)。

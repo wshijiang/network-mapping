@@ -12,7 +12,7 @@ use crate::admin::UserBaseI;
 use crate::audit::{AuditContext, AuditEvent, write as write_audit};
 use crate::client_ip::display_ip;
 use crate::config::PasswordHashConfig;
-use crate::generate_hash_password;
+use crate::identity::generate_hash_password;
 
 const DEFAULT_PAGE_SIZE: u32 = 20;
 const MAX_PAGE_SIZE: u32 = 100;

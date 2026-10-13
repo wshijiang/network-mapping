@@ -8,7 +8,9 @@ use crate::admin::UserBaseI;
 use crate::audit::{AuditContext, AuditEvent, write as write_audit};
 use crate::config::SecurityConfig;
 use crate::logs::write::error_logs_error;
-use crate::{ApplyTaskError, validate_scanner_credentials};
+use crate::{
+    scan_control::dispatch::ApplyTaskError, scan_control::dispatch::validate_scanner_credentials,
+};
 
 pub const SCHEMA_VERSION: i32 = 1;
 

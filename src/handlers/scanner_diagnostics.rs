@@ -49,12 +49,19 @@ async fn machine_auth(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(|| error::ErrorUnauthorized("missing scanner token"))?;
-    crate::validate_scanner_credentials(pool, scanner, token, &security.scanner_token_pepper)
-        .await
-        .map_err(|e| match e {
-            crate::ApplyTaskError::ScannerUnauthorized => error::ErrorUnauthorized("unauthorized"),
-            e => internal(e),
-        })?;
+    crate::scan_control::dispatch::validate_scanner_credentials(
+        pool,
+        scanner,
+        token,
+        &security.scanner_token_pepper,
+    )
+    .await
+    .map_err(|e| match e {
+        crate::scan_control::dispatch::ApplyTaskError::ScannerUnauthorized => {
+            error::ErrorUnauthorized("unauthorized")
+        }
+        e => internal(e),
+    })?;
     if !state.config.enabled {
         return Err(error::ErrorServiceUnavailable("diagnostics_disabled"));
     }

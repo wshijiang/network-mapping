@@ -82,6 +82,15 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Reclaim disposable runner disk before building
+        run: |
+          set -euo pipefail
+          df -h / "$RUNNER_TEMP"
+          # These preinstalled SDKs are unused by the container-only build.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          docker system prune --all --force
+          df -h / "$RUNNER_TEMP"
       - name: Install image transfer tool
         run: sudo apt-get update && sudo apt-get install --yes skopeo
       - name: Configure disposable runner for Elasticsearch smoke tests
@@ -151,6 +160,10 @@ jobs:
         run: |
           set -euo pipefail
           archive="$RUNNER_TEMP/image-$ARCH.oci.tar"
+          # OCI and GHA cache export have completed. Free build snapshots before
+          # importing the runtime plus database images for smoke tests.
+          docker buildx prune --all --force
+          df -h / "$RUNNER_TEMP"
           python3 docker/ci.py verify --component server --archive "$archive" --arch "$ARCH" --version "$VERSION" --revision "$REVISION" --frontend "$FRONTEND_REVISION"
           skopeo copy --override-arch "$ARCH" "oci-archive:$archive" docker-daemon:network-mapping-server:ci
           python3 docker/smoke.py network-mapping-server:ci "$archive.json"

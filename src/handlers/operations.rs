@@ -3,7 +3,7 @@ use crate::audit::{AuditContext, AuditEvent, write as write_audit};
 use crate::config::SecurityConfig;
 use crate::elasticsearch::{ElasticsearchService, ScanQueryIndex};
 use crate::logs::write::{error_logs, error_logs_error};
-use crate::{generate_scanner_token, hash_scanner_token};
+use crate::{identity::generate_scanner_token, identity::hash_scanner_token};
 use actix_web::{HttpRequest, HttpResponse, Responder, delete, get, post, put, web};
 use deadpool_postgres::Pool;
 use serde::Deserialize;
@@ -99,7 +99,7 @@ pub(crate) async fn cancel_task(
                 .json(json!({"success": false, "message": "task is already finished"}));
         }
     }
-    let now = crate::get_unix_epoch_ms();
+    let now = crate::clock::get_unix_epoch_ms();
     if let Err(error) = transaction.execute(
         "UPDATE scan_task_execution SET execution_status = CASE WHEN execution_status = 'pending' THEN 'cancelled' ELSE execution_status END, \
          cancel_requested = (execution_status = 'running'), task_end_time = CASE WHEN execution_status = 'pending' THEN $1::BIGINT ELSE task_end_time END, \
@@ -108,7 +108,9 @@ pub(crate) async fn cancel_task(
         log_database_error(&req, "CancelTaskDatabaseError", &error);
         return HttpResponse::InternalServerError().finish();
     }
-    if let Err(error) = crate::refresh_task_aggregate(&transaction, task_pk).await {
+    if let Err(error) =
+        crate::scan_control::dispatch::refresh_task_aggregate(&transaction, task_pk).await
+    {
         log_database_error(&req, "CancelTaskDatabaseError", &error);
         return HttpResponse::InternalServerError().finish();
     }
@@ -602,7 +604,7 @@ async fn release_scanner_tasks(
     let task_ids: std::collections::HashSet<i32> =
         rows.iter().map(|row| row.get("task_id")).collect();
     for task_id in task_ids {
-        crate::refresh_task_aggregate(transaction, task_id).await?;
+        crate::scan_control::dispatch::refresh_task_aggregate(transaction, task_id).await?;
     }
     Ok(rows.len() as u64)
 }

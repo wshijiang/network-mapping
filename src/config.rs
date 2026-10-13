@@ -10,8 +10,7 @@ use std::{
 };
 use tracing::info;
 
-use crate::handlers::{self, user, utils};
-use crate::{decrypt_data, encrypt_data};
+use crate::{identity::decrypt_data, identity::encrypt_data};
 
 pub trait SelfChecking {
     /// 该方法会直接 **Panic**
@@ -25,6 +24,8 @@ pub trait SelfChecking {
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub report_renderer: crate::reports::service::ReportRendererConfig,
     #[serde(default)]
     pub scanner_diagnostics: crate::scanner_diagnostics::DiagnosticsConfig,
     pub server: ServerConfig,
@@ -1446,6 +1447,7 @@ impl Config {
         config.maxmind.resolve_relative_to(path);
         config.backup.resolve_relative_to(path);
         config.elasticsearch.resolve_relative_to(path);
+        config.report_renderer.resolve_relative_to(path);
         Ok((config, report))
     }
 }
@@ -1908,152 +1910,9 @@ mod tests {
     }
 }
 
+/// Compatibility entry point; HTTP composition is owned by the transport layer.
 pub fn init_routes(cfg: &mut web::ServiceConfig) {
-    cfg.configure(handlers::scanner_diagnostics::configure);
-    cfg.service(handlers::report_mail_assets::sample)
-        .service(handlers::report_mail_assets::trend)
-        .service(handlers::report_mail_assets::revoke);
-    cfg.service(handlers::reports::generate)
-        .service(handlers::reports::list)
-        .service(handlers::reports::detail)
-        .service(handlers::reports::revise)
-        .service(handlers::reports::retry)
-        .service(handlers::reports::deliveries)
-        .service(handlers::reports::send)
-        .service(handlers::reports::schedules)
-        .service(handlers::reports::save_schedule)
-        .service(user::user_login_h)
-        .service(handlers::data_saa::get_system_data_handler)
-        .service(handlers::data_saa::get_analysis_distribution)
-        .service(handlers::data_saa::get_analysis_discovery_heatmap)
-        .service(handlers::statistics::cache_status)
-        .service(handlers::statistics::clear_cache)
-        .service(handlers::statistics::catalog)
-        .service(handlers::statistics::query)
-        .service(handlers::statistics_details::details)
-        .service(handlers::system_resources::get_system_resource_history)
-        .service(handlers::system_resources::get_database_size_history)
-        .service(handlers::scanner_latency::get_scanner_latency_history)
-        .service(handlers::system_maintenance::get_maintenance_status)
-        .service(handlers::system_maintenance::get_maintenance_history)
-        .service(handlers::system_maintenance::enter_maintenance)
-        .service(handlers::system_maintenance::update_maintenance)
-        .service(handlers::system_maintenance::exit_maintenance)
-        .service(handlers::system_maintenance::scanner_system_maintenance_probe)
-        .service(handlers::utils::benchmark_route)
-        .service(handlers::open_source::get_open_source_projects)
-        .service(handlers::search::search_ip)
-        .service(handlers::search::search_network)
-        .service(handlers::search::search_port)
-        .service(handlers::search::search_service)
-        .service(handlers::search::search_banner)
-        .service(handlers::search::elasticsearch_status)
-        .service(handlers::search::search_v2)
-        .service(handlers::assets::get_asset_summary)
-        .service(handlers::assets::get_asset_ports)
-        .service(handlers::assets::get_asset_port_history)
-        .service(handlers::tags::list_tag_categories)
-        .service(handlers::tags::create_tag_category)
-        .service(handlers::tags::update_tag_category)
-        .service(handlers::tags::delete_tag_category)
-        .service(handlers::tags::list_tags)
-        .service(handlers::tags::create_tag)
-        .service(handlers::tags::update_tag)
-        .service(handlers::tags::delete_tag)
-        .service(handlers::tags::get_asset_tags)
-        .service(handlers::tags::assign_tag)
-        .service(handlers::tags::remove_tag)
-        .service(crate::target_generated::automatic_target_status)
-        .service(handlers::task::create_task)
-        .service(handlers::task::create_dns_task)
-        .service(handlers::task::get_dns_resolver_presets)
-        .service(handlers::task::current_task_handler)
-        .service(handlers::task::apply_task_handler) //更换了 apply_task_handler 和 get_task的注册顺序
-        .service(handlers::task::scanner_public_ip_handler)
-        .service(handlers::task::scanner_heartbeat_handler)
-        .service(handlers::task::scanner_task_failure_handler)
-        .service(handlers::task::scanner_task_cancelled_handler)
-        .service(handlers::task::upload_scanner_result_handler)
-        .service(handlers::task::get_all_task_handler)
-        .service(handlers::task::get_task)
-        .service(handlers::task::get_dns_comparison)
-        .service(handlers::operations::cancel_task)
-        .service(handlers::operations::retry_task)
-        .service(handlers::operations::export_task)
-        .service(handlers::operations::dashboard_overview)
-        .service(handlers::admin_user::list_users)
-        .service(handlers::admin_user::create_user)
-        .service(handlers::admin_user::set_user_enabled)
-        .service(handlers::admin_user::kick_user)
-        .service(handlers::admin_user::delete_user)
-        .service(handlers::login_record::self_login_records)
-        .service(handlers::login_record::admin_login_records)
-        .service(handlers::login_allowlist::get_login_ip_allowlist)
-        .service(handlers::login_allowlist::update_login_ip_allowlist)
-        .service(handlers::login_allowlist::get_managed_login_ip_allowlist)
-        .service(handlers::login_allowlist::update_managed_login_ip_allowlist)
-        .service(handlers::mail_template::list_mail_templates)
-        .service(handlers::mail_template::get_mail_template)
-        .service(handlers::mail_template::validate_mail_template)
-        .service(handlers::mail_template::preview_mail_template)
-        .service(handlers::mail_template::save_mail_template_draft)
-        .service(handlers::mail_template::publish_mail_template)
-        .service(handlers::mail_template::get_mail_template_versions)
-        .service(handlers::mail_template::restore_mail_template_version)
-        .service(handlers::mail_template::test_mail_template)
-        .service(handlers::audit::list_audit_events)
-        .service(handlers::audit::export_audit_events)
-        .service(handlers::audit::get_audit_event)
-        .service(handlers::requests::list_requests)
-        .service(handlers::requests::request_summary)
-        .service(handlers::requests::request_performance)
-        .service(handlers::health::list_health_alerts)
-        .service(handlers::backup::backup_summary)
-        .service(handlers::backup::list_backup_jobs)
-        .service(handlers::backup::get_backup_job)
-        .service(handlers::backup::create_backup_job)
-        .service(handlers::backup::create_backup_check)
-        .service(user::user_logout)
-        .service(user::verify_totp_h)
-        .service(user::bind_twofa_h)
-        .service(user::get_user_info_h)
-        .service(user::update_user_info_h)
-        .service(user::change_password_h)
-        .service(user::totp_config_h)
-        .service(user::unbind_2fa_h)
-        .service(user::web_add_scanner_h)
-        .service(user::get_scanners_h)
-        .service(crate::scanner_config::get_runtime_scanner_configuration)
-        .service(user::get_scanner_h)
-        .service(crate::scanner_config::get_scanner_configuration)
-        .service(crate::scanner_config::update_scanner_configuration)
-        .service(handlers::operations::update_scanner)
-        .service(handlers::operations::set_scanner_enabled)
-        .service(handlers::operations::reissue_scanner_token)
-        .service(handlers::operations::delete_scanner)
-        .service(user::scanner_register_h)
-        .service(utils::get_config_h)
-        .service(utils::get_config_check)
-        .service(utils::get_server_config_h)
-        .service(utils::get_system_preferences)
-        .service(utils::get_system_timezones)
-        .service(handlers::health::monitor_operations)
-        .service(utils::runtime_config_history)
-        .service(utils::get_runtime_config_h)
-        .service(utils::save_runtime_config_h)
-        .service(utils::get_mail_settings_h)
-        .service(utils::save_mail_settings_h)
-        .service(utils::get_session_settings_h)
-        .service(utils::save_session_settings_h)
-        .service(utils::get_trusted_proxy_settings_h)
-        .service(utils::save_trusted_proxy_settings_h)
-        .service(utils::get_scan_settings_h)
-        .service(utils::save_scan_settings_h)
-        .service(utils::test_mail_server_h)
-        .service(utils::get_server_version);
-
-    #[cfg(feature = "rir")]
-    cfg.service(handlers::utils::update_rir);
+    crate::http::configure(cfg);
 }
 
 #[derive(Serialize)]

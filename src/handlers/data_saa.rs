@@ -13,7 +13,9 @@ use crate::elasticsearch::{ElasticsearchService, ScanQueryIndex};
 use crate::logs::write::{error_logs, error_logs_error};
 use crate::runtime_config::RuntimeConfig;
 use crate::system_resource_cache::SystemResourceCache;
-use crate::{SystemDetails, SystemStatusJson, Systems};
+use crate::{
+    system_resources::SystemDetails, system_resources::SystemStatusJson, system_resources::Systems,
+};
 
 const DEFAULT_RANGE_WEEKS: i64 = 12;
 const MAX_RANGE_DAYS: i64 = 366;

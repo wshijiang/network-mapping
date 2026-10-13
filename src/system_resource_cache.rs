@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::SystemResource;
+use crate::system_resources::SystemResource;
 
 #[derive(Default)]
 struct CacheInner {
@@ -43,7 +43,10 @@ impl SystemResourceCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DbResource, SystemCPU, SystemDisk, SystemNetwork, SystemRAM};
+    use crate::{
+        system_resources::DbResource, system_resources::SystemCPU, system_resources::SystemDisk,
+        system_resources::SystemNetwork, system_resources::SystemRAM,
+    };
     use std::collections::{BTreeMap, HashMap};
 
     fn resource(timestamp: i64, cpu: f32, ram: f32, disk_used: u64) -> SystemResource {

@@ -4,6 +4,8 @@ pub(crate) mod chart;
 pub mod mail_config;
 pub(crate) mod mail_context;
 pub mod period;
+pub mod render_module;
+pub mod service;
 pub(crate) mod statistics;
 pub(crate) mod storage;
 mod worker;

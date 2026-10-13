@@ -593,7 +593,7 @@ mod deployment_tests {
                         });
                         service.call(req)
                     })
-                    .service(crate::handlers::utils::get_config_check),
+                    .configure(crate::http::configure),
             )
             .await;
             let response = test::call_service(

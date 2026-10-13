@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::admin::UserBaseI;
 use crate::audit::{AuditContext, AuditEvent, write as write_audit, write_standalone};
 use crate::client_ip::display_ip;
-use crate::get_unix_epoch_ms;
+use crate::clock::get_unix_epoch_ms;
 use crate::logs::write::error_diagnostics;
 
 const DEFAULT_PAGE_SIZE: u32 = 10;

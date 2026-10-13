@@ -1,5 +1,5 @@
 use crate::config::DatabaseConfig;
-use crate::path_secure_join;
+use crate::web_support::path_secure_join;
 use actix_web::web;
 use deadpool_postgres::{ManagerConfig, RecyclingMethod, Runtime};
 use std::time::Duration;

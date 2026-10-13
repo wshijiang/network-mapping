@@ -73,14 +73,18 @@ cargo build --locked --release
 
 首次初始化会沿用 TOML 的扫描启用状态；多实例配置同步存在限制。完整说明见[运行时配置](docs/RUNTIME_CONFIGURATION.md)和[功能指南](docs/FEATURES.md)。
 
+## 模块化与报表渲染更新
+
+服务端按领域组织业务代码；模块运行时和纯邮件渲染是独立 Cargo workspace 包。报表邮件渲染支持内置实现或独立 worker，并可通过管理员接口切换版本。构建、制品布局和生效边界见[模块实现与热更新](docs/MODULE_RUNTIME_IMPLEMENTATION.md)。
+
 ## 开发与验证
 
 从本仓库目录运行：
 
 ```sh
 cargo fmt --check
-cargo clippy --all-targets
-cargo test
+cargo clippy --workspace --all-targets
+cargo test --workspace
 cargo build --locked --release
 ```
 

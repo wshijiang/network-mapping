@@ -12,8 +12,11 @@ COPY --from=frontend index.html login.html search.html asset.html vite.config.js
 RUN node --test src/utils/*.test.js && pnpm test:targets && pnpm build
 RUN test -f dist/index.html && test -f dist/login.html && test -f dist/search.html && test -f dist/asset.html && test -d dist/assets
 
+
 FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS rust-chef
 WORKDIR /build
+# Keep checks/tests runnable without large debug and incremental caches.
+ENV CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
 RUN rustup component add rustfmt clippy
 RUN apt-get update && apt-get install -y --no-install-recommends cmake libssl-dev pkg-config && rm -rf /var/lib/apt/lists/*
 RUN cargo install --locked --version 0.1.78 cargo-chef
@@ -21,6 +24,8 @@ RUN cargo install --locked --version 0.1.78 cargo-chef
 FROM rust-chef AS rust-planner
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY crates ./crates
+COPY examples ./examples
 COPY build.rs ./
 RUN cargo chef prepare --recipe-path recipe.json
 
@@ -28,14 +33,16 @@ FROM rust-chef AS rust-dependencies
 COPY --from=rust-planner /build/recipe.json ./recipe.json
 # Ordinary layers persist in the GHA mode=max cache, including compiled dependencies.
 # Match each validation/build command so both test and release dependencies are warm.
-RUN cargo chef cook --locked --clippy --all-targets --recipe-path recipe.json
-RUN cargo chef cook --locked --all-targets --recipe-path recipe.json
-RUN cargo chef cook --locked --release --recipe-path recipe.json
+RUN cargo chef cook --locked --clippy --workspace --all-targets --recipe-path recipe.json
+RUN cargo chef cook --locked --workspace --all-targets --recipe-path recipe.json
+RUN cargo chef cook --locked --workspace --release --recipe-path recipe.json
 
 FROM rust-dependencies AS rust-builder
 # Restore the real manifests and build script after cargo-chef's dummy project.
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY crates ./crates
+COPY examples ./examples
 COPY build.rs ./
 ENV NM_PUBLIC_CONFIG_FIELDS_FILE=src/public_config_fields.txt
 COPY docker/config.example.toml ./config.toml
@@ -47,10 +54,10 @@ COPY templates ./templates
 COPY assets/fonts ./assets/fonts
 
 # Always validate the real sources; correctness never depends on a warm cache.
-RUN cargo fmt --check
-RUN cargo clippy --locked --all-targets
-RUN cargo test --locked
-RUN cargo build --locked --release && mkdir /out && install -m 0755 target/release/network_mapping_server /out/network_mapping_server
+RUN cargo fmt --all --check
+RUN cargo clippy --locked --workspace --all-targets
+RUN cargo test --locked --workspace --all-targets
+RUN cargo build --locked --workspace --release && mkdir /out && install -m 0755 target/release/network_mapping_server /out/network_mapping_server
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 curl && rm -rf /var/lib/apt/lists/* \

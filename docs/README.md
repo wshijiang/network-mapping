@@ -49,6 +49,13 @@
 | [系统资源读取与慢依赖隔离](SYSTEM_RESOURCE_RESILIENCE.md) | 资源读取、缓存与慢依赖处理 |
 | [SQL 热路径优化与对比](SQL_HOT_PATH_OPTIMIZATION.md) | 认证热路径及性能对比 |
 
+## 架构与开发设计
+
+| 文档 | 内容 |
+| --- | --- |
+| [服务端模块化与部分热更新方案](MODULAR_ARCHITECTURE.md) | 领域边界、业务 worker 替换、配置同步、任务一致性与迁移阶段；含独立可运行 Rust 原型 |
+| [模块系统实现规格与接入步骤](MODULE_RUNTIME_IMPLEMENTATION.md) | 当前领域拆分、独立渲染包、生产接入、热更新配置与管理接口 |
+
 ## 文档维护约定
 
 - README 提供项目定位、快速开始和主要入口；详细参数、协议及排障保留在专题文档。

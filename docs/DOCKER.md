@@ -173,3 +173,19 @@ actionlint .github/workflows/docker.yml .github/workflows/release.yml
 [GHA 缓存](https://docs.docker.com/build/cache/backends/gha/)、
 [GHCR 发布](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images)、
 [Environment 门禁](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)。
+
+
+### CI 构建磁盘占用
+
+服务端 workspace 会构建检查、测试和 release 三类 Rust 产物。Docker CI
+关闭 dev/test 调试符号与增量编译，保留所有测试及原有 release 优化配置，
+减少依赖层和真实源码构建层的占用。
+
+两个一次性 GitHub 托管 runner 在构建前清理未使用的预装 SDK 和本地
+Docker 缓存，并输出磁盘容量。完整镜像的 OCI 产物与 GHA 远程缓存导出
+完成后，在镜像导入和数据库 smoke test 前清理 Buildx 快照，再输出容量。
+PR 继续执行后端构建；可信分支继续执行前后端完整镜像验收。
+
+清理只影响本次临时 runner，不删除 GHA 远程缓存或其他 CI 的缓存。
+这些全局本地清理命令不应直接用于共享的自托管 runner；共享环境应使用
+专用 builder 并只清理该 builder。

@@ -52,3 +52,4 @@ pub struct ScanTargetDone {
     pub info_count: u32,
     pub survival_ip_count: u32,
 }
+pub mod modules;

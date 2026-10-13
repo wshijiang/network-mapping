@@ -18,7 +18,7 @@ use crate::config::{
     AllowlistCommand, LoginAccessCommand, LoginOutcome, OutputFormat, PagerMode, PasswordCommand,
     PasswordHashConfig, ServerCommand, SessionSelection, TwoFactorCommand, UserCommand,
 };
-use crate::generate_hash_password;
+use crate::identity::generate_hash_password;
 use crate::login_allowlist::{display_login_allowlist, normalize_login_allowlist};
 
 type CliResult<T = ()> = Result<T, Box<dyn std::error::Error>>;

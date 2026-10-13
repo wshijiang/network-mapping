@@ -339,23 +339,51 @@ pub struct MonitorHandle {
 }
 
 impl MonitorHandle {
-    /// 启动后台通知与慢 SQL 轮询任务。开关由运行时快照控制，关闭时 worker 保持空闲。
+    /// Compatibility constructor for callers that own their Tokio runtime.
     pub fn new(config: Versioned<MonitorConfig>, pool: Pool, encryption_key: String) -> Self {
+        Self::build(config, pool, encryption_key, |_, task| {
+            tokio::spawn(task);
+        })
+    }
+
+    pub fn new_managed(
+        config: Versioned<MonitorConfig>,
+        pool: Pool,
+        encryption_key: String,
+        background: &mut crate::application::background::BackgroundServices,
+    ) -> Self {
+        Self::build(config, pool, encryption_key, |name, task| {
+            background.spawn(name, task)
+        })
+    }
+
+    fn build(
+        config: Versioned<MonitorConfig>,
+        pool: Pool,
+        encryption_key: String,
+        mut spawn: impl FnMut(&'static str, futures_util::future::BoxFuture<'static, ()>),
+    ) -> Self {
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         let (revisions, _) = tokio::sync::watch::channel(config.revision);
         let config = Arc::new(RwLock::new(config));
-        tokio::spawn(run_notifier(
-            rx,
-            pool.clone(),
-            encryption_key,
-            config.clone(),
-        ));
-        tokio::spawn(slow_sql::run_monitor(
-            pool,
-            tx.clone(),
-            config.clone(),
-            revisions.subscribe(),
-        ));
+        spawn(
+            "monitor-notifier",
+            Box::pin(run_notifier(
+                rx,
+                pool.clone(),
+                encryption_key,
+                config.clone(),
+            )),
+        );
+        spawn(
+            "slow-sql-monitor",
+            Box::pin(slow_sql::run_monitor(
+                pool,
+                tx.clone(),
+                config.clone(),
+                revisions.subscribe(),
+            )),
+        );
         info!(target: "server::startup", component = "monitor", "健康监控任务已启动");
         Self {
             tx,
