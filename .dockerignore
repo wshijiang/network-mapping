@@ -4,6 +4,10 @@
 !Cargo.toml
 !Cargo.lock
 !build.rs
+!crates/
+!crates/**
+!examples/
+!examples/**
 !src/
 !src/**
 !docker/

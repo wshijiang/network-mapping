@@ -204,3 +204,13 @@ cargo clippy --offline --locked --workspace --all-targets
 ```
 
 格式检查和 Clippy 均完成；Clippy 保留既有 ES 测试中一项 `chunks_exact` 风格警告。本次没有声称完整数据库、SMTP、扫描器联调或生产多实例发布已验证。
+
+## 11. 与主线配置检查和 Docker 构建的整合
+
+合入主线 `ee9b9d4` 后，保留新增配置检查的完整行为：配置加载返回 `(Config, ConfigCheck)`，组合层输出启动检查并把快照注入 HTTP 应用，领域路由注册 `/api/config/check`。管理员权限测试现在通过真实领域路由组合运行，避免只测试独立 handler 而遗漏生产注册。
+
+Docker allowlist 和 planner/builder 都包含 `crates/` 与 `examples/`。Cargo Chef 缓存准备、Clippy、测试和 release 构建使用 workspace，覆盖独立渲染 worker 和模块包，避免 Docker 中缺失本地路径依赖。
+
+本轮在可监听本地 TCP 的环境中运行 workspace 全目标默认测试：**389 项通过，55 项忽略，无过滤项**。另外使用一次性 PostgreSQL 18 执行全部 13 项报表数据库测试，全部通过，包括临时渲染故障后不归档、不投递，恢复后只入队一次，以及永久模板错误仍保留统计归档。两次运行合计 402 项 Rust 测试通过；其余 42 项忽略测试未执行，SMTP 实际发送和完整生产多实例环境仍未验收。Docker 发布合约的 28 项 Python 测试通过。
+
+Cargo Chef 0.1.78 使用 Docker planner 的实际 COPY 输入生成 recipe，并验证三个 workspace 包及 dummy 工程准备。完整本地 Docker 镜像构建曾因宿主磁盘容量耗尽中断，不计作通过；清理临时构建缓存后，镜像的完整构建与架构矩阵由远程 CI 验证。

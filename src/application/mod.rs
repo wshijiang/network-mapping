@@ -56,7 +56,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
         ));
     }
 
-    let config = config::Config::from_file(&args.config);
+    let (config, config_check) = config::Config::from_file_with_check(&args.config)?;
 
     let log_file_rolling = match config.log.file_rolling {
         0 => LogRollingMode::Daily,
@@ -78,6 +78,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
         terminal_mode = if args.terminal_verbose { "详细" } else { "精简" },
         "日志系统已启动"
     );
+    config_check.emit_startup();
     config.check();
     let request_log_config = config.requests.clone();
     let monitor_config = config.monitor.clone();
@@ -544,6 +545,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
         let monitor_handle = monitor_handle.clone();
 
         App::new()
+            .app_data(web::Data::new(config_check.clone()))
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(template_info.clone()))
             .app_data(web::Data::new(sys_2.clone()))

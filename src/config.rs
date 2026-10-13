@@ -1448,7 +1448,7 @@ impl Config {
         config.backup.resolve_relative_to(path);
         config.elasticsearch.resolve_relative_to(path);
         config.report_renderer.resolve_relative_to(path);
-        config
+        Ok((config, report))
     }
 }
 

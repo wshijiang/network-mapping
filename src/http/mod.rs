@@ -104,6 +104,7 @@ fn operations(cfg: &mut web::ServiceConfig) {
 fn configuration(cfg: &mut web::ServiceConfig) {
     cfg.service(handlers::utils::benchmark_route);
     cfg.service(handlers::utils::get_config_h);
+    cfg.service(handlers::utils::get_config_check);
     cfg.service(handlers::utils::get_server_config_h);
     cfg.service(handlers::utils::get_system_preferences);
     cfg.service(handlers::utils::get_system_timezones);
