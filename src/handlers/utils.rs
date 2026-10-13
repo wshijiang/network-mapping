@@ -87,6 +87,19 @@ async fn get_server_version() -> impl Responder {
     }))
 }
 
+/// 获取管理员可见的启动配置检查快照。
+#[get("/api/config/check")]
+pub async fn get_config_check(
+    report: web::Data<crate::config_check::ConfigCheck>,
+    user: UserBaseI,
+) -> impl Responder {
+    if user.role != 1 {
+        return HttpResponse::Forbidden()
+            .json(json!({"success": false, "message": "仅管理员可以查看配置检查结果"}));
+    }
+    HttpResponse::Ok().json(json!({"success": true, "data": report.get_ref()}))
+}
+
 /// 获取当前 Web 监听配置（只读）
 #[get("/api/config/server")]
 pub async fn get_server_config_h(

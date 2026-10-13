@@ -180,7 +180,7 @@ impl SelfChecking for AnalyticsSnapshotConfig {
 }
 
 /// pgBackRest 管理接口配置。默认关闭，避免未部署 pgBackRest 的现有安装在升级后失败。
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Serialize)]
 #[serde(default)]
 pub struct BackupConfig {
     pub enabled: bool,
@@ -283,7 +283,7 @@ impl BackupConfig {
 }
 
 /// Elasticsearch 扫描结果存储配置。扫描事实仅支持 Elasticsearch。
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ElasticsearchConfig {
     pub enabled: bool,
@@ -302,8 +302,10 @@ pub struct ElasticsearchConfig {
     pub write_wait_for_active_shards: String,
     /// 支持正式版 `9.5.x`；兼容旧 `9.5.N` 配置，不限制补丁版本。
     pub expected_version: String,
+    #[serde(skip_serializing)]
     pub api_key: Option<String>,
     pub username: Option<String>,
+    #[serde(skip_serializing)]
     pub password: Option<String>,
     pub ca_certificate_file: Option<PathBuf>,
     pub request_timeout_seconds: u64,
@@ -818,7 +820,7 @@ pub struct ServerConfig {
 }
 
 /// 默认 64MB：500 条/批 × 64KB/条 ≈ 32MB，再预留 JSON 转义与协议字段开销。
-fn default_max_body_size() -> usize {
+pub(crate) fn default_max_body_size() -> usize {
     64 * 1024 * 1024
 }
 
@@ -888,7 +890,7 @@ pub struct TemplatesConfig {
     pub templates_name: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Serialize)]
 #[serde(default)]
 pub struct FrontendConfig {
     /// Vite 生产构建目录；文件缺失时对应页面或资源返回 404。
@@ -912,7 +914,7 @@ impl FrontendConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Serialize)]
 #[serde(default)]
 pub struct MaxMindConfig {
     /// GeoLite2 数据库目录；文件缺失时相关 IP 情报字段保持为空。
@@ -1244,15 +1246,15 @@ impl SelfChecking for DatabaseConfig {
     }
 }
 
-fn default_pool_wait_timeout_ms() -> u64 {
+pub(crate) fn default_pool_wait_timeout_ms() -> u64 {
     2_000
 }
 
-fn default_pool_create_timeout_ms() -> u64 {
+pub(crate) fn default_pool_create_timeout_ms() -> u64 {
     5_000
 }
 
-fn default_pool_recycle_timeout_ms() -> u64 {
+pub(crate) fn default_pool_recycle_timeout_ms() -> u64 {
     3_000
 }
 
@@ -1403,9 +1405,37 @@ pub struct MailTestRequest {
 
 impl Config {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Self {
+        Self::from_file_with_check(path)
+            .expect("无法加载配置文件")
+            .0
+    }
+
+    pub fn from_file_with_check<P: AsRef<Path>>(
+        path: P,
+    ) -> Result<(Self, crate::config_check::ConfigCheck), std::io::Error> {
         let path = path.as_ref();
-        let content = fs::read_to_string(path).expect("无法读取配置文件");
-        let mut config: Self = toml::from_str(&content).expect("配置文件格式错误");
+        let content = fs::read_to_string(path)?;
+        // Error.message() omits source lines, which can contain credentials.
+        let raw: serde_json::Value = toml::from_str(&content).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("配置文件格式错误：{}", error.message()),
+            )
+        })?;
+        let report = crate::config_check::inspect_server(&raw);
+        if report.error_count() > 0 {
+            report.emit_startup();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "缺少必需配置，请根据启动提示补齐参数",
+            ));
+        }
+        let mut config: Self = toml::from_str(&content).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("配置字段无效：{}", error.message()),
+            )
+        })?;
         if config.scanner_diagnostics.directory.is_relative() {
             config.scanner_diagnostics.directory = path
                 .parent()

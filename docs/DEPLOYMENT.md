@@ -1,6 +1,10 @@
 # 服务端部署指南
 
+启动时会检查实际读取的配置字段，并在终端、日志和管理员系统设置中提示缺省参数；自定义 `--config` 路径保持支持，详见 [启动配置检查](CONFIG_CHECK.md)。
+
 [项目首页](../README.md) · [文档中心](README.md)
+
+容器镜像、Compose 与 GitHub 自动构建见 [Docker 部署指南](DOCKER.md)。
 
 本文面向 Linux 部署，覆盖首次安装、启动验收和服务托管。已有 PG 扫描结果的升级必须先阅读[Elasticsearch 存储与迁移](ELASTICSEARCH.md)，不能按空库流程直接切换。
 

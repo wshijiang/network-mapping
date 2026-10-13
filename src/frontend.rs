@@ -14,18 +14,21 @@ const SPA_ROUTES: &[&str] = &[
     "/scanner",
     "/analysis",
     "/analysis/scan",
+    "/analysis/statistics",
     "/analysis/performance",
     "/admin/users",
     "/admin/tags",
     "/admin/backups",
     "/audit",
     "/requests",
+    "/reports",
     "/health",
     "/open-source",
     "/testpage",
     "/setting",
     "/setting/maintenance",
     "/setting/scan",
+    "/setting/runtime",
     "/setting/mail-templates",
     "/user/info",
     "/user/security",
@@ -124,6 +127,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     }
 
     cfg.service(
+        web::resource("/reports/{report_id}")
+            .route(web::get().to(spa_entry))
+            .route(web::head().to(spa_entry)),
+    )
+    .service(
         web::resource("/task/{task_id}")
             .route(web::get().to(spa_entry))
             .route(web::head().to(spa_entry)),
@@ -172,6 +180,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 
 pub fn is_spa_path(path: &str) -> bool {
     if SPA_ROUTES.contains(&path) {
+        return true;
+    }
+
+    // Match Vue's single-segment report route; the API validates the report ID.
+    if single_path_parameter(path, "/reports/").is_some() {
         return true;
     }
 
@@ -358,12 +371,17 @@ mod tests {
         assert!(is_spa_path("/"));
         assert!(is_spa_path("/audit"));
         assert!(is_spa_path("/requests"));
+        assert!(is_spa_path("/reports"));
+        assert!(is_spa_path("/reports/019c0000-0000-4000-8000-000000000001"));
+        assert!(is_spa_path("/reports/not-a-uuid"));
         assert!(is_spa_path("/health"));
         assert!(is_spa_path("/admin/backups"));
         assert!(is_spa_path("/admin/tags"));
         assert!(is_spa_path("/analysis/scan"));
+        assert!(is_spa_path("/analysis/statistics"));
         assert!(is_spa_path("/analysis/performance"));
         assert!(is_spa_path("/setting/maintenance"));
+        assert!(is_spa_path("/setting/runtime"));
         assert!(!is_spa_path("/asset"));
         assert!(is_spa_path("/task/019c0000-0000-7000-8000-000000000001"));
         assert!(is_spa_path("/scanner/019c0000-0000-4000-8000-000000000001"));
@@ -373,6 +391,9 @@ mod tests {
 
         assert!(!is_spa_path("/unknown"));
         assert!(!is_spa_path("/api/audit/events"));
+        assert!(!is_spa_path("/api/reports"));
+        assert!(!is_spa_path("/reports/"));
+        assert!(!is_spa_path("/reports/id/extra"));
         assert!(!is_spa_path("/task/not-a-uuid"));
         assert!(!is_spa_path("/task/019c0000-0000-4000-8000-000000000001"));
         assert!(!is_spa_path("/scanner/id/extra"));
@@ -502,6 +523,96 @@ mod tests {
             web::Bytes::from_static(br#"{"type":"FeatureCollection","features":[]}"#)
         );
 
+        fs::remove_dir_all(directory).expect("remove frontend fixture");
+    }
+
+    #[actix_web::test]
+    async fn reports_and_other_history_routes_serve_spa_on_direct_requests() {
+        let directory = frontend_fixture();
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(FrontendAssets::new(&directory)))
+                .configure(configure),
+        )
+        .await;
+
+        for path in [
+            "/reports?period_type=weekly",
+            "/reports/019c0000-0000-4000-8000-000000000001",
+            "/reports/not-a-uuid",
+            "/analysis/statistics",
+            "/setting/runtime",
+        ] {
+            for method in [actix_web::http::Method::GET, actix_web::http::Method::HEAD] {
+                let request = actix_test::TestRequest::default()
+                    .method(method.clone())
+                    .uri(path)
+                    .insert_header(("Accept", "text/html"))
+                    .to_request();
+                let response = actix_test::call_service(&app, request).await;
+                assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
+                assert_eq!(response.headers().get("Cache-Control").unwrap(), "no-cache");
+                assert!(
+                    response
+                        .headers()
+                        .get("Content-Type")
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .starts_with("text/html")
+                );
+                let body = actix_test::read_body(response).await;
+                if method == actix_web::http::Method::HEAD {
+                    assert!(body.is_empty(), "HEAD {path}");
+                } else {
+                    assert_eq!(
+                        body,
+                        web::Bytes::from_static(b"<main>spa entry</main>"),
+                        "GET {path}"
+                    );
+                }
+            }
+        }
+
+        for path in ["/api/reports/missing", "/reports/id/extra"] {
+            let request = actix_test::TestRequest::get().uri(path).to_request();
+            assert_eq!(
+                actix_test::call_service(&app, request).await.status(),
+                StatusCode::NOT_FOUND,
+                "{path}"
+            );
+        }
+        fs::remove_dir_all(directory).expect("remove frontend fixture");
+    }
+
+    #[actix_web::test]
+    async fn reports_and_other_history_routes_redirect_anonymous_users_to_login() {
+        let directory = frontend_fixture();
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(FrontendAssets::new(&directory)))
+                .wrap(crate::middlewares::smiddleware::AuthMiddleware)
+                .configure(configure),
+        )
+        .await;
+
+        for path in [
+            "/reports",
+            "/reports/019c0000-0000-4000-8000-000000000001",
+            "/analysis/statistics",
+            "/setting/runtime",
+        ] {
+            for method in [actix_web::http::Method::GET, actix_web::http::Method::HEAD] {
+                let request = actix_test::TestRequest::default()
+                    .method(method.clone())
+                    .uri(path)
+                    .insert_header(("Accept", "text/html"))
+                    .to_request();
+                let response = actix_test::call_service(&app, request).await;
+                assert_eq!(response.status(), StatusCode::FOUND, "{method} {path}");
+                assert_eq!(response.headers().get("Location").unwrap(), "/login");
+            }
+        }
         fs::remove_dir_all(directory).expect("remove frontend fixture");
     }
 

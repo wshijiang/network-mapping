@@ -1,0 +1,213 @@
+name: Docker images
+
+on:
+  push:
+    branches: [main, dev, 'dev/**', 'feature/**', 'fix/**', 'release/**']
+    tags: ['v*']
+  pull_request:
+    branches: [main, dev, 'dev/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      revision: ${{ steps.metadata.outputs.revision }}
+      image: ${{ steps.metadata.outputs.image }}
+      frontend_revision: ${{ steps.metadata.outputs.frontend_revision }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate package version, lockfile and release ancestry
+        id: metadata
+        run: python3 docker/ci.py metadata --component server
+
+      - name: Checkout fixed frontend (trusted pushes only)
+        if: github.event_name != 'pull_request'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: wshijiang/network-mapping-vue
+          ref: ${{ steps.metadata.outputs.frontend_revision }}
+          token: ${{ secrets.FRONTEND_REPO_TOKEN || github.token }}
+          path: _frontend
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export credential-free frontend sources
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          test "$(git -C _frontend rev-parse HEAD)" = "$FRONTEND_REVISION"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            git -C _frontend merge-base --is-ancestor "$FRONTEND_REVISION" origin/main
+          fi
+          git -C _frontend archive --format=tar HEAD -- package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc src public index.html login.html search.html asset.html vite.config.js jsconfig.json tailwindcss.config.js LICENSE > "$RUNNER_TEMP/frontend.tar"
+        env:
+          FRONTEND_REVISION: ${{ steps.metadata.outputs.frontend_revision }}
+      - name: Upload frontend sources
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: docker-frontend-source
+          path: ${{ runner.temp }}/frontend.tar
+          retention-days: 3
+          if-no-files-found: error
+
+
+  build:
+    needs: prepare
+    name: Build and test linux/${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install image transfer tool
+        run: sudo apt-get update && sudo apt-get install --yes skopeo
+      - name: Configure disposable runner for Elasticsearch smoke tests
+        run: sudo sysctl -w vm.max_map_count=1048576
+      - name: Verify release artifact contracts
+        run: python3 -m unittest discover -s docker -p 'test_*.py'
+      - name: Set up native Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Download fixed frontend sources
+        if: github.event_name != 'pull_request'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: docker-frontend-source
+          path: ${{ runner.temp }}/frontend
+      - name: Unpack frontend sources
+        if: github.event_name != 'pull_request'
+        id: frontend
+        run: |
+          mkdir _frontend
+          tar -xf "$RUNNER_TEMP/frontend/frontend.tar" -C _frontend
+          printf 'version=%s\n' "$(python3 -c 'import json; print(json.load(open("_frontend/package.json"))["version"])')" >> "$GITHUB_OUTPUT"
+      - name: Validate backend on PR without private frontend credentials
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          target: rust-builder
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          cache-from: type=gha,scope=server-${{ matrix.arch }}
+          cache-to: type=gha,scope=server-${{ matrix.arch }},mode=max
+      - name: Explain PR coverage
+        if: github.event_name == 'pull_request'
+        run: echo 'Backend checks/build passed; combined image and pinned private frontend are validated on trusted branch pushes. No frontend token is supplied to PR jobs.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Export checked runtime with SBOM and provenance
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+
+          build-contexts: |
+            frontend=./_frontend
+
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          outputs: type=oci,dest=${{ runner.temp }}/image-${{ matrix.arch }}.oci.tar
+          provenance: mode=min
+          sbom: true
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.version }}
+            REVISION=${{ needs.prepare.outputs.revision }}
+
+            FRONTEND_REVISION=${{ needs.prepare.outputs.frontend_revision }}
+            FRONTEND_VERSION=${{ steps.frontend.outputs.version }}
+
+          cache-from: type=gha,scope=server-${{ matrix.arch }}
+          cache-to: type=gha,scope=server-${{ matrix.arch }},mode=max
+      - name: Verify OCI blobs and run smoke tests from the exported image
+        if: github.event_name != 'pull_request'
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          REVISION: ${{ needs.prepare.outputs.revision }}
+          FRONTEND_REVISION: ${{ needs.prepare.outputs.frontend_revision }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/image-$ARCH.oci.tar"
+          python3 docker/ci.py verify --component server --archive "$archive" --arch "$ARCH" --version "$VERSION" --revision "$REVISION" --frontend "$FRONTEND_REVISION"
+          skopeo copy --override-arch "$ARCH" "oci-archive:$archive" docker-daemon:network-mapping-server:ci
+          python3 docker/smoke.py network-mapping-server:ci "$archive.json"
+      - name: Save tested OCI artifact and checksums
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: docker-server-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/image-${{ matrix.arch }}.oci.tar
+            ${{ runner.temp }}/image-${{ matrix.arch }}.oci.tar.sha256
+            ${{ runner.temp }}/image-${{ matrix.arch }}.oci.tar.json
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
+
+  publish:
+    # Enabling this variable is a one-time workflow setup, not release approval.
+    # Each tag push still requires explicit component/version authorization.
+    if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' && vars.DOCKER_PUBLISH_ENABLED == 'true'
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: container-release
+    concurrency:
+      group: docker-publish-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout authorized release commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download this run's tested image artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: docker-server-*
+          path: docker/output
+          merge-multiple: true
+      - name: Install image transfer tool
+        run: sudo apt-get update && sudo apt-get install --yes skopeo
+      - name: Set up manifest tooling
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Authenticate to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Copy existing OCI images and publish immutable tags
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          REVISION: ${{ needs.prepare.outputs.revision }}
+          FRONTEND_REVISION: ${{ needs.prepare.outputs.frontend_revision }}
+          COMPONENT: server
+        run: bash docker/publish.sh

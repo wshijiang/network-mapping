@@ -37,6 +37,7 @@ fn failed() -> Failure {
 
 #[post("/api/analysis/statistics/details")]
 pub(crate) async fn details(
+    req: actix_web::HttpRequest,
     body: web::Json<DetailsQuery>,
     pool: web::Data<Pool>,
     es: web::Data<ElasticsearchService>,
@@ -68,8 +69,14 @@ pub(crate) async fn details(
         return HttpResponse::Conflict()
             .json(json!({"success":false,"message":"系统时区已改变，请重新生成统计"}));
     }
-    if service.refresh(&pool).await.is_err() {
-        return HttpResponse::ServiceUnavailable().finish();
+    if let Err(error) = service.refresh(&pool).await {
+        tracing::warn!(event = "StatisticsConfigurationReadFailed", request_id = %crate::logs::write::request_id(&req), error_message = %error);
+        return super::statistics::error_response(
+            &req,
+            Failure("statistics_config_unavailable", "统计配置暂不可用"),
+            &body.data_type,
+            None,
+        );
     }
     let mode = config.get().await;
     let scan = matches!(body.data_type.as_str(), "discovery" | "port" | "service");
@@ -86,6 +93,7 @@ pub(crate) async fn details(
             .json(json!({"success":false,"message":"统计数据源已改变，请重新生成统计"}));
     }
     let key=json!({"details":body,"user":user.id,"role":user.role,"mode":data_mode,"mode_revision":mode.revision,"start":f.start_at,"end":f.end_at}).to_string();
+    let data_type = body.data_type.clone();
     let result=service.execute(key,user.id,data_mode.into(),move |deadline|async move {
         let mut slot=ClusterSlot::acquire(&pool).await?;
         let output=async {
@@ -165,6 +173,6 @@ pub(crate) async fn details(
             .insert_header(("X-Statistics-Cache", cache))
             .content_type("application/json; charset=utf-8")
             .body(bytes),
-        Err(error) => super::statistics::error_response(error),
+        Err(error) => super::statistics::error_response(&req, error, &data_type, None),
     }
 }

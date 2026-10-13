@@ -2,6 +2,13 @@ name: Build release
 
 on:
   push:
+    # Main builds only warm the Cargo cache; packaging and publishing require a release run.
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - build.rs
+      - .github/workflows/release.yml
     tags:
       - 'v*'
   workflow_dispatch:
@@ -12,7 +19,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
@@ -20,9 +27,22 @@ concurrency:
 
 jobs:
   build-release:
-    name: Build and package Linux x86_64
-    runs-on: ubuntu-24.04
+    name: Build and package ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
     env:
+      BUILD_TARGET: ${{ matrix.target }}
       FRONTEND_REPO_TOKEN: ${{ secrets.FRONTEND_REPO_TOKEN }}
     steps:
       - name: Checkout server
@@ -31,6 +51,7 @@ jobs:
           persist-credentials: false
 
       - name: Resolve frontend revision
+        if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
         id: frontend_ref
         env:
           REQUESTED_REF: ${{ inputs.frontend_ref }}
@@ -47,7 +68,7 @@ jobs:
           echo "ref=$frontend_ref" >> "$GITHUB_OUTPUT"
 
       - name: Checkout private frontend
-        if: env.FRONTEND_REPO_TOKEN != ''
+        if: (github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')) && env.FRONTEND_REPO_TOKEN != ''
         uses: actions/checkout@v5
         with:
           repository: wshijiang/network-mapping-vue
@@ -57,7 +78,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout public frontend
-        if: env.FRONTEND_REPO_TOKEN == ''
+        if: (github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')) && env.FRONTEND_REPO_TOKEN == ''
         uses: actions/checkout@v5
         with:
           repository: wshijiang/network-mapping-vue
@@ -68,22 +89,66 @@ jobs:
       - name: Install system build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libssl-dev pkg-config
+          sudo apt-get install --yes binutils build-essential libssl-dev musl-tools perl pkg-config
 
       - name: Install Rust stable
         run: |
           rustup toolchain install stable --profile minimal --no-self-update
           rustup default stable
+          rustup target add "$BUILD_TARGET"
+
+      - name: Configure Cargo build
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_TARGET" == *-musl ]]; then
+            echo 'CC=musl-gcc' >> "$GITHUB_ENV"
+            echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
+            echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
+            echo 'BUILD_FEATURES=openssl/vendored' >> "$GITHUB_ENV"
+          fi
+
+      - name: Restore Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          shared-key: server-release-${{ matrix.target }}
+          env-vars: 'CARGO CC CFLAGS CXX CMAKE RUST BUILD_FEATURES'
+          cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
 
       - name: Build server
-        run: cargo build --locked --release
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_TARGET" == *-musl ]]; then
+            # Resolve the optional OpenSSL source dependency in CI for musl only.
+            cargo build --release --target "$BUILD_TARGET" --features "$BUILD_FEATURES"
+          else
+            cargo build --locked --release --target "$BUILD_TARGET"
+          fi
+
+      - name: Verify static musl binary
+        if: endsWith(matrix.target, '-musl')
+        run: |
+          set -euo pipefail
+          binary="target/$BUILD_TARGET/release/network_mapping_server"
+          readelf -l "$binary" > "$RUNNER_TEMP/musl-program-headers.txt"
+          readelf -d "$binary" > "$RUNNER_TEMP/musl-dynamic-section.txt"
+          if grep -q 'INTERP' "$RUNNER_TEMP/musl-program-headers.txt"; then
+            echo 'musl binary contains a dynamic interpreter' >&2
+            exit 1
+          fi
+          if grep -q '(NEEDED)' "$RUNNER_TEMP/musl-dynamic-section.txt"; then
+            echo 'musl binary depends on shared libraries' >&2
+            exit 1
+          fi
 
       - name: Set up pnpm
+        if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
         uses: pnpm/action-setup@v6
         with:
           version: 11
 
       - name: Set up Node.js
+        if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
         uses: actions/setup-node@v7
         with:
           node-version: '22'
@@ -91,14 +156,17 @@ jobs:
           cache-dependency-path: _frontend/pnpm-lock.yaml
 
       - name: Install frontend dependencies
+        if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
         working-directory: _frontend
         run: pnpm install --frozen-lockfile
 
       - name: Build frontend
+        if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
         working-directory: _frontend
         run: pnpm build
 
       - name: Resolve package metadata
+        if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
         id: package
         run: |
           set -euo pipefail
@@ -112,17 +180,18 @@ jobs:
             echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version v$version" >&2
             exit 1
           fi
-          archive="network-mapping-server-v${version}-x86_64-unknown-linux-gnu"
+          archive="network-mapping-server-v${version}-${BUILD_TARGET}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
 
       - name: Assemble release archive
+        if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
         env:
           ARCHIVE_NAME: ${{ steps.package.outputs.archive }}
           FRONTEND_REF: ${{ steps.frontend_ref.outputs.ref }}
         run: |
           set -euo pipefail
-          test -x target/release/network_mapping_server
+          test -x "target/$BUILD_TARGET/release/network_mapping_server"
           for path in index.html login.html search.html asset.html; do
             test -f "_frontend/dist/$path"
           done
@@ -134,7 +203,7 @@ jobs:
           frontend_root="$package_root/network-mapping-vue"
 
           mkdir -p "$server_root/source/maxmind" "$frontend_root" release
-          install -m 0755 target/release/network_mapping_server "$server_root/network_mapping_server"
+          install -m 0755 "target/$BUILD_TARGET/release/network_mapping_server" "$server_root/network_mapping_server"
           install -m 0644 config.toml "$server_root/config.example.toml"
           sed -E -i \
             -e 's/^([[:space:]]*(encrypt_key|scanner_token_pepper|password)[[:space:]]*=).*/\1 ""/' \
@@ -153,7 +222,7 @@ jobs:
           frontend-repository=wshijiang/network-mapping-vue
           frontend-ref=$FRONTEND_REF
           frontend-commit=$(git -C _frontend rev-parse HEAD)
-          target=x86_64-unknown-linux-gnu
+          target=$BUILD_TARGET
           rustc=$(rustc --version)
           node=$(node --version)
           pnpm=$(pnpm --version)
@@ -172,8 +241,8 @@ jobs:
             exit 1
           fi
 
-      - name: Upload manual build artifact
-        if: github.event_name == 'workflow_dispatch'
+      - name: Upload build artifact
+        if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.package.outputs.archive }}
@@ -181,10 +250,33 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  publish-release:
+    name: Publish all Linux release archives
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: build-release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: network-mapping-server-v*
+          path: release
+          merge-multiple: true
+
+      - name: Verify archive checksums
+        run: |
+          set -euo pipefail
+          test "$(find release -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 4
+          test "$(find release -maxdepth 1 -name '*.tar.gz.sha256' | wc -l)" -eq 4
+          cd release
+          sha256sum --check *.sha256
+
       - name: Publish GitHub Release
-        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail

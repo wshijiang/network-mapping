@@ -9,6 +9,7 @@ pub mod cli_progress;
 pub mod cli_user;
 pub mod client_ip;
 pub mod config;
+pub mod config_check;
 pub mod db;
 pub mod dns;
 pub mod dns_follow_up;

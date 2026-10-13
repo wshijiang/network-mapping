@@ -1,0 +1,21 @@
+# Allowlist: environment configuration, credentials, state and host artifacts
+# never enter the Docker build context (including intermediate cache layers).
+**
+!Cargo.toml
+!Cargo.lock
+!build.rs
+!src/
+!src/**
+!docker/
+!docker/config.example.toml
+!LICENSE
+
+!source/
+!source/database/
+!source/database/**
+!source/open_source_projects.json
+!templates/
+!templates/**
+!assets/
+!assets/fonts/
+!assets/fonts/**

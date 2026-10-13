@@ -154,6 +154,33 @@ fn normalize_error_body(
             .and_then(|body| body.get("code"))
             .and_then(Value::as_str)
             == Some("system_maintenance");
+    let statistics_error = (status == StatusCode::SERVICE_UNAVAILABLE
+        && matches!(
+            path,
+            "/api/analysis/statistics/query" | "/api/analysis/statistics/details"
+        ))
+    .then(|| {
+        let code = parsed.as_ref()?.get("code")?.as_str()?;
+        // Only fixed public contracts survive 5xx normalization; never forward diagnostics.
+        match code {
+            "statistics_budget_exceeded" => Some((
+                "statistics_budget_exceeded",
+                "统计量超过在线预算，请缩小范围、增加筛选或使用就绪快照",
+            )),
+            "statistics_timeout" => Some(("statistics_timeout", "统计查询超时，请缩小时间范围")),
+            "statistics_snapshot_pending" => Some((
+                "statistics_snapshot_pending",
+                "分析快照尚未就绪，请稍后重试",
+            )),
+            "statistics_config_unavailable" => Some((
+                "statistics_config_unavailable",
+                "统计配置暂不可用，请稍后重试",
+            )),
+            "statistics_failed" => Some(("statistics_failed", "统计查询暂不可用，请稍后重试")),
+            _ => None,
+        }
+    })
+    .flatten();
 
     let mut body = if status.is_server_error() && !maintenance {
         Map::new()
@@ -173,9 +200,13 @@ fn normalize_error_body(
     body.insert(
         "code".to_owned(),
         Value::String(
-            body.get("code")
-                .and_then(Value::as_str)
-                .filter(|_| !status.is_server_error() || maintenance)
+            statistics_error
+                .map(|(code, _)| code)
+                .or_else(|| {
+                    body.get("code")
+                        .and_then(Value::as_str)
+                        .filter(|_| !status.is_server_error() || maintenance)
+                })
                 .unwrap_or_else(|| default_code(status))
                 .to_owned(),
         ),
@@ -183,6 +214,8 @@ fn normalize_error_body(
 
     let message = if totp_required {
         "请验证 2FA 验证码".to_owned()
+    } else if let Some((_, message)) = statistics_error {
+        message.to_owned()
     } else if maintenance {
         "系统维护中，请稍后重试".to_owned()
     } else if status.is_server_error()
@@ -328,6 +361,41 @@ mod tests {
         assert_eq!(value["code"], "system_maintenance");
         assert_eq!(value["maintenance"]["retry_after_seconds"], 600);
         assert_eq!(value["message"], "系统维护中，请稍后重试");
+    }
+
+    #[test]
+    fn statistics_contract_is_restricted_to_known_codes_routes_and_status() {
+        for (status, path, code) in [
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "/api/other",
+                "statistics_timeout",
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "/api/analysis/statistics/query",
+                "unknown_failure",
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "/api/analysis/statistics/query",
+                "statistics_timeout",
+            ),
+        ] {
+            let value: Value = serde_json::from_slice(&normalize_error_body(
+                status,
+                path,
+                &serde_json::to_vec(
+                    &json!({"code":code,"message":"password=secret","detail":"SQLSTATE 42P01"}),
+                )
+                .unwrap(),
+                Uuid::nil(),
+            ))
+            .unwrap();
+            assert_eq!(value["code"], super::default_code(status));
+            assert!(!value.to_string().contains("secret"));
+            assert!(!value.to_string().contains("42P01"));
+        }
     }
 
     #[test]

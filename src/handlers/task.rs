@@ -319,6 +319,8 @@ pub struct ScannerSystemInfo {
 #[derive(Deserialize)]
 pub struct ScannerHeartbeat {
     #[serde(default)]
+    local_config_check: Option<crate::config_check::ConfigCheck>,
+    #[serde(default)]
     diagnostics: crate::scanner_diagnostics::protocol::Capabilities,
     #[serde(default)]
     diagnostic_health: Option<crate::scanner_diagnostics::Health>,
@@ -850,6 +852,13 @@ pub(crate) async fn scanner_heartbeat_handler(
     if !matches!(heartbeat.state.as_str(), "idle" | "scanning" | "stopping") {
         return HttpResponse::BadRequest().body("invalid scanner state");
     }
+    if heartbeat
+        .local_config_check
+        .as_ref()
+        .is_some_and(|report| !report.valid_scanner_report())
+    {
+        return HttpResponse::BadRequest().body("invalid local configuration check");
+    }
     if let Err(message) = heartbeat.scan_capabilities.validate() {
         return HttpResponse::BadRequest().body(message);
     }
@@ -1062,8 +1071,8 @@ pub(crate) async fn scanner_heartbeat_handler(
         .map(|h| h.accepting_tasks)
         .unwrap_or(true);
     if let Err(error) = scanner_transaction.execute(
-        "UPDATE scanner_info SET diagnostics_capabilities=$2, accepting_tasks=$3, diagnostic_health=$4, diagnostic_dropped_events=$5 WHERE scanner_id=$1",
-        &[&scanner_id, &serde_json::json!(heartbeat.diagnostics), &accepting_tasks, &diagnostic_health, &(heartbeat.diagnostic_health.as_ref().map(|h| h.dropped_events).unwrap_or(0).min(i64::MAX as u64) as i64)],
+        "UPDATE scanner_info SET diagnostics_capabilities=$2, accepting_tasks=$3, diagnostic_health=$4, diagnostic_dropped_events=$5, local_config_check=$6 WHERE scanner_id=$1",
+        &[&scanner_id, &serde_json::json!(heartbeat.diagnostics), &accepting_tasks, &diagnostic_health, &(heartbeat.diagnostic_health.as_ref().map(|h| h.dropped_events).unwrap_or(0).min(i64::MAX as u64) as i64), &heartbeat.local_config_check.as_ref().map(|report| serde_json::json!(report))],
     ).await {
         error_logs_error(&req, "ScannerDiagnosticHealthError", "update_diagnostic_health", &error);
         return HttpResponse::InternalServerError().finish();

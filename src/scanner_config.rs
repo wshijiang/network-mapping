@@ -340,8 +340,12 @@ pub async fn get_scanner_configuration(
     req: HttpRequest,
     pool: web::Data<Pool>,
     scanner_id: web::Path<Uuid>,
-    _user: UserBaseI,
+    user: UserBaseI,
 ) -> impl Responder {
+    if user.role != 1 {
+        return HttpResponse::Forbidden()
+            .json(json!({"success": false, "message": "仅管理员可以查看扫描器配置"}));
+    }
     let scanner_id = scanner_id.into_inner().to_string();
     let client = match pool.get().await {
         Ok(value) => value,
@@ -358,7 +362,7 @@ pub async fn get_scanner_configuration(
     match load_configuration(&client, &scanner_id).await {
         Ok(Some(configuration)) => {
             let status = client.query_one(
-                "SELECT name, applied_config_revision, config_status, config_error, config_reported_at FROM scanner_info WHERE scanner_id = $1;",
+                "SELECT name, applied_config_revision, config_status, config_error, config_reported_at, local_config_check FROM scanner_info WHERE scanner_id = $1;",
                 &[&scanner_id],
             ).await;
             match status {
@@ -372,6 +376,7 @@ pub async fn get_scanner_configuration(
                     "status": row.get::<_, Option<String>>("config_status"),
                     "error": row.get::<_, Option<String>>("config_error"),
                     "reported_at": row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("config_reported_at"),
+                    "local_config_check": row.get::<_, Option<Value>>("local_config_check"),
                 }})),
                 Err(error) => {
                     error_logs_error(&req, "ScannerConfigurationStatusError", "load_status", &error);

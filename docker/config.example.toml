@@ -1,0 +1,65 @@
+# Copy to docker/runtime/config.toml and fill the three empty secrets.
+# This file is an example, never a working production configuration.
+[server]
+host = "0.0.0.0"
+port = 9999
+encrypt_key = ""
+max_body_size = 67108864
+
+[tls]
+certificate_chain_file = "/etc/network-mapping/tls/cert.pem"
+private_key_file = "/etc/network-mapping/tls/key.pem"
+
+[security]
+scanner_token_pepper = ""
+
+[log]
+directory = "/var/log/network-mapping"
+file_name = "server.json"
+file_rolling = 0
+status_duration = 5
+
+[templates]
+templates_directory = "/opt/network-mapping/templates/**/*.html"
+templates_name = "error.html"
+
+[frontend]
+directory = "/opt/network-mapping/frontend/dist"
+
+[maxmind]
+directory = "/var/lib/network-mapping/maxmind"
+
+[scanner_diagnostics]
+directory = "/var/lib/network-mapping/scanner-diagnostics"
+
+[backup]
+enabled = false
+
+[elasticsearch]
+enabled = true
+read_enabled = true
+scan_storage = "elasticsearch"
+fallback_to_postgres = false
+url = "http://elasticsearch:9200"
+expected_version = "9.5.x"
+scan_number_of_replicas = 0
+write_wait_for_active_shards = "1"
+
+[database]
+host = "postgres"
+port = 5432
+username = "network_mapping"
+password = ""
+db_name = "network_mapping"
+pool_max_size = 10
+pool_wait_timeout_ms = 2000
+pool_create_timeout_ms = 5000
+pool_recycle_timeout_ms = 3000
+tls = false
+init_database_file = "/opt/network-mapping/source/database/init.sql"
+sql_file_path = "/opt/network-mapping/source/database/"
+
+[pwd_hash]
+m = 64
+t = 2
+p = 2

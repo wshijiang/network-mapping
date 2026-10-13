@@ -12,3 +12,10 @@ source/maxmind/*.mmdb
 CLAUDE.md
 
 .codegraph/
+
+# Docker runtime secrets and generated build artifacts
+/docker/runtime/
+/docker/output/
+/docker/.env
+/_frontend/
+/docker/__pycache__/
