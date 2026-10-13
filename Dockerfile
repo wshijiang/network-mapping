@@ -23,6 +23,7 @@ COPY src ./src
 COPY build.rs ./
 ENV NM_PUBLIC_CONFIG_FIELDS_FILE=src/public_config_fields.txt
 COPY docker/config.example.toml ./config.toml
+COPY docker/config.example.toml ./docker/config.example.toml
 
 COPY source/database ./source/database
 COPY source/open_source_projects.json ./source/open_source_projects.json
