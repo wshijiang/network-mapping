@@ -102,6 +102,22 @@ PG 就绪探测通过 TCP，避开初始化临时实例的 Unix socket；就绪�
 GHA 缓存按组件/架构分开，Cargo.lock 和基础镜像 digest 固定；APT 软件仓库仍会变化，
 因此不承诺不同日期重新构建有相同字节。缓存失效不会影响正确性。
 
+Docker 使用固定版本 `cargo-chef 0.1.78`：先从真实 manifests 和目标列表生成依赖配方，
+再分别预编译 Clippy、开发/测试和 release 依赖。编译产物保存在普通 Docker 层中，
+由现有 `type=gha,mode=max` 跨运行保存；没有需要额外导出的 BuildKit cache mount。
+只修改业务源码时配方保持不变，依赖编译层可复用；依赖、features、工具链或基础镜像变化时重新构建。
+真实 Cargo.toml、Cargo.lock、build.rs、源码和编译期资源在预编译后恢复，随后执行完整检查和测试。
+Cargo 构建和测试使用默认并发，不设置 jobs 或 test-threads。
+
+独立归档构建通过固定提交的 `Swatinem/rust-cache` 缓存 Cargo 下载和依赖编译产物，
+按组件/目标三元组、Rust 编译器及构建环境区分；musl 的链接器和 features 在恢复缓存前配置。
+`release.yml` 在 main 的 Cargo.toml、Cargo.lock、build.rs 或该工作流变化时预热四个目标的缓存，
+此路径不检出前端、不打包、不上传归档、不发布。普通业务源码提交不额外触发预热。
+只有 main 和 tag 运行写 Cargo 缓存；手动运行其他分支只读取可访问的缓存。
+tag/手动归档构建保留原有行为，GitHub Release 发布仍要求 tag push。
+Cargo 缓存和 Docker GHA 缓存共同占用仓库缓存容量；比较冷缓存、重复构建、源码修改和依赖更新的
+总耗时及缓存传输耗时，容量不足或缓存过期时允许回退到完整编译。
+
 镜像以包含 SBOM/最小构建来源证明的 OCI archive 保存为 Actions artifact，保留 14 天。
 CI 校验所有 blob 摘要、镜像版本/提交/架构、前端提交（服务端）和归档 SHA-256，
 再将同一产物导入 Docker 执行冒烟测试。发布复制这些产物，不重新编译。
@@ -145,7 +161,7 @@ tag 必须与 Cargo.toml/Cargo.lock 版本一致，且提交已包含于远端 `
 python3 -m unittest discover -s docker -p 'test_*.py'
 python3 docker/ci.py metadata --component server
 shellcheck docker/publish.sh
-actionlint .github/workflows/docker.yml
+actionlint .github/workflows/docker.yml .github/workflows/release.yml
 ```
 
 新代码的 OCI 合约测试会拒绝损坏 blob、错误版本/提交/架构、缺少证明、归档路径穿越和错误校验和。

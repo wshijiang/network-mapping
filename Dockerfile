@@ -12,12 +12,29 @@ COPY --from=frontend index.html login.html search.html asset.html vite.config.js
 RUN node --test src/utils/*.test.js && pnpm test:targets && pnpm build
 RUN test -f dist/index.html && test -f dist/login.html && test -f dist/search.html && test -f dist/asset.html && test -d dist/assets
 
-FROM rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS rust-builder
+FROM rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS rust-chef
 WORKDIR /build
 RUN rustup component add rustfmt clippy
 RUN apt-get update && apt-get install -y --no-install-recommends cmake libssl-dev pkg-config && rm -rf /var/lib/apt/lists/*
+RUN cargo install --locked --version 0.1.78 cargo-chef
+
+FROM rust-chef AS rust-planner
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && printf 'fn main() {}\n' > src/main.rs && cargo fetch --locked
+COPY src ./src
+COPY build.rs ./
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM rust-chef AS rust-dependencies
+COPY --from=rust-planner /build/recipe.json ./recipe.json
+# Ordinary layers persist in the GHA mode=max cache, including compiled dependencies.
+# Match each validation/build command so both test and release dependencies are warm.
+RUN cargo chef cook --locked --clippy --all-targets --recipe-path recipe.json
+RUN cargo chef cook --locked --all-targets --recipe-path recipe.json
+RUN cargo chef cook --locked --release --recipe-path recipe.json
+
+FROM rust-dependencies AS rust-builder
+# Restore the real manifests and build script after cargo-chef's dummy project.
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY build.rs ./
 ENV NM_PUBLIC_CONFIG_FIELDS_FILE=src/public_config_fields.txt
@@ -29,8 +46,7 @@ COPY source/open_source_projects.json ./source/open_source_projects.json
 COPY templates ./templates
 COPY assets/fonts ./assets/fonts
 
-# Keep dependency downloads in cached build layers. Cache mounts alone are not
-# persisted by cache-to=gha; correctness never depends on a warm cache.
+# Always validate the real sources; correctness never depends on a warm cache.
 RUN cargo fmt --check
 RUN cargo clippy --locked --all-targets
 RUN cargo test --locked
