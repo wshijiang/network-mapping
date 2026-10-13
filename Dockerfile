@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Supply the separately checked-out frontend as --build-context frontend=PATH.
-FROM node:24.16.0-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203 AS frontend-builder
+FROM node:26.11.1-bookworm-slim@sha256:86f07bc9c5dce4578cf37e5a418b7bfc7f817cda25cde66e2b66e95ed86c4567 AS frontend-builder
 WORKDIR /frontend
 RUN npm install --global pnpm@11.9.0
 COPY --from=frontend package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
