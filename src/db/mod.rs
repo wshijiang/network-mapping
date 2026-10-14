@@ -210,6 +210,11 @@ pub async fn init_database_table(
     transaction.batch_execute(&sql).await?;
     transaction
         .batch_execute(include_str!(
+            "../../source/database/migrate_scan_upload_stream.sql"
+        ))
+        .await?;
+    transaction
+        .batch_execute(include_str!(
             "../../source/database/migrate_scan_projection.sql"
         ))
         .await?;

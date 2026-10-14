@@ -1185,15 +1185,6 @@ impl ElasticsearchService {
         .map(|_| ())
     }
 
-    pub(crate) async fn persist_scan_batch(
-        &self,
-        context: &ScanBatchContext,
-        observations: &[Value],
-    ) -> Result<ScanBatchWriteResult, String> {
-        self.persist_scan_batch_scoped(context, observations, None)
-            .await
-    }
-
     pub(crate) fn scan_batch_indices(&self, observations: &[Value]) -> Result<Vec<String>, String> {
         observations
             .iter()

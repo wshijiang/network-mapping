@@ -121,3 +121,19 @@ refresh_execution_index_chunk、count_execution_observation_chunk 阶段记录�
 
 旧回执有观察却没有 storage_references，以及历史 PG → ES 迁移，显式走全历史索引
 兼容范围，记录 ScanSummaryLegacyIndexScope。新上传不依赖该兼容路径。
+
+## 上传会话与增量回执状态
+
+scan_upload_stream 按 (execution_id, upload_id) 保存批次数、确认数、pending 数、最小/最大
+批号、final 数/批号与已确认观察数。上传身份检查只读取本执行的上传流；普通批次不再扫描
+历史回执。final 结合唯一批号、连续区间、确认数和 pending 数验证完成，预约 final 后拒绝
+新批次。DNS sidecar 允许稀疏批号，但必须全部确认、没有 final，且批号落入已连续确认的
+主上传区间。ES 文档/IP/端点统计仍沿用 ES 的精确口径，不以回执观察数替代。
+
+数据库触发器与回执 INSERT/确认 UPDATE 同事务维护派生状态；重复确认不加计数，迁移及
+旧写入者也遵循此规则。身份、批号、final 标志与观察数不可修改。删除回执标记 dirty，
+下次上传只修复受影响流；删除执行通过外键清理流。
+
+内嵌 migrate_scan_upload_stream.sql 在首次升级时锁住回执写入并回填历史分组，后续启动
+通过 schema marker 跳过回填。大回执库应安排维护窗口；该一次性回填会增加升级时间。
+回滚应用可保留新表/触发器，旧代码仍从回执读取，新表继续跟随旧写入。

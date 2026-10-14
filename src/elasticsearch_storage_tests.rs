@@ -414,7 +414,7 @@ async fn fresh_install_restart_pending_and_missing_index_gate() {
     pool.get()
         .await
         .unwrap()
-        .batch_execute("ALTER TABLE scan_result_batch DROP COLUMN storage_backend")
+        .batch_execute("DROP TRIGGER scan_upload_stream_receipt ON scan_result_batch; ALTER TABLE scan_result_batch DROP COLUMN storage_backend")
         .await
         .unwrap();
     // Upgrading a pre-backend-column schema must classify existing receipts as PG.
@@ -1615,15 +1615,9 @@ async fn uploads_recover_without_pg_facts_and_reject_changed_completed_batches()
         .await
         .is_err()
     );
-    assert!(
-        fixture
-            .state
-            .lock()
-            .unwrap()
-            .requests
-            .iter()
-            .any(|path| path.contains("scan-observations-v1-*,") && path.contains("_refresh"))
-    );
+    assert!(fixture.state.lock().unwrap().requests.iter().any(|path| {
+        path.contains("scan-observations-v1-") && !path.contains('*') && path.contains("_refresh")
+    }));
     pool.get()
         .await
         .unwrap()
@@ -2074,6 +2068,138 @@ async fn empty_final_uses_all_execution_months_and_excludes_unrelated_history() 
     pool.get()
         .await
         .unwrap()
+        .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn upload_stream_tracks_gaps_retries_deletions_and_final_boundary() {
+    use crate::result_ingest::upload_stream;
+    let (pool, schema) = isolated_pool().await;
+    seed_execution(&pool).await;
+    let mut client = pool.get().await.unwrap();
+    client.batch_execute("INSERT INTO scan_result_batch(execution_id,upload_id,batch_index,is_final,observation_count,storage_backend)
+        VALUES(1,'upload',2,false,5,'elasticsearch'),(1,'upload',0,false,3,'pending');").await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    assert!(
+        upload_stream::validate_final(&tx, 1, "upload", 3, "scan result", false)
+            .await
+            .is_err()
+    );
+    tx.commit().await.unwrap();
+    client.batch_execute("UPDATE scan_result_batch SET storage_backend='elasticsearch' WHERE batch_index=0;
+        INSERT INTO scan_result_batch(execution_id,upload_id,batch_index,is_final,observation_count,storage_backend)
+        VALUES(1,'upload',1,false,4,'elasticsearch');").await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    upload_stream::validate_final(&tx, 1, "upload", 3, "scan result", false)
+        .await
+        .unwrap();
+    tx.execute("INSERT INTO scan_result_batch(execution_id,upload_id,batch_index,is_final,observation_count,storage_backend) VALUES(1,'upload',3,true,0,'pending')",&[]).await.unwrap();
+    assert!(
+        upload_stream::ensure_open(&tx, 1, "upload", 4, "scan result")
+            .await
+            .is_err()
+    );
+    assert!(
+        upload_stream::validate_final(&tx, 1, "upload", 3, "scan result", true)
+            .await
+            .is_err()
+    );
+    tx.execute(
+        "UPDATE scan_result_batch SET storage_backend='elasticsearch' WHERE batch_index=3",
+        &[],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        "UPDATE scan_result_batch SET storage_backend='elasticsearch' WHERE batch_index=3",
+        &[],
+    )
+    .await
+    .unwrap();
+    upload_stream::validate_final(&tx, 1, "upload", 3, "scan result", true)
+        .await
+        .unwrap();
+    let state = upload_stream::load(&tx, 1, "upload")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.get::<_, i64>("confirmed_count"), 4);
+    assert_eq!(state.get::<_, i64>("confirmed_observations"), 12);
+    tx.execute("DELETE FROM scan_result_batch WHERE batch_index=1", &[])
+        .await
+        .unwrap();
+    upload_stream::repair_deleted_receipts(&tx, 1)
+        .await
+        .unwrap();
+    assert!(
+        upload_stream::validate_final(&tx, 1, "upload", 3, "scan result", true)
+            .await
+            .is_err()
+    );
+    tx.commit().await.unwrap();
+    client
+        .execute("DELETE FROM scan_task_execution WHERE id=1", &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .query_one("SELECT COUNT(*) FROM scan_upload_stream", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    client
+        .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn upload_stream_migration_backfills_legacy_receipts_once_and_is_idempotent() {
+    let (pool, schema) = isolated_pool().await;
+    seed_execution(&pool).await;
+    let client = pool.get().await.unwrap();
+    client.batch_execute("DROP TRIGGER scan_upload_stream_receipt ON scan_result_batch;
+        DROP TABLE scan_upload_stream; DELETE FROM scan_storage_state WHERE state_key='upload_stream_schema_v1';
+        INSERT INTO scan_result_batch(execution_id,upload_id,batch_index,is_final,observation_count,storage_backend)
+        VALUES(1,'legacy',0,false,3,'elasticsearch'),(1,'legacy',1,true,4,'pending');").await.unwrap();
+    for _ in 0..2 {
+        client
+            .batch_execute(include_str!(
+                "../source/database/migrate_scan_upload_stream.sql"
+            ))
+            .await
+            .unwrap();
+    }
+    let state = client
+        .query_one("SELECT * FROM scan_upload_stream", &[])
+        .await
+        .unwrap();
+    assert_eq!(state.get::<_, i64>("batch_count"), 2);
+    assert_eq!(state.get::<_, i64>("confirmed_count"), 1);
+    assert_eq!(state.get::<_, i64>("pending_count"), 1);
+    assert_eq!(state.get::<_, i64>("confirmed_observations"), 3);
+    client
+        .execute(
+            "UPDATE scan_result_batch SET storage_backend='elasticsearch' WHERE batch_index=1",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .query_one("SELECT confirmed_observations FROM scan_upload_stream", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        7
+    );
+    client
         .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
         .unwrap();

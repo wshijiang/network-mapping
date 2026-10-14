@@ -2,6 +2,7 @@
 
 use super::dns::dns_batch_payload_checksum;
 use super::telemetry::WriteStage;
+use super::upload_stream;
 use crate::{search_content, target_generated};
 use tracing::{Instrument, info_span};
 
@@ -39,11 +40,12 @@ pub(crate) async fn validate_execution_upload_ids(
     execution_id: i32,
     upload_ids: &[String],
 ) -> Result<(), SaveScannerResultsError> {
+    upload_stream::repair_deleted_receipts(transaction, execution_id).await?;
     let conflict = transaction
         .query_one(
             "SELECT COUNT(DISTINCT upload_id)::BIGINT AS conflicting_count, \
                     MIN(upload_id) AS conflicting_upload_id \
-             FROM scan_result_batch \
+             FROM scan_upload_stream \
              WHERE execution_id = $1 AND NOT (upload_id = ANY($2::TEXT[]));",
             &[&execution_id, &upload_ids],
         )
@@ -345,45 +347,15 @@ async fn save_scanner_results_inner(
     }
     if is_final {
         let stage = WriteStage::new("validate_final_sequence");
-        let sequence = transaction
-            .query_one(
-                "SELECT COUNT(*) FILTER (WHERE batch_index < $3 AND storage_backend <> 'pending')::BIGINT AS prior_count, \
-                    MIN(batch_index) FILTER (WHERE batch_index < $3) AS first_prior, \
-                    MAX(batch_index) FILTER (WHERE batch_index < $3) AS last_prior, \
-                    COUNT(*) FILTER (WHERE batch_index > $3)::BIGINT AS later_count, \
-                    COUNT(*) FILTER (WHERE is_final)::BIGINT AS final_count, \
-                    BOOL_OR(is_final) FILTER (WHERE batch_index = $3) AS current_is_final \
-                 FROM scan_result_batch WHERE execution_id = $1 AND upload_id = $2;",
-                &[&execution_db_id, &upload_id, &batch_index],
-            )
-            .await
-            .map_err(scanner_result_database_error)?;
-        let prior_count: i64 = sequence.get("prior_count");
-        let first_prior: Option<i32> = sequence.get("first_prior");
-        let last_prior: Option<i32> = sequence.get("last_prior");
-        let later_count: i64 = sequence.get("later_count");
-        let final_count: i64 = sequence.get("final_count");
-        let current_is_final: Option<bool> = sequence.get("current_is_final");
-        let prior_sequence_valid = if batch_index == 0 {
-            prior_count == 0 && first_prior.is_none() && last_prior.is_none()
-        } else {
-            prior_count == i64::from(batch_index)
-                && first_prior == Some(0)
-                && last_prior == Some(batch_index - 1)
-        };
-        let existing_final_valid = match current_is_final {
-            Some(true) => final_count == 1,
-            Some(false) => false,
-            None => final_count == 0,
-        };
-        if !prior_sequence_valid || later_count != 0 || !existing_final_valid {
-            return Err(SaveScannerResultsError::NonContiguousFinalBatch {
-                execution_id: execution_db_id,
-                upload_id: upload_id.clone(),
-                batch_index,
-                content_kind: "scan result",
-            });
-        }
+        upload_stream::validate_final(
+            &transaction,
+            execution_db_id,
+            &upload_id,
+            batch_index,
+            "scan result",
+            false,
+        )
+        .await?;
         stage.finish(true);
     }
     let observation_count = i32::try_from(normalized_observations.len()).map_err(|_| {
@@ -588,6 +560,7 @@ async fn save_scanner_results_inner(
                 return Ok(0);
             }
         } else {
+            upload_stream::ensure_open(&transaction, execution_db_id, &upload_id, batch_index, "scan result").await?;
             if already_succeeded {
                 return Err(SaveScannerResultsError::CompletedExecutionNewBatch {
                     execution_id: execution_db_id,
@@ -748,32 +721,15 @@ async fn save_scanner_results_inner(
     let saved = normalized_observations.len() + dns_upload.observations.len();
 
     if !is_typed || upload.is_final == Some(true) {
-        let batch_sequence = transaction
-            .query_one(
-                "SELECT COUNT(*)::BIGINT AS count, MIN(batch_index) AS first_batch, \
-                    MAX(batch_index) AS last_batch, \
-                    COUNT(*) FILTER (WHERE is_final)::BIGINT AS final_count \
-                 FROM scan_result_batch WHERE execution_id = $1 AND upload_id = $2;",
-                &[&execution_db_id, &upload_id],
-            )
-            .await
-            .map_err(scanner_result_database_error)?;
-        let count: i64 = batch_sequence.get("count");
-        let first_batch: Option<i32> = batch_sequence.get("first_batch");
-        let last_batch: Option<i32> = batch_sequence.get("last_batch");
-        let final_count: i64 = batch_sequence.get("final_count");
-        if first_batch != Some(0)
-            || last_batch != Some(batch_index)
-            || count != i64::from(batch_index) + 1
-            || final_count != 1
-        {
-            return Err(SaveScannerResultsError::NonContiguousFinalBatch {
-                execution_id: execution_db_id,
-                upload_id: upload_id.clone(),
-                batch_index,
-                content_kind: "scan result",
-            });
-        }
+        upload_stream::validate_final(
+            &transaction,
+            execution_db_id,
+            &upload_id,
+            batch_index,
+            "scan result",
+            true,
+        )
+        .await?;
         let execution_summary = {
             es_execution_summary.ok_or_else(|| {
                 SaveScannerResultsError::Storage(
@@ -781,22 +737,29 @@ async fn save_scanner_results_inner(
                 )
             })?
         };
-        let dns_summary = transaction.query_one(
-            "SELECT COALESCE(SUM(d.observation_count), 0)::BIGINT AS count, \
-             COUNT(*) FILTER (WHERE d.storage_backend = 'pending' OR d.is_final \
-                 OR p.id IS NULL OR p.storage_backend = 'pending')::BIGINT AS incomplete \
-             FROM scan_result_batch d LEFT JOIN scan_result_batch p \
-                 ON p.execution_id = d.execution_id AND p.upload_id = $3 AND p.batch_index = d.batch_index \
-             WHERE d.execution_id = $1 AND d.upload_id = $2;",
-            &[&execution_db_id, &sidecar_identity, &upload_id],
-        ).await.map_err(scanner_result_database_error)?;
-        if dns_summary.get::<_, i64>("incomplete") != 0 {
-            return Err(SaveScannerResultsError::InvalidUpload(
-                "final batch requires completed DNS children with matching primary batches".into(),
-            ));
-        }
-        let total_observation_count =
-            execution_summary.observation_count + dns_summary.get::<_, i64>("count");
+        let dns_summary = if let Some(sidecar) = &sidecar_identity {
+            upload_stream::load(&transaction, execution_db_id, sidecar).await?
+        } else {
+            None
+        };
+        let dns_count = if let Some(summary) = dns_summary {
+            if summary.get::<_, bool>("dirty")
+                || summary.get::<_, i64>("pending_count") != 0
+                || summary.get::<_, i64>("final_count") != 0
+                || summary
+                    .get::<_, Option<i32>>("last_batch")
+                    .is_some_and(|last| last > batch_index)
+            {
+                return Err(SaveScannerResultsError::InvalidUpload(
+                    "final batch requires completed DNS children with matching primary batches"
+                        .into(),
+                ));
+            }
+            summary.get::<_, i64>("confirmed_observations")
+        } else {
+            0
+        };
+        let total_observation_count = execution_summary.observation_count + dns_count;
         transaction
             .execute(
                 "UPDATE scan_task_execution SET execution_status = 'succeeded', task_end_time = $1, \

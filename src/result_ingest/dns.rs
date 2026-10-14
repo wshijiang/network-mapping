@@ -2,6 +2,7 @@
 
 use super::storage::dns_sidecar_upload_id;
 use super::telemetry::WriteStage;
+use super::upload_stream;
 use crate::target_generated;
 
 use deadpool_postgres::GenericClient;
@@ -211,47 +212,15 @@ pub(crate) async fn save_dns_scanner_results(
     )?;
     if is_final {
         let stage = WriteStage::new("validate_dns_final_sequence");
-        let sequence = transaction
-            .query_one(
-                "SELECT COUNT(*) FILTER (WHERE batch_index < $3 AND storage_backend <> 'pending')::BIGINT AS prior_count, \
-                 MIN(batch_index) FILTER (WHERE batch_index < $3) AS first_prior, \
-                 MAX(batch_index) FILTER (WHERE batch_index < $3) AS last_prior, \
-                 COUNT(*) FILTER (WHERE batch_index > $3)::BIGINT AS later_count, \
-                 COUNT(*) FILTER (WHERE is_final)::BIGINT AS final_count, \
-                 BOOL_OR(is_final) FILTER (WHERE batch_index = $3) AS current_is_final \
-                 FROM scan_result_batch WHERE execution_id = $1 AND upload_id = $2;",
-                &[&execution_db_id, &upload_id, &batch_index],
-            )
-            .await
-            .map_err(scanner_result_database_error)?;
-        let prior_count: i64 = sequence.get("prior_count");
-        let first_prior: Option<i32> = sequence.get("first_prior");
-        let last_prior: Option<i32> = sequence.get("last_prior");
-        let complete_prior_sequence = if batch_index == 0 {
-            prior_count == 0 && first_prior.is_none() && last_prior.is_none()
-        } else {
-            prior_count == i64::from(batch_index)
-                && first_prior == Some(0)
-                && last_prior == Some(batch_index - 1)
-        };
-        let final_count: i64 = sequence.get("final_count");
-        let current_is_final: Option<bool> = sequence.get("current_is_final");
-        let existing_final_valid = match current_is_final {
-            Some(true) => final_count == 1,
-            Some(false) => false,
-            None => final_count == 0,
-        };
-        if !complete_prior_sequence
-            || sequence.get::<_, i64>("later_count") != 0
-            || !existing_final_valid
-        {
-            return Err(SaveScannerResultsError::NonContiguousFinalBatch {
-                execution_id: execution_db_id,
-                upload_id: upload_id.clone(),
-                batch_index,
-                content_kind: "DNS",
-            });
-        }
+        upload_stream::validate_final(
+            &transaction,
+            execution_db_id,
+            &upload_id,
+            batch_index,
+            "DNS",
+            false,
+        )
+        .await?;
         stage.finish(true);
     }
     let stage = WriteStage::new("reserve_dns_receipt");
@@ -329,6 +298,7 @@ pub(crate) async fn save_dns_scanner_results(
             DnsWriteMode::Reconcile,
         )
     } else {
+        upload_stream::ensure_open(&transaction, execution_db_id, &upload_id, batch_index, "DNS").await?;
         if already_succeeded {
             return Err(SaveScannerResultsError::CompletedExecutionNewBatch {
                 execution_id: execution_db_id,
@@ -499,13 +469,22 @@ pub(crate) async fn save_dns_scanner_results(
         }
     }
     if is_final {
+        upload_stream::validate_final(
+            &transaction,
+            execution_db_id,
+            &upload_id,
+            batch_index,
+            "DNS",
+            true,
+        )
+        .await?;
         transaction
             .execute(
                 "UPDATE scan_task_execution SET execution_status = 'succeeded', task_end_time = $1, \
                  lease_expires_at = NULL, failure_reason = NULL, cancel_requested = false, \
                  maintenance_hold = FALSE, maintenance_hold_until = NULL, \
-                 result_ip_count = 0, result_port_count = 0, result_observation_count = (SELECT COALESCE(SUM(observation_count), 0) FROM scan_result_batch WHERE execution_id = $2) WHERE id = $2;",
-                &[&get_unix_epoch_ms(), &execution_db_id],
+                 result_ip_count = 0, result_port_count = 0, result_observation_count = (SELECT confirmed_observations FROM scan_upload_stream WHERE execution_id = $2 AND upload_id = $3) WHERE id = $2;",
+                &[&get_unix_epoch_ms(), &execution_db_id, &upload_id],
             )
             .await
             .map_err(scanner_result_database_error)?;
