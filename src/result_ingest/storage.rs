@@ -613,6 +613,51 @@ async fn save_scanner_results_inner(
                 .await
                 .map_err(scanner_result_database_error)?;
         }
+        let summary_indices = if is_final {
+            let stage = WriteStage::new("load_execution_index_manifest");
+            let receipts = transaction
+                .query(
+                    "SELECT storage_references, observation_count FROM scan_result_batch \
+                 WHERE execution_id = $1 AND upload_id = $2 AND storage_backend <> 'pending';",
+                    &[&execution_db_id, &upload_id],
+                )
+                .await
+                .map_err(scanner_result_database_error)?;
+            let mut indices = elasticsearch
+                .scan_batch_indices(&observation_rows)
+                .map_err(SaveScannerResultsError::Storage)?
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut legacy_manifest = false;
+            for receipt in receipts {
+                let references: Value = receipt.get("storage_references");
+                let references = references.as_array().ok_or_else(|| {
+                    SaveScannerResultsError::Storage("invalid scan index manifest".into())
+                })?;
+                legacy_manifest |=
+                    receipt.get::<_, i32>("observation_count") > 0 && references.is_empty();
+                for index in references {
+                    indices.insert(
+                        index
+                            .as_str()
+                            .ok_or_else(|| {
+                                SaveScannerResultsError::Storage(
+                                    "invalid scan index reference".into(),
+                                )
+                            })?
+                            .to_owned(),
+                    );
+                }
+            }
+            stage.finish(true);
+            if legacy_manifest {
+                None
+            } else {
+                Some(indices.into_iter().collect::<Vec<_>>())
+            }
+        } else {
+            Some(Vec::new())
+        };
         // 关键边界：任务行锁和连接在任何 Elasticsearch await 之前释放。
         transaction
             .commit()
@@ -635,7 +680,11 @@ async fn save_scanner_results_inner(
             .await?;
         }
         let result = elasticsearch
-            .persist_scan_batch(&batch_context, &observation_rows)
+            .persist_scan_batch_scoped(
+                &batch_context,
+                &observation_rows,
+                summary_indices.as_deref(),
+            )
             .await
             .map_err(SaveScannerResultsError::Storage)?;
         debug_assert_eq!(result.payload_checksum, es_checksum);

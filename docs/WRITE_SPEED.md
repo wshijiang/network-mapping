@@ -101,3 +101,23 @@ success=false。日志不记录 Token、checksum 或 observation 内容。
 端点 bulk、refresh、执行统计、任务聚合与目标新鲜度；DNS 路径另记录子任务生成。
 连接等待与持有时间沿用 ScanWriteConnectionAcquired/Released，bulk 排队/请求/退避时间
 沿用 ElasticsearchBulkCompleted。不要把 bulk 排队时间误判为扫描耗时。
+
+## Final 索引范围
+
+新上传在预约 final 的短事务中收集同一 execution/upload 已确认回执的索引清单，并加入
+当前批次按 observed_at 推导的索引。ES refresh 与 observation count 只访问该清单，
+跨月、空 final 和 pending 重试仍覆盖整个执行。空执行不发送 observation count。
+执行端点索引仍是共享索引，refresh 作用于该索引。精确端点总数只在 IP composite 的
+第一页计算，后续页关闭 track_total_hits；IP 数仍保持精确分页统计。
+
+索引清单排序去重后，refresh 和 count 各自按 HTTP 请求行 3 KiB 预算分块，包含实际 URL
+编码后的路径前缀、查询参数和 HTTP 方法/版本。各块顺序执行，执行端点索引仅刷新一次；
+少月份时仍合并为一次刷新。count 使用相同 execution_id 条件并检查非负计数及累加溢出，
+任一块失败均保留 pending，重试重新刷新和计数全部块，只有完整成功才确认 final。
+超长的单个目标在批次事实写入前报错；不通过扩大 ES 请求行限制处理。
+
+ScanFinalRequestPlan 记录 refresh_requests、count_requests 和 max_request_line_bytes。
+refresh_execution_index_chunk、count_execution_observation_chunk 阶段记录单块耗时。
+
+旧回执有观察却没有 storage_references，以及历史 PG → ES 迁移，显式走全历史索引
+兼容范围，记录 ScanSummaryLegacyIndexScope。新上传不依赖该兼容路径。
