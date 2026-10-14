@@ -82,18 +82,7 @@ pub async fn placement_preview(
         {
             return HttpResponse::BadRequest().finish();
         }
-        if resolvers.as_array().is_some_and(|r| {
-            !r.is_empty()
-                && r.iter().all(|r| {
-                    r.get("ip")
-                        .and_then(Value::as_str)
-                        .is_some_and(|ip| ip.contains(':'))
-                })
-        }) {
-            "ipv6"
-        } else {
-            "ipv4"
-        }
+        crate::handlers::task::DNS_TASK_ADDRESS_FAMILY
     } else {
         if resolvers.as_array().is_some_and(|r| !r.is_empty()) {
             return HttpResponse::BadRequest().finish();
@@ -170,7 +159,7 @@ pub async fn report_performance(
         let snapshot = maintenance.snapshot().await;
         if snapshot.blocks_all_scanner_requests() { return Ok(crate::system_maintenance::maintenance_response(&snapshot)); }
         let row = tx.query_opt(
-            "SELECT e.id,e.performance,t.task_target::TEXT[] AS targets,t.task_port,t.task_kind \
+            "SELECT e.id,e.performance,t.task_target::TEXT[] AS targets,t.task_port,t.task_kind,t.dns_targets,t.scan_profile \
              FROM scan_task_execution e JOIN scan_task t ON t.id=e.task_id WHERE t.task_id=$1 AND e.assigned_scanner_id=$2 \
              AND e.execution_status='running' AND NOT e.cancel_requested \
              AND (e.lease_expires_at>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::BIGINT OR e.maintenance_hold) FOR UPDATE OF e",
@@ -179,9 +168,12 @@ pub async fn report_performance(
         let Some(row) = row else {
             return Ok(HttpResponse::Conflict().json(json!({"success":false,"message":"扫描执行归属或租约已变更"})));
         };
-        if row.get::<_, &str>("task_kind") == "dns" {
-            if !input.performance.connections.is_empty() || input.performance.elapsed_ms > 604800000 { return Ok(HttpResponse::BadRequest().finish()); }
-        } else if let Err(reason) = input.performance.validate(&row.get::<_, Vec<String>>("targets"), row.get("task_port")) {
+        let validation = if row.get::<_, &str>("task_kind") == "dns" {
+            input.performance.validate_dns(&row.get::<_, Vec<String>>("dns_targets"), row.get("scan_profile"), row.get("task_port"))
+        } else {
+            input.performance.validate(&row.get::<_, Vec<String>>("targets"), row.get("task_port"))
+        };
+        if let Err(reason) = validation {
             return Ok(HttpResponse::BadRequest().json(json!({"success":false,"message":reason})));
         }
         if row.get::<_, Option<Value>>("performance").is_none() {

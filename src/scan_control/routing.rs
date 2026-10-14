@@ -138,6 +138,7 @@ pub fn target_key(targets: &[String], family: &str, profile: &str, ports: &str) 
                 Some((p, p))
             }
         })
+        .filter(|(a, b)| a <= b)
         .collect();
     ranges.sort_unstable();
     let mut merged: Vec<(u16, u16)> = Vec::new();
@@ -521,6 +522,14 @@ pub struct Performance {
     pub elapsed_ms: u64,
     #[serde(default)]
     pub connections: Vec<ConnectionSample>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_targets: Vec<ResolvedTarget>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedTarget {
+    pub domain: String,
+    pub ip: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -532,6 +541,53 @@ pub struct ConnectionSample {
 }
 impl Performance {
     pub fn validate(&self, targets: &[String], ports: &str) -> Result<(), &'static str> {
+        if !self.resolved_targets.is_empty() {
+            return Err("DNS resolutions are not valid for an IP task");
+        }
+        self.validate_samples(targets, ports)
+    }
+
+    pub fn validate_dns(
+        &self,
+        domains: &[String],
+        profile: &str,
+        ports: &str,
+    ) -> Result<(), &'static str> {
+        if !matches!(profile, "dns_ports" | "dns_full") {
+            if !self.connections.is_empty() || !self.resolved_targets.is_empty() {
+                return Err("DNS-only tasks cannot report TCP samples");
+            }
+            return self.validate_samples(&[], ports);
+        }
+        if self.resolved_targets.len() > 8 {
+            return Err("too many DNS resolution samples");
+        }
+        let domains = domains
+            .iter()
+            .filter_map(|domain| crate::dns::canonical_scan_domain(domain).ok())
+            .collect::<Vec<_>>();
+        let mut targets = Vec::new();
+        for resolved in &self.resolved_targets {
+            let domain = crate::dns::canonical_scan_domain(&resolved.domain)
+                .map_err(|_| "invalid resolution domain")?;
+            let ip = resolved
+                .ip
+                .parse::<IpAddr>()
+                .map_err(|_| "invalid resolution IP")?;
+            if !domains.contains(&domain)
+                || !self
+                    .connections
+                    .iter()
+                    .any(|sample| sample.ip.parse::<IpAddr>().ok() == Some(ip))
+            {
+                return Err("DNS resolution is outside task scope");
+            }
+            targets.push(ip.to_string());
+        }
+        self.validate_samples(&targets, ports)
+    }
+
+    fn validate_samples(&self, targets: &[String], ports: &str) -> Result<(), &'static str> {
         if self.elapsed_ms > 7 * 24 * 60 * 60 * 1000 || self.connections.len() > 8 {
             return Err("invalid performance bounds");
         }
@@ -731,6 +787,7 @@ mod tests {
         assert_eq!(nodes[0].score, nodes[1].score);
         let p = Performance {
             elapsed_ms: 100,
+            resolved_targets: vec![],
             connections: vec![ConnectionSample {
                 ip: "192.0.2.1".into(),
                 port: 443,
@@ -757,6 +814,28 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn dns_quality_requires_a_bounded_resolution_for_the_original_domain() {
+        let mut p:Performance=serde_json::from_value(json!({"elapsed_ms":100,"connections":[{"ip":"2001:db8::1","port":443,"elapsed_ms":5,"outcome":"connected"}],"resolved_targets":[{"domain":"EXAMPLE.COM.","ip":"2001:db8::1"}]})).unwrap();
+        let domains = vec!["example.com".into()];
+        for profile in ["dns_ports", "dns_full"] {
+            assert!(p.validate_dns(&domains, profile, "443").is_ok());
+        }
+        assert!(p.validate_dns(&domains, "dns_records", "443").is_err());
+        assert!(p.validate(&["2001:db8::/64".into()], "443").is_err());
+        assert!(
+            p.validate_dns(&["other.example.com".into()], "dns_full", "443")
+                .is_err()
+        );
+        assert!(p.validate_dns(&domains, "dns_full", "80").is_err());
+        p.resolved_targets = vec![p.resolved_targets[0].clone(); 9];
+        assert!(p.validate_dns(&domains, "dns_full", "443").is_err());
+        p.resolved_targets.clear();
+        assert!(p.validate_dns(&domains, "dns_ports", "443").is_err());
+        p.connections.clear();
+        assert!(p.validate_dns(&domains, "dns_records", "53").is_ok());
     }
     #[test]
     fn equivalent_host_and_port_notation_share_feedback() {

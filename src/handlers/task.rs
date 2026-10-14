@@ -228,6 +228,10 @@ fn resolve_dns_task_port(
     Ok(port.to_owned())
 }
 
+// DNS tasks retain the IPv4 dispatch contract; IPv6 resolvers additionally
+// require IPv6 readiness, rather than replacing the task's address family.
+pub(crate) const DNS_TASK_ADDRESS_FAMILY: &str = "ipv4";
+
 #[derive(Debug, PartialEq, Eq)]
 struct ResolvedDnsScanRequest {
     task_profile: String,
@@ -2442,7 +2446,7 @@ async fn create_dns_task(
         .query_one(
             "INSERT INTO scan_task (user_id, task_id, task_initiator, task_target, task_port, task_level, remarks, \
              dispatch_mode, address_family, scan_profile, scan_plan, task_kind, dns_targets, dns_resolvers, generation_metadata) \
-             VALUES ($1, $2, $3, ARRAY[]::INET[], $4, $5, $6, $7, 'ipv4', $8, \
+             VALUES ($1, $2, $3, ARRAY[]::INET[], $4, $5, $6, $7, $13, $8, \
              $9, 'dns', $10, $11, $12) RETURNING id;",
             &[
                 &user.id,
@@ -2458,6 +2462,7 @@ async fn create_dns_task(
                 &domains,
                 &serde_json::to_value(&dns_resolvers).expect("DNS resolver input is serializable"),
                 &generation_metadata,
+                &DNS_TASK_ADDRESS_FAMILY,
             ],
         )
         .await

@@ -7,6 +7,293 @@ use uuid::Uuid;
 
 const PEPPER: &str = "routing-test-pepper-with-sufficient-length";
 const TOKEN: &str = "routing-test-runtime-token";
+
+#[tokio::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn equivalent_ports_reuse_active_and_legacy_successful_work() {
+    let f = Fixture::new().await;
+    let (task, _, _) = f.task("automatic", None).await;
+    let mut c = f.pool.get().await.unwrap();
+    let tx = c.transaction().await.unwrap();
+    let key = "sequential_subnet:192.0.2.1/32";
+    let now = crate::clock::get_unix_epoch_ms();
+    tx.execute(
+        "UPDATE scan_task SET generation_key=$2,task_port='80-81,443' WHERE id=$1",
+        &[&task, &key],
+    )
+    .await
+    .unwrap();
+    for status in ["pending", "running"] {
+        tx.execute(
+            "UPDATE scan_task SET task_status=$2 WHERE id=$1",
+            &[&task, &status],
+        )
+        .await
+        .unwrap();
+        for ports in ["443,80,81", "80-81,443,80", "00080-81,443"] {
+            assert_eq!(
+                crate::target_generated::history::plan_key("port_only", ports),
+                crate::target_generated::history::plan_key("port_only", "80-81,443")
+            );
+            assert!(
+                !crate::target_generated::history::eligible(
+                    &tx,
+                    key,
+                    "port_only",
+                    ports,
+                    1000,
+                    now + 60000
+                )
+                .await
+                .unwrap()
+            );
+        }
+        assert!(
+            crate::target_generated::history::eligible(&tx, key, "port_only", "80,443", 1000, now)
+                .await
+                .unwrap()
+        );
+    }
+    tx.execute(
+        "UPDATE scan_task SET task_status='succeeded',task_end_time=$2 WHERE id=$1",
+        &[&task, &now],
+    )
+    .await
+    .unwrap();
+    assert!(
+        !crate::target_generated::history::eligible(
+            &tx,
+            key,
+            "port_only",
+            "443,80,81",
+            604800000,
+            now + 60000
+        )
+        .await
+        .unwrap()
+    );
+    // Invalid old tokens do not make an upgrade or a queue query fail.
+    tx.query_one(
+        "SELECT scan_port_set('65536,999999999999999999999999,1--2,81-80')",
+        &[],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(c);
+    f.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn due_window_filters_256_running_targets_before_refilling() {
+    let f = Fixture::new().await;
+    f.scanner().await;
+    let profile = crate::admin::get_default_scan_profile_from_database(&f.pool)
+        .await
+        .unwrap();
+    let policy = crate::config::AutomaticTargetConfig {
+        enabled: true,
+        strategy: "smart_refresh".into(),
+        authorized_cidrs: vec!["10.0.0.0/16".into()],
+        ipv4_task_prefix: 32,
+        pending_low_watermark: 1,
+        pending_high_watermark: 2,
+        common_ports: "443,80".into(),
+        ..Default::default()
+    };
+    let c = f.pool.get().await.unwrap();
+    c.execute("INSERT INTO scan_task(user_id,task_id,task_initiator,task_target,task_port,task_level,task_source,generation_key,scan_profile,task_status) \
+        SELECT $1,'active-'||i,'system',ARRAY['10.0.0.0'::INET+i],'80,443',1,'automatic','sequential_subnet:'||('10.0.0.0'::INET+i)::TEXT,$2,'running' FROM generate_series(0,255) i", &[&f.owner,&profile]).await.unwrap();
+    c.execute("INSERT INTO automatic_target_history(generation_key,plan_key,address_family,target) \
+        SELECT 'sequential_subnet:'||('10.0.0.0'::INET+i)::TEXT,$1,'ipv4',('10.0.0.0'::INET+i)::TEXT FROM generate_series(0,257) i", &[&crate::target_generated::history::plan_key(&profile,"443,80")]).await.unwrap();
+    drop(c);
+    let service = crate::target_generated::AutomaticTargetService::new(policy).unwrap();
+    assert_eq!(service.refill(&f.pool).await.unwrap().generated, 2);
+    let c = f.pool.get().await.unwrap();
+    let pending=c.query("SELECT task_target::TEXT[] AS targets FROM scan_task WHERE task_status='pending' ORDER BY task_target", &[]).await.unwrap();
+    assert_eq!(pending.len(), 2);
+    let targets: Vec<String> = pending
+        .into_iter()
+        .flat_map(|r| r.get::<_, Vec<String>>("targets"))
+        .collect();
+    assert_eq!(targets, vec!["10.0.1.0/32", "10.0.1.1/32"]);
+    drop(c);
+    f.finish().await;
+}
+
+#[actix_web::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn dns_preview_and_creation_require_the_same_dual_stack_scanner() {
+    use actix_web::{App, HttpMessage, dev::Service, http::StatusCode, test, web};
+    let f = Fixture::new().await;
+    let dual = f.scanner().await;
+    let v6_only = f.scanner().await;
+    let c = f.pool.get().await.unwrap();
+    c.execute(
+        "UPDATE scanner_info SET supports_ipv6=true,ipv6_ready=true",
+        &[],
+    )
+    .await
+    .unwrap();
+    c.execute(
+        "UPDATE scanner_info SET supports_ipv4=false,ipv4_ready=false WHERE scanner_id=$1",
+        &[&v6_only.to_string()],
+    )
+    .await
+    .unwrap();
+    drop(c);
+    let owner = f.owner;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(f.pool.clone()))
+            .app_data(web::Data::new(MaxMindState::from_directory(
+                "/workspace/work/absent-mmdb",
+            )))
+            .app_data(web::Data::new(crate::runtime_config::RuntimeConfig::new(
+                crate::dns_follow_up::DnsFollowUpConfig::default(),
+                0,
+            )))
+            .wrap_fn(move |req, srv| {
+                req.extensions_mut().insert(crate::admin::UserBaseI {
+                    id: owner,
+                    username: "routing".into(),
+                    role: 1,
+                    email: None,
+                    limit_login: false,
+                    enable_2fa: false,
+                });
+                srv.call(req)
+            })
+            .service(crate::handlers::scan_routing::placement_preview)
+            .service(crate::handlers::task::create_dns_task),
+    )
+    .await;
+    let resolvers = json!([{"id":"v6","label":"IPv6 resolver","ip":"2001:db8::53","port":53,"transport":"udp"}]);
+    let response=test::call_service(&app,test::TestRequest::post().uri("/api/task/placement-preview")
+        .set_json(json!({"targets":["example.com"],"scan_profile":"dns_records","port":"53","dns_resolvers":resolvers})).to_request()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview: Value = test::read_body_json(response).await;
+    assert_eq!(preview["data"]["preferred_scanner_id"], dual.to_string());
+    assert_eq!(preview["data"]["candidates"].as_array().unwrap().len(), 1);
+    let response=test::call_service(&app,test::TestRequest::post().uri("/api/task/create-dns")
+        .set_json(json!({"domains":["example.com"],"scan_profile":"dns_records","level":1,"dns_resolvers":resolvers})).to_request()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let c = f.pool.get().await.unwrap();
+    let family: String = c
+        .query_one("SELECT address_family FROM scan_task", &[])
+        .await
+        .unwrap()
+        .get("address_family");
+    assert_eq!(family, "ipv4");
+    drop(c);
+    assert!(matches!(
+        apply_task(&f.pool, v6_only, &token(v6_only), PEPPER).await,
+        Err(ApplyTaskError::NoTask)
+    ));
+    assert!(
+        apply_task(&f.pool, dual, &token(dual), PEPPER)
+            .await
+            .is_ok()
+    );
+    drop(app);
+    f.finish().await;
+}
+
+#[actix_web::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn dns_performance_accepts_only_task_scoped_resolution_samples() {
+    use actix_web::{App, http::StatusCode, test, web};
+    let f = Fixture::new().await;
+    let scanner = f.scanner().await;
+    let (task, id, execution) = f.task("automatic", None).await;
+    let c = f.pool.get().await.unwrap();
+    c.execute(
+        "UPDATE scanner_info SET scan_capabilities=$2 WHERE scanner_id=$1",
+        &[&scanner.to_string(), &json!({"profiles":["dns_full"]})],
+    )
+    .await
+    .unwrap();
+    c.execute("UPDATE scan_task SET task_kind='dns',task_target=ARRAY[]::INET[],dns_targets=ARRAY['example.com'],scan_profile='dns_full' WHERE id=$1", &[&task]).await.unwrap();
+    drop(c);
+    apply_task(&f.pool, scanner, &token(scanner), PEPPER)
+        .await
+        .unwrap();
+    let maintenance = crate::system_maintenance::SystemMaintenanceState::from_database(&f.pool)
+        .await
+        .unwrap();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(f.pool.clone()))
+            .app_data(web::Data::new(crate::config::SecurityConfig {
+                scanner_token_pepper: PEPPER.into(),
+            }))
+            .app_data(web::Data::new(maintenance))
+            .service(crate::handlers::scan_routing::report_performance),
+    )
+    .await;
+    let payload = json!({"scanner_id":scanner,"task_id":id,"performance":{"elapsed_ms":100,"connections":[{"ip":"192.0.2.1","port":443,"elapsed_ms":5,"outcome":"connected"}],"resolved_targets":[{"domain":"EXAMPLE.COM.","ip":"192.0.2.1"}]}});
+    for mutation in 0..4 {
+        let mut invalid = payload.clone();
+        match mutation {
+            0 => {
+                invalid["performance"]["resolved_targets"][0]["domain"] = json!("other.example.com")
+            }
+            1 => invalid["performance"]["connections"][0]["ip"] = json!("198.51.100.1"),
+            2 => invalid["performance"]["connections"][0]["port"] = json!(22),
+            _ => invalid["performance"]["resolved_targets"] = json!([]),
+        }
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/scanner/task/performance")
+                .insert_header(("Authorization", format!("Bearer {}", token(scanner))))
+                .set_json(invalid)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/scanner/task/performance")
+            .insert_header(("Authorization", format!("Bearer {}", token(scanner))))
+            .set_json(&payload)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let c = f.pool.get().await.unwrap();
+    let saved: Value = c
+        .query_one(
+            "SELECT performance FROM scan_task_execution WHERE id=$1",
+            &[&execution],
+        )
+        .await
+        .unwrap()
+        .get("performance");
+    assert_eq!(saved["connections"][0]["ip"], "192.0.2.1");
+    c.execute(
+        "UPDATE scan_task SET scan_profile='dns_records' WHERE id=$1",
+        &[&task],
+    )
+    .await
+    .unwrap();
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/scanner/task/performance")
+            .insert_header(("Authorization", format!("Bearer {}", token(scanner))))
+            .set_json(&payload)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    drop(c);
+    drop(app);
+    f.finish().await;
+}
 fn token(id: Uuid) -> String {
     format!("{TOKEN}-{id}")
 }

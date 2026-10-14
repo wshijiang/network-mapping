@@ -1376,3 +1376,32 @@ ALTER TABLE automatic_target_history ADD COLUMN IF NOT EXISTS next_refresh_at BI
 CREATE INDEX IF NOT EXISTS idx_scanner_feedback_expiry ON scanner_target_feedback(updated_at);
 
 ALTER TABLE automatic_target_history ADD COLUMN IF NOT EXISTS change_detected BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Same set semantics as routing::target_key: order, duplicates, overlapping and
+-- adjacent ranges do not change a plan. Skip invalid legacy port tokens safely.
+CREATE OR REPLACE FUNCTION scan_port_set(ports TEXT) RETURNS INT4MULTIRANGE
+LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
+DECLARE
+    token TEXT;
+    parts TEXT[];
+    low_port INT;
+    high_port INT;
+    result INT4MULTIRANGE := '{}';
+BEGIN
+    FOREACH token IN ARRAY string_to_array(ports, ',') LOOP
+        parts := regexp_match(btrim(token), '^([0-9]+)(-([0-9]+))?$');
+        IF parts IS NULL THEN CONTINUE; END IF;
+        parts[1] := COALESCE(NULLIF(ltrim(parts[1], '0'), ''), '0');
+        parts[3] := COALESCE(NULLIF(ltrim(COALESCE(parts[3], parts[1]), '0'), ''), '0');
+        IF length(parts[1]) > 5 OR length(parts[3]) > 5 THEN CONTINUE; END IF;
+        low_port := parts[1]::INT;
+        high_port := parts[3]::INT;
+        IF low_port > high_port OR high_port > 65535 THEN CONTINUE; END IF;
+        result := result + int4multirange(int4range(low_port, high_port + 1, '[)'));
+    END LOOP;
+    RETURN result;
+END;
+$$;
+CREATE INDEX IF NOT EXISTS idx_scan_task_active_plan
+    ON scan_task(generation_key, scan_profile, scan_port_set(task_port))
+    WHERE generation_key IS NOT NULL AND task_status IN ('pending', 'running');

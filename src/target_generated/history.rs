@@ -38,7 +38,7 @@ pub async fn eligible(
     repeat_ms: i64,
     now: i64,
 ) -> Result<bool, tokio_postgres::Error> {
-    let active:bool=tx.query_one("SELECT EXISTS(SELECT 1 FROM scan_task WHERE generation_key=$1 AND scan_profile=$2 AND task_port=$3 AND task_status IN ('pending','running')) AS active", &[&key,&profile,&ports]).await?.get("active");
+    let active:bool=tx.query_one("SELECT EXISTS(SELECT 1 FROM scan_task WHERE generation_key=$1 AND scan_profile=$2 AND scan_port_set(task_port)=scan_port_set($3) AND task_status IN ('pending','running')) AS active", &[&key,&profile,&ports]).await?.get("active");
     if active {
         return Ok(false);
     }
@@ -48,7 +48,7 @@ pub async fn eligible(
         return Ok(row.get::<_,i64>("next_attempt_at")<=now && deadline.is_none_or(|deadline|now>=deadline));
     }
     // Upgrade old deployments using successful completion, not creation time.
-    let last:Option<i64>=tx.query_one("SELECT MAX(task_end_time) AS last FROM scan_task WHERE generation_key=$1 AND scan_profile=$2 AND task_port=$3 AND task_status='succeeded'", &[&key,&profile,&ports]).await?.get("last");
+    let last:Option<i64>=tx.query_one("SELECT MAX(task_end_time) AS last FROM scan_task WHERE generation_key=$1 AND scan_profile=$2 AND scan_port_set(task_port)=scan_port_set($3) AND task_status='succeeded'", &[&key,&profile,&ports]).await?.get("last");
     Ok(last.is_none_or(|last| now - last >= repeat_ms))
 }
 
@@ -82,7 +82,9 @@ pub async fn due(
     Ok(tx.query("SELECT generation_key,target FROM automatic_target_history WHERE address_family=$1 AND plan_key=$2 AND next_attempt_at<=$3 \
         AND (last_success_at IS NULL OR (change_detected AND LEAST(next_refresh_at,last_success_at+$4)<=$3) OR (NOT change_detected AND last_success_at<=$3-$4)) AND EXISTS(SELECT 1 FROM UNNEST($6::TEXT[]) p(net) WHERE target::INET <<= p.net::INET) \
         AND NOT EXISTS(SELECT 1 FROM UNNEST($7::TEXT[]) e(net) WHERE target::INET && e.net::INET) \
-        AND masklen(target::INET)=$8::INT ORDER BY last_success_at NULLS FIRST,next_refresh_at,next_attempt_at,generation_key LIMIT $5", &[&family,&plan_key(profile,ports),&now,&repeat_ms,&limit,&authorized,&excluded,&i32::from(scope.2)]).await?.into_iter().map(|r|(r.get("generation_key"),r.get("target"))).collect())
+        AND NOT EXISTS(SELECT 1 FROM scan_task t WHERE t.generation_key=automatic_target_history.generation_key \
+            AND t.scan_profile=$9 AND scan_port_set(t.task_port)=scan_port_set($10) AND t.task_status IN ('pending','running')) \
+        AND masklen(target::INET)=$8::INT ORDER BY last_success_at NULLS FIRST,next_refresh_at,next_attempt_at,generation_key LIMIT $5", &[&family,&plan_key(profile,ports),&now,&repeat_ms,&limit,&authorized,&excluded,&i32::from(scope.2),&profile,&ports]).await?.into_iter().map(|r|(r.get("generation_key"),r.get("target"))).collect())
 }
 
 pub fn backoff_ms(failures: i32, base_seconds: u64) -> i64 {
