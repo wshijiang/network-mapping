@@ -88,3 +88,16 @@ STORAGE_TEST_DATABASE_URL=postgresql://test@127.0.0.1:5432/disposable \
 覆盖单连接池释放、慢 ES 期间续租、并发领取、过期令牌拒绝、重启续传、错误 bulk 不推进
 游标、刷新失败单独重试、最终上传和重复上传不等待资产发布。真实 ES 压测需要独立测试
 集群，分别测 1 万、10 万、100 万端点的上传延迟、后台吞吐、心跳和连接池等待。
+
+## 上传分段耗时
+
+`ScanResultUpload` span 关联 scanner_id、task_id、upload_id、batch_index、is_final、
+protocol_version 和 observation_count。所有同步写入阶段的 `ScanWriteStageCompleted`
+继承同一 span，记录 stage、duration_us 和 success；提前错误或取消的未完成阶段记录
+success=false。日志不记录 Token、checksum 或 observation 内容。
+
+普通批、final、已确认批重试和 DNS/混合上传应分别比较 p50/p95/p99。阶段覆盖认证与执行
+锁、上传身份、final 连续性、观察 enrichment、标签、回执预约/确认/提交、ES 事实与执行
+端点 bulk、refresh、执行统计、任务聚合与目标新鲜度；DNS 路径另记录子任务生成。
+连接等待与持有时间沿用 ScanWriteConnectionAcquired/Released，bulk 排队/请求/退避时间
+沿用 ElasticsearchBulkCompleted。不要把 bulk 排队时间误判为扫描耗时。

@@ -2644,16 +2644,20 @@ async fn upload_scanner_result_handler(
     }
 
     let dns_follow_up = dns_follow_up.get().await.value;
-    match save_scanner_results(
-        pool.get_ref(),
-        maxmind.get_ref(),
-        elasticsearch.get_ref(),
-        &dns_follow_up,
-        &upload_data,
-        token,
-        &security.scanner_token_pepper,
-    )
-    .await
+    match crate::result_ingest::telemetry::UPLOAD_REQUEST_ID
+        .scope(
+            crate::logs::write::request_id(&req),
+            save_scanner_results(
+                pool.get_ref(),
+                maxmind.get_ref(),
+                elasticsearch.get_ref(),
+                &dns_follow_up,
+                &upload_data,
+                token,
+                &security.scanner_token_pepper,
+            ),
+        )
+        .await
     {
         Ok(saved) => HttpResponse::Ok().json(serde_json::json!({
             "success": true,

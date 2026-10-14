@@ -2,6 +2,7 @@
 pub(crate) mod dns;
 pub mod model;
 pub(crate) mod storage;
+pub(crate) mod telemetry;
 pub(crate) mod validation;
 pub use model::{
     SaveScannerResultsError, ScannerObservation, ScannerResultItem, ScannerResultUpload,

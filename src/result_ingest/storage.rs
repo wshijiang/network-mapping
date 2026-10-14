@@ -1,7 +1,9 @@
 //! result_ingest / storage domain implementation, migrated from the library root.
 
 use super::dns::dns_batch_payload_checksum;
+use super::telemetry::WriteStage;
 use crate::{search_content, target_generated};
+use tracing::{Instrument, info_span};
 
 use deadpool_postgres::GenericClient;
 use serde_json::Value;
@@ -60,6 +62,44 @@ pub(crate) async fn validate_execution_upload_ids(
 }
 
 pub async fn save_scanner_results(
+    pool: &deadpool_postgres::Pool,
+    maxmind: &MaxMindState,
+    elasticsearch: &ElasticsearchService,
+    dns_follow_up: &dns_follow_up::DnsFollowUpConfig,
+    upload: &ScannerResultUpload,
+    token: &str,
+    token_pepper: &str,
+) -> Result<usize, SaveScannerResultsError> {
+    let span = info_span!("ScanResultUpload",
+        request_id = tracing::field::Empty,
+        scanner_id = %upload.scanner_id, task_id = %upload.task_id,
+        upload_id = ?upload.upload_id, batch_index = ?upload.batch_index,
+        is_final = ?upload.is_final, protocol_version = upload.protocol_version,
+        observation_count = upload.observations.len(),
+    );
+    if let Ok(request_id) = super::telemetry::UPLOAD_REQUEST_ID.try_with(|id| *id) {
+        span.record("request_id", tracing::field::display(request_id));
+    }
+    async {
+        let stage = WriteStage::new("upload");
+        let result = save_scanner_results_inner(
+            pool,
+            maxmind,
+            elasticsearch,
+            dns_follow_up,
+            upload,
+            token,
+            token_pepper,
+        )
+        .await;
+        stage.finish(result.is_ok());
+        result
+    }
+    .instrument(span)
+    .await
+}
+
+async fn save_scanner_results_inner(
     pool: &deadpool_postgres::Pool,
     maxmind: &MaxMindState,
     elasticsearch: &ElasticsearchService,
@@ -177,6 +217,7 @@ pub async fn save_scanner_results(
         hash_scanner_token(token, token_pepper).map_err(scanner_result_database_error)?;
     let scanner_id = upload.scanner_id.to_string();
 
+    let stage = WriteStage::new("authenticate_execution");
     let scanner = transaction.query_opt(
         "SELECT id FROM scanner_info WHERE scanner_id = $1 AND runtime_token_hash = $2 AND is_enable = true;",
         &[&scanner_id, &token_hash]
@@ -199,6 +240,7 @@ pub async fn save_scanner_results(
         .await
         .map_err(scanner_result_database_error)?;
 
+    stage.finish(true);
     let already_succeeded = task_row
         .as_ref()
         .is_some_and(|row| row.get::<_, String>("execution_status") == "succeeded");
@@ -254,7 +296,9 @@ pub async fn save_scanner_results(
     let sidecar_identity = sidecar_upload_id.map(|id| id.to_string());
     let mut allowed_upload_ids = vec![upload_id.clone()];
     allowed_upload_ids.extend(sidecar_identity.iter().cloned());
+    let stage = WriteStage::new("upload_identity");
     validate_execution_upload_ids(&transaction, execution_db_id, &allowed_upload_ids).await?;
+    stage.finish(true);
     // Older servers may have committed the DNS child before creating the primary
     // receipt. Validate that child first so a changed retry cannot reserve (and
     // poison) the primary identity or silently drop already persisted DNS data.
@@ -300,6 +344,7 @@ pub async fn save_scanner_results(
         }
     }
     if is_final {
+        let stage = WriteStage::new("validate_final_sequence");
         let sequence = transaction
             .query_one(
                 "SELECT COUNT(*) FILTER (WHERE batch_index < $3 AND storage_backend <> 'pending')::BIGINT AS prior_count, \
@@ -339,6 +384,7 @@ pub async fn save_scanner_results(
                 content_kind: "scan result",
             });
         }
+        stage.finish(true);
     }
     let observation_count = i32::try_from(normalized_observations.len()).map_err(|_| {
         SaveScannerResultsError::ObservationLimitExceeded {
@@ -347,6 +393,7 @@ pub async fn save_scanner_results(
         }
     })?;
     let protocol_version = i16::try_from(upload.protocol_version).expect("validated above");
+    let stage = WriteStage::new("enrich_observations");
     let mut observation_rows = Vec::with_capacity(normalized_observations.len());
     let mut ip_intel_cache = HashMap::new();
     let fallback_observed_at = task_start_time.unwrap_or_else(get_unix_epoch_ms);
@@ -439,7 +486,9 @@ pub async fn save_scanner_results(
             "longitude": intel.longitude,
         }));
     }
+    stage.finish(true);
     if !observation_rows.is_empty() {
+        let stage = WriteStage::new("load_asset_tags");
         let addresses = observation_rows
             .iter()
             .filter_map(|row| {
@@ -481,9 +530,11 @@ pub async fn save_scanner_results(
                 .expect("observation row is object")
                 .insert("tags".to_owned(), tags);
         }
+        stage.finish(true);
     }
     let storage_backend = "elasticsearch";
     let (transaction, es_execution_summary) = {
+        let stage = WriteStage::new("reserve_scan_receipt");
         let es_checksum = scan_batch_payload_checksum(&batch_context, &observation_rows)
             .map_err(SaveScannerResultsError::Storage)?;
         let expected_checksum = if dns_upload.observations.is_empty() {
@@ -533,6 +584,7 @@ pub async fn save_scanner_results(
                     .await
                     .map_err(scanner_result_database_error)?;
                 drop(client);
+                stage.finish(true);
                 return Ok(0);
             }
         } else {
@@ -567,6 +619,7 @@ pub async fn save_scanner_results(
             .await
             .map_err(scanner_result_database_error)?;
         drop(client);
+        stage.finish(true);
         if !dns_upload.observations.is_empty() {
             dns_upload.upload_id = sidecar_upload_id;
             dns_upload.is_final = Some(false);
@@ -591,6 +644,7 @@ pub async fn save_scanner_results(
         client = db::acquire_write_connection(pool, "confirm_scan_batch")
             .await
             .map_err(scanner_result_database_error)?;
+        let stage = WriteStage::new("confirm_scan_receipt");
         let transaction = client
             .transaction()
             .await
@@ -632,12 +686,14 @@ pub async fn save_scanner_results(
             .await
             .map_err(scanner_result_database_error)?;
         let Some(_) = receipt else {
+            stage.finish(true);
             transaction
                 .commit()
                 .await
                 .map_err(scanner_result_database_error)?;
             return Ok(0);
         };
+        stage.finish(true);
         (transaction, result.execution_summary)
     };
     let saved = normalized_observations.len() + dns_upload.observations.len();
@@ -731,19 +787,24 @@ pub async fn save_scanner_results(
                 .await
                 .map_err(scanner_result_database_error)?;
         }
+        let stage = WriteStage::new("refresh_task_aggregate");
         refresh_task_aggregate(&transaction, task_db_id)
             .await
             .map_err(scanner_result_database_error)?;
+        stage.finish(true);
+        let stage = WriteStage::new("update_target_freshness");
         target_generated::search::record_success(&transaction, task_db_id)
             .await
             .map_err(scanner_result_database_error)?;
+        stage.finish(true);
     }
-
+    let stage = WriteStage::new("commit_scan_receipt");
     transaction
         .commit()
         .await
         .map_err(scanner_result_database_error)?;
     drop(client);
+    stage.finish(true);
     if is_final {
         elasticsearch.notify_projection_worker();
     }

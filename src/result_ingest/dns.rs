@@ -1,6 +1,7 @@
 //! result_ingest / dns domain implementation, migrated from the library root.
 
 use super::storage::dns_sidecar_upload_id;
+use super::telemetry::WriteStage;
 use crate::target_generated;
 
 use deadpool_postgres::GenericClient;
@@ -129,7 +130,9 @@ pub(crate) async fn save_dns_scanner_results(
     let is_final = upload
         .is_final
         .expect("protocol v2 final flag was validated");
-    let mut client = pool.get().await.map_err(scanner_result_database_error)?;
+    let mut client = crate::db::acquire_write_connection(pool, "reserve_dns_batch")
+        .await
+        .map_err(scanner_result_database_error)?;
     let transaction = client
         .transaction()
         .await
@@ -141,6 +144,7 @@ pub(crate) async fn save_dns_scanner_results(
     let token_hash =
         hash_scanner_token(token, token_pepper).map_err(scanner_result_database_error)?;
     let scanner_id = upload.scanner_id.to_string();
+    let stage = WriteStage::new("authenticate_dns_execution");
     let scanner = transaction
         .query_opt(
             "SELECT id FROM scanner_info WHERE scanner_id = $1 AND runtime_token_hash = $2 AND is_enable = true;",
@@ -167,6 +171,7 @@ pub(crate) async fn save_dns_scanner_results(
     let Some(task) = task else {
         return Err(SaveScannerResultsError::TaskNotFound);
     };
+    stage.finish(true);
     let already_succeeded = task.get::<_, String>("execution_status") == "succeeded";
 
     let task_db_id: i32 = task.get("task_id");
@@ -177,7 +182,9 @@ pub(crate) async fn save_dns_scanner_results(
         debug_assert!(!is_final);
         allowed_upload_ids.push(parent.to_string());
     }
+    let stage = WriteStage::new("dns_upload_identity");
     validate_execution_upload_ids(&transaction, execution_db_id, &allowed_upload_ids).await?;
+    stage.finish(true);
     let context = ScanBatchContext {
         task_id: upload.task_id.to_string(),
         execution_id: task.get("public_execution_id"),
@@ -203,6 +210,7 @@ pub(crate) async fn save_dns_scanner_results(
         &observations.iter().collect::<Vec<_>>(),
     )?;
     if is_final {
+        let stage = WriteStage::new("validate_dns_final_sequence");
         let sequence = transaction
             .query_one(
                 "SELECT COUNT(*) FILTER (WHERE batch_index < $3 AND storage_backend <> 'pending')::BIGINT AS prior_count, \
@@ -244,7 +252,9 @@ pub(crate) async fn save_dns_scanner_results(
                 content_kind: "DNS",
             });
         }
+        stage.finish(true);
     }
+    let stage = WriteStage::new("reserve_dns_receipt");
     let write_token = Uuid::new_v4();
     let (write_attempts, write_mode) = if let Some(existing) = transaction
         .query_opt(
@@ -274,6 +284,7 @@ pub(crate) async fn save_dns_scanner_results(
                 .commit()
                 .await
                 .map_err(scanner_result_database_error)?;
+            stage.finish(true);
             return Ok(0);
         }
         let claimed = transaction
@@ -356,6 +367,7 @@ pub(crate) async fn save_dns_scanner_results(
         .await
         .map_err(scanner_result_database_error)?;
     drop(client);
+    stage.finish(true);
     info!(
         event = "DnsBatchWriteClaimed",
         execution_id = execution_db_id,
@@ -365,6 +377,7 @@ pub(crate) async fn save_dns_scanner_results(
         mode = ?write_mode,
         "DNS 批次写入租约已领取"
     );
+    let stage = WriteStage::new("write_dns_elasticsearch");
     let dns_references = match tokio::time::timeout(
         DNS_BATCH_WRITE_TIMEOUT,
         elasticsearch.persist_dns_observations(&context, "default", &observations, write_mode),
@@ -398,7 +411,11 @@ pub(crate) async fn save_dns_scanner_results(
             return Err(SaveScannerResultsError::Storage(message));
         }
     };
-    let mut client = pool.get().await.map_err(scanner_result_database_error)?;
+    stage.finish(true);
+    let mut client = crate::db::acquire_write_connection(pool, "confirm_dns_batch")
+        .await
+        .map_err(scanner_result_database_error)?;
+    let stage = WriteStage::new("confirm_dns_receipt");
     let transaction = client
         .transaction()
         .await
@@ -450,6 +467,7 @@ pub(crate) async fn save_dns_scanner_results(
             .await
             .map_err(scanner_result_database_error)?;
         if receipt.get::<_, String>("storage_backend") != "pending" {
+            stage.finish(true);
             transaction
                 .commit()
                 .await
@@ -461,6 +479,7 @@ pub(crate) async fn save_dns_scanner_results(
             retry_after_seconds: u64::try_from(retry_after).unwrap_or(1),
         });
     }
+    stage.finish(true);
     if follow_up_enabled {
         let resolved_ips = resolved_dns_answer_ips(&observations);
         if !resolved_ips.is_empty() {
@@ -490,10 +509,13 @@ pub(crate) async fn save_dns_scanner_results(
             )
             .await
             .map_err(scanner_result_database_error)?;
+        let stage = WriteStage::new("refresh_dns_task_aggregate");
         refresh_task_aggregate(&transaction, task_db_id)
             .await
             .map_err(scanner_result_database_error)?;
+        stage.finish(true);
         if follow_up_enabled {
+            let stage = WriteStage::new("create_dns_follow_up_tasks");
             create_dns_follow_up_tasks(
                 &transaction,
                 &task,
@@ -503,15 +525,20 @@ pub(crate) async fn save_dns_scanner_results(
             )
             .await
             .map_err(scanner_result_database_error)?;
+            stage.finish(true);
         }
+        let stage = WriteStage::new("update_dns_target_freshness");
         target_generated::search::record_success(&transaction, task_db_id)
             .await
             .map_err(scanner_result_database_error)?;
+        stage.finish(true);
     }
+    let stage = WriteStage::new("commit_dns_receipt");
     transaction
         .commit()
         .await
         .map_err(scanner_result_database_error)?;
+    stage.finish(true);
     Ok(usize::try_from(observation_count).expect("non-negative observation count"))
 }
 

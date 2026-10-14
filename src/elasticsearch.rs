@@ -21,6 +21,7 @@ use crate::config::{ElasticsearchConfig, ScanStorageMode};
 use crate::dns::DnsObservation;
 use crate::handlers::tags::AssetTag;
 use crate::monitor::{ElasticsearchObservation, ElasticsearchOperationKind, MonitorHandle};
+use crate::result_ingest::telemetry::WriteStage;
 
 #[derive(Default)]
 struct BulkTiming {
@@ -1575,6 +1576,7 @@ impl ElasticsearchService {
         }
 
         if !body.is_empty() {
+            let stage = WriteStage::new("write_observation_bulk");
             let result = self
                 .send_bulk_with_retry(
                     &format!(
@@ -1586,12 +1588,16 @@ impl ElasticsearchService {
                 )
                 .await?;
             self.validate_scan_bulk_result(&result, &expected).await?;
+            stage.finish(true);
         }
 
+        let stage = WriteStage::new("write_execution_endpoints");
         self.update_scan_endpoint_projections(context, observations)
             .await?;
+        stage.finish(true);
         self.mark_success();
         if context.is_final {
+            let stage = WriteStage::new("refresh_execution_indices");
             let refreshed = self
                 .send_json_request(
                     ElasticsearchOperation::IndexAdmin,
@@ -1605,9 +1611,13 @@ impl ElasticsearchService {
                 )
                 .await?;
             validate_scan_search_response(&refreshed)?;
+            stage.finish(true);
         }
         let execution_summary = if context.is_final {
-            Some(self.execution_summary(&context.execution_id).await?)
+            let stage = WriteStage::new("execution_summary");
+            let summary = self.execution_summary(&context.execution_id).await?;
+            stage.finish(true);
+            Some(summary)
         } else {
             None
         };
