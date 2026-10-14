@@ -1,0 +1,2403 @@
+{
+  "date": "2026-10-14",
+  "timezone": "Asia/Shanghai",
+  "purpose": "PR #96 post-review HTTP request-line chunking regression",
+  "environment": {
+    "cpu": 2,
+    "memory_gib": 8,
+    "postgresql": "17.11",
+    "elasticsearch": "9.5.3",
+    "es_heap_gib": 1,
+    "rust_profile": "unoptimized test",
+    "es_default_request_line_limit_bytes": 4096,
+    "chunk_budget_bytes": 3072,
+    "cluster_reused_warm": true,
+    "background_workers": false
+  },
+  "limitations": [
+    "Single run per workload; four final samples per size.",
+    "Empty-final fifty-month run overlapped Clippy checking during its early write phase.",
+    "Reused warm ES instance; no controlled before/after performance comparison.",
+    "HTTP middleware/parsing and background workers excluded.",
+    "Scratch ES bootstrap diagnostic coredump path redirected for unavailable gVisor proc interface; original JAR retained."
+  ],
+  "checks": {
+    "workspace_regular_passed": 393,
+    "elasticsearch_related_passed": 62,
+    "strict_clippy_passed": true,
+    "fmt_passed": true,
+    "five_hundred_month_recovery_cases": 4
+  },
+  "source_sha256": {
+    "src/elasticsearch.rs": "1334e926be840ae3965429d740f08b39204988de6788246ca740ddaa010c7bd8",
+    "src/elasticsearch_storage_tests.rs": "2e75fed230b8cb209d1631ccdcd5bffb2eda8d46d0f3156918f5de265d16c65f",
+    "src/elasticsearch/stress_tests.rs": "148ed1f3e087733d6e16c4255466c0a3dd8182fc89f1498ee83f16075a0e482d"
+  },
+  "runs": {
+    "three_months": {
+      "background_workers": false,
+      "batch_size": 500,
+      "empty_final": false,
+      "historical_indices": 12,
+      "index_prefix": "nm-stress-96dce0e3edc24001b264697c918d41cb",
+      "observation_months": 3,
+      "prefix_padding": 0,
+      "results": [
+        {
+          "concurrency": 4,
+          "duplicate_final": {
+            "max_ms": 184.73404299999999,
+            "p50_ms": 70.72147,
+            "p95_ms": 184.73404299999999,
+            "p99_ms": 184.73404299999999,
+            "samples": 4
+          },
+          "elapsed_seconds": 4.441550547,
+          "errors": [],
+          "es_after": {
+            "nodes": {
+              "11zQt0LnSkiGAEjxGfhXOg": {
+                "indices": {
+                  "indexing": {
+                    "delete_current": 0,
+                    "delete_time_in_millis": 0,
+                    "delete_total": 0,
+                    "index_current": 0,
+                    "index_failed": 0,
+                    "index_failed_due_to_version_conflict": 0,
+                    "index_time_in_millis": 217030,
+                    "index_total": 4500004,
+                    "is_throttled": false,
+                    "noop_update_total": 0,
+                    "peak_write_load": 0.016010338067774802,
+                    "recent_write_load": 0.008260139288919843,
+                    "throttle_time_in_millis": 0,
+                    "write_load": 0.008716445036415969
+                  },
+                  "merges": {
+                    "current": 0,
+                    "current_docs": 0,
+                    "current_size_in_bytes": 0,
+                    "total": 103,
+                    "total_auto_throttle_in_bytes": 948961280,
+                    "total_docs": 5622959,
+                    "total_size_in_bytes": 2136127851,
+                    "total_stopped_time_in_millis": 0,
+                    "total_throttled_time_in_millis": 390227,
+                    "total_time_in_millis": 448670
+                  },
+                  "refresh": {
+                    "external_total": 2239,
+                    "external_total_time_in_millis": 30402,
+                    "listeners": 0,
+                    "total": 2323,
+                    "total_time_in_millis": 29056
+                  }
+                },
+                "jvm": {
+                  "gc": {
+                    "collectors": {
+                      "G1 Concurrent GC": {
+                        "collection_count": 202,
+                        "collection_time_in_millis": 3544
+                      },
+                      "old": {
+                        "collection_count": 0,
+                        "collection_time_in_millis": 0
+                      },
+                      "young": {
+                        "collection_count": 354,
+                        "collection_time_in_millis": 20683
+                      }
+                    }
+                  },
+                  "mem": {
+                    "heap_committed_in_bytes": 1073741824,
+                    "heap_max_in_bytes": 1073741824,
+                    "heap_used_in_bytes": 562036736,
+                    "heap_used_percent": 52,
+                    "non_heap_committed_in_bytes": 268238848,
+                    "non_heap_used_in_bytes": 239416264,
+                    "pools": {
+                      "CodeHeap 'non-nmethods'": {
+                        "max_in_bytes": 5828608,
+                        "peak_max_in_bytes": 5828608,
+                        "peak_used_in_bytes": 3691520,
+                        "used_in_bytes": 3440896
+                      },
+                      "CodeHeap 'non-profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 15423872,
+                        "used_in_bytes": 13127808
+                      },
+                      "CodeHeap 'profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 35204864,
+                        "used_in_bytes": 17290496
+                      },
+                      "Compressed Class Space": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 25593920,
+                        "used_in_bytes": 24906976
+                      },
+                      "Metaspace": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 180876512,
+                        "used_in_bytes": 180650088
+                      },
+                      "old": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 351112128,
+                        "used_in_bytes": 167772160
+                      },
+                      "survivor": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 71303168,
+                        "used_in_bytes": 16777216
+                      },
+                      "young": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 637534208,
+                        "used_in_bytes": 377487360
+                      }
+                    }
+                  }
+                },
+                "process": {
+                  "cpu": {
+                    "percent": 21,
+                    "total_in_millis": 501510
+                  }
+                }
+              }
+            }
+          },
+          "es_before": {
+            "nodes": {
+              "11zQt0LnSkiGAEjxGfhXOg": {
+                "indices": {
+                  "indexing": {
+                    "delete_current": 0,
+                    "delete_time_in_millis": 0,
+                    "delete_total": 0,
+                    "index_current": 0,
+                    "index_failed": 0,
+                    "index_failed_due_to_version_conflict": 0,
+                    "index_time_in_millis": 215835,
+                    "index_total": 4480004,
+                    "is_throttled": false,
+                    "noop_update_total": 0,
+                    "peak_write_load": 0.016015360899306864,
+                    "recent_write_load": 0.008241271704398725,
+                    "throttle_time_in_millis": 0,
+                    "write_load": 0.008699017617663113
+                  },
+                  "merges": {
+                    "current": 0,
+                    "current_docs": 0,
+                    "current_size_in_bytes": 0,
+                    "total": 103,
+                    "total_auto_throttle_in_bytes": 933232640,
+                    "total_docs": 5622959,
+                    "total_size_in_bytes": 2136127851,
+                    "total_stopped_time_in_millis": 0,
+                    "total_throttled_time_in_millis": 390227,
+                    "total_time_in_millis": 448670
+                  },
+                  "refresh": {
+                    "external_total": 2204,
+                    "external_total_time_in_millis": 29765,
+                    "listeners": 0,
+                    "total": 2288,
+                    "total_time_in_millis": 28422
+                  }
+                },
+                "jvm": {
+                  "gc": {
+                    "collectors": {
+                      "G1 Concurrent GC": {
+                        "collection_count": 202,
+                        "collection_time_in_millis": 3544
+                      },
+                      "old": {
+                        "collection_count": 0,
+                        "collection_time_in_millis": 0
+                      },
+                      "young": {
+                        "collection_count": 353,
+                        "collection_time_in_millis": 20662
+                      }
+                    }
+                  },
+                  "mem": {
+                    "heap_committed_in_bytes": 1073741824,
+                    "heap_max_in_bytes": 1073741824,
+                    "heap_used_in_bytes": 285212672,
+                    "heap_used_percent": 26,
+                    "non_heap_committed_in_bytes": 268238848,
+                    "non_heap_used_in_bytes": 239288720,
+                    "pools": {
+                      "CodeHeap 'non-nmethods'": {
+                        "max_in_bytes": 5828608,
+                        "peak_max_in_bytes": 5828608,
+                        "peak_used_in_bytes": 3691520,
+                        "used_in_bytes": 3440896
+                      },
+                      "CodeHeap 'non-profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 15423872,
+                        "used_in_bytes": 13090176
+                      },
+                      "CodeHeap 'profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 35204864,
+                        "used_in_bytes": 17221760
+                      },
+                      "Compressed Class Space": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 25593920,
+                        "used_in_bytes": 24906976
+                      },
+                      "Metaspace": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 180876512,
+                        "used_in_bytes": 180628912
+                      },
+                      "old": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 351112128,
+                        "used_in_bytes": 167772160
+                      },
+                      "survivor": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 71303168,
+                        "used_in_bytes": 4194304
+                      },
+                      "young": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 637534208,
+                        "used_in_bytes": 113246208
+                      }
+                    }
+                  }
+                },
+                "process": {
+                  "cpu": {
+                    "percent": 30,
+                    "total_in_millis": 499610
+                  }
+                }
+              }
+            }
+          },
+          "final_batch": {
+            "max_ms": 1011.696493,
+            "p50_ms": 930.8838910000001,
+            "p95_ms": 1011.696493,
+            "p99_ms": 1011.696493,
+            "samples": 4
+          },
+          "final_request_plans": [
+            {
+              "count_requests": 1,
+              "max_request_line_bytes": 314,
+              "refresh_requests": 1
+            },
+            {
+              "count_requests": 1,
+              "max_request_line_bytes": 314,
+              "refresh_requests": 1
+            },
+            {
+              "count_requests": 1,
+              "max_request_line_bytes": 314,
+              "refresh_requests": 1
+            },
+            {
+              "count_requests": 1,
+              "max_request_line_bytes": 314,
+              "refresh_requests": 1
+            }
+          ],
+          "observations": 10000,
+          "observations_per_second": 2251.4659901268933,
+          "ordinary_batch": {
+            "max_ms": 1094.381737,
+            "p50_ms": 824.310533,
+            "p95_ms": 1094.381737,
+            "p99_ms": 1094.381737,
+            "samples": 16
+          },
+          "saved": 10000,
+          "stages": {
+            "ElasticsearchBulkCompleted.backoff_ms": {
+              "max_ms": 0.0,
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 40
+            },
+            "ElasticsearchBulkCompleted.queue_wait_ms": {
+              "max_ms": 0.0,
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 40
+            },
+            "ElasticsearchBulkCompleted.request_ms": {
+              "max_ms": 386.0,
+              "p50_ms": 90.0,
+              "p95_ms": 363.0,
+              "p99_ms": 386.0,
+              "samples": 40
+            },
+            "ScanWriteConnectionAcquired.wait_ms": {
+              "max_ms": 8.0,
+              "p50_ms": 0.0,
+              "p95_ms": 2.0,
+              "p99_ms": 8.0,
+              "samples": 44
+            },
+            "ScanWriteConnectionReleased.hold_ms": {
+              "max_ms": 457.0,
+              "p50_ms": 109.0,
+              "p95_ms": 282.0,
+              "p99_ms": 457.0,
+              "samples": 44
+            },
+            "authenticate_execution": {
+              "max_ms": 106.262,
+              "p50_ms": 5.266,
+              "p95_ms": 89.365,
+              "p99_ms": 106.262,
+              "samples": 24
+            },
+            "commit_scan_receipt": {
+              "max_ms": 93.058,
+              "p50_ms": 1.116,
+              "p95_ms": 72.369,
+              "p99_ms": 93.058,
+              "samples": 20
+            },
+            "confirm_scan_receipt": {
+              "max_ms": 144.836,
+              "p50_ms": 7.379,
+              "p95_ms": 108.298,
+              "p99_ms": 144.836,
+              "samples": 20
+            },
+            "count_execution_observation_chunk": {
+              "max_ms": 27.737,
+              "p50_ms": 6.655,
+              "p95_ms": 27.737,
+              "p99_ms": 27.737,
+              "samples": 4
+            },
+            "enrich_observations": {
+              "max_ms": 31.445,
+              "p50_ms": 11.349,
+              "p95_ms": 21.913,
+              "p99_ms": 31.445,
+              "samples": 24
+            },
+            "execution_summary": {
+              "max_ms": 51.922,
+              "p50_ms": 31.813,
+              "p95_ms": 51.922,
+              "p99_ms": 51.922,
+              "samples": 4
+            },
+            "load_asset_tags": {
+              "max_ms": 100.555,
+              "p50_ms": 6.575,
+              "p95_ms": 95.587,
+              "p99_ms": 100.555,
+              "samples": 24
+            },
+            "load_execution_index_manifest": {
+              "max_ms": 3.97,
+              "p50_ms": 2.107,
+              "p95_ms": 3.97,
+              "p99_ms": 3.97,
+              "samples": 4
+            },
+            "refresh_execution_index_chunk": {
+              "max_ms": 91.221,
+              "p50_ms": 53.242,
+              "p95_ms": 91.221,
+              "p99_ms": 91.221,
+              "samples": 4
+            },
+            "refresh_execution_indices": {
+              "max_ms": 91.245,
+              "p50_ms": 53.261,
+              "p95_ms": 91.245,
+              "p99_ms": 91.245,
+              "samples": 4
+            },
+            "refresh_task_aggregate": {
+              "max_ms": 5.854,
+              "p50_ms": 1.108,
+              "p95_ms": 5.854,
+              "p99_ms": 5.854,
+              "samples": 4
+            },
+            "reserve_scan_receipt": {
+              "max_ms": 269.48,
+              "p50_ms": 84.876,
+              "p95_ms": 151.946,
+              "p99_ms": 269.48,
+              "samples": 24
+            },
+            "update_target_freshness": {
+              "max_ms": 8.633,
+              "p50_ms": 2.542,
+              "p95_ms": 8.633,
+              "p99_ms": 8.633,
+              "samples": 4
+            },
+            "upload": {
+              "max_ms": 1094.319,
+              "p50_ms": 824.056,
+              "p95_ms": 1011.635,
+              "p99_ms": 1094.319,
+              "samples": 24
+            },
+            "upload_identity": {
+              "max_ms": 40.503,
+              "p50_ms": 2.889,
+              "p95_ms": 36.003,
+              "p99_ms": 40.503,
+              "samples": 24
+            },
+            "validate_final_sequence": {
+              "max_ms": 75.17,
+              "p50_ms": 1.99,
+              "p95_ms": 75.17,
+              "p99_ms": 75.17,
+              "samples": 8
+            },
+            "write_execution_endpoints": {
+              "max_ms": 599.547,
+              "p50_ms": 311.675,
+              "p95_ms": 476.974,
+              "p99_ms": 599.547,
+              "samples": 20
+            },
+            "write_observation_bulk": {
+              "max_ms": 393.993,
+              "p50_ms": 88.479,
+              "p95_ms": 372.313,
+              "p99_ms": 393.993,
+              "samples": 20
+            }
+          }
+        },
+        {
+          "concurrency": 4,
+          "duplicate_final": {
+            "max_ms": 115.328848,
+            "p50_ms": 83.584301,
+            "p95_ms": 115.328848,
+            "p99_ms": 115.328848,
+            "samples": 4
+          },
+          "elapsed_seconds": 41.004101042,
+          "errors": [],
+          "es_after": {
+            "nodes": {
+              "11zQt0LnSkiGAEjxGfhXOg": {
+                "indices": {
+                  "indexing": {
+                    "delete_current": 0,
+                    "delete_time_in_millis": 0,
+                    "delete_total": 0,
+                    "index_current": 0,
+                    "index_failed": 0,
+                    "index_failed_due_to_version_conflict": 0,
+                    "index_time_in_millis": 225875,
+                    "index_total": 4700004,
+                    "is_throttled": false,
+                    "noop_update_total": 0,
+                    "peak_write_load": 0.01599096214204538,
+                    "recent_write_load": 0.008346440554560264,
+                    "throttle_time_in_millis": 0,
+                    "write_load": 0.008790029341053423
+                  },
+                  "merges": {
+                    "current": 1,
+                    "current_docs": 58000,
+                    "current_size_in_bytes": 13136119,
+                    "total": 121,
+                    "total_auto_throttle_in_bytes": 948961280,
+                    "total_docs": 5904627,
+                    "total_size_in_bytes": 2247993141,
+                    "total_stopped_time_in_millis": 0,
+                    "total_throttled_time_in_millis": 409257,
+                    "total_time_in_millis": 470041
+                  },
+                  "refresh": {
+                    "external_total": 2371,
+                    "external_total_time_in_millis": 33680,
+                    "listeners": 0,
+                    "total": 2455,
+                    "total_time_in_millis": 31888
+                  }
+                },
+                "jvm": {
+                  "gc": {
+                    "collectors": {
+                      "G1 Concurrent GC": {
+                        "collection_count": 204,
+                        "collection_time_in_millis": 3609
+                      },
+                      "old": {
+                        "collection_count": 0,
+                        "collection_time_in_millis": 0
+                      },
+                      "young": {
+                        "collection_count": 369,
+                        "collection_time_in_millis": 21132
+                      }
+                    }
+                  },
+                  "mem": {
+                    "heap_committed_in_bytes": 1073741824,
+                    "heap_max_in_bytes": 1073741824,
+                    "heap_used_in_bytes": 433229976,
+                    "heap_used_percent": 40,
+                    "non_heap_committed_in_bytes": 268304384,
+                    "non_heap_used_in_bytes": 239250976,
+                    "pools": {
+                      "CodeHeap 'non-nmethods'": {
+                        "max_in_bytes": 5828608,
+                        "peak_max_in_bytes": 5828608,
+                        "peak_used_in_bytes": 3691520,
+                        "used_in_bytes": 3440896
+                      },
+                      "CodeHeap 'non-profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 15423872,
+                        "used_in_bytes": 13202304
+                      },
+                      "CodeHeap 'profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 35204864,
+                        "used_in_bytes": 16927872
+                      },
+                      "Compressed Class Space": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 25593920,
+                        "used_in_bytes": 24907488
+                      },
+                      "Metaspace": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 180876512,
+                        "used_in_bytes": 180772416
+                      },
+                      "old": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 351112128,
+                        "used_in_bytes": 145920152
+                      },
+                      "survivor": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 71303168,
+                        "used_in_bytes": 56623104
+                      },
+                      "young": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 637534208,
+                        "used_in_bytes": 230686720
+                      }
+                    }
+                  }
+                },
+                "process": {
+                  "cpu": {
+                    "percent": 19,
+                    "total_in_millis": 517680
+                  }
+                }
+              }
+            }
+          },
+          "es_before": {
+            "nodes": {
+              "11zQt0LnSkiGAEjxGfhXOg": {
+                "indices": {
+                  "indexing": {
+                    "delete_current": 0,
+                    "delete_time_in_millis": 0,
+                    "delete_total": 0,
+                    "index_current": 0,
+                    "index_failed": 0,
+                    "index_failed_due_to_version_conflict": 0,
+                    "index_time_in_millis": 217030,
+                    "index_total": 4500004,
+                    "is_throttled": false,
+                    "noop_update_total": 0,
+                    "peak_write_load": 0.016010310216306778,
+                    "recent_write_load": 0.008260049793018245,
+                    "throttle_time_in_millis": 0,
+                    "write_load": 0.00871635143609109
+                  },
+                  "merges": {
+                    "current": 0,
+                    "current_docs": 0,
+                    "current_size_in_bytes": 0,
+                    "total": 103,
+                    "total_auto_throttle_in_bytes": 948961280,
+                    "total_docs": 5622959,
+                    "total_size_in_bytes": 2136127851,
+                    "total_stopped_time_in_millis": 0,
+                    "total_throttled_time_in_millis": 390227,
+                    "total_time_in_millis": 448670
+                  },
+                  "refresh": {
+                    "external_total": 2239,
+                    "external_total_time_in_millis": 30402,
+                    "listeners": 0,
+                    "total": 2323,
+                    "total_time_in_millis": 29056
+                  }
+                },
+                "jvm": {
+                  "gc": {
+                    "collectors": {
+                      "G1 Concurrent GC": {
+                        "collection_count": 202,
+                        "collection_time_in_millis": 3544
+                      },
+                      "old": {
+                        "collection_count": 0,
+                        "collection_time_in_millis": 0
+                      },
+                      "young": {
+                        "collection_count": 354,
+                        "collection_time_in_millis": 20683
+                      }
+                    }
+                  },
+                  "mem": {
+                    "heap_committed_in_bytes": 1073741824,
+                    "heap_max_in_bytes": 1073741824,
+                    "heap_used_in_bytes": 562036736,
+                    "heap_used_percent": 52,
+                    "non_heap_committed_in_bytes": 268238848,
+                    "non_heap_used_in_bytes": 239416264,
+                    "pools": {
+                      "CodeHeap 'non-nmethods'": {
+                        "max_in_bytes": 5828608,
+                        "peak_max_in_bytes": 5828608,
+                        "peak_used_in_bytes": 3691520,
+                        "used_in_bytes": 3440896
+                      },
+                      "CodeHeap 'non-profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 15423872,
+                        "used_in_bytes": 13127808
+                      },
+                      "CodeHeap 'profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 35204864,
+                        "used_in_bytes": 17290496
+                      },
+                      "Compressed Class Space": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 25593920,
+                        "used_in_bytes": 24906976
+                      },
+                      "Metaspace": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 180876512,
+                        "used_in_bytes": 180650088
+                      },
+                      "old": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 351112128,
+                        "used_in_bytes": 167772160
+                      },
+                      "survivor": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 71303168,
+                        "used_in_bytes": 16777216
+                      },
+                      "young": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 637534208,
+                        "used_in_bytes": 377487360
+                      }
+                    }
+                  }
+                },
+                "process": {
+                  "cpu": {
+                    "percent": 21,
+                    "total_in_millis": 501510
+                  }
+                }
+              }
+            }
+          },
+          "final_batch": {
+            "max_ms": 1105.466705,
+            "p50_ms": 1038.142054,
+            "p95_ms": 1105.466705,
+            "p99_ms": 1105.466705,
+            "samples": 4
+          },
+          "final_request_plans": [
+            {
+              "count_requests": 1,
+              "max_request_line_bytes": 314,
+              "refresh_requests": 1
+            },
+            {
+              "count_requests": 1,
+              "max_request_line_bytes": 314,
+              "refresh_requests": 1
+            },
+            {
+              "count_requests": 1,
+              "max_request_line_bytes": 314,
+              "refresh_requests": 1
+            },
+            {
+              "count_requests": 1,
+              "max_request_line_bytes": 314,
+              "refresh_requests": 1
+            }
+          ],
+          "observations": 100000,
+          "observations_per_second": 2438.7804502181675,
+          "ordinary_batch": {
+            "max_ms": 1340.719674,
+            "p50_ms": 807.233164,
+            "p95_ms": 1099.026752,
+            "p99_ms": 1339.95753,
+            "samples": 196
+          },
+          "saved": 100000,
+          "stages": {
+            "ElasticsearchBulkCompleted.backoff_ms": {
+              "max_ms": 0.0,
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 400
+            },
+            "ElasticsearchBulkCompleted.queue_wait_ms": {
+              "max_ms": 0.0,
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 400
+            },
+            "ElasticsearchBulkCompleted.request_ms": {
+              "max_ms": 293.0,
+              "p50_ms": 73.0,
+              "p95_ms": 180.0,
+              "p99_ms": 248.0,
+              "samples": 400
+            },
+            "ScanWriteConnectionAcquired.wait_ms": {
+              "max_ms": 0.0,
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 404
+            },
+            "ScanWriteConnectionReleased.hold_ms": {
+              "max_ms": 673.0,
+              "p50_ms": 146.0,
+              "p95_ms": 357.0,
+              "p99_ms": 459.0,
+              "samples": 404
+            },
+            "authenticate_execution": {
+              "max_ms": 251.247,
+              "p50_ms": 5.494,
+              "p95_ms": 109.389,
+              "p99_ms": 162.205,
+              "samples": 204
+            },
+            "commit_scan_receipt": {
+              "max_ms": 158.035,
+              "p50_ms": 1.929,
+              "p95_ms": 93.025,
+              "p99_ms": 121.755,
+              "samples": 200
+            },
+            "confirm_scan_receipt": {
+              "max_ms": 310.347,
+              "p50_ms": 50.414,
+              "p95_ms": 207.418,
+              "p99_ms": 296.367,
+              "samples": 200
+            },
+            "count_execution_observation_chunk": {
+              "max_ms": 32.355,
+              "p50_ms": 3.013,
+              "p95_ms": 32.355,
+              "p99_ms": 32.355,
+              "samples": 4
+            },
+            "enrich_observations": {
+              "max_ms": 63.142,
+              "p50_ms": 11.388,
+              "p95_ms": 32.132,
+              "p99_ms": 47.065,
+              "samples": 204
+            },
+            "execution_summary": {
+              "max_ms": 88.008,
+              "p50_ms": 77.878,
+              "p95_ms": 88.008,
+              "p99_ms": 88.008,
+              "samples": 4
+            },
+            "load_asset_tags": {
+              "max_ms": 196.527,
+              "p50_ms": 14.928,
+              "p95_ms": 153.602,
+              "p99_ms": 184.243,
+              "samples": 204
+            },
+            "load_execution_index_manifest": {
+              "max_ms": 47.271,
+              "p50_ms": 2.63,
+              "p95_ms": 47.271,
+              "p99_ms": 47.271,
+              "samples": 4
+            },
+            "refresh_execution_index_chunk": {
+              "max_ms": 373.562,
+              "p50_ms": 33.294,
+              "p95_ms": 373.562,
+              "p99_ms": 373.562,
+              "samples": 4
+            },
+            "refresh_execution_indices": {
+              "max_ms": 373.588,
+              "p50_ms": 33.341,
+              "p95_ms": 373.588,
+              "p99_ms": 373.588,
+              "samples": 4
+            },
+            "refresh_task_aggregate": {
+              "max_ms": 2.72,
+              "p50_ms": 0.851,
+              "p95_ms": 2.72,
+              "p99_ms": 2.72,
+              "samples": 4
+            },
+            "reserve_scan_receipt": {
+              "max_ms": 445.517,
+              "p50_ms": 78.852,
+              "p95_ms": 204.178,
+              "p99_ms": 273.199,
+              "samples": 204
+            },
+            "update_target_freshness": {
+              "max_ms": 12.048,
+              "p50_ms": 2.119,
+              "p95_ms": 12.048,
+              "p99_ms": 12.048,
+              "samples": 4
+            },
+            "upload": {
+              "max_ms": 1340.585,
+              "p50_ms": 807.182,
+              "p95_ms": 1098.987,
+              "p99_ms": 1270.258,
+              "samples": 204
+            },
+            "upload_identity": {
+              "max_ms": 217.623,
+              "p50_ms": 2.879,
+              "p95_ms": 88.736,
+              "p99_ms": 182.654,
+              "samples": 204
+            },
+            "validate_final_sequence": {
+              "max_ms": 28.956,
+              "p50_ms": 0.848,
+              "p95_ms": 28.956,
+              "p99_ms": 28.956,
+              "samples": 8
+            },
+            "write_execution_endpoints": {
+              "max_ms": 649.344,
+              "p50_ms": 304.11,
+              "p95_ms": 421.209,
+              "p99_ms": 533.933,
+              "samples": 200
+            },
+            "write_observation_bulk": {
+              "max_ms": 262.656,
+              "p50_ms": 62.987,
+              "p95_ms": 159.674,
+              "p99_ms": 225.375,
+              "samples": 200
+            }
+          }
+        },
+        {
+          "concurrency": 4,
+          "duplicate_final": {
+            "max_ms": 133.691453,
+            "p50_ms": 66.494622,
+            "p95_ms": 133.691453,
+            "p99_ms": 133.691453,
+            "samples": 4
+          },
+          "elapsed_seconds": 398.076852306,
+          "errors": [],
+          "es_after": {
+            "nodes": {
+              "11zQt0LnSkiGAEjxGfhXOg": {
+                "indices": {
+                  "indexing": {
+                    "delete_current": 0,
+                    "delete_time_in_millis": 0,
+                    "delete_total": 0,
+                    "index_current": 0,
+                    "index_failed": 0,
+                    "index_failed_due_to_version_conflict": 0,
+                    "index_time_in_millis": 311513,
+                    "index_total": 6700004,
+                    "is_throttled": false,
+                    "noop_update_total": 0,
+                    "peak_write_load": 0.01594100393969026,
+                    "recent_write_load": 0.009285045805714903,
+                    "throttle_time_in_millis": 0,
+                    "write_load": 0.009618364596730296
+                  },
+                  "merges": {
+                    "current": 2,
+                    "current_docs": 551982,
+                    "current_size_in_bytes": 167586469,
+                    "total": 150,
+                    "total_auto_throttle_in_bytes": 948961280,
+                    "total_docs": 8124094,
+                    "total_size_in_bytes": 3079543463,
+                    "total_stopped_time_in_millis": 0,
+                    "total_throttled_time_in_millis": 560265,
+                    "total_time_in_millis": 641565
+                  },
+                  "refresh": {
+                    "external_total": 2515,
+                    "external_total_time_in_millis": 37143,
+                    "listeners": 0,
+                    "total": 2640,
+                    "total_time_in_millis": 35457
+                  }
+                },
+                "jvm": {
+                  "gc": {
+                    "collectors": {
+                      "G1 Concurrent GC": {
+                        "collection_count": 292,
+                        "collection_time_in_millis": 4866
+                      },
+                      "old": {
+                        "collection_count": 0,
+                        "collection_time_in_millis": 0
+                      },
+                      "young": {
+                        "collection_count": 518,
+                        "collection_time_in_millis": 30763
+                      }
+                    }
+                  },
+                  "mem": {
+                    "heap_committed_in_bytes": 1073741824,
+                    "heap_max_in_bytes": 1073741824,
+                    "heap_used_in_bytes": 406847488,
+                    "heap_used_percent": 37,
+                    "non_heap_committed_in_bytes": 268369920,
+                    "non_heap_used_in_bytes": 225234248,
+                    "pools": {
+                      "CodeHeap 'non-nmethods'": {
+                        "max_in_bytes": 5828608,
+                        "peak_max_in_bytes": 5828608,
+                        "peak_used_in_bytes": 3691520,
+                        "used_in_bytes": 3440896
+                      },
+                      "CodeHeap 'non-profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 15423872,
+                        "used_in_bytes": 10584448
+                      },
+                      "CodeHeap 'profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 35204864,
+                        "used_in_bytes": 5479936
+                      },
+                      "Compressed Class Space": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 25593920,
+                        "used_in_bytes": 24908056
+                      },
+                      "Metaspace": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 180876512,
+                        "used_in_bytes": 180821936
+                      },
+                      "old": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 351112128,
+                        "used_in_bytes": 226492416
+                      },
+                      "survivor": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 71303168,
+                        "used_in_bytes": 4194304
+                      },
+                      "young": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 637534208,
+                        "used_in_bytes": 176160768
+                      }
+                    }
+                  }
+                },
+                "process": {
+                  "cpu": {
+                    "percent": 20,
+                    "total_in_millis": 679290
+                  }
+                }
+              }
+            }
+          },
+          "es_before": {
+            "nodes": {
+              "11zQt0LnSkiGAEjxGfhXOg": {
+                "indices": {
+                  "indexing": {
+                    "delete_current": 0,
+                    "delete_time_in_millis": 0,
+                    "delete_total": 0,
+                    "index_current": 0,
+                    "index_failed": 0,
+                    "index_failed_due_to_version_conflict": 0,
+                    "index_time_in_millis": 225875,
+                    "index_total": 4700004,
+                    "is_throttled": false,
+                    "noop_update_total": 0,
+                    "peak_write_load": 0.015990954119205928,
+                    "recent_write_load": 0.008346354905410521,
+                    "throttle_time_in_millis": 0,
+                    "write_load": 0.008789945473920816
+                  },
+                  "merges": {
+                    "current": 1,
+                    "current_docs": 58000,
+                    "current_size_in_bytes": 13136119,
+                    "total": 121,
+                    "total_auto_throttle_in_bytes": 948961280,
+                    "total_docs": 5904627,
+                    "total_size_in_bytes": 2247993141,
+                    "total_stopped_time_in_millis": 0,
+                    "total_throttled_time_in_millis": 409257,
+                    "total_time_in_millis": 470041
+                  },
+                  "refresh": {
+                    "external_total": 2371,
+                    "external_total_time_in_millis": 33680,
+                    "listeners": 0,
+                    "total": 2455,
+                    "total_time_in_millis": 31888
+                  }
+                },
+                "jvm": {
+                  "gc": {
+                    "collectors": {
+                      "G1 Concurrent GC": {
+                        "collection_count": 204,
+                        "collection_time_in_millis": 3609
+                      },
+                      "old": {
+                        "collection_count": 0,
+                        "collection_time_in_millis": 0
+                      },
+                      "young": {
+                        "collection_count": 369,
+                        "collection_time_in_millis": 21132
+                      }
+                    }
+                  },
+                  "mem": {
+                    "heap_committed_in_bytes": 1073741824,
+                    "heap_max_in_bytes": 1073741824,
+                    "heap_used_in_bytes": 433229976,
+                    "heap_used_percent": 40,
+                    "non_heap_committed_in_bytes": 268304384,
+                    "non_heap_used_in_bytes": 239250976,
+                    "pools": {
+                      "CodeHeap 'non-nmethods'": {
+                        "max_in_bytes": 5828608,
+                        "peak_max_in_bytes": 5828608,
+                        "peak_used_in_bytes": 3691520,
+                        "used_in_bytes": 3440896
+                      },
+                      "CodeHeap 'non-profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 15423872,
+                        "used_in_bytes": 13202304
+                      },
+                      "CodeHeap 'profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 35204864,
+                        "used_in_bytes": 16927872
+                      },
+                      "Compressed Class Space": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 25593920,
+                        "used_in_bytes": 24907488
+                      },
+                      "Metaspace": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 180876512,
+                        "used_in_bytes": 180772416
+                      },
+                      "old": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 351112128,
+                        "used_in_bytes": 145920152
+                      },
+                      "survivor": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 71303168,
+                        "used_in_bytes": 56623104
+                      },
+                      "young": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 637534208,
+                        "used_in_bytes": 230686720
+                      }
+                    }
+                  }
+                },
+                "process": {
+                  "cpu": {
+                    "percent": 19,
+                    "total_in_millis": 517680
+                  }
+                }
+              }
+            }
+          },
+          "final_batch": {
+            "max_ms": 4429.983389,
+            "p50_ms": 2108.4416840000004,
+            "p95_ms": 4429.983389,
+            "p99_ms": 4429.983389,
+            "samples": 4
+          },
+          "final_request_plans": [
+            {
+              "count_requests": 1,
+              "max_request_line_bytes": 314,
+              "refresh_requests": 1
+            },
+            {
+              "count_requests": 1,
+              "max_request_line_bytes": 314,
+              "refresh_requests": 1
+            },
+            {
+              "count_requests": 1,
+              "max_request_line_bytes": 314,
+              "refresh_requests": 1
+            },
+            {
+              "count_requests": 1,
+              "max_request_line_bytes": 314,
+              "refresh_requests": 1
+            }
+          ],
+          "observations": 1000000,
+          "observations_per_second": 2512.0777412882685,
+          "ordinary_batch": {
+            "max_ms": 1876.674696,
+            "p50_ms": 765.676055,
+            "p95_ms": 1073.8101259999999,
+            "p99_ms": 1245.3139150000002,
+            "samples": 1996
+          },
+          "saved": 1000000,
+          "stages": {
+            "ElasticsearchBulkCompleted.backoff_ms": {
+              "max_ms": 0.0,
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 4000
+            },
+            "ElasticsearchBulkCompleted.queue_wait_ms": {
+              "max_ms": 6.0,
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 4000
+            },
+            "ElasticsearchBulkCompleted.request_ms": {
+              "max_ms": 780.0,
+              "p50_ms": 72.0,
+              "p95_ms": 196.0,
+              "p99_ms": 299.0,
+              "samples": 4000
+            },
+            "ScanWriteConnectionAcquired.wait_ms": {
+              "max_ms": 18.0,
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 4004
+            },
+            "ScanWriteConnectionReleased.hold_ms": {
+              "max_ms": 616.0,
+              "p50_ms": 139.0,
+              "p95_ms": 338.0,
+              "p99_ms": 435.0,
+              "samples": 4004
+            },
+            "authenticate_execution": {
+              "max_ms": 318.4,
+              "p50_ms": 3.947,
+              "p95_ms": 102.315,
+              "p99_ms": 177.876,
+              "samples": 2004
+            },
+            "commit_scan_receipt": {
+              "max_ms": 270.195,
+              "p50_ms": 2.217,
+              "p95_ms": 92.109,
+              "p99_ms": 149.836,
+              "samples": 2000
+            },
+            "confirm_scan_receipt": {
+              "max_ms": 355.142,
+              "p50_ms": 47.077,
+              "p95_ms": 182.363,
+              "p99_ms": 248.193,
+              "samples": 2000
+            },
+            "count_execution_observation_chunk": {
+              "max_ms": 11.543,
+              "p50_ms": 7.683,
+              "p95_ms": 11.543,
+              "p99_ms": 11.543,
+              "samples": 4
+            },
+            "enrich_observations": {
+              "max_ms": 107.481,
+              "p50_ms": 11.263,
+              "p95_ms": 30.581,
+              "p99_ms": 45.857,
+              "samples": 2004
+            },
+            "execution_summary": {
+              "max_ms": 2788.998,
+              "p50_ms": 828.681,
+              "p95_ms": 2788.998,
+              "p99_ms": 2788.998,
+              "samples": 4
+            },
+            "load_asset_tags": {
+              "max_ms": 411.539,
+              "p50_ms": 11.145,
+              "p95_ms": 135.97,
+              "p99_ms": 204.15,
+              "samples": 2004
+            },
+            "load_execution_index_manifest": {
+              "max_ms": 12.366,
+              "p50_ms": 10.349,
+              "p95_ms": 12.366,
+              "p99_ms": 12.366,
+              "samples": 4
+            },
+            "refresh_execution_index_chunk": {
+              "max_ms": 846.788,
+              "p50_ms": 146.421,
+              "p95_ms": 846.788,
+              "p99_ms": 846.788,
+              "samples": 4
+            },
+            "refresh_execution_indices": {
+              "max_ms": 846.805,
+              "p50_ms": 146.466,
+              "p95_ms": 846.805,
+              "p99_ms": 846.805,
+              "samples": 4
+            },
+            "refresh_task_aggregate": {
+              "max_ms": 2.61,
+              "p50_ms": 0.978,
+              "p95_ms": 2.61,
+              "p99_ms": 2.61,
+              "samples": 4
+            },
+            "reserve_scan_receipt": {
+              "max_ms": 403.136,
+              "p50_ms": 77.168,
+              "p95_ms": 196.375,
+              "p99_ms": 257.855,
+              "samples": 2004
+            },
+            "update_target_freshness": {
+              "max_ms": 2.396,
+              "p50_ms": 1.633,
+              "p95_ms": 2.396,
+              "p99_ms": 2.396,
+              "samples": 4
+            },
+            "upload": {
+              "max_ms": 4429.919,
+              "p50_ms": 765.603,
+              "p95_ms": 1075.095,
+              "p99_ms": 1255.719,
+              "samples": 2004
+            },
+            "upload_identity": {
+              "max_ms": 342.156,
+              "p50_ms": 3.479,
+              "p95_ms": 102.961,
+              "p99_ms": 165.317,
+              "samples": 2004
+            },
+            "validate_final_sequence": {
+              "max_ms": 7.518,
+              "p50_ms": 1.097,
+              "p95_ms": 7.518,
+              "p99_ms": 7.518,
+              "samples": 8
+            },
+            "write_execution_endpoints": {
+              "max_ms": 964.799,
+              "p50_ms": 296.546,
+              "p95_ms": 457.329,
+              "p99_ms": 578.639,
+              "samples": 2000
+            },
+            "write_observation_bulk": {
+              "max_ms": 742.441,
+              "p50_ms": 61.594,
+              "p95_ms": 154.145,
+              "p99_ms": 252.148,
+              "samples": 2000
+            }
+          }
+        }
+      ],
+      "schema": "storage_250dd527ff8f4c389cd2ba9c60960b5f",
+      "unchunked_request_line_bytes": 259,
+      "unchunked_request_rejected": false,
+      "unrelated_search_targets": 100000
+    },
+    "fifty_months_data_final": {
+      "background_workers": false,
+      "batch_size": 500,
+      "empty_final": false,
+      "historical_indices": 12,
+      "index_prefix": "nm-stress-afe5f883abd046f3bcbd5fae11e09e46",
+      "observation_months": 50,
+      "prefix_padding": 120,
+      "results": [
+        {
+          "concurrency": 4,
+          "duplicate_final": {
+            "max_ms": 133.079601,
+            "p50_ms": 106.242765,
+            "p95_ms": 133.079601,
+            "p99_ms": 133.079601,
+            "samples": 4
+          },
+          "elapsed_seconds": 7.2103323679999995,
+          "errors": [],
+          "es_after": {
+            "nodes": {
+              "11zQt0LnSkiGAEjxGfhXOg": {
+                "indices": {
+                  "indexing": {
+                    "delete_current": 0,
+                    "delete_time_in_millis": 0,
+                    "delete_total": 0,
+                    "index_current": 0,
+                    "index_failed": 0,
+                    "index_failed_due_to_version_conflict": 0,
+                    "index_time_in_millis": 215835,
+                    "index_total": 4480004,
+                    "is_throttled": false,
+                    "noop_update_total": 0,
+                    "peak_write_load": 0.01604195172201704,
+                    "recent_write_load": 0.008255673203005251,
+                    "throttle_time_in_millis": 0,
+                    "write_load": 0.00871420646301006
+                  },
+                  "merges": {
+                    "current": 0,
+                    "current_docs": 0,
+                    "current_size_in_bytes": 0,
+                    "total": 103,
+                    "total_auto_throttle_in_bytes": 859832320,
+                    "total_docs": 5622959,
+                    "total_size_in_bytes": 2136127851,
+                    "total_stopped_time_in_millis": 0,
+                    "total_throttled_time_in_millis": 390227,
+                    "total_time_in_millis": 448670
+                  },
+                  "refresh": {
+                    "external_total": 2176,
+                    "external_total_time_in_millis": 29765,
+                    "listeners": 0,
+                    "total": 2260,
+                    "total_time_in_millis": 28422
+                  }
+                },
+                "jvm": {
+                  "gc": {
+                    "collectors": {
+                      "G1 Concurrent GC": {
+                        "collection_count": 200,
+                        "collection_time_in_millis": 3482
+                      },
+                      "old": {
+                        "collection_count": 0,
+                        "collection_time_in_millis": 0
+                      },
+                      "young": {
+                        "collection_count": 352,
+                        "collection_time_in_millis": 20656
+                      }
+                    }
+                  },
+                  "mem": {
+                    "heap_committed_in_bytes": 1073741824,
+                    "heap_max_in_bytes": 1073741824,
+                    "heap_used_in_bytes": 765460480,
+                    "heap_used_percent": 71,
+                    "non_heap_committed_in_bytes": 268107776,
+                    "non_heap_used_in_bytes": 243170912,
+                    "pools": {
+                      "CodeHeap 'non-nmethods'": {
+                        "max_in_bytes": 5828608,
+                        "peak_max_in_bytes": 5828608,
+                        "peak_used_in_bytes": 3691520,
+                        "used_in_bytes": 3440896
+                      },
+                      "CodeHeap 'non-profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 15423872,
+                        "used_in_bytes": 14718208
+                      },
+                      "CodeHeap 'profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 35204864,
+                        "used_in_bytes": 19611904
+                      },
+                      "Compressed Class Space": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 25593920,
+                        "used_in_bytes": 24906976
+                      },
+                      "Metaspace": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 180876512,
+                        "used_in_bytes": 180492928
+                      },
+                      "old": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 351112128,
+                        "used_in_bytes": 171966464
+                      },
+                      "survivor": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 71303168,
+                        "used_in_bytes": 39845888
+                      },
+                      "young": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 637534208,
+                        "used_in_bytes": 553648128
+                      }
+                    }
+                  }
+                },
+                "process": {
+                  "cpu": {
+                    "percent": 47,
+                    "total_in_millis": 497760
+                  }
+                }
+              }
+            }
+          },
+          "es_before": {
+            "nodes": {
+              "11zQt0LnSkiGAEjxGfhXOg": {
+                "indices": {
+                  "indexing": {
+                    "delete_current": 0,
+                    "delete_time_in_millis": 0,
+                    "delete_total": 0,
+                    "index_current": 0,
+                    "index_failed": 0,
+                    "index_failed_due_to_version_conflict": 0,
+                    "index_time_in_millis": 214179,
+                    "index_total": 4460004,
+                    "is_throttled": false,
+                    "noop_update_total": 0,
+                    "peak_write_load": 0.016236311389534772,
+                    "recent_write_load": 0.008324936645497856,
+                    "throttle_time_in_millis": 0,
+                    "write_load": 0.008791023744919248
+                  },
+                  "merges": {
+                    "current": 0,
+                    "current_docs": 0,
+                    "current_size_in_bytes": 0,
+                    "total": 102,
+                    "total_auto_throttle_in_bytes": 597688320,
+                    "total_docs": 5614959,
+                    "total_size_in_bytes": 2133946562,
+                    "total_stopped_time_in_millis": 0,
+                    "total_throttled_time_in_millis": 389915,
+                    "total_time_in_millis": 448216
+                  },
+                  "refresh": {
+                    "external_total": 1610,
+                    "external_total_time_in_millis": 26721,
+                    "listeners": 0,
+                    "total": 1694,
+                    "total_time_in_millis": 25464
+                  }
+                },
+                "jvm": {
+                  "gc": {
+                    "collectors": {
+                      "G1 Concurrent GC": {
+                        "collection_count": 200,
+                        "collection_time_in_millis": 3482
+                      },
+                      "old": {
+                        "collection_count": 0,
+                        "collection_time_in_millis": 0
+                      },
+                      "young": {
+                        "collection_count": 349,
+                        "collection_time_in_millis": 20517
+                      }
+                    }
+                  },
+                  "mem": {
+                    "heap_committed_in_bytes": 1073741824,
+                    "heap_max_in_bytes": 1073741824,
+                    "heap_used_in_bytes": 723691528,
+                    "heap_used_percent": 67,
+                    "non_heap_committed_in_bytes": 268107776,
+                    "non_heap_used_in_bytes": 240356552,
+                    "pools": {
+                      "CodeHeap 'non-nmethods'": {
+                        "max_in_bytes": 5828608,
+                        "peak_max_in_bytes": 5828608,
+                        "peak_used_in_bytes": 3691520,
+                        "used_in_bytes": 3440896
+                      },
+                      "CodeHeap 'non-profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 15423872,
+                        "used_in_bytes": 14164352
+                      },
+                      "CodeHeap 'profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 35204864,
+                        "used_in_bytes": 17807104
+                      },
+                      "Compressed Class Space": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 25593920,
+                        "used_in_bytes": 24906976
+                      },
+                      "Metaspace": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 180876512,
+                        "used_in_bytes": 180037224
+                      },
+                      "old": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 351112128,
+                        "used_in_bytes": 167946248
+                      },
+                      "survivor": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 71303168,
+                        "used_in_bytes": 31457280
+                      },
+                      "young": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 637534208,
+                        "used_in_bytes": 524288000
+                      }
+                    }
+                  }
+                },
+                "process": {
+                  "cpu": {
+                    "percent": 3,
+                    "total_in_millis": 490770
+                  }
+                }
+              }
+            }
+          },
+          "final_batch": {
+            "max_ms": 1593.556076,
+            "p50_ms": 1521.513418,
+            "p95_ms": 1593.556076,
+            "p99_ms": 1593.556076,
+            "samples": 4
+          },
+          "final_request_plans": [
+            {
+              "count_requests": 4,
+              "max_request_line_bytes": 3013,
+              "refresh_requests": 4
+            },
+            {
+              "count_requests": 4,
+              "max_request_line_bytes": 3013,
+              "refresh_requests": 4
+            },
+            {
+              "count_requests": 4,
+              "max_request_line_bytes": 3013,
+              "refresh_requests": 4
+            },
+            {
+              "count_requests": 4,
+              "max_request_line_bytes": 3013,
+              "refresh_requests": 4
+            }
+          ],
+          "observations": 10000,
+          "observations_per_second": 1386.898618485433,
+          "ordinary_batch": {
+            "max_ms": 2412.1977540000003,
+            "p50_ms": 1121.6563589999998,
+            "p95_ms": 2412.1977540000003,
+            "p99_ms": 2412.1977540000003,
+            "samples": 16
+          },
+          "saved": 10000,
+          "stages": {
+            "ElasticsearchBulkCompleted.backoff_ms": {
+              "max_ms": 0.0,
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 40
+            },
+            "ElasticsearchBulkCompleted.queue_wait_ms": {
+              "max_ms": 0.0,
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 40
+            },
+            "ElasticsearchBulkCompleted.request_ms": {
+              "max_ms": 1698.0,
+              "p50_ms": 210.0,
+              "p95_ms": 1396.0,
+              "p99_ms": 1698.0,
+              "samples": 40
+            },
+            "ScanWriteConnectionAcquired.wait_ms": {
+              "max_ms": 8.0,
+              "p50_ms": 0.0,
+              "p95_ms": 3.0,
+              "p99_ms": 8.0,
+              "samples": 44
+            },
+            "ScanWriteConnectionReleased.hold_ms": {
+              "max_ms": 404.0,
+              "p50_ms": 94.0,
+              "p95_ms": 330.0,
+              "p99_ms": 404.0,
+              "samples": 44
+            },
+            "authenticate_execution": {
+              "max_ms": 47.476,
+              "p50_ms": 3.074,
+              "p95_ms": 16.666,
+              "p99_ms": 47.476,
+              "samples": 24
+            },
+            "commit_scan_receipt": {
+              "max_ms": 28.612,
+              "p50_ms": 2.156,
+              "p95_ms": 16.291,
+              "p99_ms": 28.612,
+              "samples": 20
+            },
+            "confirm_scan_receipt": {
+              "max_ms": 170.125,
+              "p50_ms": 11.559,
+              "p95_ms": 86.011,
+              "p99_ms": 170.125,
+              "samples": 20
+            },
+            "count_execution_observation_chunk": {
+              "max_ms": 25.909,
+              "p50_ms": 9.583,
+              "p95_ms": 25.909,
+              "p99_ms": 25.909,
+              "samples": 16
+            },
+            "enrich_observations": {
+              "max_ms": 47.656,
+              "p50_ms": 12.054,
+              "p95_ms": 21.777,
+              "p99_ms": 47.656,
+              "samples": 24
+            },
+            "execution_summary": {
+              "max_ms": 79.956,
+              "p50_ms": 61.869,
+              "p95_ms": 79.956,
+              "p99_ms": 79.956,
+              "samples": 4
+            },
+            "load_asset_tags": {
+              "max_ms": 163.943,
+              "p50_ms": 18.202,
+              "p95_ms": 96.74,
+              "p99_ms": 163.943,
+              "samples": 24
+            },
+            "load_execution_index_manifest": {
+              "max_ms": 72.24,
+              "p50_ms": 2.965,
+              "p95_ms": 72.24,
+              "p99_ms": 72.24,
+              "samples": 4
+            },
+            "refresh_execution_index_chunk": {
+              "max_ms": 146.749,
+              "p50_ms": 10.619,
+              "p95_ms": 146.749,
+              "p99_ms": 146.749,
+              "samples": 16
+            },
+            "refresh_execution_indices": {
+              "max_ms": 218.752,
+              "p50_ms": 78.801,
+              "p95_ms": 218.752,
+              "p99_ms": 218.752,
+              "samples": 4
+            },
+            "refresh_task_aggregate": {
+              "max_ms": 42.199,
+              "p50_ms": 2.303,
+              "p95_ms": 42.199,
+              "p99_ms": 42.199,
+              "samples": 4
+            },
+            "reserve_scan_receipt": {
+              "max_ms": 293.839,
+              "p50_ms": 56.118,
+              "p95_ms": 273.72,
+              "p99_ms": 293.839,
+              "samples": 24
+            },
+            "update_target_freshness": {
+              "max_ms": 15.641,
+              "p50_ms": 9.851,
+              "p95_ms": 15.641,
+              "p99_ms": 15.641,
+              "samples": 4
+            },
+            "upload": {
+              "max_ms": 2411.976,
+              "p50_ms": 1121.591,
+              "p95_ms": 2281.676,
+              "p99_ms": 2411.976,
+              "samples": 24
+            },
+            "upload_identity": {
+              "max_ms": 74.036,
+              "p50_ms": 8.788,
+              "p95_ms": 50.906,
+              "p99_ms": 74.036,
+              "samples": 24
+            },
+            "validate_final_sequence": {
+              "max_ms": 56.443,
+              "p50_ms": 2.136,
+              "p95_ms": 56.443,
+              "p99_ms": 56.443,
+              "samples": 8
+            },
+            "write_execution_endpoints": {
+              "max_ms": 710.295,
+              "p50_ms": 501.919,
+              "p95_ms": 626.551,
+              "p99_ms": 710.295,
+              "samples": 20
+            },
+            "write_observation_bulk": {
+              "max_ms": 1713.314,
+              "p50_ms": 220.062,
+              "p95_ms": 1708.135,
+              "p99_ms": 1713.314,
+              "samples": 20
+            }
+          }
+        }
+      ],
+      "schema": "storage_a6d28ad6ec0f4750bdc86b8e5fec5ab0",
+      "unchunked_request_line_bytes": 9267,
+      "unchunked_request_rejected": true,
+      "unrelated_search_targets": 100000
+    },
+    "fifty_months_empty_final": {
+      "background_workers": false,
+      "batch_size": 500,
+      "empty_final": true,
+      "historical_indices": 12,
+      "index_prefix": "nm-stress-74f410092a4240c88d9dd91998ebbe1d",
+      "observation_months": 50,
+      "prefix_padding": 120,
+      "results": [
+        {
+          "concurrency": 4,
+          "duplicate_final": {
+            "max_ms": 10.807245,
+            "p50_ms": 7.7568280000000005,
+            "p95_ms": 10.807245,
+            "p99_ms": 10.807245,
+            "samples": 4
+          },
+          "elapsed_seconds": 11.845751812,
+          "errors": [],
+          "es_after": {
+            "nodes": {
+              "11zQt0LnSkiGAEjxGfhXOg": {
+                "indices": {
+                  "indexing": {
+                    "delete_current": 0,
+                    "delete_time_in_millis": 0,
+                    "delete_total": 0,
+                    "index_current": 0,
+                    "index_failed": 0,
+                    "index_failed_due_to_version_conflict": 0,
+                    "index_time_in_millis": 214179,
+                    "index_total": 4460004,
+                    "is_throttled": false,
+                    "noop_update_total": 0,
+                    "peak_write_load": 0.016303980117986994,
+                    "recent_write_load": 0.008360454637825103,
+                    "throttle_time_in_millis": 0,
+                    "write_load": 0.008828516472354017
+                  },
+                  "merges": {
+                    "current": 0,
+                    "current_docs": 0,
+                    "current_size_in_bytes": 0,
+                    "total": 102,
+                    "total_auto_throttle_in_bytes": 524288000,
+                    "total_docs": 5614959,
+                    "total_size_in_bytes": 2133946562,
+                    "total_stopped_time_in_millis": 0,
+                    "total_throttled_time_in_millis": 389915,
+                    "total_time_in_millis": 448216
+                  },
+                  "refresh": {
+                    "external_total": 1582,
+                    "external_total_time_in_millis": 26720,
+                    "listeners": 0,
+                    "total": 1666,
+                    "total_time_in_millis": 25464
+                  }
+                },
+                "jvm": {
+                  "gc": {
+                    "collectors": {
+                      "G1 Concurrent GC": {
+                        "collection_count": 200,
+                        "collection_time_in_millis": 3482
+                      },
+                      "old": {
+                        "collection_count": 0,
+                        "collection_time_in_millis": 0
+                      },
+                      "young": {
+                        "collection_count": 349,
+                        "collection_time_in_millis": 20517
+                      }
+                    }
+                  },
+                  "mem": {
+                    "heap_committed_in_bytes": 1073741824,
+                    "heap_max_in_bytes": 1073741824,
+                    "heap_used_in_bytes": 560113672,
+                    "heap_used_percent": 52,
+                    "non_heap_committed_in_bytes": 268107776,
+                    "non_heap_used_in_bytes": 238813208,
+                    "pools": {
+                      "CodeHeap 'non-nmethods'": {
+                        "max_in_bytes": 5828608,
+                        "peak_max_in_bytes": 5828608,
+                        "peak_used_in_bytes": 3691520,
+                        "used_in_bytes": 3440896
+                      },
+                      "CodeHeap 'non-profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 15423872,
+                        "used_in_bytes": 13977472
+                      },
+                      "CodeHeap 'profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 35204864,
+                        "used_in_bytes": 16693504
+                      },
+                      "Compressed Class Space": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 25593920,
+                        "used_in_bytes": 24906448
+                      },
+                      "Metaspace": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 180876512,
+                        "used_in_bytes": 179794888
+                      },
+                      "old": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 351112128,
+                        "used_in_bytes": 167946248
+                      },
+                      "survivor": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 71303168,
+                        "used_in_bytes": 31457280
+                      },
+                      "young": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 637534208,
+                        "used_in_bytes": 360710144
+                      }
+                    }
+                  }
+                },
+                "process": {
+                  "cpu": {
+                    "percent": 42,
+                    "total_in_millis": 488960
+                  }
+                }
+              }
+            }
+          },
+          "es_before": {
+            "nodes": {
+              "11zQt0LnSkiGAEjxGfhXOg": {
+                "indices": {
+                  "indexing": {
+                    "delete_current": 0,
+                    "delete_time_in_millis": 0,
+                    "delete_total": 0,
+                    "index_current": 0,
+                    "index_failed": 0,
+                    "index_failed_due_to_version_conflict": 0,
+                    "index_time_in_millis": 212431,
+                    "index_total": 4440004,
+                    "is_throttled": false,
+                    "noop_update_total": 0,
+                    "peak_write_load": 0.016662562926240677,
+                    "recent_write_load": 0.008510619695255059,
+                    "throttle_time_in_millis": 0,
+                    "write_load": 0.008991231268333011
+                  },
+                  "merges": {
+                    "current": 0,
+                    "current_docs": 0,
+                    "current_size_in_bytes": 0,
+                    "total": 97,
+                    "total_auto_throttle_in_bytes": 262144000,
+                    "total_docs": 5605919,
+                    "total_size_in_bytes": 2130699952,
+                    "total_stopped_time_in_millis": 0,
+                    "total_throttled_time_in_millis": 389543,
+                    "total_time_in_millis": 447570
+                  },
+                  "refresh": {
+                    "external_total": 878,
+                    "external_total_time_in_millis": 20850,
+                    "listeners": 0,
+                    "total": 962,
+                    "total_time_in_millis": 19873
+                  }
+                },
+                "jvm": {
+                  "gc": {
+                    "collectors": {
+                      "G1 Concurrent GC": {
+                        "collection_count": 198,
+                        "collection_time_in_millis": 3326
+                      },
+                      "old": {
+                        "collection_count": 0,
+                        "collection_time_in_millis": 0
+                      },
+                      "young": {
+                        "collection_count": 346,
+                        "collection_time_in_millis": 20261
+                      }
+                    }
+                  },
+                  "mem": {
+                    "heap_committed_in_bytes": 1073741824,
+                    "heap_max_in_bytes": 1073741824,
+                    "heap_used_in_bytes": 308281344,
+                    "heap_used_percent": 28,
+                    "non_heap_committed_in_bytes": 267780096,
+                    "non_heap_used_in_bytes": 233989560,
+                    "pools": {
+                      "CodeHeap 'non-nmethods'": {
+                        "max_in_bytes": 5828608,
+                        "peak_max_in_bytes": 5828608,
+                        "peak_used_in_bytes": 3598080,
+                        "used_in_bytes": 3440896
+                      },
+                      "CodeHeap 'non-profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 15423872,
+                        "used_in_bytes": 13189760
+                      },
+                      "CodeHeap 'profiled nmethods'": {
+                        "max_in_bytes": 122916864,
+                        "peak_max_in_bytes": 122916864,
+                        "peak_used_in_bytes": 35204864,
+                        "used_in_bytes": 13518976
+                      },
+                      "Compressed Class Space": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 25593920,
+                        "used_in_bytes": 24905864
+                      },
+                      "Metaspace": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 180876512,
+                        "used_in_bytes": 178934064
+                      },
+                      "old": {
+                        "max_in_bytes": 1073741824,
+                        "peak_max_in_bytes": 1073741824,
+                        "peak_used_in_bytes": 351112128,
+                        "used_in_bytes": 226492416
+                      },
+                      "survivor": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 71303168,
+                        "used_in_bytes": 31457280
+                      },
+                      "young": {
+                        "max_in_bytes": 0,
+                        "peak_max_in_bytes": 0,
+                        "peak_used_in_bytes": 637534208,
+                        "used_in_bytes": 50331648
+                      }
+                    }
+                  }
+                },
+                "process": {
+                  "cpu": {
+                    "percent": 0,
+                    "total_in_millis": 478930
+                  }
+                }
+              }
+            }
+          },
+          "final_batch": {
+            "max_ms": 1776.199138,
+            "p50_ms": 414.01024199999995,
+            "p95_ms": 1776.199138,
+            "p99_ms": 1776.199138,
+            "samples": 4
+          },
+          "final_request_plans": [
+            {
+              "count_requests": 4,
+              "max_request_line_bytes": 3013,
+              "refresh_requests": 4
+            },
+            {
+              "count_requests": 4,
+              "max_request_line_bytes": 3013,
+              "refresh_requests": 4
+            },
+            {
+              "count_requests": 4,
+              "max_request_line_bytes": 3013,
+              "refresh_requests": 4
+            },
+            {
+              "count_requests": 4,
+              "max_request_line_bytes": 3013,
+              "refresh_requests": 4
+            }
+          ],
+          "observations": 10000,
+          "observations_per_second": 844.1844940453493,
+          "ordinary_batch": {
+            "max_ms": 4620.101524,
+            "p50_ms": 1714.07162,
+            "p95_ms": 4596.7516829999995,
+            "p99_ms": 4620.101524,
+            "samples": 20
+          },
+          "saved": 10000,
+          "stages": {
+            "ElasticsearchBulkCompleted.backoff_ms": {
+              "max_ms": 0.0,
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 40
+            },
+            "ElasticsearchBulkCompleted.queue_wait_ms": {
+              "max_ms": 0.0,
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0,
+              "samples": 40
+            },
+            "ElasticsearchBulkCompleted.request_ms": {
+              "max_ms": 3383.0,
+              "p50_ms": 240.0,
+              "p95_ms": 3303.0,
+              "p99_ms": 3383.0,
+              "samples": 40
+            },
+            "ScanWriteConnectionAcquired.wait_ms": {
+              "max_ms": 3.0,
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 3.0,
+              "samples": 60
+            },
+            "ScanWriteConnectionReleased.hold_ms": {
+              "max_ms": 691.0,
+              "p50_ms": 68.0,
+              "p95_ms": 570.0,
+              "p99_ms": 691.0,
+              "samples": 60
+            },
+            "authenticate_execution": {
+              "max_ms": 259.641,
+              "p50_ms": 4.173,
+              "p95_ms": 235.123,
+              "p99_ms": 259.641,
+              "samples": 28
+            },
+            "commit_scan_receipt": {
+              "max_ms": 174.135,
+              "p50_ms": 2.103,
+              "p95_ms": 50.102,
+              "p99_ms": 174.135,
+              "samples": 24
+            },
+            "confirm_scan_receipt": {
+              "max_ms": 450.96,
+              "p50_ms": 11.576,
+              "p95_ms": 298.162,
+              "p99_ms": 450.96,
+              "samples": 24
+            },
+            "count_execution_observation_chunk": {
+              "max_ms": 54.89,
+              "p50_ms": 17.814,
+              "p95_ms": 54.89,
+              "p99_ms": 54.89,
+              "samples": 16
+            },
+            "enrich_observations": {
+              "max_ms": 66.752,
+              "p50_ms": 14.34,
+              "p95_ms": 54.664,
+              "p99_ms": 66.752,
+              "samples": 28
+            },
+            "execution_summary": {
+              "max_ms": 157.405,
+              "p50_ms": 104.778,
+              "p95_ms": 157.405,
+              "p99_ms": 157.405,
+              "samples": 4
+            },
+            "load_asset_tags": {
+              "max_ms": 100.535,
+              "p50_ms": 6.967,
+              "p95_ms": 79.341,
+              "p99_ms": 100.535,
+              "samples": 20
+            },
+            "load_execution_index_manifest": {
+              "max_ms": 1.699,
+              "p50_ms": 1.1,
+              "p95_ms": 1.699,
+              "p99_ms": 1.699,
+              "samples": 4
+            },
+            "refresh_execution_index_chunk": {
+              "max_ms": 737.857,
+              "p50_ms": 57.911,
+              "p95_ms": 737.857,
+              "p99_ms": 737.857,
+              "samples": 16
+            },
+            "refresh_execution_indices": {
+              "max_ms": 889.671,
+              "p50_ms": 244.7,
+              "p95_ms": 889.671,
+              "p99_ms": 889.671,
+              "samples": 4
+            },
+            "refresh_task_aggregate": {
+              "max_ms": 7.119,
+              "p50_ms": 3.187,
+              "p95_ms": 7.119,
+              "p99_ms": 7.119,
+              "samples": 4
+            },
+            "reserve_scan_receipt": {
+              "max_ms": 490.802,
+              "p50_ms": 94.94,
+              "p95_ms": 418.345,
+              "p99_ms": 490.802,
+              "samples": 28
+            },
+            "update_target_freshness": {
+              "max_ms": 9.846,
+              "p50_ms": 6.51,
+              "p95_ms": 9.846,
+              "p99_ms": 9.846,
+              "samples": 4
+            },
+            "upload": {
+              "max_ms": 4620.019,
+              "p50_ms": 1634.387,
+              "p95_ms": 4596.676,
+              "p99_ms": 4620.019,
+              "samples": 28
+            },
+            "upload_identity": {
+              "max_ms": 218.104,
+              "p50_ms": 3.374,
+              "p95_ms": 208.633,
+              "p99_ms": 218.104,
+              "samples": 28
+            },
+            "validate_final_sequence": {
+              "max_ms": 88.92,
+              "p50_ms": 1.139,
+              "p95_ms": 88.92,
+              "p99_ms": 88.92,
+              "samples": 8
+            },
+            "write_execution_endpoints": {
+              "max_ms": 938.141,
+              "p50_ms": 639.297,
+              "p95_ms": 902.008,
+              "p99_ms": 938.141,
+              "samples": 24
+            },
+            "write_observation_bulk": {
+              "max_ms": 3402.009,
+              "p50_ms": 203.226,
+              "p95_ms": 3348.032,
+              "p99_ms": 3402.009,
+              "samples": 20
+            }
+          }
+        }
+      ],
+      "schema": "storage_d923bca7e97b44c599edb2b9e800514f",
+      "unchunked_request_line_bytes": 9267,
+      "unchunked_request_rejected": true,
+      "unrelated_search_targets": 100000
+    }
+  }
+}

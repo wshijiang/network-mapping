@@ -4833,3 +4833,7 @@ mod tests {
 #[cfg(test)]
 #[path = "elasticsearch_storage_tests.rs"]
 mod storage_tests;
+
+#[cfg(test)]
+#[path = "elasticsearch/stress_tests.rs"]
+mod stress_tests;

@@ -31,6 +31,7 @@
 | --- | --- |
 | [Elasticsearch 9.5.x 扫描结果存储](ELASTICSEARCH.md) | 新安装、存储切换与历史数据迁移 |
 | [扫描写入与后台资产发布](WRITE_SPEED.md) | 上传边界、投影租约、检查点与写入观测 |
+| [扫描写入压力测试](SCAN_WRITE_STRESS.md) | 大数据写入方法、延迟分布、吞吐与实测记录 |
 | [扫描分析快照](ANALYTICS_SNAPSHOTS.md) | 分析快照模式与回填 |
 | [统计分析](STATISTICS.md) | 自定义汇总、图表及图片和数据导出 |
 | [平台周报与月报](reports.md) | 周报、月报、发送计划与归档 |

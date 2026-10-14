@@ -1,0 +1,2286 @@
+{
+  "environment": {
+    "recorded_at": "2026-10-14T11:21:56.643523+08:00",
+    "baseline_commit": "ab08c60e23a4fe1ae99637122fdcf625cc61c175",
+    "candidate": "four-commit PR implementation",
+    "rust": "1.99.0",
+    "profile": "test, unoptimized, debug info disabled",
+    "cpu_quota": 2,
+    "memory_limit_bytes": 8589934592,
+    "postgresql": "17.11",
+    "elasticsearch": "9.5.3",
+    "es_heap_bytes": 1073741824,
+    "background_workers": false,
+    "runtime_adaptation": "Only bootstrap coredump_filter diagnostic path redirected to /tmp because gVisor lacks /proc/self/coredump_filter; indexing/query code unchanged.",
+    "limitations": [
+      "Single run per version; baseline first cohort includes JVM warmup.",
+      "Build-cache copy overlapped the early baseline million-row phase; small throughput differences cannot be attributed confidently.",
+      "Four final samples per scale; only port observations, no HTTP parsing/middleware or background worker load.",
+      "Baseline writes and exact-count assertions passed; its initial wildcard cleanup was rejected by ES. Explicit cleanup was performed and the harness was fixed; candidate completed successfully."
+    ]
+  },
+  "resources": {
+    "baseline": {
+      "samples": 224,
+      "java_rss_peak_bytes": 2010738688,
+      "cgroup_memory_peak_bytes": 8589934592
+    },
+    "candidate": {
+      "samples": 243,
+      "java_rss_peak_bytes": 1962795008,
+      "cgroup_memory_peak_bytes": 7690018816
+    }
+  },
+  "baseline": {
+    "background_workers": false,
+    "batch_size": 500,
+    "historical_indices": 12,
+    "index_prefix": "nm-stress-ff44846194314f56b38b1ea0075e64f7",
+    "results": [
+      {
+        "concurrency": 4,
+        "duplicate_final": {
+          "max_ms": 102.109015,
+          "p50_ms": 78.566839,
+          "p95_ms": 102.109015,
+          "p99_ms": 102.109015,
+          "samples": 4
+        },
+        "elapsed_seconds": 9.976169776,
+        "errors": [],
+        "es_after": {
+          "nodes": {
+            "11zQt0LnSkiGAEjxGfhXOg": {
+              "indices": {
+                "indexing": {
+                  "delete_current": 0,
+                  "delete_time_in_millis": 0,
+                  "delete_total": 0,
+                  "index_current": 0,
+                  "index_failed": 0,
+                  "index_failed_due_to_version_conflict": 0,
+                  "index_time_in_millis": 6109,
+                  "index_total": 20004,
+                  "is_throttled": false,
+                  "noop_update_total": 0,
+                  "peak_write_load": 0.02060517538187083,
+                  "recent_write_load": 0.020589556194116867,
+                  "throttle_time_in_millis": 0,
+                  "write_load": 0.02059897301376622
+                },
+                "merges": {
+                  "current": 0,
+                  "current_docs": 0,
+                  "current_size_in_bytes": 0,
+                  "total": 3,
+                  "total_auto_throttle_in_bytes": 322751708,
+                  "total_docs": 12966,
+                  "total_size_in_bytes": 5581745,
+                  "total_stopped_time_in_millis": 0,
+                  "total_throttled_time_in_millis": 0,
+                  "total_time_in_millis": 1151
+                },
+                "refresh": {
+                  "external_total": 131,
+                  "external_total_time_in_millis": 2377,
+                  "listeners": 0,
+                  "total": 131,
+                  "total_time_in_millis": 2234
+                }
+              },
+              "jvm": {
+                "gc": {
+                  "collectors": {
+                    "G1 Concurrent GC": {
+                      "collection_count": 10,
+                      "collection_time_in_millis": 53
+                    },
+                    "old": {
+                      "collection_count": 0,
+                      "collection_time_in_millis": 0
+                    },
+                    "young": {
+                      "collection_count": 16,
+                      "collection_time_in_millis": 518
+                    }
+                  }
+                },
+                "mem": {
+                  "heap_committed_in_bytes": 1073741824,
+                  "heap_max_in_bytes": 1073741824,
+                  "heap_used_in_bytes": 287309824,
+                  "heap_used_percent": 26,
+                  "non_heap_committed_in_bytes": 249692160,
+                  "non_heap_used_in_bytes": 242539584,
+                  "pools": {
+                    "CodeHeap 'non-nmethods'": {
+                      "max_in_bytes": 5828608,
+                      "peak_max_in_bytes": 5828608,
+                      "peak_used_in_bytes": 3538048,
+                      "used_in_bytes": 3433216
+                    },
+                    "CodeHeap 'non-profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 8856320,
+                      "used_in_bytes": 8856320
+                    },
+                    "CodeHeap 'profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 27148288,
+                      "used_in_bytes": 27148288
+                    },
+                    "Compressed Class Space": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 25436944,
+                      "used_in_bytes": 25436944
+                    },
+                    "Metaspace": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 177664816,
+                      "used_in_bytes": 177664816
+                    },
+                    "old": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 102760448,
+                      "used_in_bytes": 102760448
+                    },
+                    "survivor": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 60817408,
+                      "used_in_bytes": 16777216
+                    },
+                    "young": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 624951296,
+                      "used_in_bytes": 167772160
+                    }
+                  }
+                }
+              },
+              "process": {
+                "cpu": {
+                  "percent": 62,
+                  "total_in_millis": 44980
+                }
+              }
+            }
+          }
+        },
+        "es_before": {
+          "nodes": {
+            "11zQt0LnSkiGAEjxGfhXOg": {
+              "indices": {
+                "indexing": {
+                  "delete_current": 0,
+                  "delete_time_in_millis": 0,
+                  "delete_total": 0,
+                  "index_current": 0,
+                  "index_failed": 0,
+                  "index_failed_due_to_version_conflict": 0,
+                  "index_time_in_millis": 20,
+                  "index_total": 4,
+                  "is_throttled": false,
+                  "noop_update_total": 0,
+                  "peak_write_load": 0.0001806163031182978,
+                  "recent_write_load": 0.0001806163031182978,
+                  "throttle_time_in_millis": 0,
+                  "write_load": 0.0001902063900652503
+                },
+                "merges": {
+                  "current": 0,
+                  "current_docs": 0,
+                  "current_size_in_bytes": 0,
+                  "total": 0,
+                  "total_auto_throttle_in_bytes": 335544320,
+                  "total_docs": 0,
+                  "total_size_in_bytes": 0,
+                  "total_stopped_time_in_millis": 0,
+                  "total_throttled_time_in_millis": 0,
+                  "total_time_in_millis": 0
+                },
+                "refresh": {
+                  "external_total": 34,
+                  "external_total_time_in_millis": 157,
+                  "listeners": 0,
+                  "total": 34,
+                  "total_time_in_millis": 150
+                }
+              },
+              "jvm": {
+                "gc": {
+                  "collectors": {
+                    "G1 Concurrent GC": {
+                      "collection_count": 10,
+                      "collection_time_in_millis": 53
+                    },
+                    "old": {
+                      "collection_count": 0,
+                      "collection_time_in_millis": 0
+                    },
+                    "young": {
+                      "collection_count": 14,
+                      "collection_time_in_millis": 318
+                    }
+                  }
+                },
+                "mem": {
+                  "heap_committed_in_bytes": 1073741824,
+                  "heap_max_in_bytes": 1073741824,
+                  "heap_used_in_bytes": 265732592,
+                  "heap_used_percent": 24,
+                  "non_heap_committed_in_bytes": 231735296,
+                  "non_heap_used_in_bytes": 224866536,
+                  "pools": {
+                    "CodeHeap 'non-nmethods'": {
+                      "max_in_bytes": 5828608,
+                      "peak_max_in_bytes": 5828608,
+                      "peak_used_in_bytes": 3417344,
+                      "used_in_bytes": 3335680
+                    },
+                    "CodeHeap 'non-profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 6626304,
+                      "used_in_bytes": 6626304
+                    },
+                    "CodeHeap 'profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 18257280,
+                      "used_in_bytes": 18257280
+                    },
+                    "Compressed Class Space": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 24817208,
+                      "used_in_bytes": 24817208
+                    },
+                    "Metaspace": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 171830064,
+                      "used_in_bytes": 171830064
+                    },
+                    "old": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 67108864,
+                      "used_in_bytes": 64406000
+                    },
+                    "survivor": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 60817408,
+                      "used_in_bytes": 46137344
+                    },
+                    "young": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 624951296,
+                      "used_in_bytes": 155189248
+                    }
+                  }
+                }
+              },
+              "process": {
+                "cpu": {
+                  "percent": 10,
+                  "total_in_millis": 32450
+                }
+              }
+            }
+          }
+        },
+        "final_batch": {
+          "max_ms": 2768.951251,
+          "p50_ms": 1890.2602,
+          "p95_ms": 2768.951251,
+          "p99_ms": 2768.951251,
+          "samples": 4
+        },
+        "observations": 10000,
+        "observations_per_second": 1002.388714760782,
+        "ordinary_batch": {
+          "max_ms": 2871.0080959999996,
+          "p50_ms": 1795.994416,
+          "p95_ms": 2871.0080959999996,
+          "p99_ms": 2871.0080959999996,
+          "samples": 16
+        },
+        "saved": 10000,
+        "stages": {
+          "ElasticsearchBulkCompleted.backoff_ms": {
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 40
+          },
+          "ElasticsearchBulkCompleted.queue_wait_ms": {
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 40
+          },
+          "ElasticsearchBulkCompleted.request_ms": {
+            "max_ms": 1266.0,
+            "p50_ms": 360.0,
+            "p95_ms": 1104.0,
+            "p99_ms": 1266.0,
+            "samples": 40
+          },
+          "ScanWriteConnectionAcquired.wait_ms": {
+            "max_ms": 10.0,
+            "p50_ms": 0.0,
+            "p95_ms": 4.0,
+            "p99_ms": 10.0,
+            "samples": 44
+          },
+          "ScanWriteConnectionReleased.hold_ms": {
+            "max_ms": 472.0,
+            "p50_ms": 154.0,
+            "p95_ms": 391.0,
+            "p99_ms": 472.0,
+            "samples": 44
+          }
+        }
+      },
+      {
+        "concurrency": 4,
+        "duplicate_final": {
+          "max_ms": 124.207426,
+          "p50_ms": 115.525013,
+          "p95_ms": 124.207426,
+          "p99_ms": 124.207426,
+          "samples": 4
+        },
+        "elapsed_seconds": 49.675890251,
+        "errors": [],
+        "es_after": {
+          "nodes": {
+            "11zQt0LnSkiGAEjxGfhXOg": {
+              "indices": {
+                "indexing": {
+                  "delete_current": 0,
+                  "delete_time_in_millis": 0,
+                  "delete_total": 0,
+                  "index_current": 0,
+                  "index_failed": 0,
+                  "index_failed_due_to_version_conflict": 0,
+                  "index_time_in_millis": 19393,
+                  "index_total": 220004,
+                  "is_throttled": false,
+                  "noop_update_total": 0,
+                  "peak_write_load": 0.02781913831916549,
+                  "recent_write_load": 0.015428715047621557,
+                  "throttle_time_in_millis": 0,
+                  "write_load": 0.015627224340490305
+                },
+                "merges": {
+                  "current": 0,
+                  "current_docs": 0,
+                  "current_size_in_bytes": 0,
+                  "total": 19,
+                  "total_auto_throttle_in_bytes": 112536620,
+                  "total_docs": 231009,
+                  "total_size_in_bytes": 84968639,
+                  "total_stopped_time_in_millis": 0,
+                  "total_throttled_time_in_millis": 7096,
+                  "total_time_in_millis": 13028
+                },
+                "refresh": {
+                  "external_total": 307,
+                  "external_total_time_in_millis": 7855,
+                  "listeners": 0,
+                  "total": 308,
+                  "total_time_in_millis": 7280
+                }
+              },
+              "jvm": {
+                "gc": {
+                  "collectors": {
+                    "G1 Concurrent GC": {
+                      "collection_count": 10,
+                      "collection_time_in_millis": 53
+                    },
+                    "old": {
+                      "collection_count": 0,
+                      "collection_time_in_millis": 0
+                    },
+                    "young": {
+                      "collection_count": 31,
+                      "collection_time_in_millis": 1380
+                    }
+                  }
+                },
+                "mem": {
+                  "heap_committed_in_bytes": 1073741824,
+                  "heap_max_in_bytes": 1073741824,
+                  "heap_used_in_bytes": 361640280,
+                  "heap_used_percent": 33,
+                  "non_heap_committed_in_bytes": 262144000,
+                  "non_heap_used_in_bytes": 254967312,
+                  "pools": {
+                    "CodeHeap 'non-nmethods'": {
+                      "max_in_bytes": 5828608,
+                      "peak_max_in_bytes": 5828608,
+                      "peak_used_in_bytes": 3597440,
+                      "used_in_bytes": 3433216
+                    },
+                    "CodeHeap 'non-profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 14057728,
+                      "used_in_bytes": 14057728
+                    },
+                    "CodeHeap 'profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 32961536,
+                      "used_in_bytes": 32961536
+                    },
+                    "Compressed Class Space": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 25470992,
+                      "used_in_bytes": 25470992
+                    },
+                    "Metaspace": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 179046576,
+                      "used_in_bytes": 179046576
+                    },
+                    "old": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 151925080,
+                      "used_in_bytes": 151925080
+                    },
+                    "survivor": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 60817408,
+                      "used_in_bytes": 46137344
+                    },
+                    "young": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 624951296,
+                      "used_in_bytes": 163577856
+                    }
+                  }
+                }
+              },
+              "process": {
+                "cpu": {
+                  "percent": 34,
+                  "total_in_millis": 78820
+                }
+              }
+            }
+          }
+        },
+        "es_before": {
+          "nodes": {
+            "11zQt0LnSkiGAEjxGfhXOg": {
+              "indices": {
+                "indexing": {
+                  "delete_current": 0,
+                  "delete_time_in_millis": 0,
+                  "delete_total": 0,
+                  "index_current": 0,
+                  "index_failed": 0,
+                  "index_failed_due_to_version_conflict": 0,
+                  "index_time_in_millis": 6109,
+                  "index_total": 20004,
+                  "is_throttled": false,
+                  "noop_update_total": 0,
+                  "peak_write_load": 0.020618785238935268,
+                  "recent_write_load": 0.02055761085943494,
+                  "throttle_time_in_millis": 0,
+                  "write_load": 0.02056756967829464
+                },
+                "merges": {
+                  "current": 0,
+                  "current_docs": 0,
+                  "current_size_in_bytes": 0,
+                  "total": 3,
+                  "total_auto_throttle_in_bytes": 322751708,
+                  "total_docs": 12966,
+                  "total_size_in_bytes": 5581745,
+                  "total_stopped_time_in_millis": 0,
+                  "total_throttled_time_in_millis": 0,
+                  "total_time_in_millis": 1151
+                },
+                "refresh": {
+                  "external_total": 131,
+                  "external_total_time_in_millis": 2377,
+                  "listeners": 0,
+                  "total": 131,
+                  "total_time_in_millis": 2234
+                }
+              },
+              "jvm": {
+                "gc": {
+                  "collectors": {
+                    "G1 Concurrent GC": {
+                      "collection_count": 10,
+                      "collection_time_in_millis": 53
+                    },
+                    "old": {
+                      "collection_count": 0,
+                      "collection_time_in_millis": 0
+                    },
+                    "young": {
+                      "collection_count": 16,
+                      "collection_time_in_millis": 518
+                    }
+                  }
+                },
+                "mem": {
+                  "heap_committed_in_bytes": 1073741824,
+                  "heap_max_in_bytes": 1073741824,
+                  "heap_used_in_bytes": 287309824,
+                  "heap_used_percent": 26,
+                  "non_heap_committed_in_bytes": 249692160,
+                  "non_heap_used_in_bytes": 242539584,
+                  "pools": {
+                    "CodeHeap 'non-nmethods'": {
+                      "max_in_bytes": 5828608,
+                      "peak_max_in_bytes": 5828608,
+                      "peak_used_in_bytes": 3538048,
+                      "used_in_bytes": 3433216
+                    },
+                    "CodeHeap 'non-profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 8856320,
+                      "used_in_bytes": 8856320
+                    },
+                    "CodeHeap 'profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 27148288,
+                      "used_in_bytes": 27148288
+                    },
+                    "Compressed Class Space": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 25436944,
+                      "used_in_bytes": 25436944
+                    },
+                    "Metaspace": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 177664816,
+                      "used_in_bytes": 177664816
+                    },
+                    "old": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 102760448,
+                      "used_in_bytes": 102760448
+                    },
+                    "survivor": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 60817408,
+                      "used_in_bytes": 16777216
+                    },
+                    "young": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 624951296,
+                      "used_in_bytes": 167772160
+                    }
+                  }
+                }
+              },
+              "process": {
+                "cpu": {
+                  "percent": 62,
+                  "total_in_millis": 44980
+                }
+              }
+            }
+          }
+        },
+        "final_batch": {
+          "max_ms": 1805.7785210000002,
+          "p50_ms": 1438.627978,
+          "p95_ms": 1805.7785210000002,
+          "p99_ms": 1805.7785210000002,
+          "samples": 4
+        },
+        "observations": 100000,
+        "observations_per_second": 2013.0489759665043,
+        "ordinary_batch": {
+          "max_ms": 1871.520505,
+          "p50_ms": 939.030764,
+          "p95_ms": 1438.192291,
+          "p99_ms": 1690.712226,
+          "samples": 196
+        },
+        "saved": 100000,
+        "stages": {
+          "ElasticsearchBulkCompleted.backoff_ms": {
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 400
+          },
+          "ElasticsearchBulkCompleted.queue_wait_ms": {
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 400
+          },
+          "ElasticsearchBulkCompleted.request_ms": {
+            "max_ms": 515.0,
+            "p50_ms": 98.0,
+            "p95_ms": 267.0,
+            "p99_ms": 423.0,
+            "samples": 400
+          },
+          "ScanWriteConnectionAcquired.wait_ms": {
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 404
+          },
+          "ScanWriteConnectionReleased.hold_ms": {
+            "max_ms": 561.0,
+            "p50_ms": 158.0,
+            "p95_ms": 381.0,
+            "p99_ms": 512.0,
+            "samples": 404
+          }
+        }
+      },
+      {
+        "concurrency": 4,
+        "duplicate_final": {
+          "max_ms": 86.244534,
+          "p50_ms": 82.810496,
+          "p95_ms": 86.244534,
+          "p99_ms": 86.244534,
+          "samples": 4
+        },
+        "elapsed_seconds": 416.093615626,
+        "errors": [],
+        "es_after": {
+          "nodes": {
+            "11zQt0LnSkiGAEjxGfhXOg": {
+              "indices": {
+                "indexing": {
+                  "delete_current": 0,
+                  "delete_time_in_millis": 0,
+                  "delete_total": 0,
+                  "index_current": 0,
+                  "index_failed": 0,
+                  "index_failed_due_to_version_conflict": 0,
+                  "index_time_in_millis": 110759,
+                  "index_total": 2220004,
+                  "is_throttled": false,
+                  "noop_update_total": 0,
+                  "peak_write_load": 0.029777710496861978,
+                  "recent_write_load": 0.012999691556048356,
+                  "throttle_time_in_millis": 0,
+                  "write_load": 0.01319338412622074
+                },
+                "merges": {
+                  "current": 2,
+                  "current_docs": 456597,
+                  "current_size_in_bytes": 130892982,
+                  "total": 49,
+                  "total_auto_throttle_in_bytes": 99614720,
+                  "total_docs": 2623914,
+                  "total_size_in_bytes": 1039143982,
+                  "total_stopped_time_in_millis": 0,
+                  "total_throttled_time_in_millis": 186947,
+                  "total_time_in_millis": 220367
+                },
+                "refresh": {
+                  "external_total": 506,
+                  "external_total_time_in_millis": 12691,
+                  "listeners": 0,
+                  "total": 549,
+                  "total_time_in_millis": 12110
+                }
+              },
+              "jvm": {
+                "gc": {
+                  "collectors": {
+                    "G1 Concurrent GC": {
+                      "collection_count": 94,
+                      "collection_time_in_millis": 1471
+                    },
+                    "old": {
+                      "collection_count": 0,
+                      "collection_time_in_millis": 0
+                    },
+                    "young": {
+                      "collection_count": 180,
+                      "collection_time_in_millis": 11035
+                    }
+                  }
+                },
+                "mem": {
+                  "heap_committed_in_bytes": 1073741824,
+                  "heap_max_in_bytes": 1073741824,
+                  "heap_used_in_bytes": 367001600,
+                  "heap_used_percent": 34,
+                  "non_heap_committed_in_bytes": 266862592,
+                  "non_heap_used_in_bytes": 226540224,
+                  "pools": {
+                    "CodeHeap 'non-nmethods'": {
+                      "max_in_bytes": 5828608,
+                      "peak_max_in_bytes": 5828608,
+                      "peak_used_in_bytes": 3597440,
+                      "used_in_bytes": 3439488
+                    },
+                    "CodeHeap 'non-profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 15423872,
+                      "used_in_bytes": 9688192
+                    },
+                    "CodeHeap 'profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 35204864,
+                      "used_in_bytes": 7675648
+                    },
+                    "Compressed Class Space": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 25541488,
+                      "used_in_bytes": 25541488
+                    },
+                    "Metaspace": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 180195408,
+                      "used_in_bytes": 180195408
+                    },
+                    "old": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 351112128,
+                      "used_in_bytes": 255852544
+                    },
+                    "survivor": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 71303168,
+                      "used_in_bytes": 6291456
+                    },
+                    "young": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 633339904,
+                      "used_in_bytes": 104857600
+                    }
+                  }
+                }
+              },
+              "process": {
+                "cpu": {
+                  "percent": 22,
+                  "total_in_millis": 263610
+                }
+              }
+            }
+          }
+        },
+        "es_before": {
+          "nodes": {
+            "11zQt0LnSkiGAEjxGfhXOg": {
+              "indices": {
+                "indexing": {
+                  "delete_current": 0,
+                  "delete_time_in_millis": 0,
+                  "delete_total": 0,
+                  "index_current": 0,
+                  "index_failed": 0,
+                  "index_failed_due_to_version_conflict": 0,
+                  "index_time_in_millis": 19393,
+                  "index_total": 220004,
+                  "is_throttled": false,
+                  "noop_update_total": 0,
+                  "peak_write_load": 0.02781942130787604,
+                  "recent_write_load": 0.015424030429517331,
+                  "throttle_time_in_millis": 0,
+                  "write_load": 0.015622804455605871
+                },
+                "merges": {
+                  "current": 0,
+                  "current_docs": 0,
+                  "current_size_in_bytes": 0,
+                  "total": 19,
+                  "total_auto_throttle_in_bytes": 112536620,
+                  "total_docs": 231009,
+                  "total_size_in_bytes": 84968639,
+                  "total_stopped_time_in_millis": 0,
+                  "total_throttled_time_in_millis": 7096,
+                  "total_time_in_millis": 13028
+                },
+                "refresh": {
+                  "external_total": 307,
+                  "external_total_time_in_millis": 7855,
+                  "listeners": 0,
+                  "total": 308,
+                  "total_time_in_millis": 7280
+                }
+              },
+              "jvm": {
+                "gc": {
+                  "collectors": {
+                    "G1 Concurrent GC": {
+                      "collection_count": 10,
+                      "collection_time_in_millis": 53
+                    },
+                    "old": {
+                      "collection_count": 0,
+                      "collection_time_in_millis": 0
+                    },
+                    "young": {
+                      "collection_count": 31,
+                      "collection_time_in_millis": 1380
+                    }
+                  }
+                },
+                "mem": {
+                  "heap_committed_in_bytes": 1073741824,
+                  "heap_max_in_bytes": 1073741824,
+                  "heap_used_in_bytes": 361640280,
+                  "heap_used_percent": 33,
+                  "non_heap_committed_in_bytes": 262144000,
+                  "non_heap_used_in_bytes": 254967312,
+                  "pools": {
+                    "CodeHeap 'non-nmethods'": {
+                      "max_in_bytes": 5828608,
+                      "peak_max_in_bytes": 5828608,
+                      "peak_used_in_bytes": 3597440,
+                      "used_in_bytes": 3433216
+                    },
+                    "CodeHeap 'non-profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 14057728,
+                      "used_in_bytes": 14057728
+                    },
+                    "CodeHeap 'profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 32961536,
+                      "used_in_bytes": 32961536
+                    },
+                    "Compressed Class Space": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 25470992,
+                      "used_in_bytes": 25470992
+                    },
+                    "Metaspace": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 179046576,
+                      "used_in_bytes": 179046576
+                    },
+                    "old": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 151925080,
+                      "used_in_bytes": 151925080
+                    },
+                    "survivor": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 60817408,
+                      "used_in_bytes": 46137344
+                    },
+                    "young": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 624951296,
+                      "used_in_bytes": 163577856
+                    }
+                  }
+                }
+              },
+              "process": {
+                "cpu": {
+                  "percent": 34,
+                  "total_in_millis": 78820
+                }
+              }
+            }
+          }
+        },
+        "final_batch": {
+          "max_ms": 4133.120552,
+          "p50_ms": 3485.83074,
+          "p95_ms": 4133.120552,
+          "p99_ms": 4133.120552,
+          "samples": 4
+        },
+        "observations": 1000000,
+        "observations_per_second": 2403.305319875026,
+        "ordinary_batch": {
+          "max_ms": 2248.850056,
+          "p50_ms": 791.817439,
+          "p95_ms": 1164.597338,
+          "p99_ms": 1488.779228,
+          "samples": 1996
+        },
+        "saved": 1000000,
+        "stages": {
+          "ElasticsearchBulkCompleted.backoff_ms": {
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 4000
+          },
+          "ElasticsearchBulkCompleted.queue_wait_ms": {
+            "max_ms": 38.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 4000
+          },
+          "ElasticsearchBulkCompleted.request_ms": {
+            "max_ms": 868.0,
+            "p50_ms": 76.0,
+            "p95_ms": 214.0,
+            "p99_ms": 369.0,
+            "samples": 4000
+          },
+          "ScanWriteConnectionAcquired.wait_ms": {
+            "max_ms": 18.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 4004
+          },
+          "ScanWriteConnectionReleased.hold_ms": {
+            "max_ms": 887.0,
+            "p50_ms": 144.0,
+            "p95_ms": 331.0,
+            "p99_ms": 437.0,
+            "samples": 4004
+          }
+        }
+      }
+    ],
+    "schema": "storage_932aff314cb24ca3952c5d7ec0b5608d",
+    "unrelated_search_targets": 100000
+  },
+  "candidate": {
+    "background_workers": false,
+    "batch_size": 500,
+    "historical_indices": 12,
+    "index_prefix": "nm-stress-87de94868c9f438f93f393f9f64c44fc",
+    "results": [
+      {
+        "concurrency": 4,
+        "duplicate_final": {
+          "max_ms": 216.82316400000002,
+          "p50_ms": 48.079819,
+          "p95_ms": 216.82316400000002,
+          "p99_ms": 216.82316400000002,
+          "samples": 4
+        },
+        "elapsed_seconds": 5.162856939,
+        "errors": [],
+        "es_after": {
+          "nodes": {
+            "11zQt0LnSkiGAEjxGfhXOg": {
+              "indices": {
+                "indexing": {
+                  "delete_current": 0,
+                  "delete_time_in_millis": 0,
+                  "delete_total": 0,
+                  "index_current": 0,
+                  "index_failed": 0,
+                  "index_failed_due_to_version_conflict": 0,
+                  "index_time_in_millis": 111892,
+                  "index_total": 2240004,
+                  "is_throttled": false,
+                  "noop_update_total": 0,
+                  "peak_write_load": 0.029258415230820806,
+                  "recent_write_load": 0.010017901167585566,
+                  "throttle_time_in_millis": 0,
+                  "write_load": 0.011262682789492743
+                },
+                "merges": {
+                  "current": 1,
+                  "current_docs": 10000,
+                  "current_size_in_bytes": 2433940,
+                  "total": 51,
+                  "total_auto_throttle_in_bytes": 188743680,
+                  "total_docs": 3080511,
+                  "total_size_in_bytes": 1170036964,
+                  "total_stopped_time_in_millis": 0,
+                  "total_throttled_time_in_millis": 210843,
+                  "total_time_in_millis": 246342
+                },
+                "refresh": {
+                  "external_total": 573,
+                  "external_total_time_in_millis": 13117,
+                  "listeners": 0,
+                  "total": 616,
+                  "total_time_in_millis": 12517
+                }
+              },
+              "jvm": {
+                "gc": {
+                  "collectors": {
+                    "G1 Concurrent GC": {
+                      "collection_count": 96,
+                      "collection_time_in_millis": 1499
+                    },
+                    "old": {
+                      "collection_count": 0,
+                      "collection_time_in_millis": 0
+                    },
+                    "young": {
+                      "collection_count": 182,
+                      "collection_time_in_millis": 11081
+                    }
+                  }
+                },
+                "mem": {
+                  "heap_committed_in_bytes": 1073741824,
+                  "heap_max_in_bytes": 1073741824,
+                  "heap_used_in_bytes": 327501120,
+                  "heap_used_percent": 30,
+                  "non_heap_committed_in_bytes": 267583488,
+                  "non_heap_used_in_bytes": 232644224,
+                  "pools": {
+                    "CodeHeap 'non-nmethods'": {
+                      "max_in_bytes": 5828608,
+                      "peak_max_in_bytes": 5828608,
+                      "peak_used_in_bytes": 3598080,
+                      "used_in_bytes": 3440896
+                    },
+                    "CodeHeap 'non-profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 15423872,
+                      "used_in_bytes": 11102848
+                    },
+                    "CodeHeap 'profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 35204864,
+                      "used_in_bytes": 11715072
+                    },
+                    "Compressed Class Space": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 25592816,
+                      "used_in_bytes": 25592816
+                    },
+                    "Metaspace": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 180792592,
+                      "used_in_bytes": 180792592
+                    },
+                    "old": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 351112128,
+                      "used_in_bytes": 180700480
+                    },
+                    "survivor": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 71303168,
+                      "used_in_bytes": 8388608
+                    },
+                    "young": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 633339904,
+                      "used_in_bytes": 138412032
+                    }
+                  }
+                }
+              },
+              "process": {
+                "cpu": {
+                  "percent": 32,
+                  "total_in_millis": 272940
+                }
+              }
+            }
+          }
+        },
+        "es_before": {
+          "nodes": {
+            "11zQt0LnSkiGAEjxGfhXOg": {
+              "indices": {
+                "indexing": {
+                  "delete_current": 0,
+                  "delete_time_in_millis": 0,
+                  "delete_total": 0,
+                  "index_current": 0,
+                  "index_failed": 0,
+                  "index_failed_due_to_version_conflict": 0,
+                  "index_time_in_millis": 110759,
+                  "index_total": 2220004,
+                  "is_throttled": false,
+                  "noop_update_total": 0,
+                  "peak_write_load": 0.02941649207665742,
+                  "recent_write_load": 0.010002379795406628,
+                  "throttle_time_in_millis": 0,
+                  "write_load": 0.01125854537171494
+                },
+                "merges": {
+                  "current": 0,
+                  "current_docs": 0,
+                  "current_size_in_bytes": 0,
+                  "total": 51,
+                  "total_auto_throttle_in_bytes": 173015040,
+                  "total_docs": 3080511,
+                  "total_size_in_bytes": 1170036964,
+                  "total_stopped_time_in_millis": 0,
+                  "total_throttled_time_in_millis": 210843,
+                  "total_time_in_millis": 246342
+                },
+                "refresh": {
+                  "external_total": 536,
+                  "external_total_time_in_millis": 12707,
+                  "listeners": 0,
+                  "total": 579,
+                  "total_time_in_millis": 12112
+                }
+              },
+              "jvm": {
+                "gc": {
+                  "collectors": {
+                    "G1 Concurrent GC": {
+                      "collection_count": 94,
+                      "collection_time_in_millis": 1471
+                    },
+                    "old": {
+                      "collection_count": 0,
+                      "collection_time_in_millis": 0
+                    },
+                    "young": {
+                      "collection_count": 180,
+                      "collection_time_in_millis": 11035
+                    }
+                  }
+                },
+                "mem": {
+                  "heap_committed_in_bytes": 1073741824,
+                  "heap_max_in_bytes": 1073741824,
+                  "heap_used_in_bytes": 744488960,
+                  "heap_used_percent": 69,
+                  "non_heap_committed_in_bytes": 267517952,
+                  "non_heap_used_in_bytes": 231865048,
+                  "pools": {
+                    "CodeHeap 'non-nmethods'": {
+                      "max_in_bytes": 5828608,
+                      "peak_max_in_bytes": 5828608,
+                      "peak_used_in_bytes": 3597440,
+                      "used_in_bytes": 3440896
+                    },
+                    "CodeHeap 'non-profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 15423872,
+                      "used_in_bytes": 10800512
+                    },
+                    "CodeHeap 'profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 35204864,
+                      "used_in_bytes": 11287808
+                    },
+                    "Compressed Class Space": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 25592816,
+                      "used_in_bytes": 25592816
+                    },
+                    "Metaspace": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 180743016,
+                      "used_in_bytes": 180743016
+                    },
+                    "old": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 351112128,
+                      "used_in_bytes": 260046848
+                    },
+                    "survivor": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 71303168,
+                      "used_in_bytes": 6291456
+                    },
+                    "young": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 633339904,
+                      "used_in_bytes": 478150656
+                    }
+                  }
+                }
+              },
+              "process": {
+                "cpu": {
+                  "percent": 2,
+                  "total_in_millis": 269620
+                }
+              }
+            }
+          }
+        },
+        "final_batch": {
+          "max_ms": 1286.804979,
+          "p50_ms": 1080.4157910000001,
+          "p95_ms": 1286.804979,
+          "p99_ms": 1286.804979,
+          "samples": 4
+        },
+        "observations": 10000,
+        "observations_per_second": 1936.9120853340771,
+        "ordinary_batch": {
+          "max_ms": 1320.287337,
+          "p50_ms": 990.496096,
+          "p95_ms": 1320.287337,
+          "p99_ms": 1320.287337,
+          "samples": 16
+        },
+        "saved": 10000,
+        "stages": {
+          "ElasticsearchBulkCompleted.backoff_ms": {
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 40
+          },
+          "ElasticsearchBulkCompleted.queue_wait_ms": {
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 40
+          },
+          "ElasticsearchBulkCompleted.request_ms": {
+            "max_ms": 636.0,
+            "p50_ms": 82.0,
+            "p95_ms": 290.0,
+            "p99_ms": 636.0,
+            "samples": 40
+          },
+          "ScanWriteConnectionAcquired.wait_ms": {
+            "max_ms": 5.0,
+            "p50_ms": 0.0,
+            "p95_ms": 4.0,
+            "p99_ms": 5.0,
+            "samples": 44
+          },
+          "ScanWriteConnectionReleased.hold_ms": {
+            "max_ms": 433.0,
+            "p50_ms": 109.0,
+            "p95_ms": 355.0,
+            "p99_ms": 433.0,
+            "samples": 44
+          },
+          "authenticate_execution": {
+            "max_ms": 157.466,
+            "p50_ms": 5.641,
+            "p95_ms": 128.848,
+            "p99_ms": 157.466,
+            "samples": 24
+          },
+          "commit_scan_receipt": {
+            "max_ms": 89.795,
+            "p50_ms": 2.086,
+            "p95_ms": 45.823,
+            "p99_ms": 89.795,
+            "samples": 20
+          },
+          "confirm_scan_receipt": {
+            "max_ms": 281.817,
+            "p50_ms": 13.272,
+            "p95_ms": 215.276,
+            "p99_ms": 281.817,
+            "samples": 20
+          },
+          "enrich_observations": {
+            "max_ms": 46.421,
+            "p50_ms": 11.648,
+            "p95_ms": 24.925,
+            "p99_ms": 46.421,
+            "samples": 24
+          },
+          "execution_summary": {
+            "max_ms": 180.441,
+            "p50_ms": 12.355,
+            "p95_ms": 180.441,
+            "p99_ms": 180.441,
+            "samples": 4
+          },
+          "load_asset_tags": {
+            "max_ms": 116.795,
+            "p50_ms": 12.567,
+            "p95_ms": 65.942,
+            "p99_ms": 116.795,
+            "samples": 24
+          },
+          "load_execution_index_manifest": {
+            "max_ms": 89.716,
+            "p50_ms": 30.007,
+            "p95_ms": 89.716,
+            "p99_ms": 89.716,
+            "samples": 4
+          },
+          "refresh_execution_indices": {
+            "max_ms": 271.922,
+            "p50_ms": 25.295,
+            "p95_ms": 271.922,
+            "p99_ms": 271.922,
+            "samples": 4
+          },
+          "refresh_task_aggregate": {
+            "max_ms": 25.549,
+            "p50_ms": 1.173,
+            "p95_ms": 25.549,
+            "p99_ms": 25.549,
+            "samples": 4
+          },
+          "reserve_scan_receipt": {
+            "max_ms": 204.282,
+            "p50_ms": 64.791,
+            "p95_ms": 117.83,
+            "p99_ms": 204.282,
+            "samples": 24
+          },
+          "update_target_freshness": {
+            "max_ms": 4.14,
+            "p50_ms": 2.647,
+            "p95_ms": 4.14,
+            "p99_ms": 4.14,
+            "samples": 4
+          },
+          "upload": {
+            "max_ms": 1320.13,
+            "p50_ms": 990.412,
+            "p95_ms": 1286.737,
+            "p99_ms": 1320.13,
+            "samples": 24
+          },
+          "upload_identity": {
+            "max_ms": 181.582,
+            "p50_ms": 3.418,
+            "p95_ms": 157.297,
+            "p99_ms": 181.582,
+            "samples": 24
+          },
+          "validate_final_sequence": {
+            "max_ms": 18.285,
+            "p50_ms": 0.899,
+            "p95_ms": 18.285,
+            "p99_ms": 18.285,
+            "samples": 8
+          },
+          "write_execution_endpoints": {
+            "max_ms": 582.896,
+            "p50_ms": 339.34,
+            "p95_ms": 573.381,
+            "p99_ms": 582.896,
+            "samples": 20
+          },
+          "write_observation_bulk": {
+            "max_ms": 655.018,
+            "p50_ms": 83.893,
+            "p95_ms": 307.477,
+            "p99_ms": 655.018,
+            "samples": 20
+          }
+        }
+      },
+      {
+        "concurrency": 4,
+        "duplicate_final": {
+          "max_ms": 118.202348,
+          "p50_ms": 102.69518599999999,
+          "p95_ms": 118.202348,
+          "p99_ms": 118.202348,
+          "samples": 4
+        },
+        "elapsed_seconds": 41.504880933,
+        "errors": [],
+        "es_after": {
+          "nodes": {
+            "11zQt0LnSkiGAEjxGfhXOg": {
+              "indices": {
+                "indexing": {
+                  "delete_current": 0,
+                  "delete_time_in_millis": 0,
+                  "delete_total": 0,
+                  "index_current": 0,
+                  "index_failed": 0,
+                  "index_failed_due_to_version_conflict": 0,
+                  "index_time_in_millis": 120869,
+                  "index_total": 2440004,
+                  "is_throttled": false,
+                  "noop_update_total": 0,
+                  "peak_write_load": 0.0280610007155644,
+                  "recent_write_load": 0.010108870743709229,
+                  "throttle_time_in_millis": 0,
+                  "write_load": 0.011270455312798983
+                },
+                "merges": {
+                  "current": 1,
+                  "current_docs": 49500,
+                  "current_size_in_bytes": 11182868,
+                  "total": 69,
+                  "total_auto_throttle_in_bytes": 188743680,
+                  "total_docs": 3361010,
+                  "total_size_in_bytes": 1277603061,
+                  "total_stopped_time_in_millis": 0,
+                  "total_throttled_time_in_millis": 229666,
+                  "total_time_in_millis": 267813
+                },
+                "refresh": {
+                  "external_total": 704,
+                  "external_total_time_in_millis": 16543,
+                  "listeners": 0,
+                  "total": 747,
+                  "total_time_in_millis": 15529
+                }
+              },
+              "jvm": {
+                "gc": {
+                  "collectors": {
+                    "G1 Concurrent GC": {
+                      "collection_count": 104,
+                      "collection_time_in_millis": 1597
+                    },
+                    "old": {
+                      "collection_count": 0,
+                      "collection_time_in_millis": 0
+                    },
+                    "young": {
+                      "collection_count": 196,
+                      "collection_time_in_millis": 11454
+                    }
+                  }
+                },
+                "mem": {
+                  "heap_committed_in_bytes": 1073741824,
+                  "heap_max_in_bytes": 1073741824,
+                  "heap_used_in_bytes": 746640512,
+                  "heap_used_percent": 69,
+                  "non_heap_committed_in_bytes": 267649024,
+                  "non_heap_used_in_bytes": 232388456,
+                  "pools": {
+                    "CodeHeap 'non-nmethods'": {
+                      "max_in_bytes": 5828608,
+                      "peak_max_in_bytes": 5828608,
+                      "peak_used_in_bytes": 3598080,
+                      "used_in_bytes": 3440896
+                    },
+                    "CodeHeap 'non-profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 15423872,
+                      "used_in_bytes": 11287808
+                    },
+                    "CodeHeap 'profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 35204864,
+                      "used_in_bytes": 11221760
+                    },
+                    "Compressed Class Space": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 25593384,
+                      "used_in_bytes": 25593384
+                    },
+                    "Metaspace": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 180844608,
+                      "used_in_bytes": 180844608
+                    },
+                    "old": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 351112128,
+                      "used_in_bytes": 136369280
+                    },
+                    "survivor": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 71303168,
+                      "used_in_bytes": 48234496
+                    },
+                    "young": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 633339904,
+                      "used_in_bytes": 562036736
+                    }
+                  }
+                }
+              },
+              "process": {
+                "cpu": {
+                  "percent": 22,
+                  "total_in_millis": 291420
+                }
+              }
+            }
+          }
+        },
+        "es_before": {
+          "nodes": {
+            "11zQt0LnSkiGAEjxGfhXOg": {
+              "indices": {
+                "indexing": {
+                  "delete_current": 0,
+                  "delete_time_in_millis": 0,
+                  "delete_total": 0,
+                  "index_current": 0,
+                  "index_failed": 0,
+                  "index_failed_due_to_version_conflict": 0,
+                  "index_time_in_millis": 111892,
+                  "index_total": 2240004,
+                  "is_throttled": false,
+                  "noop_update_total": 0,
+                  "peak_write_load": 0.02925759402571473,
+                  "recent_write_load": 0.010017471223039844,
+                  "throttle_time_in_millis": 0,
+                  "write_load": 0.01126220271212902
+                },
+                "merges": {
+                  "current": 1,
+                  "current_docs": 10000,
+                  "current_size_in_bytes": 2433940,
+                  "total": 51,
+                  "total_auto_throttle_in_bytes": 188743680,
+                  "total_docs": 3080511,
+                  "total_size_in_bytes": 1170036964,
+                  "total_stopped_time_in_millis": 0,
+                  "total_throttled_time_in_millis": 210843,
+                  "total_time_in_millis": 246342
+                },
+                "refresh": {
+                  "external_total": 573,
+                  "external_total_time_in_millis": 13117,
+                  "listeners": 0,
+                  "total": 616,
+                  "total_time_in_millis": 12517
+                }
+              },
+              "jvm": {
+                "gc": {
+                  "collectors": {
+                    "G1 Concurrent GC": {
+                      "collection_count": 96,
+                      "collection_time_in_millis": 1499
+                    },
+                    "old": {
+                      "collection_count": 0,
+                      "collection_time_in_millis": 0
+                    },
+                    "young": {
+                      "collection_count": 182,
+                      "collection_time_in_millis": 11081
+                    }
+                  }
+                },
+                "mem": {
+                  "heap_committed_in_bytes": 1073741824,
+                  "heap_max_in_bytes": 1073741824,
+                  "heap_used_in_bytes": 327501120,
+                  "heap_used_percent": 30,
+                  "non_heap_committed_in_bytes": 267583488,
+                  "non_heap_used_in_bytes": 232644224,
+                  "pools": {
+                    "CodeHeap 'non-nmethods'": {
+                      "max_in_bytes": 5828608,
+                      "peak_max_in_bytes": 5828608,
+                      "peak_used_in_bytes": 3598080,
+                      "used_in_bytes": 3440896
+                    },
+                    "CodeHeap 'non-profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 15423872,
+                      "used_in_bytes": 11102848
+                    },
+                    "CodeHeap 'profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 35204864,
+                      "used_in_bytes": 11715072
+                    },
+                    "Compressed Class Space": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 25592816,
+                      "used_in_bytes": 25592816
+                    },
+                    "Metaspace": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 180792592,
+                      "used_in_bytes": 180792592
+                    },
+                    "old": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 351112128,
+                      "used_in_bytes": 180700480
+                    },
+                    "survivor": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 71303168,
+                      "used_in_bytes": 8388608
+                    },
+                    "young": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 633339904,
+                      "used_in_bytes": 138412032
+                    }
+                  }
+                }
+              },
+              "process": {
+                "cpu": {
+                  "percent": 32,
+                  "total_in_millis": 272940
+                }
+              }
+            }
+          }
+        },
+        "final_batch": {
+          "max_ms": 1484.057261,
+          "p50_ms": 839.196832,
+          "p95_ms": 1484.057261,
+          "p99_ms": 1484.057261,
+          "samples": 4
+        },
+        "observations": 100000,
+        "observations_per_second": 2409.355183103086,
+        "ordinary_batch": {
+          "max_ms": 1253.000024,
+          "p50_ms": 806.691243,
+          "p95_ms": 1071.074539,
+          "p99_ms": 1183.407289,
+          "samples": 196
+        },
+        "saved": 100000,
+        "stages": {
+          "ElasticsearchBulkCompleted.backoff_ms": {
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 400
+          },
+          "ElasticsearchBulkCompleted.queue_wait_ms": {
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 400
+          },
+          "ElasticsearchBulkCompleted.request_ms": {
+            "max_ms": 485.0,
+            "p50_ms": 74.0,
+            "p95_ms": 208.0,
+            "p99_ms": 272.0,
+            "samples": 400
+          },
+          "ScanWriteConnectionAcquired.wait_ms": {
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 404
+          },
+          "ScanWriteConnectionReleased.hold_ms": {
+            "max_ms": 499.0,
+            "p50_ms": 145.0,
+            "p95_ms": 342.0,
+            "p99_ms": 431.0,
+            "samples": 404
+          },
+          "authenticate_execution": {
+            "max_ms": 315.001,
+            "p50_ms": 4.558,
+            "p95_ms": 136.945,
+            "p99_ms": 158.124,
+            "samples": 204
+          },
+          "commit_scan_receipt": {
+            "max_ms": 168.044,
+            "p50_ms": 2.199,
+            "p95_ms": 86.23,
+            "p99_ms": 113.595,
+            "samples": 200
+          },
+          "confirm_scan_receipt": {
+            "max_ms": 275.018,
+            "p50_ms": 48.14,
+            "p95_ms": 196.145,
+            "p99_ms": 211.404,
+            "samples": 200
+          },
+          "enrich_observations": {
+            "max_ms": 53.359,
+            "p50_ms": 11.326,
+            "p95_ms": 35.722,
+            "p99_ms": 44.144,
+            "samples": 204
+          },
+          "execution_summary": {
+            "max_ms": 108.832,
+            "p50_ms": 74.186,
+            "p95_ms": 108.832,
+            "p99_ms": 108.832,
+            "samples": 4
+          },
+          "load_asset_tags": {
+            "max_ms": 243.16,
+            "p50_ms": 11.043,
+            "p95_ms": 161.472,
+            "p99_ms": 206.593,
+            "samples": 204
+          },
+          "load_execution_index_manifest": {
+            "max_ms": 47.621,
+            "p50_ms": 1.895,
+            "p95_ms": 47.621,
+            "p99_ms": 47.621,
+            "samples": 4
+          },
+          "refresh_execution_indices": {
+            "max_ms": 422.737,
+            "p50_ms": 16.826,
+            "p95_ms": 422.737,
+            "p99_ms": 422.737,
+            "samples": 4
+          },
+          "refresh_task_aggregate": {
+            "max_ms": 6.906,
+            "p50_ms": 1.417,
+            "p95_ms": 6.906,
+            "p99_ms": 6.906,
+            "samples": 4
+          },
+          "reserve_scan_receipt": {
+            "max_ms": 284.724,
+            "p50_ms": 73.84,
+            "p95_ms": 171.589,
+            "p99_ms": 267.273,
+            "samples": 204
+          },
+          "update_target_freshness": {
+            "max_ms": 33.931,
+            "p50_ms": 7.182,
+            "p95_ms": 33.931,
+            "p99_ms": 33.931,
+            "samples": 4
+          },
+          "upload": {
+            "max_ms": 1484.003,
+            "p50_ms": 805.837,
+            "p95_ms": 1071.021,
+            "p99_ms": 1183.334,
+            "samples": 204
+          },
+          "upload_identity": {
+            "max_ms": 252.635,
+            "p50_ms": 2.132,
+            "p95_ms": 109.307,
+            "p99_ms": 181.55,
+            "samples": 204
+          },
+          "validate_final_sequence": {
+            "max_ms": 12.086,
+            "p50_ms": 0.951,
+            "p95_ms": 12.086,
+            "p99_ms": 12.086,
+            "samples": 8
+          },
+          "write_execution_endpoints": {
+            "max_ms": 680.662,
+            "p50_ms": 319.411,
+            "p95_ms": 465.535,
+            "p99_ms": 538.318,
+            "samples": 200
+          },
+          "write_observation_bulk": {
+            "max_ms": 361.095,
+            "p50_ms": 65.247,
+            "p95_ms": 167.241,
+            "p99_ms": 232.881,
+            "samples": 200
+          }
+        }
+      },
+      {
+        "concurrency": 4,
+        "duplicate_final": {
+          "max_ms": 107.584509,
+          "p50_ms": 69.218007,
+          "p95_ms": 107.584509,
+          "p99_ms": 107.584509,
+          "samples": 4
+        },
+        "elapsed_seconds": 403.924361226,
+        "errors": [],
+        "es_after": {
+          "nodes": {
+            "11zQt0LnSkiGAEjxGfhXOg": {
+              "indices": {
+                "indexing": {
+                  "delete_current": 0,
+                  "delete_time_in_millis": 0,
+                  "delete_total": 0,
+                  "index_current": 0,
+                  "index_failed": 0,
+                  "index_failed_due_to_version_conflict": 0,
+                  "index_time_in_millis": 212431,
+                  "index_total": 4440004,
+                  "is_throttled": false,
+                  "noop_update_total": 0,
+                  "peak_write_load": 0.02216347163832099,
+                  "recent_write_load": 0.011359289443061912,
+                  "throttle_time_in_millis": 0,
+                  "write_load": 0.011999745975260163
+                },
+                "merges": {
+                  "current": 2,
+                  "current_docs": 1235550,
+                  "current_size_in_bytes": 319492839,
+                  "total": 97,
+                  "total_auto_throttle_in_bytes": 188743680,
+                  "total_docs": 5605919,
+                  "total_size_in_bytes": 2130699952,
+                  "total_stopped_time_in_millis": 0,
+                  "total_throttled_time_in_millis": 389543,
+                  "total_time_in_millis": 447570
+                },
+                "refresh": {
+                  "external_total": 850,
+                  "external_total_time_in_millis": 20850,
+                  "listeners": 0,
+                  "total": 934,
+                  "total_time_in_millis": 19873
+                }
+              },
+              "jvm": {
+                "gc": {
+                  "collectors": {
+                    "G1 Concurrent GC": {
+                      "collection_count": 196,
+                      "collection_time_in_millis": 3302
+                    },
+                    "old": {
+                      "collection_count": 0,
+                      "collection_time_in_millis": 0
+                    },
+                    "young": {
+                      "collection_count": 345,
+                      "collection_time_in_millis": 20222
+                    }
+                  }
+                },
+                "mem": {
+                  "heap_committed_in_bytes": 1073741824,
+                  "heap_max_in_bytes": 1073741824,
+                  "heap_used_in_bytes": 616562688,
+                  "heap_used_percent": 57,
+                  "non_heap_committed_in_bytes": 267714560,
+                  "non_heap_used_in_bytes": 230634808,
+                  "pools": {
+                    "CodeHeap 'non-nmethods'": {
+                      "max_in_bytes": 5828608,
+                      "peak_max_in_bytes": 5828608,
+                      "peak_used_in_bytes": 3598080,
+                      "used_in_bytes": 3440896
+                    },
+                    "CodeHeap 'non-profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 15423872,
+                      "used_in_bytes": 12456576
+                    },
+                    "CodeHeap 'profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 35204864,
+                      "used_in_bytes": 11421440
+                    },
+                    "Compressed Class Space": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 25593920,
+                      "used_in_bytes": 24896072
+                    },
+                    "Metaspace": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 180876512,
+                      "used_in_bytes": 178419824
+                    },
+                    "old": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 351112128,
+                      "used_in_bytes": 230686720
+                    },
+                    "survivor": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 71303168,
+                      "used_in_bytes": 33554432
+                    },
+                    "young": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 637534208,
+                      "used_in_bytes": 352321536
+                    }
+                  }
+                }
+              },
+              "process": {
+                "cpu": {
+                  "percent": 20,
+                  "total_in_millis": 458350
+                }
+              }
+            }
+          }
+        },
+        "es_before": {
+          "nodes": {
+            "11zQt0LnSkiGAEjxGfhXOg": {
+              "indices": {
+                "indexing": {
+                  "delete_current": 0,
+                  "delete_time_in_millis": 0,
+                  "delete_total": 0,
+                  "index_current": 0,
+                  "index_failed": 0,
+                  "index_failed_due_to_version_conflict": 0,
+                  "index_time_in_millis": 120869,
+                  "index_total": 2440004,
+                  "is_throttled": false,
+                  "noop_update_total": 0,
+                  "peak_write_load": 0.02806015584261523,
+                  "recent_write_load": 0.010108329066628754,
+                  "throttle_time_in_millis": 0,
+                  "write_load": 0.01126988629161311
+                },
+                "merges": {
+                  "current": 1,
+                  "current_docs": 49500,
+                  "current_size_in_bytes": 11182868,
+                  "total": 69,
+                  "total_auto_throttle_in_bytes": 188743680,
+                  "total_docs": 3361010,
+                  "total_size_in_bytes": 1277603061,
+                  "total_stopped_time_in_millis": 0,
+                  "total_throttled_time_in_millis": 229666,
+                  "total_time_in_millis": 267813
+                },
+                "refresh": {
+                  "external_total": 704,
+                  "external_total_time_in_millis": 16543,
+                  "listeners": 0,
+                  "total": 747,
+                  "total_time_in_millis": 15529
+                }
+              },
+              "jvm": {
+                "gc": {
+                  "collectors": {
+                    "G1 Concurrent GC": {
+                      "collection_count": 104,
+                      "collection_time_in_millis": 1597
+                    },
+                    "old": {
+                      "collection_count": 0,
+                      "collection_time_in_millis": 0
+                    },
+                    "young": {
+                      "collection_count": 196,
+                      "collection_time_in_millis": 11454
+                    }
+                  }
+                },
+                "mem": {
+                  "heap_committed_in_bytes": 1073741824,
+                  "heap_max_in_bytes": 1073741824,
+                  "heap_used_in_bytes": 746640512,
+                  "heap_used_percent": 69,
+                  "non_heap_committed_in_bytes": 267649024,
+                  "non_heap_used_in_bytes": 232388456,
+                  "pools": {
+                    "CodeHeap 'non-nmethods'": {
+                      "max_in_bytes": 5828608,
+                      "peak_max_in_bytes": 5828608,
+                      "peak_used_in_bytes": 3598080,
+                      "used_in_bytes": 3440896
+                    },
+                    "CodeHeap 'non-profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 15423872,
+                      "used_in_bytes": 11287808
+                    },
+                    "CodeHeap 'profiled nmethods'": {
+                      "max_in_bytes": 122916864,
+                      "peak_max_in_bytes": 122916864,
+                      "peak_used_in_bytes": 35204864,
+                      "used_in_bytes": 11221760
+                    },
+                    "Compressed Class Space": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 25593384,
+                      "used_in_bytes": 25593384
+                    },
+                    "Metaspace": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 180844608,
+                      "used_in_bytes": 180844608
+                    },
+                    "old": {
+                      "max_in_bytes": 1073741824,
+                      "peak_max_in_bytes": 1073741824,
+                      "peak_used_in_bytes": 351112128,
+                      "used_in_bytes": 136369280
+                    },
+                    "survivor": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 71303168,
+                      "used_in_bytes": 48234496
+                    },
+                    "young": {
+                      "max_in_bytes": 0,
+                      "peak_max_in_bytes": 0,
+                      "peak_used_in_bytes": 633339904,
+                      "used_in_bytes": 562036736
+                    }
+                  }
+                }
+              },
+              "process": {
+                "cpu": {
+                  "percent": 22,
+                  "total_in_millis": 291420
+                }
+              }
+            }
+          }
+        },
+        "final_batch": {
+          "max_ms": 3856.8764309999997,
+          "p50_ms": 1303.29867,
+          "p95_ms": 3856.8764309999997,
+          "p99_ms": 3856.8764309999997,
+          "samples": 4
+        },
+        "observations": 1000000,
+        "observations_per_second": 2475.7110389796208,
+        "ordinary_batch": {
+          "max_ms": 1499.106391,
+          "p50_ms": 781.3594929999999,
+          "p95_ms": 1097.295747,
+          "p99_ms": 1248.1164869999998,
+          "samples": 1996
+        },
+        "saved": 1000000,
+        "stages": {
+          "ElasticsearchBulkCompleted.backoff_ms": {
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 4000
+          },
+          "ElasticsearchBulkCompleted.queue_wait_ms": {
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 4000
+          },
+          "ElasticsearchBulkCompleted.request_ms": {
+            "max_ms": 723.0,
+            "p50_ms": 76.0,
+            "p95_ms": 197.0,
+            "p99_ms": 304.0,
+            "samples": 4000
+          },
+          "ScanWriteConnectionAcquired.wait_ms": {
+            "max_ms": 34.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "samples": 4004
+          },
+          "ScanWriteConnectionReleased.hold_ms": {
+            "max_ms": 627.0,
+            "p50_ms": 140.0,
+            "p95_ms": 339.0,
+            "p99_ms": 438.0,
+            "samples": 4004
+          },
+          "authenticate_execution": {
+            "max_ms": 395.478,
+            "p50_ms": 4.266,
+            "p95_ms": 112.539,
+            "p99_ms": 191.062,
+            "samples": 2004
+          },
+          "commit_scan_receipt": {
+            "max_ms": 245.195,
+            "p50_ms": 2.11,
+            "p95_ms": 88.896,
+            "p99_ms": 140.785,
+            "samples": 2000
+          },
+          "confirm_scan_receipt": {
+            "max_ms": 499.89,
+            "p50_ms": 45.924,
+            "p95_ms": 195.901,
+            "p99_ms": 273.405,
+            "samples": 2000
+          },
+          "enrich_observations": {
+            "max_ms": 65.491,
+            "p50_ms": 11.424,
+            "p95_ms": 30.41,
+            "p99_ms": 46.441,
+            "samples": 2004
+          },
+          "execution_summary": {
+            "max_ms": 1721.009,
+            "p50_ms": 614.186,
+            "p95_ms": 1721.009,
+            "p99_ms": 1721.009,
+            "samples": 4
+          },
+          "load_asset_tags": {
+            "max_ms": 355.57,
+            "p50_ms": 11.229,
+            "p95_ms": 147.736,
+            "p99_ms": 211.847,
+            "samples": 2004
+          },
+          "load_execution_index_manifest": {
+            "max_ms": 8.346,
+            "p50_ms": 4.992,
+            "p95_ms": 8.346,
+            "p99_ms": 8.346,
+            "samples": 4
+          },
+          "refresh_execution_indices": {
+            "max_ms": 1144.322,
+            "p50_ms": 63.822,
+            "p95_ms": 1144.322,
+            "p99_ms": 1144.322,
+            "samples": 4
+          },
+          "refresh_task_aggregate": {
+            "max_ms": 0.909,
+            "p50_ms": 0.866,
+            "p95_ms": 0.909,
+            "p99_ms": 0.909,
+            "samples": 4
+          },
+          "reserve_scan_receipt": {
+            "max_ms": 432.725,
+            "p50_ms": 77.319,
+            "p95_ms": 195.345,
+            "p99_ms": 259.347,
+            "samples": 2004
+          },
+          "update_target_freshness": {
+            "max_ms": 3.755,
+            "p50_ms": 2.261,
+            "p95_ms": 3.755,
+            "p99_ms": 3.755,
+            "samples": 4
+          },
+          "upload": {
+            "max_ms": 3856.78,
+            "p50_ms": 781.299,
+            "p95_ms": 1102.018,
+            "p99_ms": 1251.216,
+            "samples": 2004
+          },
+          "upload_identity": {
+            "max_ms": 307.719,
+            "p50_ms": 3.094,
+            "p95_ms": 97.708,
+            "p99_ms": 176.992,
+            "samples": 2004
+          },
+          "validate_final_sequence": {
+            "max_ms": 74.067,
+            "p50_ms": 0.851,
+            "p95_ms": 74.067,
+            "p99_ms": 74.067,
+            "samples": 8
+          },
+          "write_execution_endpoints": {
+            "max_ms": 959.794,
+            "p50_ms": 305.351,
+            "p95_ms": 472.956,
+            "p99_ms": 608.658,
+            "samples": 2000
+          },
+          "write_observation_bulk": {
+            "max_ms": 637.096,
+            "p50_ms": 64.543,
+            "p95_ms": 172.882,
+            "p99_ms": 249.478,
+            "samples": 2000
+          }
+        }
+      }
+    ],
+    "schema": "storage_2b708a6eae2c4c618ba388d46d4a054f",
+    "unrelated_search_targets": 100000
+  }
+}

@@ -312,29 +312,58 @@ async fn admit(
     })
 }
 
+const RECORD_SUCCESS_SQL: &str = r#"WITH completed AS MATERIALIZED (
+            SELECT t.user_id, t.task_kind, t.task_target, t.dns_targets, t.generation_metadata,
+                GREATEST(e.task_end_time, (
+                    SELECT MAX(c.task_end_time) FROM scan_task_lineage l
+                    JOIN scan_task_execution c ON c.task_id=l.child_task_id
+                    WHERE l.parent_execution_id=e.id
+                )) AS ended_at,
+                jsonb_build_object('profile', CASE WHEN t.task_kind='dns'
+                    THEN t.generation_metadata->'dns_follow_up'->>'scan_profile'
+                    ELSE t.scan_profile END, 'ports', t.task_port) AS plan
+            FROM scan_task t JOIN scan_task_execution e ON e.task_id=t.id
+            WHERE (t.id=$1 OR t.id IN (SELECT parent_task_id FROM scan_task_lineage WHERE child_task_id=$1))
+                AND e.execution_status='succeeded' AND e.task_end_time IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM scan_task_lineage l
+                    JOIN scan_task_execution child ON child.task_id=l.child_task_id
+                    WHERE l.parent_execution_id=e.id AND child.execution_status<>'succeeded')
+        ), matched AS (
+            -- Single-host targets use the existing owner/kind/key primary key.
+            SELECT s.owner_id,s.target_kind,s.target_key,t.ended_at,t.plan
+            FROM completed t CROSS JOIN LATERAL unnest(t.task_target) a(address)
+            JOIN search_target_state s ON s.owner_id=t.user_id AND s.target_kind='ip'
+                AND s.target_key=host(a.address)
+            WHERE t.task_kind='ip' AND masklen(a.address)=CASE WHEN family(a.address)=4 THEN 32 ELSE 128 END
+            UNION ALL
+            -- Networks use the typed inet GiST operand; never cast every text key.
+            SELECT s.owner_id,s.target_kind,s.target_key,t.ended_at,t.plan
+            FROM completed t CROSS JOIN LATERAL unnest(t.task_target) a(address)
+            JOIN search_target_state s ON s.owner_id=t.user_id AND s.target_kind='ip'
+                AND s.target_ip <<= a.address
+            WHERE t.task_kind='ip' AND masklen(a.address)<CASE WHEN family(a.address)=4 THEN 32 ELSE 128 END
+            UNION ALL
+            SELECT s.owner_id,s.target_kind,s.target_key,t.ended_at,t.plan
+            FROM completed t CROSS JOIN LATERAL unnest(t.dns_targets) d(domain)
+            JOIN search_target_state s ON s.owner_id=t.user_id AND s.target_kind='domain'
+                AND s.target_key=d.domain
+            WHERE t.task_kind='dns' AND t.generation_metadata->'dns_follow_up'->>'scan_profile' IS NOT NULL
+        ), candidates AS (
+            SELECT DISTINCT ON (owner_id,target_kind,target_key) * FROM matched
+            ORDER BY owner_id,target_kind,target_key,ended_at DESC
+        )
+        UPDATE search_target_state s SET last_success_at=c.ended_at,last_success_plan=c.plan
+        FROM candidates c WHERE s.owner_id=c.owner_id AND s.target_kind=c.target_kind
+            AND s.target_key=c.target_key AND (s.last_success_at IS NULL OR s.last_success_at<=c.ended_at)"#;
+
 /// Called inside the successful-upload transaction, including zero-result
 /// executions. DNS freshness waits for any generated descendants to succeed.
 pub(crate) async fn record_success(
     tx: &deadpool_postgres::Transaction<'_>,
     completed_task_id: i32,
 ) -> Result<(), tokio_postgres::Error> {
-    tx.execute(
-        "WITH candidates AS (SELECT DISTINCT ON (s.owner_id,s.target_kind,s.target_key) \
-         s.owner_id,s.target_kind,s.target_key,GREATEST(e.task_end_time, (SELECT MAX(c.task_end_time) FROM scan_task_lineage l JOIN scan_task_execution c ON c.task_id=l.child_task_id WHERE l.parent_execution_id=e.id)) AS task_end_time, \
-         jsonb_build_object('profile',CASE WHEN t.task_kind='dns' THEN t.generation_metadata->'dns_follow_up'->>'scan_profile' ELSE t.scan_profile END,'ports',t.task_port) AS plan \
-         FROM search_target_state s JOIN scan_task t ON t.user_id=s.owner_id \
-         JOIN scan_task_execution e ON e.task_id=t.id \
-         WHERE (t.id=$1 OR t.id IN (SELECT parent_task_id FROM scan_task_lineage WHERE child_task_id=$1)) \
-         AND e.execution_status='succeeded' AND e.task_end_time IS NOT NULL \
-         AND CASE WHEN s.target_kind='ip' THEN t.task_kind='ip' AND EXISTS(SELECT 1 FROM unnest(t.task_target) a WHERE a >>= s.target_key::inet) \
-         ELSE t.task_kind='dns' AND s.target_key=ANY(t.dns_targets) AND t.generation_metadata->'dns_follow_up'->>'scan_profile' IS NOT NULL END \
-         AND NOT EXISTS(SELECT 1 FROM scan_task_lineage l JOIN scan_task_execution child ON child.task_id=l.child_task_id WHERE l.parent_execution_id=e.id AND child.execution_status<>'succeeded') \
-         ORDER BY s.owner_id,s.target_kind,s.target_key,4 DESC) \
-         UPDATE search_target_state s SET last_success_at=c.task_end_time,last_success_plan=c.plan FROM candidates c \
-         WHERE s.owner_id=c.owner_id AND s.target_kind=c.target_kind AND s.target_key=c.target_key \
-         AND (s.last_success_at IS NULL OR s.last_success_at<=c.task_end_time)",
-        &[&completed_task_id],
-    ).await?;
+    tx.execute(RECORD_SUCCESS_SQL, &[&completed_task_id])
+        .await?;
     Ok(())
 }
 
@@ -637,6 +666,87 @@ mod tests {
             f.request("ip", "198.51.100.42", None).await.status,
             "existing"
         );
+        f.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+    async fn successful_manual_ranges_update_only_matching_owner_targets() {
+        let f = Fixture::new().await;
+        f.sql("INSERT INTO search_target_state(owner_id,target_kind,target_key) VALUES
+            (1,'ip','192.0.2.1'),(1,'ip','192.0.2.129'),(1,'ip','2001:db8::1'),
+            (1,'ip','2001:db8::2'),(1,'domain','example.com'),(2,'ip','192.0.2.1');
+            INSERT INTO scan_task(id,user_id,task_id,task_initiator,task_target,task_source)
+            VALUES(1,1,'manual','search-test',ARRAY['192.0.2.0/25'::inet,'2001:db8::1/128'::inet],'manual');
+            INSERT INTO scan_task_execution(execution_id,task_id,execution_status,task_end_time)
+            VALUES('manual-execution',1,'succeeded',1000);").await;
+        let mut client = f.pool.get().await.unwrap();
+        let tx = client.transaction().await.unwrap();
+        record_success(&tx, 1).await.unwrap();
+        tx.commit().await.unwrap();
+        let keys=client.query("SELECT target_key FROM search_target_state WHERE last_success_at IS NOT NULL ORDER BY target_key",&[]).await.unwrap()
+            .into_iter().map(|row| row.get::<_,String>(0)).collect::<Vec<_>>();
+        assert_eq!(keys, vec!["192.0.2.1", "2001:db8::1"]);
+        client.batch_execute("UPDATE search_target_state SET last_success_at=2000 WHERE owner_id=1 AND target_key='192.0.2.1'").await.unwrap();
+        let tx = client.transaction().await.unwrap();
+        record_success(&tx, 1).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(client.query_one("SELECT last_success_at FROM search_target_state WHERE owner_id=1 AND target_key='192.0.2.1'",&[]).await.unwrap().get::<_,i64>(0),2000);
+        drop(client);
+        f.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+    async fn target_containment_uses_gist_at_one_hundred_thousand_targets() {
+        let f = Fixture::new().await;
+        f.sql(
+            "INSERT INTO search_target_state(owner_id,target_kind,target_key)
+            SELECT 1,'ip',host('10.0.0.0'::inet+n) FROM generate_series(1,100000) n;
+            ANALYZE search_target_state;",
+        )
+        .await;
+        let client = f.pool.get().await.unwrap();
+        let plan:Value=client.query_one("EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON)
+            SELECT target_key FROM search_target_state WHERE owner_id=1 AND target_kind='ip' AND target_ip <<= '10.0.1.0/24'::inet",&[]).await.unwrap().get(0);
+        let text = plan.to_string();
+        assert!(text.contains("idx_search_target_ip_gist"), "{text}");
+        assert!(!text.contains("Seq Scan"), "{text}");
+        assert_eq!(client.query_one("SELECT COUNT(*) FROM search_target_state WHERE owner_id=1 AND target_kind='ip' AND target_ip <<= '10.0.1.0/24'::inet",&[]).await.unwrap().get::<_,i64>(0),256);
+        println!("TARGET_CONTAINMENT_PLAN={plan}");
+        client
+            .batch_execute(
+                "INSERT INTO scan_task(id,user_id,task_id,task_initiator,task_target)
+            VALUES(1,1,'plan','search-test',ARRAY['10.0.1.0/24'::inet]);
+            INSERT INTO scan_task_execution(execution_id,task_id,execution_status,task_end_time)
+            VALUES('plan-execution',1,'succeeded',1000);",
+            )
+            .await
+            .unwrap();
+        let full_plan: Value = client
+            .query_one(
+                &format!("EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) {RECORD_SUCCESS_SQL}"),
+                &[&1_i32],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        println!("TARGET_SUCCESS_PLAN={full_plan}");
+        assert!(full_plan.to_string().contains("idx_search_target_ip_gist"));
+        fn scans_targets(plan: &Value) -> bool {
+            match plan {
+                Value::Object(object) => {
+                    (object.get("Node Type").and_then(Value::as_str) == Some("Seq Scan")
+                        && object.get("Relation Name").and_then(Value::as_str)
+                            == Some("search_target_state"))
+                        || object.values().any(scans_targets)
+                }
+                Value::Array(values) => values.iter().any(scans_targets),
+                _ => false,
+            }
+        }
+        assert!(!scans_targets(&full_plan), "{full_plan}");
+        drop(client);
         f.cleanup().await;
     }
     #[tokio::test]

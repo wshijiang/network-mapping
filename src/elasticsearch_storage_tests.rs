@@ -167,7 +167,7 @@ fn fixture_response(state: &mut FixtureState, _method: &str, path: &str, body: &
             }
         }
         let mut items = Vec::new();
-        for pair in lines.chunks_exact(2) {
+        for pair in lines.as_chunks::<2>().0 {
             let (operation, action) = pair[0].as_object().unwrap().iter().next().unwrap();
             let requested_index = action["_index"].as_str().unwrap();
             let backing_create = operation == "create" && requested_index.starts_with(".ds-");

@@ -91,7 +91,7 @@ STORAGE_TEST_DATABASE_URL=postgresql://test@127.0.0.1:5432/disposable \
 
 ## 上传分段耗时
 
-`ScanResultUpload` span 关联 scanner_id、task_id、upload_id、batch_index、is_final、
+`ScanResultUpload` span 关联 HTTP request_id、scanner_id、task_id、upload_id、batch_index、is_final、
 protocol_version 和 observation_count。所有同步写入阶段的 `ScanWriteStageCompleted`
 继承同一 span，记录 stage、duration_us 和 success；提前错误或取消的未完成阶段记录
 success=false。日志不记录 Token、checksum 或 observation 内容。
@@ -137,3 +137,14 @@ scan_upload_stream 按 (execution_id, upload_id) 保存批次数、确认数、p
 内嵌 migrate_scan_upload_stream.sql 在首次升级时锁住回执写入并回填历史分组，后续启动
 通过 schema marker 跳过回填。大回执库应安排维护窗口；该一次性回填会增加升级时间。
 回滚应用可保留新表/触发器，旧代码仍从回执读取，新表继续跟随旧写入。
+
+## 可索引的目标新鲜度更新
+
+上传确认事务先选出本任务及相关 DNS 父任务的成功执行，再分别匹配单 IP、CIDR 和域名。
+单 IP/域名使用 owner/kind/key 主键；CIDR 使用生成列 target_ip INET 的部分 GiST 索引。
+域名不会转为 INET，IPv4/IPv6 仍分别匹配；更新只作用于同一 owner 的已有搜索目标，
+较旧执行不会覆盖较新时间。DNS 父任务仍等待全部后续执行成功，普通手动扫描仍更新其
+覆盖范围内的目标。
+
+首次增加存储生成列和 GiST 索引会改写/扫描目标表，应与上传流回填一起安排维护窗口。
+回滚应用可保留列和索引。压力测试方法见 [扫描写入压力测试](SCAN_WRITE_STRESS.md)。
