@@ -20,9 +20,10 @@ use crate::runtime_config::{
     ANALYTICS_SNAPSHOT_NAMESPACE, AUTOMATIC_TARGET_NAMESPACE, DNS_FOLLOW_UP_NAMESPACE,
     DNS_RESOLVERS_NAMESPACE, GENERAL_NAMESPACE, MONITOR_NAMESPACE, PersistError,
     REPORT_MAIL_NAMESPACE, REQUESTS_NAMESPACE, RuntimeConfigResponse, RuntimeSettings,
-    SCANNER_HEALTH_NAMESPACE, UpdateRuntimeConfigRequest, parse_analytics_snapshot,
-    parse_automatic_target, parse_dns_follow_up, parse_dns_resolvers, parse_general, parse_monitor,
-    parse_report_mail, parse_requests, parse_scanner_health, persist,
+    SCAN_ROUTING_NAMESPACE, SCANNER_HEALTH_NAMESPACE, UpdateRuntimeConfigRequest,
+    parse_analytics_snapshot, parse_automatic_target, parse_dns_follow_up, parse_dns_resolvers,
+    parse_general, parse_monitor, parse_report_mail, parse_requests, parse_scan_routing,
+    parse_scanner_health, persist,
 };
 use crate::statistics::{
     NAMESPACE as STATISTICS_CACHE_NAMESPACE, parse_config as parse_statistics_cache,
@@ -158,6 +159,10 @@ async fn get_runtime_config_h(
         MONITOR_NAMESPACE => {
             let value = settings.monitor.get().await;
             HttpResponse::Ok().json(json!({"success": true, "data": RuntimeConfigResponse { namespace: MONITOR_NAMESPACE, revision: value.revision, document: value.value }}))
+        }
+        SCAN_ROUTING_NAMESPACE => {
+            let value = settings.scan_routing.get().await;
+            HttpResponse::Ok().json(json!({"success": true, "data": RuntimeConfigResponse { namespace: SCAN_ROUTING_NAMESPACE, revision: value.revision, document: value.value }}))
         }
         AUTOMATIC_TARGET_NAMESPACE => {
             let value = settings.automatic_target.get().await;
@@ -324,6 +329,12 @@ async fn save_runtime_config_h(
             monitor,
             |value: &crate::config::MonitorConfig| monitor
                 .replace_config(value.clone(), body.expected_revision + 1)
+        ),
+        SCAN_ROUTING_NAMESPACE => publish!(
+            SCAN_ROUTING_NAMESPACE,
+            parse_scan_routing,
+            scan_routing,
+            |_| {}
         ),
         AUTOMATIC_TARGET_NAMESPACE => publish!(
             AUTOMATIC_TARGET_NAMESPACE,

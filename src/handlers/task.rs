@@ -4,6 +4,7 @@ use crate::client_ip::{normalize_ip, request_ip};
 use crate::config::SecurityConfig;
 use crate::dns_follow_up::DnsFollowUpConfig;
 use crate::elasticsearch::{ElasticsearchService, ScanQueryIndex};
+use crate::identity::Permission;
 use crate::logs::write::{error_diagnostics, error_logs, error_logs_error, info_logs};
 use crate::maxmind::MaxMindState;
 use crate::runtime_config::RuntimeConfig;
@@ -11,7 +12,6 @@ use crate::scanner_latency::{ScannerLatencyHistory, ScannerLatencyHistoryEntry};
 use crate::system_maintenance::{
     MaintenanceSnapshot, SystemMaintenanceState, maintenance_response,
 };
-use crate::{identity::Permission, web_support::TEXT_HTML_UTF_8};
 use crate::{
     result_ingest::model::SaveScannerResultsError, result_ingest::model::ScannerResultUpload,
     result_ingest::storage::save_scanner_results,
@@ -140,7 +140,7 @@ struct CreateDnsTask {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct CreateDnsResolver {
+pub(crate) struct CreateDnsResolver {
     id: String,
     label: String,
     ip: String,
@@ -149,7 +149,7 @@ struct CreateDnsResolver {
 }
 
 impl CreateDnsResolver {
-    fn normalize(mut self) -> Result<Self, &'static str> {
+    pub(crate) fn normalize(mut self) -> Result<Self, &'static str> {
         self.id = self.id.trim().to_ascii_lowercase();
         self.label = self.label.trim().to_owned();
         self.ip = self
@@ -474,6 +474,8 @@ pub struct ScannerTaskFailure {
     error: String,
     #[serde(default = "default_retryable")]
     retryable: bool,
+    #[serde(default)]
+    failure_class: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1334,6 +1336,18 @@ pub(crate) async fn scanner_task_failure_handler(
     let scanner_id = failure.scanner_id.to_string();
     let task_id = failure.task_id.to_string();
     let reason: String = failure.error.chars().take(1000).collect();
+    if failure.failure_class.as_deref().is_some_and(|c| {
+        !matches!(
+            c,
+            "scan_error" | "route_unavailable" | "network_unavailable"
+        )
+    }) {
+        return HttpResponse::BadRequest().finish();
+    }
+    let route_failure = matches!(
+        failure.failure_class.as_deref(),
+        Some("route_unavailable" | "network_unavailable")
+    );
     let force_terminal = !failure.retryable;
     let transaction = match connection.transaction().await {
         Ok(value) => value,
@@ -1367,6 +1381,23 @@ pub(crate) async fn scanner_task_failure_handler(
             );
             return HttpResponse::InternalServerError().finish();
         }
+    }
+    let execution = match transaction.query_opt("SELECT e.id FROM scan_task_execution e JOIN scan_task t ON t.id=e.task_id WHERE t.task_id=$1 AND e.assigned_scanner_id=$2 AND e.execution_status='running' FOR UPDATE OF e", &[&task_id,&scanner_id]).await {
+        Ok(value)=>value, Err(error)=>{error_logs_error(&req,"TaskFailureLookupError","load_execution",&error);return HttpResponse::InternalServerError().finish();}
+    };
+    if route_failure
+        && let Some(execution) = &execution
+        && let Err(error) =
+            crate::scan_control::routing::record_outcome(&transaction, execution.get("id"), true)
+                .await
+    {
+        error_logs_error(
+            &req,
+            "TaskFailureFeedbackError",
+            "record_route_failure",
+            &error,
+        );
+        return HttpResponse::InternalServerError().finish();
     }
     let changed = transaction
         .query(
@@ -1415,6 +1446,34 @@ pub(crate) async fn scanner_task_failure_handler(
                 );
                 return HttpResponse::InternalServerError().finish();
             }
+            if let Err(error) =
+                crate::target_generated::history::record_result(&transaction, task_db_id).await
+            {
+                error_logs_error(
+                    &req,
+                    "TaskFailureRefreshError",
+                    "record_refresh_failure",
+                    &error,
+                );
+                return HttpResponse::InternalServerError().finish();
+            }
+            if retryable
+                && let Err(error) = transaction
+                    .execute(
+                        "DELETE FROM scan_task_routing WHERE task_id=$1",
+                        &[&task_db_id],
+                    )
+                    .await
+            {
+                error_logs_error(
+                    &req,
+                    "TaskFailurePreferenceError",
+                    "clear_preference",
+                    &error,
+                );
+                return HttpResponse::InternalServerError().finish();
+            }
+
             if let Err(error) = transaction.commit().await {
                 error_logs_error(
                     &req,
@@ -1608,7 +1667,7 @@ async fn get_task(
              t.task_level, t.task_create_time, t.task_start_time, t.task_end_time, \
              t.task_status, t.lease_expires_at, t.attempt_count, t.failure_reason, t.cancel_requested, \
              t.retry_of_task_id, t.remarks, t.dispatch_mode, t.task_source, \
-             t.generation_strategy, t.generation_metadata, t.address_family, t.scan_profile, t.scan_plan, t.dns_resolvers \
+             t.generation_strategy, t.generation_metadata, t.task_group_id, t.address_family, t.scan_profile, t.scan_plan, t.dns_resolvers \
              FROM scan_task t \
              WHERE t.task_id = $1 AND ($2 = 1 OR t.user_id = $3) LIMIT 1;",
             &[&task_id, &user.role, &user.id],
@@ -1629,11 +1688,32 @@ async fn get_task(
     };
 
     let task_pk: i32 = task.get("id");
+    let routing = match crate::scan_control::routing::decision(&connection, task_pk).await {
+        Ok(value) => value,
+        Err(error) => {
+            error_logs_error(
+                &req,
+                "TaskRoutingReadError",
+                "load_routing_decision",
+                &error,
+            );
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+    let task_group_id: Option<Uuid> = task.get("task_group_id");
+    let task_group = if let Some(id) = task_group_id {
+        match connection.query("SELECT task_id,task_status,cardinality(task_target) AS target_count FROM scan_task WHERE task_group_id=$1 AND ($2=1 OR user_id=$3) ORDER BY id", &[&id,&user.role,&user.id]).await {
+            Ok(rows)=>rows.into_iter().map(|r|json!({"task_id":r.get::<_,String>("task_id"),"status":r.get::<_,String>("task_status"),"target_count":r.get::<_,i32>("target_count")})).collect::<Vec<_>>(),
+            Err(error)=>{error_logs_error(&req,"TaskGroupReadError","load_task_group",&error);return HttpResponse::InternalServerError().finish();}
+        }
+    } else {
+        Vec::new()
+    };
     let execution_rows = match connection.query(
         "SELECT e.id, e.execution_id, e.requested_scanner_id, e.assigned_scanner_id, \
          COALESCE(s.name, e.assigned_scanner_id, e.requested_scanner_id) AS scanner_name, s.location, \
          e.execution_status, e.attempt_count, e.task_start_time, e.task_end_time, e.lease_expires_at, \
-         e.failure_reason, e.cancel_requested, COALESCE(e.result_ip_count, 0)::BIGINT AS ip_count, \
+         e.failure_reason, e.cancel_requested, e.performance, e.routing_decision, COALESCE(e.result_ip_count, 0)::BIGINT AS ip_count, \
          COALESCE(e.result_port_count, 0)::BIGINT AS port_count, COALESCE(e.result_observation_count, 0)::BIGINT AS result_count, \
          CASE WHEN t.scan_profile = 'dns_records' THEN 'not_applicable' \
               WHEN e.execution_status <> 'succeeded' THEN 'not_started' \
@@ -1670,6 +1750,8 @@ async fn get_task(
         "scanner_id": row.get::<_, Option<String>>("assigned_scanner_id"),
         "scanner_name": row.get::<_, Option<String>>("scanner_name"),
         "scanner_location": row.get::<_, Option<String>>("location"),
+        "performance": row.get::<_, Option<Value>>("performance"),
+        "routing_decision": row.get::<_, Option<Value>>("routing_decision"),
         "status": row.get::<_, String>("execution_status"),
         "projection_status": row.get::<_, String>("projection_status"),
         "attempt_count": row.get::<_, i32>("attempt_count"),
@@ -1745,6 +1827,9 @@ async fn get_task(
             "task_end_time": selected_execution.get::<_, Option<i64>>("task_end_time"),
             "task_status": task.get::<_, String>("task_status"),
             "dispatch_mode": task.get::<_, String>("dispatch_mode"),
+            "routing": routing,
+            "task_group_id": task_group_id,
+            "task_group": task_group,
             "task_source": task.get::<_, String>("task_source"),
             "generation_strategy": task.get::<_, Option<String>>("generation_strategy"),
             "generation_metadata": generation_metadata,
@@ -1973,6 +2058,7 @@ async fn get_dns_comparison(
 #[post("/api/task/create")]
 async fn create_task(
     req: HttpRequest,
+    maxmind: web::Data<MaxMindState>,
     pool: web::Data<Pool>,
     create_data: web::Json<CreateTask>,
     user_base_i: UserBaseI,
@@ -2118,12 +2204,13 @@ async fn create_task(
             &scan_plan,
             &AuditContext::from_request(&req),
             &user_base_i,
+            &maxmind,
         )
         .await
     {
-        Ok(()) => HttpResponse::Ok()
-            .content_type(TEXT_HTML_UTF_8)
-            .body("创建成功"),
+        Ok(created) => {
+            HttpResponse::Ok().json(json!({"success":true,"message":"创建成功","data":created}))
+        }
         Err(error) => {
             error_logs_error(&req, "AddTaskError", "insert_scan_task", error.as_ref());
             HttpResponse::InternalServerError().body("500")
@@ -2516,6 +2603,7 @@ async fn current_task_handler(
 async fn apply_task_handler(
     req: HttpRequest,
     scanner_id: web::Query<ApplyTaskQuery>,
+    maxmind: web::Data<MaxMindState>,
     pool: web::Data<Pool>,
     security: web::Data<SecurityConfig>,
     maintenance: web::Data<SystemMaintenanceState>,
@@ -2576,6 +2664,29 @@ async fn apply_task_handler(
         };
     }
 
+    if validate_scanner_credentials(
+        database_conn,
+        scanner_id.scannerid,
+        token,
+        &security.scanner_token_pepper,
+    )
+    .await
+    .is_ok()
+    {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            crate::scan_control::routing::plan_queue(database_conn, &maxmind),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(event="ScanRoutingClaimFallback", %error),
+            Err(_) => tracing::warn!(
+                event = "ScanRoutingClaimTimeout",
+                "claiming continues with existing or expired preferences"
+            ),
+        }
+    }
     match apply_task(
         database_conn,
         scanner_id.scannerid,

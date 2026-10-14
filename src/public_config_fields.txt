@@ -1,9 +1,11 @@
 analytics_snapshot.interval_minutes
 analytics_snapshot.mode
 automatic_target.authorized_cidrs
+automatic_target.change_refresh_seconds
 automatic_target.common_ports
 automatic_target.enabled
 automatic_target.excluded_cidrs
+automatic_target.failure_backoff_seconds
 automatic_target.interval_seconds
 automatic_target.ipv4_task_prefix
 automatic_target.ipv6_authorized_cidrs

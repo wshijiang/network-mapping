@@ -65,6 +65,8 @@ ipv6_pending_low_watermark = 1
 ipv6_pending_high_watermark = 2
 common_ports = "21,22,23,25,53,80,110,135,139,143,443,445,465,587,993,995,1433,1521,2049,2375,2376,3000,3306,3389,5432,5900,6379,8080,8443,9200,11211,27017"
 repeat_after_seconds = 604800
+failure_backoff_seconds = 300 # 智能刷新失败退避起始时间
+change_refresh_seconds = 3600 # 检测到资产变化后的复核间隔
 
 [dns_follow_up]
 # 将 DNS 的 A/AAAA 结果创建为独立端口扫描任务。仅允许明确授权的网段，默认关闭。

@@ -1,3 +1,4 @@
+pub(crate) mod history;
 pub(crate) mod search;
 
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -257,16 +258,70 @@ impl AutomaticTargetService {
         }
 
         let to_generate = i64::from(generator.high_watermark) - pending_before;
+        let now = crate::clock::get_unix_epoch_ms();
+        let mut due = if self.policy.strategy == "smart_refresh" {
+            history::due(
+                &transaction,
+                generator.family,
+                scan_profile,
+                &self.policy.common_ports,
+                (self.policy.repeat_after_seconds as i64) * 1000,
+                now,
+                256,
+                (&generator.pools, &generator.excluded, generator.task_prefix),
+            )
+            .await?
+            .into_iter()
+        } else {
+            Vec::new().into_iter()
+        };
         let mut attempts = 0_u128;
-        while report.generated < to_generate as usize && attempts < generator.total_subnets {
-            let target = target_at(generator, position);
-            position = (position + 1) % generator.total_subnets;
+        while report.generated < to_generate as usize
+            && attempts < generator.total_subnets.min(256) + 256
+        {
+            let target = if let Some((generation_key, cidr)) = due.next() {
+                let Ok(net) = cidr.parse::<IpNet>() else {
+                    continue;
+                };
+                if net.prefix_len() != generator.task_prefix
+                    || !generator
+                        .pools
+                        .iter()
+                        .any(|p| p.contains(&net.network()) && p.contains(&net.broadcast()))
+                {
+                    continue;
+                }
+                GeneratedTarget {
+                    generation_key,
+                    cidr,
+                    pool: net.to_string(),
+                    position,
+                }
+            } else {
+                if attempts >= generator.total_subnets.min(256) {
+                    break;
+                }
+                let target = target_at(generator, position);
+                position = (position + 1) % generator.total_subnets;
+                target
+            };
             attempts += 1;
             if is_excluded(generator, &target.cidr) {
                 report.skipped_excluded += 1;
                 continue;
             }
-            let recent_exists: bool = transaction
+            let recent_exists: bool = if self.policy.strategy == "smart_refresh" {
+                !history::eligible(
+                    &transaction,
+                    &target.generation_key,
+                    scan_profile,
+                    &self.policy.common_ports,
+                    (self.policy.repeat_after_seconds as i64) * 1000,
+                    now,
+                )
+                .await?
+            } else {
+                transaction
                 .query_one(
                     "SELECT EXISTS(SELECT 1 FROM scan_task \
                      WHERE generation_key = $1 AND task_source = 'automatic' \
@@ -274,7 +329,8 @@ impl AutomaticTargetService {
                     &[&target.generation_key, &((self.policy.repeat_after_seconds as i64) * 1000)],
                 )
                 .await?
-                .get("recent");
+                .get("recent")
+            };
             if recent_exists {
                 report.skipped_recent += 1;
                 continue;
@@ -318,7 +374,7 @@ impl AutomaticTargetService {
             .get("id");
         let task_id = Uuid::now_v7().to_string();
         let metadata = json!({
-            "strategy": STRATEGY,
+            "strategy": self.policy.strategy,
             "address_family": generator.family,
             "pool": target.pool,
             "position": target.position.to_string(),
@@ -334,7 +390,7 @@ impl AutomaticTargetService {
                  VALUES ($1, $2, 'system', ARRAY[$3::text::inet], $4, $5, \
                  '系统自动生成扫描任务', 'automatic', 'automatic', $6, $7, $8, $9, $10, $11) RETURNING id;",
                 &[&system_user_id, &task_id, &target.cidr, &self.policy.common_ports, &self.policy.priority,
-                  &STRATEGY, &target.generation_key, &metadata, &generator.family, &scan_profile, &scan_plan],
+                  &self.policy.strategy, &target.generation_key, &metadata, &generator.family, &scan_profile, &scan_plan],
             )
             .await?
             .get("id");
@@ -345,7 +401,17 @@ impl AutomaticTargetService {
                 &[&Uuid::now_v7().to_string(), &task_pk],
             )
             .await?;
-        let event = generated_target_audit_event(
+        history::created(
+            transaction,
+            &target.generation_key,
+            generator.family,
+            &target.cidr,
+            scan_profile,
+            &self.policy.common_ports,
+            crate::clock::get_unix_epoch_ms(),
+        )
+        .await?;
+        let mut event = generated_target_audit_event(
             system_user_id,
             task_id,
             generator,
@@ -354,6 +420,7 @@ impl AutomaticTargetService {
             queue_depth_before,
             scan_profile,
         );
+        event.metadata["strategy"] = json!(self.policy.strategy);
         write_audit(transaction, &system_audit_context(), &event).await
     }
 
@@ -675,7 +742,7 @@ fn is_excluded(generator: &FamilyGenerator, cidr: &str) -> bool {
 
 pub(crate) fn ready_scanner_exists_query(family: &str) -> String {
     format!(
-        "SELECT EXISTS(SELECT 1 FROM scanner_info WHERE is_enable = true AND deleted_at IS NULL \
+        "SELECT EXISTS(SELECT 1 FROM scanner_info WHERE is_enable = true AND deleted_at IS NULL AND accepting_tasks \
         AND runtime_state <> 'stopping' AND last_seen_at >= NOW() - ({}) * INTERVAL '1 second' AND supports_{family} AND {family}_ready \
         AND ($1 = 'legacy' OR scan_capabilities->'profiles' ? $1)) AS available;",
         crate::scanner_health::seconds_sql()
@@ -684,7 +751,7 @@ pub(crate) fn ready_scanner_exists_query(family: &str) -> String {
 
 fn ready_scanner_count_query(family: &str) -> String {
     format!(
-        "SELECT COUNT(*)::BIGINT AS count FROM scanner_info WHERE is_enable = true AND deleted_at IS NULL \
+        "SELECT COUNT(*)::BIGINT AS count FROM scanner_info WHERE is_enable = true AND deleted_at IS NULL AND accepting_tasks \
         AND runtime_state <> 'stopping' AND last_seen_at >= NOW() - ({}) * INTERVAL '1 second' AND supports_{family} AND {family}_ready \
         AND ($1 = 'legacy' OR scan_capabilities->'profiles' ? $1);",
         crate::scanner_health::seconds_sql()

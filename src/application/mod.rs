@@ -403,6 +403,14 @@ pub async fn run(args: Clis) -> io::Result<()> {
     let system_resource_cache = SystemResourceCache::new();
     let system_resource_cache_data = web::Data::new(system_resource_cache.clone());
     let maxmind_state = web::Data::new(maxmind_state);
+    background.spawn(
+        "scan-routing",
+        crate::scan_control::routing::run_planner(
+            db_pool.clone(),
+            maxmind_state.clone(),
+            system_maintenance_state.clone(),
+        ),
+    );
     let runtime_settings = web::Data::new(runtime_settings);
     let automatic_target_service = web::Data::new(runtime_settings.automatic_target.clone());
     let dns_follow_up = web::Data::new(runtime_settings.dns_follow_up.clone());

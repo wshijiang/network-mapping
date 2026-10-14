@@ -2,6 +2,7 @@
 pub mod creation;
 pub mod dispatch;
 pub mod query;
+pub mod routing;
 pub(crate) mod target;
 pub use creation::{CreateTask, STask, build_scan_plan, display_scan_profile, is_ip_scan_profile};
 pub use dispatch::{

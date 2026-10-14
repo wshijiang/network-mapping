@@ -49,6 +49,7 @@ pub(crate) fn is_scanner_api_request(method: &Method, path: &str) -> bool {
         "/api/scanner/register"
         | "/api/scanner/heartbeat"
         | "/api/scanner/result"
+        | "/api/scanner/task/performance"
         | "/api/scanner/task/fail"
         | "/api/scanner/task/cancelled" => method == Method::POST,
         "/api/scanner/diagnostics/ack"

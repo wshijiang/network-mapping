@@ -1010,6 +1010,8 @@ pub struct AutomaticTargetConfig {
     pub ipv6_pending_high_watermark: u32,
     pub common_ports: String,
     pub repeat_after_seconds: u64,
+    pub failure_backoff_seconds: u64,
+    pub change_refresh_seconds: u64,
 }
 
 impl Default for AutomaticTargetConfig {
@@ -1034,6 +1036,8 @@ impl Default for AutomaticTargetConfig {
             ipv6_pending_high_watermark: 2,
             common_ports: DEFAULT_COMMON_SCAN_PORTS.to_owned(),
             repeat_after_seconds: 7 * 24 * 60 * 60,
+            failure_backoff_seconds: 300,
+            change_refresh_seconds: 3600,
         }
     }
 }
@@ -1041,8 +1045,19 @@ impl Default for AutomaticTargetConfig {
 impl AutomaticTargetConfig {
     pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.search_generation.validate()?;
-        if self.strategy != "sequential_subnet" {
+        if !matches!(
+            self.strategy.as_str(),
+            "sequential_subnet" | "smart_refresh"
+        ) {
             return Err(format!("不支持的自动目标生成策略：{}", self.strategy).into());
+        }
+        if !(30..=86400).contains(&self.change_refresh_seconds)
+            || !(1..=315360000).contains(&self.repeat_after_seconds)
+        {
+            return Err("变化复核时间必须为 30～86400 秒，刷新间隔必须为 1～315360000 秒".into());
+        }
+        if !(30..=86400).contains(&self.failure_backoff_seconds) {
+            return Err("失败退避时间必须为 30～86400 秒".into());
         }
         if self.interval_seconds < 5 {
             return Err("automatic_target.interval_seconds 不能小于 5".into());

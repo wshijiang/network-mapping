@@ -342,7 +342,7 @@ pub async fn recover_scanner_task_with_failure(
 
     let row = transaction
         .query_opt(
-            "SELECT t.id AS task_pk, e.id AS execution_pk, e.execution_status, t.user_id, t.task_id, \
+            &"SELECT t.id AS task_pk, e.id AS execution_pk, e.execution_status, t.user_id, t.task_id, \
              CASE WHEN t.task_kind = 'dns' THEN t.dns_targets ELSE t.task_target::text[] END AS task_target, \
              t.task_port, t.address_family, t.scan_plan, t.dns_resolvers \
              FROM scan_task_execution e JOIN scan_task t ON t.id = e.task_id \
@@ -351,16 +351,17 @@ pub async fn recover_scanner_task_with_failure(
                  (e.execution_status = 'running' AND e.assigned_scanner_id = $1 \
                   AND ($2::TEXT IS NULL OR t.task_id = $2)) \
                  OR ($2::TEXT IS NOT NULL AND t.task_id = $2 AND e.execution_status = 'pending' \
-                     AND e.assigned_scanner_id IS NULL AND s.accepting_tasks \
+                     AND e.assigned_scanner_id IS NULL AND s.accepting_tasks AND @routing_guard@ \
                      AND (e.requested_scanner_id IS NULL OR e.requested_scanner_id = $1) \
                      AND ((t.address_family = 'ipv4' AND s.supports_ipv4 AND s.ipv4_ready) \
                        OR (t.address_family = 'ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
                      AND (t.scan_profile = 'legacy' OR s.scan_capabilities->'profiles' ? t.scan_profile) \
                      AND (jsonb_array_length(t.dns_resolvers) = 0 \
-                       OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)))) \
+                       OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
+           AND (NOT EXISTS(SELECT 1 FROM jsonb_array_elements(t.dns_resolvers) d WHERE d->>'ip' LIKE '%:%') OR (s.supports_ipv6 AND s.ipv6_ready)))) \
              ORDER BY CASE WHEN e.execution_status = 'running' THEN 0 ELSE 1 END, \
                  e.task_start_time NULLS FIRST, e.id \
-             FOR UPDATE OF e SKIP LOCKED LIMIT 1;",
+             FOR UPDATE OF e SKIP LOCKED LIMIT 1;".replace("@routing_guard@", &super::routing::claim_guard("$1")),
             &[&scanner_id, &requested_task_id],
         )
         .await
@@ -386,11 +387,13 @@ pub async fn recover_scanner_task_with_failure(
     let lease_expires_at = now + TASK_LEASE_MS;
     transaction
         .execute(
-            "UPDATE scan_task_execution SET execution_status = 'running', assigned_scanner_id = $1, \
+            &"UPDATE scan_task_execution SET execution_status = 'running', assigned_scanner_id = $1::TEXT, \
              task_start_time = COALESCE(task_start_time, $2::BIGINT), task_end_time = NULL, \
              lease_expires_at = CASE WHEN maintenance_hold THEN NULL ELSE $3::BIGINT END, \
              attempt_count = attempt_count + CASE WHEN execution_status = 'pending' THEN 1 ELSE 0 END, \
-             failure_reason = NULL WHERE id = $4;",
+             performance = CASE WHEN execution_status='pending' THEN NULL ELSE performance END, \
+             routing_decision = CASE WHEN execution_status='pending' THEN @assignment_decision@ ELSE routing_decision END, \
+             failure_reason = NULL WHERE id = $4;".replace("@assignment_decision@", &super::routing::assignment_decision("$1")),
             &[
                 &scanner_id,
                 &now,
@@ -496,6 +499,7 @@ pub async fn apply_task(
            AND (t.scan_profile = 'legacy' OR s.scan_capabilities->'profiles' ? t.scan_profile) \
            AND (jsonb_array_length(t.dns_resolvers) = 0 \
              OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
+           AND (NOT EXISTS(SELECT 1 FROM jsonb_array_elements(t.dns_resolvers) d WHERE d->>'ip' LIKE '%:%') OR (s.supports_ipv6 AND s.ipv6_ready)) \
          ORDER BY t.task_level DESC, t.task_create_time, t.id, e.id \
          FOR UPDATE OF e SKIP LOCKED LIMIT 1;",
             &[&scanner_id],
@@ -507,7 +511,7 @@ pub async fn apply_task(
     } else {
         transaction
             .query_opt(
-                "/* nm:claim_general */ \
+                &"/* nm:claim_general */ \
                  SELECT t.id AS task_pk, e.execution_pk, t.user_id, t.task_id, \
                      CASE WHEN t.task_kind = 'dns' THEN t.dns_targets ELSE t.task_target::text[] END AS task_target, \
                      t.task_port, t.address_family, t.scan_plan, t.dns_resolvers \
@@ -526,14 +530,15 @@ pub async fn apply_task(
                      ) \
                      ORDER BY candidate.id FOR UPDATE SKIP LOCKED LIMIT 1 \
                  ) e ON TRUE \
-                 WHERE s.accepting_tasks AND t.task_status IN ('pending', 'running') \
+                 WHERE s.accepting_tasks AND @routing_guard@ AND t.task_status IN ('pending', 'running') \
                    AND ((t.address_family = 'ipv4' AND s.supports_ipv4 AND s.ipv4_ready) \
                      OR (t.address_family = 'ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
                    AND (t.scan_profile = 'legacy' OR s.scan_capabilities->'profiles' ? t.scan_profile) \
                    AND (jsonb_array_length(t.dns_resolvers) = 0 \
                      OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
+           AND (NOT EXISTS(SELECT 1 FROM jsonb_array_elements(t.dns_resolvers) d WHERE d->>'ip' LIKE '%:%') OR (s.supports_ipv6 AND s.ipv6_ready)) \
                  ORDER BY t.task_level DESC, t.task_create_time, t.id, e.execution_pk \
-                 LIMIT 1;",
+                 LIMIT 1;".replace("@routing_guard@", &super::routing::claim_guard("$2")),
                 &[&get_unix_epoch_ms(), &scanner_id],
             )
             .await
@@ -566,10 +571,11 @@ pub async fn apply_task(
     let lease_expires_at = get_unix_epoch_ms() + TASK_LEASE_MS;
     transaction
         .execute(
-            "UPDATE scan_task_execution SET task_start_time = COALESCE(task_start_time, $1::BIGINT), task_end_time = NULL, \
-             execution_status = 'running', assigned_scanner_id = $2, lease_expires_at = $3::BIGINT, \
+            &"UPDATE scan_task_execution SET task_start_time = COALESCE(task_start_time, $1::BIGINT), task_end_time = NULL, \
+             execution_status = 'running', assigned_scanner_id = $2::TEXT, lease_expires_at = $3::BIGINT, \
              maintenance_hold = FALSE, maintenance_hold_until = NULL, \
-             attempt_count = attempt_count + 1, failure_reason = NULL WHERE id = $4;",
+             performance = NULL, routing_decision = @assignment_decision@, \
+             attempt_count = attempt_count + 1, failure_reason = NULL WHERE id = $4;".replace("@assignment_decision@", &super::routing::assignment_decision("$2")),
             &[
                 &get_unix_epoch_ms(),
                 &scanner_id,

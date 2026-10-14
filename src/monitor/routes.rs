@@ -205,6 +205,8 @@ pub const WEB_OPERATIONS: &[(&str, &str)] = &[
     ("POST /api/scanner/register", "提交扫描器注册"),
     ("POST /api/scanner/result", "上传扫描结果"),
     ("POST /api/scanner/task/cancelled", "提交扫描任务取消上报"),
+    ("POST /api/scanner/task/performance", "提交目标网络质量"),
+    ("POST /api/task/placement-preview", "预览扫描器分配"),
     ("POST /api/scanner/task/fail", "提交扫描任务失败上报"),
     (
         "POST /api/scanner/{scanner_id}/diagnostic-jobs",

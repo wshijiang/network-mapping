@@ -22,6 +22,8 @@ pub const GENERAL_NAMESPACE: &str = "general";
 pub const REQUESTS_NAMESPACE: &str = "requests";
 pub const SCANNER_HEALTH_NAMESPACE: &str = "scanner_health";
 pub const MONITOR_NAMESPACE: &str = "monitor";
+pub const SCAN_ROUTING_NAMESPACE: &str = "scan_routing";
+
 pub const AUTOMATIC_TARGET_NAMESPACE: &str = "automatic_target";
 pub const DNS_FOLLOW_UP_NAMESPACE: &str = "dns_follow_up";
 pub const DNS_RESOLVERS_NAMESPACE: &str = "dns_resolvers";
@@ -74,6 +76,7 @@ pub struct RuntimeSettings {
     pub requests: RuntimeConfig<RequestsConfig>,
     pub monitor: RuntimeConfig<MonitorConfig>,
     pub scanner_health: RuntimeConfig<crate::scanner_health::ScannerHealthConfig>,
+    pub scan_routing: RuntimeConfig<crate::scan_control::routing::RoutingConfig>,
     pub automatic_target: RuntimeConfig<AutomaticTargetConfig>,
     pub dns_follow_up: RuntimeConfig<DnsFollowUpConfig>,
     pub dns_resolvers: RuntimeConfig<DnsResolverSettings>,
@@ -117,7 +120,7 @@ impl RuntimeSettings {
         pool: &Pool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let client = pool.get().await?;
-        let rows = client.query("SELECT namespace, document, revision FROM runtime_configuration WHERE namespace IN ('monitor', 'scanner_health');", &[]).await?;
+        let rows = client.query("SELECT namespace, document, revision FROM runtime_configuration WHERE namespace IN ('monitor', 'scanner_health', 'scan_routing', 'automatic_target');", &[]).await?;
         for row in rows {
             let namespace: String = row.get("namespace");
             let document: Value = row.get("document");
@@ -135,6 +138,22 @@ impl RuntimeSettings {
                     self.scanner_health
                         .replace(
                             parse_scanner_health(document).map_err(std::io::Error::other)?,
+                            revision,
+                        )
+                        .await
+                }
+                SCAN_ROUTING_NAMESPACE => {
+                    self.scan_routing
+                        .replace(
+                            parse_scan_routing(document).map_err(std::io::Error::other)?,
+                            revision,
+                        )
+                        .await
+                }
+                AUTOMATIC_TARGET_NAMESPACE => {
+                    self.automatic_target
+                        .replace(
+                            parse_automatic_target(document).map_err(std::io::Error::other)?,
                             revision,
                         )
                         .await
@@ -191,6 +210,14 @@ impl RuntimeSettings {
                 Default::default(),
                 Default::default(),
                 crate::scanner_health::ScannerHealthConfig::validate,
+            )
+            .await?,
+            scan_routing: load_namespace(
+                pool,
+                SCAN_ROUTING_NAMESPACE,
+                Default::default(),
+                Default::default(),
+                crate::scan_control::routing::RoutingConfig::validate,
             )
             .await?,
             automatic_target: load_namespace(
@@ -422,6 +449,12 @@ pub fn parse_monitor(value: Value) -> Result<MonitorConfig, String> {
         .unwrap_or(write.warning_threshold_ms);
     Ok(config)
 }
+pub fn parse_scan_routing(
+    value: Value,
+) -> Result<crate::scan_control::routing::RoutingConfig, String> {
+    parse(value, crate::scan_control::routing::RoutingConfig::validate)
+}
+
 pub fn parse_automatic_target(value: Value) -> Result<AutomaticTargetConfig, String> {
     parse(value, validate_automatic_target)
 }

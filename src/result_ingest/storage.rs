@@ -183,6 +183,7 @@ async fn save_scanner_results_inner(
                 token,
                 token_pepper,
                 None,
+                Some(maxmind),
             )
             .await;
         }
@@ -649,6 +650,7 @@ async fn save_scanner_results_inner(
                 token,
                 token_pepper,
                 upload.upload_id,
+                Some(maxmind),
             )
             .await?;
         }
@@ -718,6 +720,8 @@ async fn save_scanner_results_inner(
         stage.finish(true);
         (transaction, result.execution_summary)
     };
+    transaction.execute("UPDATE scan_task_execution SET asset_signature=COALESCE(asset_signature,repeat('0',256)::BIT(256)) # $2::TEXT::BIT(256) WHERE id=$1",
+        &[&execution_db_id,&target_generated::history::fingerprint(&observation_rows)]).await.map_err(scanner_result_database_error)?;
     let saved = normalized_observations.len() + dns_upload.observations.len();
 
     if !is_typed || upload.is_final == Some(true) {
@@ -805,6 +809,12 @@ async fn save_scanner_results_inner(
             .map_err(scanner_result_database_error)?;
         stage.finish(true);
         let stage = WriteStage::new("update_target_freshness");
+        crate::scan_control::routing::record_outcome(&transaction, execution_db_id, false)
+            .await
+            .map_err(scanner_result_database_error)?;
+        target_generated::history::record_result(&transaction, task_db_id)
+            .await
+            .map_err(scanner_result_database_error)?;
         target_generated::search::record_success(&transaction, task_db_id)
             .await
             .map_err(scanner_result_database_error)?;

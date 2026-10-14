@@ -91,6 +91,7 @@ pub(crate) fn dns_batch_payload_checksum(
         .collect())
 }
 
+#[allow(clippy::too_many_arguments)] // request dependencies and upload identity
 pub(crate) async fn save_dns_scanner_results(
     pool: &deadpool_postgres::Pool,
     elasticsearch: &ElasticsearchService,
@@ -99,6 +100,7 @@ pub(crate) async fn save_dns_scanner_results(
     token: &str,
     token_pepper: &str,
     parent_upload_id: Option<Uuid>,
+    maxmind: Option<&crate::maxmind::MaxMindState>,
 ) -> Result<usize, SaveScannerResultsError> {
     if !elasticsearch.enabled() {
         return Err(SaveScannerResultsError::Storage(
@@ -501,12 +503,19 @@ pub(crate) async fn save_dns_scanner_results(
                 dns_follow_up,
                 task_db_id,
                 execution_db_id,
+                maxmind,
             )
             .await
             .map_err(scanner_result_database_error)?;
             stage.finish(true);
         }
         let stage = WriteStage::new("update_dns_target_freshness");
+        crate::scan_control::routing::record_outcome(&transaction, execution_db_id, false)
+            .await
+            .map_err(scanner_result_database_error)?;
+        target_generated::history::record_result(&transaction, task_db_id)
+            .await
+            .map_err(scanner_result_database_error)?;
         target_generated::search::record_success(&transaction, task_db_id)
             .await
             .map_err(scanner_result_database_error)?;
@@ -538,6 +547,7 @@ async fn create_dns_follow_up_tasks(
     policy: &dns_follow_up::DnsFollowUpConfig,
     parent_task_id: i32,
     parent_execution_id: i32,
+    maxmind: Option<&crate::maxmind::MaxMindState>,
 ) -> Result<(), tokio_postgres::Error> {
     let metadata: Value = parent.get("generation_metadata");
     let Some(follow_up) = metadata.get("dns_follow_up") else {
@@ -608,11 +618,31 @@ async fn create_dns_follow_up_tasks(
     let scan_plan =
         build_scan_plan(scan_profile).expect("stored DNS follow-up profile was validated");
     let mut created_task_count = 0_i32;
+    let group_id = Uuid::parse_str(&parent_public_execution_id).ok();
     for (family, family_targets) in targets {
-        for (chunk_index, chunk) in family_targets
-            .chunks(usize::from(policy.max_targets_per_task))
-            .enumerate()
-        {
+        let groups = if let Some(maxmind) = maxmind {
+            let nets = family_targets
+                .iter()
+                .filter_map(|ip| ip.parse::<IpAddr>().ok().map(ipnet::IpNet::from))
+                .collect::<Vec<_>>();
+            crate::scan_control::routing::group_targets(&nets, |net| {
+                crate::scan_control::routing::target_geo(&[net.to_string()], maxmind)
+            })
+            .into_iter()
+            .map(|group| {
+                group
+                    .into_iter()
+                    .map(|net| net.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+        } else {
+            vec![family_targets]
+        };
+        let chunks = groups
+            .iter()
+            .flat_map(|targets| targets.chunks(usize::from(policy.max_targets_per_task)));
+        for (chunk_index, chunk) in chunks.enumerate() {
             let task_id = Uuid::now_v7().to_string();
             let metadata = serde_json::json!({
                 "dns_follow_up": {
@@ -643,6 +673,12 @@ async fn create_dns_follow_up_tasks(
                 )
                 .await?
                 .get("id");
+            transaction
+                .execute(
+                    "UPDATE scan_task SET task_group_id=$2 WHERE id=$1",
+                    &[&task_pk, &group_id],
+                )
+                .await?;
             transaction
                 .execute(
                     "INSERT INTO scan_task_execution (execution_id, task_id, requested_scanner_id) VALUES ($1, $2, NULL);",
