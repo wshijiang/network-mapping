@@ -1521,9 +1521,8 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn environment_loads_without_a_config_file_and_keeps_builtin_sql_paths() {
-        let pairs = [
+    fn environment_pairs(extra: &[(&str, &str)]) -> Vec<(String, String)> {
+        [
             (
                 "NM__SERVER__ENCRYPT_KEY",
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
@@ -1533,12 +1532,107 @@ mod tests {
                 "fixture-pepper-at-least-32-characters",
             ),
             ("NM__DATABASE__PASSWORD", "00123"),
-            ("NM__DATABASE__PORT", "5433"),
         ]
-        .map(|(k, v)| (k.to_owned(), v.to_owned()));
+        .into_iter()
+        .chain(extra.iter().copied())
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect()
+    }
+
+    #[test]
+    fn environment_accepts_elasticsearch_credentials_and_ca_path() {
+        for credentials in [
+            vec![("NM__ELASTICSEARCH__API_KEY", "123")],
+            vec![
+                ("NM__ELASTICSEARCH__USERNAME", "123"),
+                ("NM__ELASTICSEARCH__PASSWORD", "00123"),
+            ],
+        ] {
+            let mut inputs = credentials;
+            inputs.push((
+                "NM__ELASTICSEARCH__CA_CERTIFICATE_FILE",
+                "/etc/elasticsearch/http_ca.crt",
+            ));
+            let (config, report) =
+                super::Config::from_env_pairs(environment_pairs(&inputs)).unwrap();
+            let es = &config.elasticsearch;
+            assert!(es.try_check().unwrap());
+            if inputs[0].0.ends_with("API_KEY") {
+                assert_eq!(es.api_key.as_deref(), Some("123"));
+                assert!(es.username.is_none());
+                assert!(es.password.is_none());
+            } else {
+                assert!(es.api_key.is_none());
+                assert_eq!(es.username.as_deref(), Some("123"));
+                assert_eq!(es.password.as_deref(), Some("00123"));
+            }
+            assert_eq!(
+                es.ca_certificate_file.as_deref(),
+                Some(Path::new("/etc/elasticsearch/http_ca.crt"))
+            );
+            assert_eq!(report.error_count(), 0);
+            for field in ["api_key", "username", "password", "ca_certificate_file"] {
+                assert!(
+                    !report
+                        .public_fields
+                        .contains(&format!("elasticsearch.{field}"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn environment_accepts_elasticsearch_secret_file_inputs() {
+        let path = std::env::temp_dir().join(format!("es-env-{}", uuid::Uuid::now_v7()));
+        std::fs::write(&path, "123\r\n").unwrap();
+        let path_text = path.to_str().unwrap();
+        for inputs in [
+            vec![("NM__ELASTICSEARCH__API_KEY_FILE", path_text)],
+            vec![
+                ("NM__ELASTICSEARCH__USERNAME_FILE", path_text),
+                ("NM__ELASTICSEARCH__PASSWORD_FILE", path_text),
+            ],
+        ] {
+            let (config, _) = super::Config::from_env_pairs(environment_pairs(&inputs)).unwrap();
+            let es = &config.elasticsearch;
+            assert!(es.try_check().unwrap());
+            if inputs.len() == 1 {
+                assert_eq!(es.api_key.as_deref(), Some("123"));
+            } else {
+                assert_eq!(es.username.as_deref(), Some("123"));
+                assert_eq!(es.password.as_deref(), Some("123"));
+            }
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn environment_rejects_unknown_elasticsearch_fields() {
+        let error = super::Config::from_env_pairs(environment_pairs(&[(
+            "NM__ELASTICSEARCH__API_KEEY",
+            "private-value",
+        )]))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown configuration field"));
+        assert!(!error.to_string().contains("private-value"));
+    }
+
+    #[test]
+    fn environment_loads_without_a_config_file_and_keeps_builtin_sql_paths() {
+        let pairs = environment_pairs(&[
+            ("NM__DATABASE__HOST", "pg.example.internal"),
+            ("NM__DATABASE__PORT", "5433"),
+            ("NM__ELASTICSEARCH__URL", "https://es.example.internal:9243"),
+        ]);
         let (config, report) = super::Config::from_env_pairs(pairs).unwrap();
+        assert_eq!(config.database.host, "pg.example.internal");
         assert_eq!(config.database.port, 5433);
+        assert_eq!(config.elasticsearch.url, "https://es.example.internal:9243");
         assert_eq!(config.database.password, "00123");
+        assert!(config.elasticsearch.api_key.is_none());
+        assert!(config.elasticsearch.username.is_none());
+        assert!(config.elasticsearch.password.is_none());
+        assert!(config.elasticsearch.ca_certificate_file.is_none());
         assert_eq!(
             config.database.init_database_file,
             "/opt/network-mapping/source/database/init.sql"

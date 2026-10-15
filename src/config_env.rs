@@ -2,6 +2,15 @@
 use serde_json::Value;
 use std::{collections::BTreeMap, io};
 
+// Optional deployment fields are intentionally absent from the public config
+// catalog. Keep their env names and string types explicit, including when unset.
+const OPTIONAL_DEPLOYMENT_STRING_FIELDS: &[&str] = &[
+    "elasticsearch.api_key",
+    "elasticsearch.username",
+    "elasticsearch.password",
+    "elasticsearch.ca_certificate_file",
+];
+
 fn invalid(field: &str, message: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -22,6 +31,7 @@ pub(crate) fn apply(
         let direct = name.to_ascii_lowercase().replace("__", ".");
         let known = |field: &str| {
             allowed(field)
+                || OPTIONAL_DEPLOYMENT_STRING_FIELDS.contains(&field)
                 || field
                     .split('.')
                     .try_fold(&*defaults, |value, part| value.get(part))
@@ -81,7 +91,10 @@ pub(crate) fn apply(
         ]
         .iter()
         .any(|part| field.contains(part));
-        let parsed = if current.is_string() || sensitive {
+        let parsed = if current.is_string()
+            || sensitive
+            || OPTIONAL_DEPLOYMENT_STRING_FIELDS.contains(&field.as_str())
+        {
             Value::String(text)
         } else if current.is_boolean()
             || current.is_number()

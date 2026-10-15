@@ -86,6 +86,14 @@ Docker 的默认入口为 `--config-source env`，Compose 使用 `env_file: ./.e
 例如 `NM__SERVER__ENCRYPT_KEY_FILE=/run/secrets/encrypt_key`，与直接值不能同时配置。
 示例 Compose 的 PG 使用直接密码；使用外部 Secret 时需同步配置 PG 的密码来源。
 
+连接需要认证的 Elasticsearch 时，使用 `NM__ELASTICSEARCH__API_KEY`，或同时设置
+`NM__ELASTICSEARCH__USERNAME` 与 `NM__ELASTICSEARCH__PASSWORD`，两种方式互斥；
+认证字段也支持对应的 `_FILE` 输入。请勿将用户名和密码写入 Elasticsearch URL。
+私有 CA 可放在 `docker/runtime/tls/elasticsearch-ca.pem`，设置
+`NM__ELASTICSEARCH__CA_CERTIFICATE_FILE=/etc/network-mapping/tls/elasticsearch-ca.pem`。
+TLS 目录已只读挂载；该变量直接表示容器内的证书路径，不会被当作 `_FILE` 密钥输入读取。
+未配置这些可选字段时，保持无认证和系统 CA 的原有行为。
+
 SQL、模板、前端和日志路径等容器默认值内置在程序中，不依赖宿主机配置文件。
 文件部署继续使用 `--config config.toml`（默认 file 模式）。需要兼容旧容器挂载时，显式使用
 `--config-source file --config /etc/network-mapping/config.toml`。
@@ -104,15 +112,37 @@ ca.pem 用于容器健康探针，必须能验证 cert.pem。`.env` 的 `SERVER_
 
 ## Compose 示例
 
+需要 Docker Compose 2.20.0 或更新版本（支持可选启动依赖）。
+
 ```sh
 docker compose --env-file docker/.env -f docker/compose.example.yml config --quiet
 docker compose --env-file docker/.env -f docker/compose.example.yml up -d
 docker compose --env-file docker/.env -f docker/compose.example.yml ps
 ```
 
-示例部署一个服务端、一套 PG 18 和 ES 9.5.0，数据库没有宿主机端口映射；PG 18 卷挂载到
+`.env.example` 默认启用 `local-postgres,local-elasticsearch` 两个 profile，
+部署一个服务端、一套 PG 18 和 ES 9.5.0，数据库没有宿主机端口映射；PG 18 卷挂载到
 `/var/lib/postgresql`。服务端默认只发布宿主机 127.0.0.1:9999；需要直接访问时在 .env 明确设置
 `SERVER_BIND_ADDRESS=0.0.0.0` 并配置防火墙、可信 DNS 和证书。
+
+已有 PostgreSQL 和 Elasticsearch 时，在 `docker/.env` 清空 profile 并指定地址和认证：
+
+```dotenv
+COMPOSE_PROFILES=
+NM__DATABASE__HOST=pg.example.internal
+NM__DATABASE__PORT=5432
+NM__DATABASE__USERNAME=network_mapping
+NM__DATABASE__PASSWORD=replace-with-database-password
+NM__DATABASE__DB_NAME=network_mapping
+NM__ELASTICSEARCH__URL=https://es.example.internal:9200
+NM__ELASTICSEARCH__API_KEY=replace-with-api-key
+```
+
+使用上面相同的 Compose 命令即可只启动服务端，PG/ES 容器不会创建，也不会等待它们的健康检查。
+只使用一项外部服务时，保留另一项的 profile，例如外部 ES 配本地 PG：
+`COMPOSE_PROFILES=local-postgres`。外部服务必须能从容器网络访问，地址不能用容器内的 `127.0.0.1`；
+数据库需预先创建并授予应用角色建表和升级权限，ES 版本须符合 [ES 指南](ELASTICSEARCH.md)。
+已运行的本地 PG/ES 容器不会因禁用 profile 自动删除；切换前备份数据，迁移并验证外部服务后再停用旧容器。
 
 ES 示例关闭认证，只适用于隔离的单宿主机网络。生产应按 [ES 指南](ELASTICSEARCH.md)
 配置认证与 TLS，并调整对应 env 参数、CA 挂载及 ES healthcheck。PG 当前使用 NoTls，跨主机连接不能靠
