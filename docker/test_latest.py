@@ -202,6 +202,16 @@ class RegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, 'digest mismatch'):
                 self.registry().request('blobs', 'sha256:' + 'a' * 64)
 
+    def test_registry_manifests_use_put_with_oci_content_type(self):
+        raw = json.dumps({'mediaType': latest.INDEX, 'manifests': []}).encode()
+        with patch('urllib.request.urlopen') as open_url:
+            open_url.return_value.__enter__.return_value.read.return_value = b''
+            self.registry().request('manifests', latest.digest(raw), data=raw)
+            request = open_url.call_args.args[0]
+            self.assertEqual(request.get_method(), 'PUT')
+            self.assertEqual(request.get_header('Content-type'), latest.INDEX)
+            self.assertEqual(request.data, raw)
+
 
 if __name__ == '__main__':
     unittest.main()

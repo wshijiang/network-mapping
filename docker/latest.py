@@ -49,7 +49,7 @@ class Registry:
         if data is not None:
             headers['Content-Type'] = json.loads(data)['mediaType']
         request = urllib.request.Request(f'https://ghcr.io/v2/{self.repository}/{kind}/{reference}',
-                                         data=data, headers=headers)
+                                         data=data, headers=headers, method='PUT' if data is not None else 'GET')
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 result = response.read()
