@@ -7,9 +7,9 @@
 ## 文件与 Docker 部署
 
 - 文件部署继续使用原配置路径，例如 `network_mapping_server --config /srv/network-mapping/config.toml`。
-- Docker 部署继续使用 Compose 的只读文件绑定挂载，配置检查不写回、不补写、不替换文件，也不要求增加可写配置卷。
+- 标准 Docker/Compose 使用镜像默认 `--config-source env`，从内置默认值和 `NM__…` 环境变量生成同一检查快照，无需挂载 TOML；详见 [Docker 部署指南](DOCKER.md)。兼容旧文件挂载时显式使用 `--config-source file --config /etc/network-mapping/config.toml`，检查不写回、不补写或替换文件。
 - 路径默认值沿用程序既有行为。文件与 Docker 部署的资源目录可能不同，应按检查详情核对路径和挂载；不会把新版示例中的路径自动覆盖到用户配置。
-- 修改配置后重启对应进程或重建应用容器；Web 的“重新读取”只重新获取启动快照，不重新加载磁盘文件。
+- 修改 TOML 后重启对应进程；修改 Compose `.env` 后使用 `up -d --force-recreate` 重新注入环境，单纯 restart 不更新环境。Web 的“重新读取”只重新获取启动快照，不重新加载启动配置。
 
 ## 提示与来源
 

@@ -8,8 +8,8 @@
 
 | 文档 | 内容 |
 | --- | --- |
-| [Docker 构建与部署](DOCKER.md) | 多架构镜像、GitHub CI、配置、持久化与发布门禁 |
-| [服务端部署指南](DEPLOYMENT.md) | 启动配置、TLS、前端托管与 IP 情报 |
+| [服务端部署指南](DEPLOYMENT.md) | 部署选型、两端安装顺序、原生托管、升级恢复与验收 |
+| [Docker 构建与部署](DOCKER.md) | Compose、首次登录与联调、持久化、升级排障及镜像构建发布 |
 | [服务端功能指南](FEATURES.md) | 功能入口、交互约束与配置示例 |
 | [用户管理 CLI](USER_MANAGEMENT_CLI.md) | 用户、凭据、会话和登录限制的本地管理 |
 | [资产搜索语法与 API](SEARCH_SYNTAX.md) | 搜索字段、表达式语法与 API 契约 |

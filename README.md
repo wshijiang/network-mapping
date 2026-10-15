@@ -37,6 +37,8 @@ flowchart LR
 
 ## 快速开始
 
+标准容器环境可直接按 [Docker 部署指南](docs/DOCKER.md#准备运行配置)安装，镜像包含前端与 SQL，可选自动启动本地 PG/ES。以下为源码运行步骤；发布归档与 systemd 托管、两端联调及升级恢复见[部署指南](docs/DEPLOYMENT.md)。
+
 ### 1. 准备环境
 
 | 依赖 | 用途 |
@@ -95,6 +97,7 @@ cargo build --locked --release
 | 我想了解 | 阅读入口 |
 | --- | --- |
 | 安装、证书与页面托管 | [部署指南](docs/DEPLOYMENT.md) |
+| 镜像、Compose 与容器升级 | [Docker 部署](docs/DOCKER.md) |
 | 搜索、扫描模式与自动任务 | [功能指南](docs/FEATURES.md) |
 | API、存储、备份与排障 | [文档中心](docs/README.md) |
 

@@ -4,18 +4,55 @@
 
 [项目首页](../README.md) · [文档中心](README.md)
 
-容器镜像、Compose 与 GitHub 自动构建见 [Docker 部署指南](DOCKER.md)。
+本文是服务端部署入口，面向 Linux，覆盖部署选型、安装顺序、原生服务托管和升级。容器的具体命令见 [Docker 部署指南](DOCKER.md)；扫描节点见[扫描端部署指南](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/DEPLOYMENT.md)。已有 PG 扫描结果的升级必须先阅读[Elasticsearch 存储与迁移](ELASTICSEARCH.md)，不能按空库流程直接切换。
 
-本文面向 Linux 部署，覆盖首次安装、启动验收和服务托管。已有 PG 扫描结果的升级必须先阅读[Elasticsearch 存储与迁移](ELASTICSEARCH.md)，不能按空库流程直接切换。
+[部署方式与安装顺序](#部署方式与安装顺序) · [准备环境](#准备环境) · [文件布局](#文件布局) · [数据库](#数据库) · [配置](#配置) · [首次启动](#首次启动) · [服务托管](#服务托管) · [升级与恢复](#升级与恢复) · [验收与排障](#验收与排障)
 
-[准备环境](#准备环境) · [文件布局](#文件布局) · [数据库](#数据库) · [配置](#配置) · [首次启动](#首次启动) · [服务托管](#服务托管) · [验收与排障](#验收与排障)
+## 部署方式与安装顺序
+
+| 方式 | 适用场景 | 需要准备 |
+| --- | --- | --- |
+| 已发布镜像 + Compose | Linux AMD64/ARM64，优先使用标准容器环境 | Docker Engine、Compose ≥ 2.20、镜像版本/digest、`.env`、TLS；前端和 SQL 已在镜像内 |
+| 发布归档 + systemd | 直接运行二进制，独立管理 PG/ES | 匹配架构与运行库的归档、完整运行资源、TOML、TLS；无需 Rust/Node |
+| 源码构建 + systemd | 开发或需要自定义构建 | Rust 工具链及编译依赖、匹配提交的前端构建产物，再按原生部署步骤安装 |
+
+服务端与扫描端独立发布，版本号不要求相同；升级前核对结果协议、数据库和模块兼容性。生产记录服务端提交、前端提交、扫描端及引擎版本，并固定镜像 digest 或归档校验和。
+
+按以下顺序完成一套环境：
+
+1. 确定访问域名、HTTPS 端口、TLS 信任链、存储位置和备份位置。
+2. 准备 PostgreSQL 和 ES 9.5.x；Compose 可启动本地依赖，也可连接外部依赖。
+3. 启动服务端，保存首次管理员凭据，确认登录页和静态资源完整。
+4. 登录控制台创建扫描器，在节点配置同一个 HTTPS 入口并完成注册、心跳和能力检查。
+5. 对一个已授权的小范围目标验收端口发现、上传和搜索，再启用自动任务及可选功能。
+
+```mermaid
+flowchart LR
+    Browser[浏览器] -->|HTTPS| Server[服务端入口]
+    Scanner[扫描节点] -->|HTTPS 注册、心跳、任务与上传| Server
+    Server -->|TCP 5432，按实际配置| PG[(PostgreSQL)]
+    Server -->|HTTP/HTTPS 9200，按实际配置| ES[(Elasticsearch 9.5.x)]
+    Scanner -->|节点路由及扫描协议| Target[授权目标]
+```
+
+PG/ES 通常仅对服务端网络开放，扫描节点不需要直接连接存储，也不需要映射入站 API 端口。跨主机节点不能连接服务端的 `127.0.0.1`；Docker 默认仅发布本机地址，需要代理入口或明确修改发布地址。代理应转发完整 `/api/` 路径，支持 64 MiB 业务请求和 4 MiB 诊断分块，并使用可信 HTTPS 上游。
+
+### 配置来源
+
+| 运行方式 | 配置来源 | 修改后生效 |
+| --- | --- | --- |
+| 原生文件部署 | 默认 `--config-source file`，通过 `--config` 指定 TOML | 重启进程 |
+| 标准 Docker/Compose | 镜像默认 `--config-source env`，内置容器默认值 + `NM__…` 环境变量 | `up -d --force-recreate` |
+| Web 运行策略 | 已发布的数据库值；TOML/env 仅在记录缺失时初始化 | 按[运行时配置](RUNTIME_CONFIGURATION.md)发布与同步 |
+
+文件模式不会合并 `NM__…` 环境变量；容器 env 模式不会读取宿主机 `config.toml`。不要同时修改两处并期待自动覆盖。
 
 ## 准备环境
 
 | 依赖 | 要求 |
 | --- | --- |
 | 服务端二进制 | 与目标系统架构、运行库兼容；源码构建使用 Rust stable，edition 2024 |
-| 编译工具 | 源码构建需要 C 编译工具、OpenSSL 开发库和 pkg-config；CI 使用 Ubuntu 24.04 |
+| 编译工具 | 源码构建需要 C 编译工具、CMake、OpenSSL 开发库和 pkg-config；以所选版本 Dockerfile/CI 工具链为参考 |
 | PostgreSQL | 预先创建数据库和登录角色；角色需要执行初始化 SQL 中的建表、索引及升级 DDL |
 | Elasticsearch | 支持正式版 9.5.x，服务端必须可访问并有创建/管理所需索引及读写权限 |
 | 前端 | 已构建的 `dist/`，包含 `index.html`、`login.html`、`search.html`、`asset.html` 和 `assets/` |
@@ -25,7 +62,7 @@
 
 ```sh
 # network-mapping/
-cargo build --locked --release
+cargo build --locked --release --bin network_mapping_server
 
 # network-mapping-vue/
 pnpm install --frozen-lockfile
@@ -36,7 +73,14 @@ pnpm build
 
 ## 文件布局
 
-以下路径是部署示例，按实际环境调整。服务用户示例为 `network-mapping`，需要预先创建。
+以下路径是部署示例，按实际环境调整。服务用户示例为 `network-mapping`。首次安装时创建系统用户与可写目录；已有用户可跳过创建：
+
+```sh
+sudo useradd --system --user-group --home-dir /var/lib/network-mapping --no-create-home --shell /usr/sbin/nologin network-mapping
+sudo install -d -o root -g network-mapping -m 0750 /etc/network-mapping /etc/network-mapping/ssl
+sudo install -d -o network-mapping -g network-mapping -m 0750 /var/log/network-mapping /var/lib/network-mapping/scanner-diagnostics
+sudo install -d -o root -g root -m 0755 /opt/network-mapping/network-mapping /opt/network-mapping/network-mapping-vue
+```
 
 ```text
 /opt/network-mapping/
@@ -57,7 +101,25 @@ pnpm build
 └── scanner-diagnostics/      诊断快照与采集文件
 ```
 
-源码部署需从 `target/release/` 复制二进制，并保留运行 SQL、模板和前端产物。发布包已包含这些资源；`config.example.toml` 是待配置模板。
+源码部署需从 `target/release/` 复制二进制，并保留 `source/database/`、`source/open_source_projects.json`、`templates/` 和前端产物。发布包已包含这些资源；`config.example.toml` 是待配置模板。
+
+源码首次安装时，从服务端仓库执行（相邻前端已完成构建）：
+
+```sh
+sudo install -m 0755 target/release/network_mapping_server /opt/network-mapping/network-mapping/network_mapping_server
+sudo install -d -m 0755 /opt/network-mapping/network-mapping/source
+sudo cp -a source/database source/open_source_projects.json /opt/network-mapping/network-mapping/source/
+sudo cp -a templates /opt/network-mapping/network-mapping/
+sudo cp -a ../network-mapping-vue/dist /opt/network-mapping/network-mapping-vue/
+sudo install -m 0644 network-mapping-server.service /opt/network-mapping/network-mapping/network-mapping-server.service
+sudo install -o root -g network-mapping -m 0640 config.toml /etc/network-mapping/config.toml
+```
+
+上述配置复制只用于首次安装；填写后再启动。已有环境升级应保留原配置、长期密钥和数据库连接参数。
+
+下载归档及同名 `.tar.gz.sha256` 后，在下载目录执行 `sha256sum --check <归档文件名>.sha256`，检查架构与 `BUILD-INFO`，再解压。归档外层是版本目录，内部的 `network-mapping/` 和 `network-mapping-vue/` 对应上图两个目录；不要多嵌套一层版本目录。GNU/musl 目标按实际运行库选择，最终以 `./network_mapping_server --version` 能在目标主机运行作为基础检查。
+
+复制配置后设置为 `root:network-mapping`、`0640`；证书链和私钥也必须允许该服务用户读取。代码和前端目录保持管理员所有，只给服务用户读取/执行权限。
 
 ### 路径解析规则
 
@@ -171,6 +233,9 @@ directory = "/opt/network-mapping/network-mapping-vue/dist"
 
 [scanner_diagnostics]
 directory = "/var/lib/network-mapping/scanner-diagnostics"
+
+[maxmind]
+directory = "/opt/network-mapping/network-mapping/source/maxmind"
 ```
 
 JSON 通用请求体默认上限为 64 MiB；代理入口需要容纳相同业务请求。诊断实时事件单独限 8 MiB，日志分块最多 4 MiB，详见[诊断协议](SCANNER_DIAGNOSTICS.md#固定目录与文件语义)。
@@ -213,7 +278,7 @@ SMTP、平台报告、pgBackRest 备份等功能按需配置，分别见[健康�
 
 ```sh
 cd /opt/network-mapping/network-mapping
-./network_mapping_server --config /etc/network-mapping/config.toml
+sudo -u network-mapping ./network_mapping_server --config /etc/network-mapping/config.toml
 ```
 
 启动会检查配置、连接 PG、执行初始化 SQL、校验 ES 存储及加载运行策略，再加载 TLS 并绑定监听端口。前端文件缺失只产生警告，服务可能仍能启动，因此需要单独验收页面。
@@ -223,8 +288,8 @@ cd /opt/network-mapping/network-mapping
 也可使用 CLI 在已有初始化结构中创建或管理账号：
 
 ```sh
-./network_mapping_server --config /etc/network-mapping/config.toml user create operator --role admin
-./network_mapping_server --config /etc/network-mapping/config.toml user password set admin
+sudo -u network-mapping ./network_mapping_server --config /etc/network-mapping/config.toml user create operator --role admin
+sudo -u network-mapping ./network_mapping_server --config /etc/network-mapping/config.toml user password set admin
 ```
 
 密码交互输入。若自动管理员名称不同，替换最后一个用户名。CLI 同样加载并校验配置，详见[用户管理](USER_MANAGEMENT_CLI.md)。
@@ -233,7 +298,7 @@ cd /opt/network-mapping/network-mapping
 
 ## 服务托管
 
-首次验收通过后，再交由 systemd。仓库中的 `network-mapping-server.service` 含占位用户和路径，不能原样安装；其 `ExecStart=./network_mapping_server` 应替换为绝对路径。以下示例适用于上面的目录布局：
+首次验收通过后，停止前台进程，再交由 systemd，避免端口冲突。仓库中的 [`network-mapping-server.service`](../network-mapping-server.service) 对应上面的用户和目录布局；自定义路径时同步修改 `WorkingDirectory`、`ExecStart` 和 TOML。
 
 ```ini
 # /etc/systemd/system/network-mapping-server.service
@@ -261,6 +326,7 @@ WantedBy=multi-user.target
 以系统管理员身份安装 unit 后执行：
 
 ```sh
+sudo install -m 0644 network-mapping-server.service /etc/systemd/system/network-mapping-server.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now network-mapping-server
 sudo systemctl status network-mapping-server
@@ -268,6 +334,16 @@ sudo journalctl -u network-mapping-server -n 100 --no-pager
 ```
 
 修改 unit 后先 `daemon-reload` 再重启；修改启动配置后需重启服务。命令含义见 [systemctl](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html)。首次自动管理员若在 systemd 下创建，标准输出可能进入 journal，应按凭据管理要求限制日志访问。
+
+## 升级与恢复
+
+1. 记录当前二进制/镜像、前端提交、配置和运行策略；核对目标版本的迁移与协议变化。先在隔离环境用备份验证启动和恢复。
+2. 暂停自动任务和新任务分配，让活动扫描及待上传批次完成；需要中断时保留扫描端全部状态。扫描端停机应使用 SIGINT。
+3. 在无写入的维护窗口，保存配对的 PG 备份与 ES 快照，以及 TOML/env、`encrypt_key`、Pepper、TLS 和诊断数据。PG 备份见[备份指南](PGBACKREST_BACKUP.md)，ES 及回执一致性见[存储指南](ELASTICSEARCH.md)。
+4. 原生部署先 `sudo systemctl stop network-mapping-server`，替换完整二进制、SQL、模板与匹配的前端，不覆盖环境配置。Docker 按[容器升级流程](DOCKER.md#升级与恢复)操作，保持项目名和卷不变。
+5. 先启动服务端，检查自动 DDL、ES、登录及历史数据，再逐批恢复扫描节点。验证一次注册身份恢复、授权任务、上传、搜索与后台投影，最后恢复自动任务。
+
+程序启动会升级数据库；替换旧二进制或旧镜像不会撤销 DDL。只有确认数据库/schema 与协议向后兼容时才直接切回旧程序。需要数据恢复时停止所有写入，以同一个维护边界恢复 PG、ES 和长期密钥；仅恢复一侧会导致回执/事实不一致。不要通过删除 ES 索引、初始化空库或重新生成密钥排除升级错误。
 
 ## 验收与排障
 

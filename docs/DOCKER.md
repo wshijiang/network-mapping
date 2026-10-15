@@ -7,6 +7,10 @@
 Rust 使用 1.99.0、Node 26.11.1、pnpm 11.9.0；构建与运行环境采用 Debian 12，基础镜像固定多架构 digest。
 真实配置、TLS、日志、数据库、本机二进制和 Git 目录通过构建上下文允许清单排除，最终镜像没有编译器或源代码。
 
+部署已有镜像无需本地编译或单独构建前端，从[准备运行配置](#准备运行配置)开始。所有命令默认在 `network-mapping/` 执行，使用同一份 `docker/.env`、Compose 文件及项目名；`docker/runtime/` 路径相对于 Compose 文件所在目录。
+
+[准备配置](#准备运行配置) · [启动](#compose-示例) · [首次登录与联调](#首次登录与联调) · [升级与恢复](#升级与恢复) · [常见问题](#常见问题) · [本地构建](#固定前端与本地构建) · [CI 发布](#github-自动构建与发布)
+
 ## 固定前端与本地构建
 
 `.github/frontend-ref` 必须是前端完整 40 位提交。前端与后端独立版本，修改前端后先提交并推送前端，
@@ -69,6 +73,7 @@ docker compose --env-file docker/.env -f docker/compose.example.yml \
 ```sh
 mkdir -p docker/runtime/tls
 cp docker/.env.example docker/.env
+chmod 0600 docker/.env
 openssl rand -base64 32
 openssl rand -hex 32
 openssl rand -hex 24
@@ -78,6 +83,17 @@ openssl rand -hex 24
 `NM__SECURITY__SCANNER_TOKEN_PEPPER`、`NM__DATABASE__PASSWORD`。Compose 将数据库密码同时
 传给服务端和 PostgreSQL；已有 PG 数据卷的角色密码不会随 env 修改自动改变。
 `.env` 不提交到仓库，建议权限 0600。
+
+`cp` 仅用于首次安装，已有部署应编辑原文件，避免覆盖长期密钥与连接参数。先确认以下项目，再启动：
+
+| 配置 | 需要填写/确认 |
+| --- | --- |
+| `SERVER_IMAGE` | 实际存在且可拉取的版本或完整 `@sha256:…`；模板中的占位版本不能使用 |
+| 三个随机值 | Base64 加密密钥、独立 Pepper、PG 密码，填到对应变量 |
+| HTTPS | `cert.pem` 为完整服务证书链，`key.pem` 为匹配私钥，`ca.pem` 为健康探针信任的 CA 链 |
+| 域名/端口 | `SERVER_TLS_NAME` 匹配证书 DNS 名；`SERVER_PUBLISH_PORT` 是宿主机入口，`NM__SERVER__PORT` 是容器监听端口 |
+| 外部访问 | 默认仅 `127.0.0.1`；远程扫描节点需要可达的 HTTPS 代理或对外发布地址 |
+| 依赖与资源 | 本地 PG/ES profiles 或已就绪的外部存储；ES 所需内存、磁盘与宿主机内核参数 |
 
 Docker 的默认入口为 `--config-source env`，Compose 使用 `env_file: ./.env` 注入参数，
 无需挂载 TOML。`--env-file` 负责 Compose 插值，不能单独代替服务级 `env_file`。
@@ -110,15 +126,29 @@ ca.pem 用于容器健康探针，必须能验证 cert.pem。`.env` 的 `SERVER_
 属主 10001、模式 0400；TLS 目录允许该用户遍历。不要通过公开可读权限解决私钥读取问题。
 命名卷首次创建会沿用镜像目录的属主，已有卷或宿主机绑定目录需手动检查 UID/GID。
 
+专用 TLS 目录可在放入证书后按如下方式授权；原证书由其他服务共用时，复制到此目录再调整权限：
+
+```sh
+sudo chown 10001:10001 docker/runtime/tls docker/runtime/tls/cert.pem docker/runtime/tls/key.pem docker/runtime/tls/ca.pem
+sudo chmod 0500 docker/runtime/tls
+sudo chmod 0400 docker/runtime/tls/cert.pem docker/runtime/tls/key.pem docker/runtime/tls/ca.pem
+```
+
+如果还有 `elasticsearch-ca.pem`，也需给 UID 10001 读取权限。不要把客户端所需 CA 与服务端私钥一起复制到扫描节点。
+
 ## Compose 示例
 
 需要 Docker Compose 2.20.0 或更新版本（支持可选启动依赖）。
 
 ```sh
 docker compose --env-file docker/.env -f docker/compose.example.yml config --quiet
+docker compose --env-file docker/.env -f docker/compose.example.yml pull
 docker compose --env-file docker/.env -f docker/compose.example.yml up -d
 docker compose --env-file docker/.env -f docker/compose.example.yml ps
+docker compose --env-file docker/.env -f docker/compose.example.yml logs --tail=100 server
 ```
+
+`config --quiet` 只验证 Compose 结构与插值，不验证应用密钥、证书、存储权限或服务就绪。不要把无 `--quiet` 的配置展开结果、`docker inspect` 环境信息发到工单，它们可能包含凭据。私有 GHCR 包需先使用有读取该包权限的身份登录注册表；拉取失败应先确认包可见性、版本和架构。
 
 `.env.example` 默认启用 `local-postgres,local-elasticsearch` 两个 profile，
 部署一个服务端、一套 PG 18 和 ES 9.5.0，数据库没有宿主机端口映射；PG 18 卷挂载到
@@ -153,6 +183,70 @@ server-data 保存诊断与可选 MaxMind 数据，server-logs 保存滚动 JSON
 docker stdout 日志限制为 3×10MiB，应用文件日志仍需外部保留/轮转管理。
 不要执行 `down -v` 清空生产数据。启动依赖健康检查仅控制启动顺序；服务端健康探针只验证
 TLS 和登录页存活，不代表运行期间 PG/ES 持续就绪。pgBackRest Web 桥接默认关闭，备份由独立服务或宿主机负责。
+
+## 首次登录与联调
+
+首次空库启动在不存在管理员时自动创建默认管理员。随机密码一次性输出到容器标准输出，可从上面的 `logs` 命令获取；用户名通常为 `admin`，以输出为准。限制这些日志的访问，登录后立即改密。首次启动失败前已写入的管理员不会在重试时重新显示密码。
+
+已初始化数据库但没有保存密码时，使用交互式 CLI 设置密码（替换实际用户名）：
+
+```sh
+docker compose --env-file docker/.env -f docker/compose.example.yml exec server \
+  /opt/network-mapping/bin/network_mapping_server --config-source env user password set admin
+```
+
+该命令复用容器环境与数据库，不会另起 HTTPS 监听。完整账号操作见[用户管理 CLI](USER_MANAGEMENT_CLI.md)。
+
+以下检查示例使用 `server.example.com` 和宿主机 9999 端口，按实际入口替换：
+
+```sh
+sudo curl --fail --show-error --silent --cacert docker/runtime/tls/ca.pem \
+  --resolve server.example.com:9999:127.0.0.1 https://server.example.com:9999/login -o /dev/null
+```
+
+随后从浏览器和**实际扫描节点**访问正式域名，检查静态资源、管理员登录和 API 鉴权。`SERVER_TLS_NAME` 只用于容器探针，不会创建 DNS 记录，也不会让客户端自动信任证书。使用 443 代理入口时，节点配置的是代理域名及 443，而非 Compose 内部服务名 `server` 或容器监听端口。
+
+在控制台创建扫描器，按[扫描端部署指南](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/DEPLOYMENT.md)完成注册。确认心跳、`accepting_tasks`、地址族/profile、首个授权任务、结果上传及搜索。`healthy` 仅证明 TLS/登录页存活，不替代这组验收。
+
+## 升级与恢复
+
+1. 保存当前镜像 digest、`.env`、TLS、配置与数据卷清单；核对 schema、ES 和扫描协议变化。暂停自动任务及新任务分配，等待活动任务与上传完成。
+2. 在 `.env` 中仅将 `SERVER_IMAGE` 改为待部署的固定版本/digest，先验证与拉取。升级应用时保持 PG/ES 版本、项目名和卷不变：
+
+   ```sh
+   docker compose --env-file docker/.env -f docker/compose.example.yml config --quiet
+   docker compose --env-file docker/.env -f docker/compose.example.yml pull server
+   docker compose --env-file docker/.env -f docker/compose.example.yml stop server
+   ```
+
+3. 确认其他实例也停止写入，在同一维护窗口取得 PG 备份与 ES 快照，并保存 server-data 中的诊断/可选数据。PG 数据卷的文件复制不能代替一致性备份。备份策略见[部署恢复](DEPLOYMENT.md#升级与恢复)。
+4. 只重建服务端，不连带升级数据库：
+
+   ```sh
+   docker compose --env-file docker/.env -f docker/compose.example.yml up -d --no-deps --force-recreate server
+   docker compose --env-file docker/.env -f docker/compose.example.yml ps
+   docker compose --env-file docker/.env -f docker/compose.example.yml logs --tail=100 server
+   ```
+
+5. 重新执行首次登录与联调检查，再逐批恢复节点和自动任务。使用自定义 SQL 覆盖文件的部署，所有命令仍须带上原来的第二个 `-f` 参数。
+
+回滚镜像不会撤销自动 DDL；只有确认 schema/协议向后兼容时才能改回原 digest 并重建。需要恢复数据时，停止全部写入，配对恢复 PG、ES、配置和长期密钥。保持 Compose 的 `name: network-mapping`（或原 `-p` 参数）及卷名，避免误启动空库；不要使用 `down -v`、删索引或清空数据卷排障。已有 PG 卷修改密码须在数据库内同步更新，改 env 不会重设已有角色密码。
+
+## 常见问题
+
+| 现象 | 优先检查 |
+| --- | --- |
+| 镜像不存在/拉取被拒绝 | 是否替换占位版本、GHCR 读权限、包可见性、节点架构 |
+| 启动提示必填配置为空 | 三个密钥/密码是否填入 `.env`，是否同时配置直接值与 `_FILE`，是否重建容器 |
+| `unhealthy` 或 TLS 读取失败 | UID 10001 的目录遍历/文件权限、证书链与私钥、`ca.pem`、`SERVER_TLS_NAME` 及监听端口 |
+| 本机能访问、远程节点失败 | 默认仅绑定 127.0.0.1，检查入口代理、发布地址、防火墙、DNS 和客户端 CA |
+| 本地 PG/ES 不启动 | `.env` 的 `COMPOSE_PROFILES`；若已改为外部服务，确认网络地址不是容器自身的 127.0.0.1 |
+| ES 等待失败/内存不足 | 查看 `logs --tail=100 elasticsearch`，检查内存、磁盘水位、`vm.max_map_count` 与 healthcheck |
+| PG 认证失败 | env 角色/库名与现有卷是否一致，旧角色密码是否已在 PG 中更改 |
+| 修改 env 没有效果 | 使用同一 `.env` 和 Compose 文件执行 `up -d --force-recreate`；策略配置另按 Web 发布 |
+| 重启后历史数据消失 | 检查项目名、卷名和连接目标；先找回原卷/原存储，不继续初始化新空库 |
+
+先保存首个错误的脱敏日志，再调整配置。服务端文件日志在 server-logs，容器启动失败信息在 stdout；持续运行也应监控 PG、ES、磁盘、投影积压及扫描器心跳。
 
 ## 容器验收范围
 

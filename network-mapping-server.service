@@ -1,15 +1,17 @@
 [Unit]
 Description=Network Mapping Server
-After=network.target postgresql.service
-Requires=postgresql.service
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=someuser
-WorkingDirectory=/path/to/app
-ExecStart=./network_mapping_server
+User=network-mapping
+Group=network-mapping
+WorkingDirectory=/opt/network-mapping/network-mapping
+ExecStart=/opt/network-mapping/network-mapping/network_mapping_server --config /etc/network-mapping/config.toml
 Restart=on-failure
 RestartSec=5
+UMask=0027
 
 [Install]
 WantedBy=multi-user.target
