@@ -56,7 +56,10 @@ pub async fn run(args: Clis) -> io::Result<()> {
         ));
     }
 
-    let (config, config_check) = config::Config::from_file_with_check(&args.config)?;
+    let (config, config_check) = match args.config_source {
+        config::ConfigSource::File => config::Config::from_file_with_check(&args.config)?,
+        config::ConfigSource::Env => config::Config::from_env_with_check()?,
+    };
 
     let log_file_rolling = match config.log.file_rolling {
         0 => LogRollingMode::Daily,
@@ -72,7 +75,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
         &log_debug_mode,
         args.terminal_verbose,
     );
-    info!(target: "server::startup", config_path = %args.config, "配置文件已加载");
+    info!(target: "server::startup", config_source = ?args.config_source, "启动配置已加载");
     info!(
         target: "server::startup",
         terminal_mode = if args.terminal_verbose { "详细" } else { "精简" },

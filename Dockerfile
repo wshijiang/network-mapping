@@ -98,6 +98,6 @@ USER 10001:10001
 EXPOSE 9999
 ENV SERVER_TLS_NAME=localhost
 # This checks HTTPS/frontend liveness, not ongoing PG/ES readiness.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 CMD curl --fail --silent --show-error --cacert /etc/network-mapping/tls/ca.pem --resolve "$SERVER_TLS_NAME:9999:127.0.0.1" "https://$SERVER_TLS_NAME:9999/login" > /dev/null || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 CMD curl --fail --silent --show-error --cacert /etc/network-mapping/tls/ca.pem --resolve "$SERVER_TLS_NAME:${NM__SERVER__PORT:-9999}:127.0.0.1" "https://$SERVER_TLS_NAME:${NM__SERVER__PORT:-9999}/login" > /dev/null || exit 1
 ENTRYPOINT ["/opt/network-mapping/bin/network_mapping_server"]
-CMD ["--config", "/etc/network-mapping/config.toml"]
+CMD ["--config-source", "env"]

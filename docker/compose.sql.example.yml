@@ -1,6 +1,6 @@
 # Optional override: the normal compose file always uses the bundled SQL.
 # Set SERVER_SQL_DIRECTORY to an existing directory containing reviewed SQL,
-# then set database.init_database_file / sql_file_path in runtime/config.toml.
+# then set NM__DATABASE__INIT_DATABASE_FILE / NM__DATABASE__SQL_FILE_PATH in .env.
 services:
   server:
     volumes:

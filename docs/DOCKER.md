@@ -4,7 +4,7 @@
 
 服务端镜像包含 Rust 后端、固定提交的 Vue 前端 dist、SQL 和模板；PostgreSQL、Elasticsearch 独立运行。
 镜像地址为 `ghcr.io/wshijiang/network-mapping-server`，支持 Linux AMD64/ARM64。
-Rust 使用 1.98.0、Node 24.16.0、pnpm 11.9.0；构建与运行环境采用 Debian 12，基础镜像固定多架构 digest。
+Rust 使用 1.99.0、Node 26.11.1、pnpm 11.9.0；构建与运行环境采用 Debian 12，基础镜像固定多架构 digest。
 真实配置、TLS、日志、数据库、本机二进制和 Git 目录通过构建上下文允许清单排除，最终镜像没有编译器或源代码。
 
 ## 固定前端与本地构建
@@ -42,11 +42,11 @@ docker buildx build --build-context frontend=../network-mapping-vue \
 随镜像提供的手工迁移、验证、查询及设计草案 SQL 不会因为打包而额外自动执行。
 
 需要自定义 SQL 时，将审核后的文件放入宿主机独立目录，在 `docker/.env` 设置
-`SERVER_SQL_DIRECTORY=/srv/network-mapping/sql`，按需修改运行配置已有的 `[database]` 路径：
+`SERVER_SQL_DIRECTORY=/srv/network-mapping/sql`，按需配置 SQL 路径：
 
-```toml
-init_database_file = "/etc/network-mapping/sql/init.sql"
-sql_file_path = "/etc/network-mapping/sql/"
+```dotenv
+NM__DATABASE__INIT_DATABASE_FILE=/etc/network-mapping/sql/init.sql
+NM__DATABASE__SQL_FILE_PATH=/etc/network-mapping/sql/
 ```
 
 只需覆盖其中一项时保留另一项的内置路径。自定义目录需包含所选路径使用的 SQL 文件，
@@ -68,16 +68,30 @@ docker compose --env-file docker/.env -f docker/compose.example.yml \
 
 ```sh
 mkdir -p docker/runtime/tls
-cp docker/config.example.toml docker/runtime/config.toml
 cp docker/.env.example docker/.env
 openssl rand -base64 32
 openssl rand -hex 32
 openssl rand -hex 24
 ```
 
-将上述三个随机值分别填写到运行配置的 `server.encrypt_key`、`security.scanner_token_pepper`、
-`database.password`。将同一数据库密码写入 `docker/runtime/postgres_password`，不得提交这些文件。
-首次初始化后修改该文件不会自动修改 PG 中已存在的角色密码。
+将上述三个随机值分别填写到 `docker/.env` 的 `NM__SERVER__ENCRYPT_KEY`、
+`NM__SECURITY__SCANNER_TOKEN_PEPPER`、`NM__DATABASE__PASSWORD`。Compose 将数据库密码同时
+传给服务端和 PostgreSQL；已有 PG 数据卷的角色密码不会随 env 修改自动改变。
+`.env` 不提交到仓库，建议权限 0600。
+
+Docker 的默认入口为 `--config-source env`，Compose 使用 `env_file: ./.env` 注入参数，
+无需挂载 TOML。`--env-file` 负责 Compose 插值，不能单独代替服务级 `env_file`。
+变量规则为 `NM__SECTION__FIELD`，映射到 `section.field`；数字和布尔值按类型校验，数组/对象用 JSON。
+未知变量报错；字符串密码不会因为只含数字而被转换为数字。支持字段对应的 `_FILE` 输入，
+例如 `NM__SERVER__ENCRYPT_KEY_FILE=/run/secrets/encrypt_key`，与直接值不能同时配置。
+示例 Compose 的 PG 使用直接密码；使用外部 Secret 时需同步配置 PG 的密码来源。
+
+SQL、模板、前端和日志路径等容器默认值内置在程序中，不依赖宿主机配置文件。
+文件部署继续使用 `--config config.toml`（默认 file 模式）。需要兼容旧容器挂载时，显式使用
+`--config-source file --config /etc/network-mapping/config.toml`。
+env 模式的相对路径以进程工作目录为基准。日志和 Web 检查不展示密钥值。
+Web 管理的运行设置继续以数据库为准，env 只提供缺失记录的初始值。
+修改 `.env` 后执行 `docker compose ... up -d --force-recreate` 重新注入环境，单纯 restart 不更新环境。
 
 准备可信 TLS 文件 `docker/runtime/tls/cert.pem`、`key.pem` 和 `ca.pem`；
 ca.pem 用于容器健康探针，必须能验证 cert.pem。`.env` 的 `SERVER_TLS_NAME` 填证书中的真实 DNS 名，
@@ -101,8 +115,8 @@ docker compose --env-file docker/.env -f docker/compose.example.yml ps
 `SERVER_BIND_ADDRESS=0.0.0.0` 并配置防火墙、可信 DNS 和证书。
 
 ES 示例关闭认证，只适用于隔离的单宿主机网络。生产应按 [ES 指南](ELASTICSEARCH.md)
-配置认证与 TLS，并调整 TOML、CA 挂载及 ES healthcheck。PG 当前使用 NoTls，跨主机连接不能靠
-`database.tls=true` 获得加密。宿主机需满足 ES 内存、文件描述符及 vm.max_map_count 要求，
+配置认证与 TLS，并调整对应 env 参数、CA 挂载及 ES healthcheck。PG 当前使用 NoTls，跨主机连接不能靠
+`NM__DATABASE__TLS=true` 获得加密。宿主机需满足 ES 内存、文件描述符及 vm.max_map_count 要求，
 例如由管理员设置 `vm.max_map_count=1048576`；不要从 Web 容器修改宿主机内核参数。
 
 server-data 保存诊断与可选 MaxMind 数据，server-logs 保存滚动 JSON 日志；数据库分别有独立数据卷。
@@ -124,7 +138,7 @@ PG 就绪探测通过 TCP，避开初始化临时实例的 Unix socket；就绪�
 
 `.github/workflows/docker.yml` 在 `main`、`dev`、`dev/**`、`feature/**`、`fix/**`、
 `release/**` 提交以及面向 `main`/`dev` 的 PR 上运行；扫描仓库另外兼容现有 `rust` 分支。
-`workflow_dispatch` 只构建，不发布。工作流文件需先进入远端相应分支，手动入口需在默认 `main` 中存在。
+`workflow_dispatch` 留空版本时只构建；填写 `promote_version` 时只提升已发布镜像的 latest。工作流文件需先进入远端相应分支，手动入口需在默认 `main` 中存在。
 
 两个原生 runner 分别构建 `linux/amd64` 与 `linux/arm64`，Dockerfile 内执行
 `cargo fmt --check`、`cargo clippy --locked --all-targets`、`cargo test --locked` 和 release 构建。

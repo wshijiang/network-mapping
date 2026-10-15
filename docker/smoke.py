@@ -178,12 +178,12 @@ def main():
             for file in tls.iterdir():
                 file.chmod(0o644)  # Only disposable CI certificates, removed on exit.
             password = secrets.token_hex(24)
-            content = Path('docker/config.example.toml').read_text()
-            content = content.replace('encrypt_key = ""', f'encrypt_key = "{base64.b64encode(secrets.token_bytes(32)).decode()}"')
-            content = content.replace('scanner_token_pepper = ""', f'scanner_token_pepper = "{secrets.token_hex(32)}"')
-            content = content.replace('password = ""', f'password = "{password}"')
-            (directory/'config.toml').write_text(content)
-            (directory/'config.toml').chmod(0o644)
+            content = (f'NM__SERVER__ENCRYPT_KEY={base64.b64encode(secrets.token_bytes(32)).decode()}\n'
+                       f'NM__SECURITY__SCANNER_TOKEN_PEPPER={secrets.token_hex(32)}\n'
+                       f'NM__DATABASE__PASSWORD={password}\n')
+            env_file = directory/'server.env'
+            env_file.write_text(content)
+            env_file.chmod(0o600)
             pg_name = namespace+'-pg'
             start(pg_name, PG_IMAGE, '--network-alias', 'postgres', '-e', 'POSTGRES_USER=network_mapping',
                   '-e', 'POSTGRES_DB=network_mapping', '-e', 'POSTGRES_PASSWORD='+password)
@@ -191,7 +191,8 @@ def main():
                        containers=(es_name, pg_name))
             server = namespace+'-server'
             start(server, image, '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
-                  '-e', 'SERVER_TLS_NAME=localhost', '--mount', f'type=bind,src={directory},dst=/etc/network-mapping,readonly',
+                  '-e', 'SERVER_TLS_NAME=localhost', '--env-file', str(env_file),
+                  '--mount', f'type=bind,src={tls},dst=/etc/network-mapping/tls,readonly',
                   '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m',
                   '--tmpfs', '/var/lib/network-mapping:rw,uid=10001,gid=10001,mode=0700',
                   '--tmpfs', '/var/log/network-mapping:rw,uid=10001,gid=10001,mode=0700')

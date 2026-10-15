@@ -1419,6 +1419,53 @@ pub struct MailTestRequest {
 }
 
 impl Config {
+    pub fn from_env_with_check() -> Result<(Self, crate::config_check::ConfigCheck), std::io::Error>
+    {
+        Self::from_env_pairs(std::env::vars())
+    }
+
+    fn from_env_pairs(
+        pairs: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<(Self, crate::config_check::ConfigCheck), std::io::Error> {
+        // Embedded public container defaults contain no deployment credentials.
+        let mut raw: serde_json::Value =
+            toml::from_str(include_str!("../docker/config.example.toml"))
+                .map_err(|_| std::io::Error::other("invalid embedded container defaults"))?;
+        crate::config_env::apply(
+            &mut raw,
+            pairs,
+            crate::config_check::environment_field_allowed,
+        )?;
+        for path in [
+            "/server/encrypt_key",
+            "/security/scanner_token_pepper",
+            "/database/password",
+        ] {
+            if raw
+                .pointer(path)
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "required environment field {} is missing or empty",
+                        path.trim_start_matches('/').replace('/', ".")
+                    ),
+                ));
+            }
+        }
+        let report = crate::config_check::inspect_server(&raw);
+        let mut config: Self = serde_json::from_value(raw).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "environment configuration has invalid field types",
+            )
+        })?;
+        config.resolve_paths(&std::env::current_dir()?.join(".environment"));
+        Ok((config, report))
+    }
+
     pub fn from_file<P: AsRef<Path>>(path: P) -> Self {
         Self::from_file_with_check(path)
             .expect("无法加载配置文件")
@@ -1451,6 +1498,12 @@ impl Config {
                 format!("配置字段无效：{}", error.message()),
             )
         })?;
+        config.resolve_paths(path);
+        Ok((config, report))
+    }
+
+    fn resolve_paths(&mut self, path: &Path) {
+        let config = self;
         if config.scanner_diagnostics.directory.is_relative() {
             config.scanner_diagnostics.directory = path
                 .parent()
@@ -1463,12 +1516,44 @@ impl Config {
         config.backup.resolve_relative_to(path);
         config.elasticsearch.resolve_relative_to(path);
         config.report_renderer.resolve_relative_to(path);
-        Ok((config, report))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn environment_loads_without_a_config_file_and_keeps_builtin_sql_paths() {
+        let pairs = [
+            (
+                "NM__SERVER__ENCRYPT_KEY",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            ),
+            (
+                "NM__SECURITY__SCANNER_TOKEN_PEPPER",
+                "fixture-pepper-at-least-32-characters",
+            ),
+            ("NM__DATABASE__PASSWORD", "00123"),
+            ("NM__DATABASE__PORT", "5433"),
+        ]
+        .map(|(k, v)| (k.to_owned(), v.to_owned()));
+        let (config, report) = super::Config::from_env_pairs(pairs).unwrap();
+        assert_eq!(config.database.port, 5433);
+        assert_eq!(config.database.password, "00123");
+        assert_eq!(
+            config.database.init_database_file,
+            "/opt/network-mapping/source/database/init.sql"
+        );
+        assert_eq!(
+            config.database.sql_file_path,
+            "/opt/network-mapping/source/database/"
+        );
+        assert_eq!(report.error_count(), 0);
+    }
+    #[test]
+    fn environment_requires_deployment_secrets() {
+        let error = super::Config::from_env_pairs([]).unwrap_err();
+        assert!(error.to_string().contains("server.encrypt_key"));
+    }
     use super::{
         AutomaticTargetConfig, BackupConfig, Clis, DatabaseConfig, ElasticsearchConfig,
         FrontendConfig, MaxMindConfig, MonitorConfig, NotificationPreferences, SecurityConfig,
@@ -2027,6 +2112,9 @@ pub struct MailConfig {
     about = "这是一个网络测绘系统的服务端，可用于向扫描器分发扫描任务，并接收扫描器上传的数据，然后存入数据库。"
 )]
 pub struct Clis {
+    /// 配置来源：文件部署使用 file，Docker 使用 env
+    #[arg(long, value_enum, default_value = "file")]
+    pub config_source: ConfigSource,
     /// 配置文件路径
     #[arg(long, default_value = "config.toml")]
     pub config: String,
@@ -2058,6 +2146,12 @@ pub struct Clis {
     /// 从所有已成功的 IP 扫描执行重建分析快照后退出；不会修改扫描原始事实
     #[arg(long)]
     pub rebuild_analytics_snapshots: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ConfigSource {
+    File,
+    Env,
 }
 
 #[derive(Debug, Subcommand)]

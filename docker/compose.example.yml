@@ -2,6 +2,7 @@ name: network-mapping
 services:
   server:
     image: ${SERVER_IMAGE:?Set SERVER_IMAGE to an approved version or digest}
+    env_file: ./.env
     init: true
     restart: unless-stopped
     user: "10001:10001"
@@ -10,9 +11,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    ports: ["${SERVER_BIND_ADDRESS:-127.0.0.1}:9999:9999"]
+    ports: ["${SERVER_BIND_ADDRESS:-127.0.0.1}:${SERVER_PUBLISH_PORT:-9999}:${NM__SERVER__PORT:-9999}"]
     volumes:
-      - ./runtime/config.toml:/etc/network-mapping/config.toml:ro
       - ./runtime/tls:/etc/network-mapping/tls:ro
       - server-data:/var/lib/network-mapping
       - server-logs:/var/log/network-mapping
@@ -31,13 +31,12 @@ services:
     image: postgres:18.6-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c
     restart: unless-stopped
     environment:
-      POSTGRES_USER: network_mapping
-      POSTGRES_DB: network_mapping
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-    secrets: [postgres_password]
+      POSTGRES_USER: ${NM__DATABASE__USERNAME:-network_mapping}
+      POSTGRES_DB: ${NM__DATABASE__DB_NAME:-network_mapping}
+      POSTGRES_PASSWORD: ${NM__DATABASE__PASSWORD:?Set NM__DATABASE__PASSWORD in docker/.env}
     volumes: ["postgres-data:/var/lib/postgresql"]
     healthcheck:
-      test: [CMD, pg_isready, -h, 127.0.0.1, -t, "3", -U, network_mapping, -d, network_mapping]
+      test: [CMD-SHELL, 'pg_isready -h 127.0.0.1 -t 3 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
       interval: 10s
       timeout: 5s
       retries: 20
@@ -65,9 +64,6 @@ services:
     ulimits:
       nofile: {soft: 65536, hard: 65536}
 
-secrets:
-  postgres_password:
-    file: ./runtime/postgres_password
 volumes:
   server-data:
   server-logs:
