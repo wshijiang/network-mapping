@@ -33,6 +33,35 @@ docker buildx build --build-context frontend=../network-mapping-vue \
 
 启动配置检查同时适用于文件和 Docker 部署，不修改只读挂载文件；Web 提示和升级后的处理方式见 [启动配置检查](CONFIG_CHECK.md)。
 
+## 内置 SQL 与可选自定义 SQL
+
+镜像默认包含仓库全部 SQL：`source/database/` 下的初始化、查询和迁移脚本，以及
+`docs/` 下的 SQL，目录保留在 `/opt/network-mapping/` 中。`SQL-SHA256SUMS` 记录内置文件的摘要；
+两个架构的 CI 都逐文件核对镜像内容与发布源码。默认配置直接使用内置 `init.sql` 与 SQL 目录，
+首次启动无需挂载 SQL；初始化和自动迁移仍按服务端原有顺序执行。
+随镜像提供的手工迁移、验证、查询及设计草案 SQL 不会因为打包而额外自动执行。
+
+需要自定义 SQL 时，将审核后的文件放入宿主机独立目录，在 `docker/.env` 设置
+`SERVER_SQL_DIRECTORY=/srv/network-mapping/sql`，按需修改运行配置已有的 `[database]` 路径：
+
+```toml
+init_database_file = "/etc/network-mapping/sql/init.sql"
+sql_file_path = "/etc/network-mapping/sql/"
+```
+
+只需覆盖其中一项时保留另一项的内置路径。自定义目录需包含所选路径使用的 SQL 文件，
+例如查询目录中的 `get_table_size.sql`；文件须允许 UID 10001 读取。使用可选 Compose 覆盖文件：
+
+```sh
+docker compose --env-file docker/.env -f docker/compose.example.yml \
+  -f docker/compose.sql.example.yml config --quiet
+docker compose --env-file docker/.env -f docker/compose.example.yml \
+  -f docker/compose.sql.example.yml up -d
+```
+
+此挂载位于独立的只读目录，镜像自带 SQL 仍可使用。配置路径不改变程序内嵌自动迁移的执行逻辑；
+额外维护脚本由管理员按对应迁移文档执行。
+
 ## 准备运行配置
 
 从 `network-mapping/` 运行：
@@ -140,7 +169,25 @@ tag 必须与 Cargo.toml/Cargo.lock 版本一致，且提交已包含于远端 `
 
 首次引入 Docker 发布也应使用新的、明确批准的版本，不能为触发新工作流重推或复用已发布 tag。
 
-发布生成 `vX.Y.Z` 和 `sha-<完整提交>`；不自动维护 `latest`，避免并发旧版本覆盖新版本。
+发布生成 `vX.Y.Z` 和 `sha-<完整提交>`；稳定版本发布成功后自动维护以下可移动标签：
+
+| 标签 | 运行架构 |
+| --- | --- |
+| `ghcr.io/wshijiang/network-mapping-server-amd64:latest` | 仅 Linux AMD64，保留该架构的构建证明 |
+| `ghcr.io/wshijiang/network-mapping-server-arm64:latest` | 仅 Linux ARM64，保留该架构的构建证明 |
+
+`docker/latest.py` 先读回正式版本，核对组件、Git tag 对应提交、两种架构的配置和各自证明的关联。
+按数值比较稳定版本，旧版本不能覆盖更新的 latest；预发布版本不移动 latest。
+所有标签更新与正式发布共享仓库级并发锁。两个架构使用独立的镜像名称，各自维护 `:latest`。
+Skopeo 跨镜像仓库复制对应架构的全部 layers 和构建证明，逐个读回核对 digest；
+注册表不支持两个镜像仓库的原子事务，失败后可重试修复部分更新。
+版本与 SHA 标签保持不可变，latest 不替代生产部署的 digest 固定。
+
+已有正式镜像可在 **Docker images → Run workflow** 填写 `promote_version`（如 `0.1.28`），
+复用相同校验与 `container-release` 环境，仅补齐 latest，不构建、不重推版本或 SHA 标签。
+此入口不依赖 `DOCKER_PUBLISH_ENABLED`：它只提升已存在的正式镜像；留空仍只构建。
+首次创建这两个 GHCR 包后，检查它们各自的可见性和 Actions 访问权限。
+
 若任一正式标签已经存在，立即拒绝覆盖。网络/认证失败也会停止，不能视为标签不存在。
 发布后读回 manifest，确认两种架构、证明文件和标签 digest 一致，并在运行摘要记录 digest。
 `build-<run-id>-<attempt>-<arch>` 是发布阶段上传 OCI 的暂存标签，不是稳定版本；暂不自动删除。

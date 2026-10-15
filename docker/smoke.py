@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Smoke-test the image loaded from the verified OCI archive, using disposable containers."""
 import base64
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -97,6 +98,20 @@ def best_effort_docker(*args):
     return result
 
 
+def verify_sql_bundle(image):
+    paths = command('git', 'ls-files', '--', '*.sql').stdout.splitlines()
+    assert paths, 'No tracked SQL files found'
+    expected = {path: hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in paths}
+    result = docker('run', '--rm', '--entrypoint', 'sha256sum', image,
+                    *('/opt/network-mapping/' + path for path in paths))
+    actual = {}
+    for line in result.stdout.splitlines():
+        checksum, path = line.split(None, 1)
+        actual[path.strip().removeprefix('/opt/network-mapping/')] = checksum
+    assert actual == expected, 'Bundled SQL differs from the release sources'
+    docker('run', '--rm', '--entrypoint', 'sha256sum', image, '--check', 'SQL-SHA256SUMS')
+
+
 def main():
     image, metadata_path = sys.argv[1:]
     metadata = json.loads(Path(metadata_path).read_text())
@@ -105,6 +120,8 @@ def main():
     assert config['Architecture'] == metadata['architecture']
     version = docker('run', '--rm', image, '--version').stdout
     assert metadata['version'] in version
+    if metadata['component'] == 'server':
+        verify_sql_bundle(image)
     namespace = 'nm-smoke-'+uuid.uuid4().hex[:12]
     containers = []
     network_created = False

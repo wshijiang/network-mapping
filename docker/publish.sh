@@ -57,3 +57,4 @@ sha_digest="$(docker buildx imagetools inspect "$IMAGE:sha-$REVISION" --format '
 test "$version_digest" = "$sha_digest"
 # shellcheck disable=SC2016 # Markdown code spans are literal printf text.
 printf 'Published `%s:v%s`\n\nDigest: `%s`\n\nCommit: `%s`\n' "$IMAGE" "$VERSION" "$version_digest" "$REVISION" >> "$GITHUB_STEP_SUMMARY"
+python3 docker/latest.py --component "$COMPONENT" --version "$VERSION"

@@ -56,6 +56,9 @@ pool_wait_timeout_ms = 2000
 pool_create_timeout_ms = 5000
 pool_recycle_timeout_ms = 3000
 tls = false
+# Built-in SQL is present in the image; no external SQL mount is required.
+# Optional custom files: enable compose.sql.example.yml and point these paths
+# at /etc/network-mapping/sql/init.sql and /etc/network-mapping/sql/.
 init_database_file = "/opt/network-mapping/source/database/init.sql"
 sql_file_path = "/opt/network-mapping/source/database/"
 

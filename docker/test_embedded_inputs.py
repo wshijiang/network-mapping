@@ -2,12 +2,34 @@
 import fnmatch
 from pathlib import Path
 import re
+import subprocess
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class EmbeddedInputsTests(unittest.TestCase):
+    def test_every_tracked_sql_is_in_the_runtime_copy_inputs(self):
+        paths = subprocess.check_output(['git', 'ls-files', '--', '*.sql'], cwd=ROOT, text=True).splitlines()
+        self.assertIn('source/database/init.sql', paths)
+        self.assertIn('docs/MODULE_RUNTIME_MIGRATION.sql', paths)
+        rules = [line.strip() for line in (ROOT / '.dockerignore').read_text().splitlines()
+                 if line.strip() and not line.lstrip().startswith('#')]
+        runtime = (ROOT / 'Dockerfile').read_text().split(' AS runtime\n', 1)[1]
+        sources = []
+        for line in runtime.splitlines():
+            if line.startswith('COPY ') and '--from=' not in line:
+                sources.extend(line.split()[1:-1])
+        for path in paths:
+            with self.subTest(path=path):
+                included = False
+                for rule in rules:
+                    if fnmatch.fnmatch(path, rule.lstrip('!').rstrip('/')):
+                        included = rule.startswith('!')
+                self.assertTrue(included, f'{path} excluded from Docker context')
+                self.assertTrue(any(fnmatch.fnmatch(path, source) or Path(source) in Path(path).parents
+                                    for source in sources), f'{path} missing from runtime COPY')
+
     def test_open_api_embedded_inputs_are_allowed_and_copied(self):
         rules = [line.strip() for line in (ROOT / '.dockerignore').read_text().splitlines()
                  if line.strip() and not line.lstrip().startswith('#')]

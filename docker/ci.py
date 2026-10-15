@@ -79,8 +79,8 @@ def verify_archive(archive, arch, component, version, revision, frontend):
                     predicate_types.add(statement.get('predicateType', ''))
             elif 'config' in obj:
                 config = document(obj['config']['digest'])
-                if config.get('os') == 'linux' and config.get('architecture') == arch:
-                    runtime.append((obj, config))
+                assert config.get('os') == 'linux' and config.get('architecture') == arch, 'Unexpected runtime architecture in OCI archive'
+                runtime.append((obj, config))
         assert len(runtime) == 1, 'Expected exactly one runtime image for the requested architecture'
         assert attestations, 'SBOM/provenance attestations are missing'
         assert 'https://spdx.dev/Document' in predicate_types, 'SPDX SBOM is missing'

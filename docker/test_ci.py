@@ -18,7 +18,7 @@ class ArchiveTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name)/'image-amd64.oci.tar'
 
-    def fixture(self, architecture='amd64', attestations=True, corrupt=False, unsafe=False, component='server', sbom=True):
+    def fixture(self, architecture='amd64', attestations=True, corrupt=False, unsafe=False, component='server', sbom=True, extra_architecture=False):
         blobs = {}
 
         def blob(value):
@@ -37,6 +37,9 @@ class ArchiveTests(unittest.TestCase):
         image = blob({'schemaVersion': 2, 'config': config, 'layers': []})
         image['platform'] = {'os': 'linux', 'architecture': architecture}
         manifests = [image]
+        if extra_architecture:
+            other_config = blob({'architecture': 'arm64', 'os': 'linux'})
+            manifests.append(blob({'schemaVersion': 2, 'config': other_config, 'layers': []}))
         if attestations:
             layers = [blob({'predicateType': 'https://slsa.dev/provenance/v1'})]
             if sbom:
@@ -80,7 +83,12 @@ class ArchiveTests(unittest.TestCase):
 
     def test_wrong_architecture_is_rejected(self):
         self.fixture(architecture='arm64')
-        with self.assertRaisesRegex(AssertionError, 'runtime image'):
+        with self.assertRaisesRegex(AssertionError, 'runtime architecture'):
+            self.verify()
+
+    def test_mixed_architecture_archive_is_rejected(self):
+        self.fixture(extra_architecture=True)
+        with self.assertRaisesRegex(AssertionError, 'runtime architecture'):
             self.verify()
 
     def test_corrupt_blob_is_rejected(self):

@@ -1,10 +1,38 @@
 """Readiness waits must reject partial startup and preserve the original failure."""
 import json
+import hashlib
 import subprocess
 import unittest
 from unittest.mock import patch
 
 import smoke
+
+
+class SqlBundleTests(unittest.TestCase):
+    def verify(self, output):
+        files = subprocess.CompletedProcess([], 0, stdout='source/database/init.sql\ndocs/migration.sql\n')
+        result = subprocess.CompletedProcess([], 0, stdout=output)
+        with patch('smoke.command', return_value=files), \
+             patch('smoke.Path.read_bytes', return_value=b'fixture sql'), \
+             patch('smoke.docker', return_value=result) as docker:
+            smoke.verify_sql_bundle('server-image')
+            return docker
+
+    def test_all_sql_paths_and_contents_are_verified(self):
+        checksum = hashlib.sha256(b'fixture sql').hexdigest()
+        calls = self.verify(f'{checksum}  /opt/network-mapping/source/database/init.sql\n'
+                            f'{checksum}  /opt/network-mapping/docs/migration.sql\n')
+        self.assertEqual(calls.call_count, 2)
+
+    def test_missing_documentation_sql_fails(self):
+        checksum = hashlib.sha256(b'fixture sql').hexdigest()
+        with self.assertRaisesRegex(AssertionError, 'Bundled SQL'):
+            self.verify(f'{checksum}  /opt/network-mapping/source/database/init.sql\n')
+
+    def test_changed_sql_contents_fail(self):
+        with self.assertRaisesRegex(AssertionError, 'Bundled SQL'):
+            self.verify('invalid  /opt/network-mapping/source/database/init.sql\n'
+                        'invalid  /opt/network-mapping/docs/migration.sql\n')
 
 
 class ElasticsearchReadinessTests(unittest.TestCase):
@@ -80,7 +108,7 @@ class StartupTests(unittest.TestCase):
 
 class FailureCleanupTests(unittest.TestCase):
     def test_diagnostic_and_cleanup_timeouts_preserve_original_error(self):
-        metadata = {'config_digest': 'sha256:fixture', 'architecture': 'amd64', 'version': '1.2.3'}
+        metadata = {'config_digest': 'sha256:fixture', 'architecture': 'amd64', 'version': '1.2.3', 'component': 'server'}
         def docker(*args, **kwargs):
             if args[:2] == ('image', 'inspect'):
                 body = json.dumps([{'Id': metadata['config_digest'], 'Architecture': 'amd64'}])
@@ -94,6 +122,7 @@ class FailureCleanupTests(unittest.TestCase):
         with patch('smoke.sys.argv', ['smoke.py', 'fixture-image', 'fixture-metadata.json']), \
              patch('smoke.Path.read_text', return_value=json.dumps(metadata)), \
              patch('smoke.docker', side_effect=docker) as calls, \
+             patch('smoke.verify_sql_bundle'), \
              patch('smoke.wait_until', side_effect=RuntimeError('original readiness failure')), \
              patch('smoke.sys.stderr'):
             with self.assertRaisesRegex(RuntimeError, 'original readiness failure'):

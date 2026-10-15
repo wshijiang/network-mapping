@@ -19,6 +19,7 @@
 !docs/OPEN_API.md
 !docs/OPEN_API_MANAGEMENT.md
 !docs/OPEN_API_IMPLEMENTATION.md
+!docs/*.sql
 !docs/open-api/
 !docs/open-api/openapi.json
 

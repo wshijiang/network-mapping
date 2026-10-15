@@ -73,6 +73,9 @@ COPY source/database ./source/database
 COPY source/open_source_projects.json ./source/open_source_projects.json
 COPY templates ./templates
 COPY LICENSE ./licenses/LICENSE
+COPY docs/*.sql ./docs/
+RUN find source/database docs -type f -name '*.sql' -print0 | sort -z | xargs -0 sha256sum > SQL-SHA256SUMS \
+    && sha256sum --check SQL-SHA256SUMS
 COPY assets/fonts/Noto-LICENSE.txt assets/fonts/Apache-2.0.txt ./licenses/
 COPY --from=frontend-builder /frontend/LICENSE ./licenses/frontend-LICENSE
 COPY --from=rust-builder /out/rust-build-info ./rust-build-info
