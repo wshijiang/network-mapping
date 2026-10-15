@@ -240,6 +240,7 @@ pub fn inspect_server(raw: &Value) -> ConfigCheck {
     use crate::config::*;
     // The schema's optional fields and values come from the application's own Defaults.
     let defaults = json!({
+        "tls": {"enabled": default_tls_enabled()},
         "server": {"max_body_size": default_max_body_size()},
         "database": {"pool_wait_timeout_ms": default_pool_wait_timeout_ms(),
             "pool_create_timeout_ms": default_pool_create_timeout_ms(), "pool_recycle_timeout_ms": default_pool_recycle_timeout_ms()},
@@ -252,37 +253,34 @@ pub fn inspect_server(raw: &Value) -> ConfigCheck {
         "analytics_snapshot": AnalyticsSnapshotConfig::default(),
         "report_mail": crate::reports::mail_config::ReportMailConfig::default(),
     });
-    let mut report = ConfigCheck::inspect(
-        raw,
-        &defaults,
-        &[
-            "server.host",
-            "server.port",
-            "server.encrypt_key",
-            "tls.certificate_chain_file",
-            "tls.private_key_file",
-            "log.directory",
-            "log.file_name",
-            "log.file_rolling",
-            "log.status_duration",
-            "templates.templates_directory",
-            "templates.templates_name",
-            "database.host",
-            "database.port",
-            "database.username",
-            "database.password",
-            "database.db_name",
-            "database.pool_max_size",
-            "database.tls",
-            "database.init_database_file",
-            "database.sql_file_path",
-            "pwd_hash.m",
-            "pwd_hash.t",
-            "pwd_hash.p",
-            "security.scanner_token_pepper",
-        ],
-        "server",
-    );
+    let mut required = vec![
+        "server.host",
+        "server.port",
+        "server.encrypt_key",
+        "log.directory",
+        "log.file_name",
+        "log.file_rolling",
+        "log.status_duration",
+        "templates.templates_directory",
+        "templates.templates_name",
+        "database.host",
+        "database.port",
+        "database.username",
+        "database.password",
+        "database.db_name",
+        "database.pool_max_size",
+        "database.tls",
+        "database.init_database_file",
+        "database.sql_file_path",
+        "pwd_hash.m",
+        "pwd_hash.t",
+        "pwd_hash.p",
+        "security.scanner_token_pepper",
+    ];
+    if lookup(raw, "tls.enabled").and_then(Value::as_bool) != Some(false) {
+        required.extend(["tls.certificate_chain_file", "tls.private_key_file"]);
+    }
+    let mut report = ConfigCheck::inspect(raw, &defaults, &required, "server");
     report
         .items
         .retain(|item| PUBLIC_CONFIG_FIELDS.contains(&item.field.as_str()));

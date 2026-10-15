@@ -13,6 +13,7 @@ encrypt_key = ""
 max_body_size = 67108864
 
 [tls]
+enabled = true
 certificate_chain_file = "/etc/network-mapping/tls/cert.pem"
 private_key_file = "/etc/network-mapping/tls/key.pem"
 

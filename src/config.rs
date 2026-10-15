@@ -60,18 +60,50 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct TlsConfig {
+    #[serde(default = "default_tls_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
     pub certificate_chain_file: PathBuf,
+    #[serde(default)]
     pub private_key_file: PathBuf,
 }
 
+pub(crate) fn default_tls_enabled() -> bool {
+    true
+}
+
 impl TlsConfig {
+    pub fn validate_listener(&self, host: &str) -> std::io::Result<()> {
+        if self.enabled {
+            if self.certificate_chain_file.as_os_str().is_empty()
+                || self.private_key_file.as_os_str().is_empty()
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "启用 TLS 时必须配置 tls.certificate_chain_file 和 tls.private_key_file",
+                ));
+            }
+        } else if !host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "tls.enabled = false 时 server.host 只能是回环 IP 地址（127.0.0.0/8 或 ::1）；不接受通配地址、内网地址或主机名",
+            ));
+        }
+        Ok(())
+    }
+
     fn resolve_relative_to(&mut self, config_path: &Path) {
         let base_directory = config_path.parent().unwrap_or_else(|| Path::new(""));
 
-        if self.certificate_chain_file.is_relative() {
+        if !self.certificate_chain_file.as_os_str().is_empty()
+            && self.certificate_chain_file.is_relative()
+        {
             self.certificate_chain_file = base_directory.join(&self.certificate_chain_file);
         }
-        if self.private_key_file.is_relative() {
+        if !self.private_key_file.as_os_str().is_empty() && self.private_key_file.is_relative() {
             self.private_key_file = base_directory.join(&self.private_key_file);
         }
     }
@@ -79,6 +111,9 @@ impl TlsConfig {
 
 impl SelfChecking for Config {
     fn check(&self) {
+        self.tls
+            .validate_listener(&self.server.host)
+            .expect("invalid TLS listener configuration");
         self.scanner_diagnostics
             .validate()
             .expect("invalid scanner diagnostics configuration");
@@ -102,6 +137,7 @@ impl SelfChecking for Config {
     }
 
     fn try_check(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        self.tls.validate_listener(&self.server.host)?;
         self.scanner_diagnostics
             .validate()
             .map_err(|e| e.to_string())?;
@@ -1462,6 +1498,7 @@ impl Config {
                 "environment configuration has invalid field types",
             )
         })?;
+        config.tls.validate_listener(&config.server.host)?;
         config.resolve_paths(&std::env::current_dir()?.join(".environment"));
         Ok((config, report))
     }
@@ -1498,6 +1535,7 @@ impl Config {
                 format!("配置字段无效：{}", error.message()),
             )
         })?;
+        config.tls.validate_listener(&config.server.host)?;
         config.resolve_paths(path);
         Ok((config, report))
     }
@@ -1521,6 +1559,105 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tls_defaults_to_enabled_for_existing_configuration() {
+        let tls: super::TlsConfig =
+            toml::from_str("certificate_chain_file = 'cert.pem'\nprivate_key_file = 'key.pem'")
+                .unwrap();
+        assert!(tls.enabled);
+        assert!(tls.validate_listener("0.0.0.0").is_ok());
+        let missing: super::TlsConfig = toml::from_str("enabled = true").unwrap();
+        assert!(missing.validate_listener("127.0.0.1").is_err());
+    }
+
+    #[test]
+    fn plaintext_listener_only_accepts_literal_loopback_ips() {
+        let tls: super::TlsConfig = toml::from_str("enabled = false").unwrap();
+        for host in ["127.0.0.1", "127.0.0.2", "127.255.255.255", "::1"] {
+            assert!(tls.validate_listener(host).is_ok(), "{host}");
+        }
+        for host in [
+            "0.0.0.0",
+            "::",
+            "192.168.1.1",
+            "10.0.0.1",
+            "203.0.113.1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+            "localhost",
+            "localhost.localdomain",
+            "[::1]",
+            "",
+            "127.1",
+        ] {
+            assert!(tls.validate_listener(host).is_err(), "{host}");
+        }
+    }
+
+    #[test]
+    fn environment_tls_switch_rejects_unsafe_bindings_and_missing_certificates() {
+        for host in [
+            "127.0.0.1",
+            "::1",
+            "0.0.0.0",
+            "::",
+            "192.168.1.1",
+            "localhost",
+        ] {
+            let result = super::Config::from_env_pairs(environment_pairs(&[
+                ("NM__TLS__ENABLED", "false"),
+                ("NM__SERVER__HOST", host),
+                ("NM__TLS__CERTIFICATE_CHAIN_FILE", ""),
+                ("NM__TLS__PRIVATE_KEY_FILE", ""),
+            ]));
+            assert_eq!(
+                result.is_ok(),
+                matches!(host, "127.0.0.1" | "::1"),
+                "{host}"
+            );
+            if let Ok((config, report)) = result {
+                assert!(!config.tls.enabled);
+                assert!(config.tls.private_key_file.as_os_str().is_empty());
+                assert_eq!(report.error_count(), 0);
+            }
+        }
+        assert!(
+            super::Config::from_env_pairs(environment_pairs(&[
+                ("NM__TLS__ENABLED", "true"),
+                ("NM__TLS__PRIVATE_KEY_FILE", ""),
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn file_tls_switch_allows_omitted_certificates_only_on_loopback() {
+        let directory = std::env::temp_dir().join(format!("nm-tls-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.toml");
+        let mut raw: toml::Value =
+            toml::from_str(include_str!("../docker/config.example.toml")).unwrap();
+        raw["tls"] = toml::from_str::<toml::Value>("enabled = false").unwrap();
+        for host in ["127.0.0.1", "::1", "0.0.0.0", "localhost"] {
+            raw["server"]["host"] = toml::Value::String(host.into());
+            std::fs::write(&path, toml::to_string(&raw).unwrap()).unwrap();
+            let result = super::Config::from_file_with_check(&path);
+            assert_eq!(
+                result.is_ok(),
+                matches!(host, "127.0.0.1" | "::1"),
+                "{host}"
+            );
+            if let Ok((config, report)) = result {
+                assert!(config.tls.private_key_file.as_os_str().is_empty());
+                assert_eq!(report.error_count(), 0);
+            }
+        }
+        raw["tls"].as_table_mut().unwrap().remove("enabled");
+        std::fs::write(&path, toml::to_string(&raw).unwrap()).unwrap();
+        assert!(super::Config::from_file_with_check(&path).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     fn environment_pairs(extra: &[(&str, &str)]) -> Vec<(String, String)> {
         [
             (
@@ -1715,6 +1852,7 @@ mod tests {
     #[test]
     fn tls_paths_are_resolved_relative_to_config_file() {
         let mut tls = TlsConfig {
+            enabled: true,
             certificate_chain_file: PathBuf::from("ssl/cert.pem"),
             private_key_file: PathBuf::from("ssl/key.pem"),
         };
@@ -1734,6 +1872,7 @@ mod tests {
     #[test]
     fn absolute_tls_paths_are_unchanged() {
         let mut tls = TlsConfig {
+            enabled: true,
             certificate_chain_file: PathBuf::from("/run/secrets/cert.pem"),
             private_key_file: PathBuf::from("/run/secrets/key.pem"),
         };

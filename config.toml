@@ -6,6 +6,8 @@ encrypt_key = ""
 max_body_size = 67108864
 
 [tls]
+# 默认开启。关闭时 server.host 必须是回环 IP（127.0.0.0/8 或 ::1），证书可省略
+enabled = true
 # 相对路径以本配置文件所在目录为基准
 certificate_chain_file = "ssl/cert.pem"
 private_key_file = "ssl/key.pem"

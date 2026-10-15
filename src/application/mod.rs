@@ -396,7 +396,12 @@ pub async fn run(args: Clis) -> io::Result<()> {
         }
     });
 
-    let tls = build_acceptor(&config.tls)?;
+    let tls = if config.tls.enabled {
+        Some(build_acceptor(&config.tls)?)
+    } else {
+        None
+    };
+    let tls_config = web::Data::new(config.tls);
     let frontend_assets = FrontendAssets::new(frontend_directory);
     let frontend_directory = frontend_assets.directory().to_path_buf();
     let frontend_assets = web::Data::new(frontend_assets);
@@ -558,12 +563,13 @@ pub async fn run(args: Clis) -> io::Result<()> {
     let scanner_diagnostics_data = web::Data::new(scanner_diagnostics);
 
     let renderer_shutdown = report_renderer.clone();
-    let server_result = HttpServer::new(move || {
+    let http_server = HttpServer::new(move || {
         let request_log_tx = request_log_tx.clone();
         let runtime_settings = runtime_settings.clone();
         let monitor_handle = monitor_handle.clone();
 
         App::new()
+            .app_data(tls_config.clone())
             .app_data(web::Data::new(config_check.clone()))
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(template_info.clone()))
@@ -808,10 +814,21 @@ pub async fn run(args: Clis) -> io::Result<()> {
             .configure(frontend::configure)
             .configure(|cfg| frontend::configure_assets(cfg, &frontend_directory))
             .default_service(web::to(crate::handlers::utils::not_found))
-    })
-    .bind_openssl((server_host, server_port), tls)?
-    .run()
-    .await;
+    });
+    let scheme = if tls.is_some() { "https" } else { "http" };
+    let http_server = match tls {
+        Some(tls) => http_server.bind_openssl((server_host.as_str(), server_port), tls)?,
+        None => {
+            // Bind the same parsed IP that passed validation; never resolve a hostname here.
+            let address = server_host
+                .parse::<std::net::IpAddr>()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            http_server.bind(std::net::SocketAddr::new(address, server_port))?
+        }
+    };
+    info!(target: "server::startup", host = %server_host, port = server_port,
+        scheme, "HTTP 监听已绑定");
+    let server_result = http_server.run().await;
     background
         .shutdown(std::time::Duration::from_secs(150))
         .await;

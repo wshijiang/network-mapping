@@ -36,7 +36,7 @@ flowchart LR
     Scanner -->|节点路由及扫描协议| Target[授权目标]
 ```
 
-PG/ES 通常仅对服务端网络开放，扫描节点不需要直接连接存储，也不需要映射入站 API 端口。跨主机节点不能连接服务端的 `127.0.0.1`；Docker 默认仅发布本机地址，需要代理入口或明确修改发布地址。代理应转发完整 `/api/` 路径，支持 64 MiB 业务请求和 4 MiB 诊断分块，并使用可信 HTTPS 上游。
+PG/ES 通常仅对服务端网络开放，扫描节点不需要直接连接存储，也不需要映射入站 API 端口。跨主机节点不能连接服务端的 `127.0.0.1`；Docker 默认仅发布本机地址，需要代理入口或明确修改发布地址。代理应转发完整 `/api/` 路径，支持 64 MiB 业务请求和 4 MiB 诊断分块。默认使用可信 HTTPS 上游；同机代理可使用下文受回环绑定限制的 HTTP 上游。
 
 ### 配置来源
 
@@ -57,7 +57,7 @@ PG/ES 通常仅对服务端网络开放，扫描节点不需要直接连接存�
 | PostgreSQL | 预先创建数据库和登录角色；角色需要执行初始化 SQL 中的建表、索引及升级 DDL |
 | Elasticsearch | 支持正式版 9.5.x，服务端必须可访问并有创建/管理所需索引及读写权限 |
 | 前端 | 已构建的 `dist/`，包含 `index.html`、`login.html`、`search.html`、`asset.html` 和 `assets/` |
-| HTTPS | PEM 证书链与匹配私钥，域名与客户端访问地址一致 |
+| HTTPS | TLS 默认开启，需 PEM 证书链与匹配私钥；关闭服务端 TLS 时仅允许回环 HTTP，远程入口由代理提供 HTTPS |
 
 源码构建命令在对应仓库目录执行：
 
@@ -189,6 +189,7 @@ encrypt_key = "替换为上面生成的 Base64 密钥"
 max_body_size = 67108864
 
 [tls]
+enabled = true
 certificate_chain_file = "/etc/network-mapping/ssl/cert.pem"
 private_key_file = "/etc/network-mapping/ssl/key.pem"
 
@@ -200,7 +201,40 @@ scanner_token_pepper = "替换为上面生成的十六进制 Pepper"
 
 TLS 加载会检查文件可读性和证书/私钥匹配。扫描器和浏览器需信任证书链；私有 CA 应安装到客户端信任链，不应以关闭证书校验作为部署完成的标准。
 
-`127.0.0.1` 适用于同机代理入口。直接向外提供服务时修改监听地址，并按实际需要放行该 HTTPS 端口。服务端自身仍使用 HTTPS，反向代理上游也应使用 HTTPS；可信代理的来源 IP 设置见[双栈与可信代理](DUAL_STACK_SCANNING.md)。
+`tls.enabled` 默认为 `true`，旧配置省略该字段仍启用 TLS；启用时证书链和私钥均必填，文件不可读或不匹配会终止启动，不会自动退回 HTTP。`127.0.0.1` 适用于同机代理入口。直接向外提供服务时保持 TLS 开启，再修改监听地址，并按实际需要放行 HTTPS 端口。可信代理的来源 IP 设置见[双栈与可信代理](DUAL_STACK_SCANNING.md)。
+
+### 本地 HTTP
+
+修改现有配置的对应字段，保留数据库、长期密钥等其他必需参数：
+
+```toml
+[server]
+host = "127.0.0.1" # IPv6 使用 "::1"，不带方括号
+port = 9999
+
+[tls]
+enabled = false
+# 关闭 TLS 后可省略 certificate_chain_file 和 private_key_file，也不会读取已有证书路径
+```
+
+关闭 TLS 时只接受回环 IP 字面量：IPv4 的 `127.0.0.0/8` 或 IPv6 的 `::1`。`0.0.0.0`、`::`、内网/公网地址和 `localhost` 等主机名均会在连接数据库前被拒绝；不会自动修改监听地址。程序直接绑定校验通过的 IP，不通过 DNS 解析。该开关与 PostgreSQL 的 `database.tls`、Elasticsearch 的 HTTPS 配置互相独立。
+
+本机可通过 `curl --fail http://127.0.0.1:9999/login` 验证页面；本地 HTTP 会话 Cookie 不设 `Secure`，响应不下发 HSTS，HttpOnly 和 SameSite 规则继续生效。原有浏览器 HSTS 缓存可能仍将曾访问的域名升级到 HTTPS。
+
+远程浏览器和扫描器使用同机代理的 HTTPS 入口，代理将上游设为 `http://127.0.0.1:9999`。代理必须清除客户端的 `Forwarded` 并覆盖 `X-Forwarded-Proto`，以准确传递外部协议；HTTPS 入口的 Cookie 会保留 `Secure`。例如在已配置 TLS 的 Nginx `server` 块中：
+
+```nginx
+location / {
+    client_max_body_size 64m;
+    proxy_pass http://127.0.0.1:9999;
+    proxy_set_header Host $host;
+    proxy_set_header Forwarded "";
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $remote_addr;
+}
+```
+
+来源 IP 仍需在 Web 的可信代理设置中信任实际回环代理。跨主机代理不能连接此 HTTP 监听，应继续使用服务端 TLS。修改这些启动参数需要重启进程；切换协议后同步修改代理上游和本地探针的 URL。
 
 ### PostgreSQL 与运行目录
 
@@ -282,7 +316,7 @@ cd /opt/network-mapping/network-mapping
 sudo -u network-mapping ./network_mapping_server --config /etc/network-mapping/config.toml
 ```
 
-启动会检查配置、连接 PG、执行初始化 SQL、校验 ES 存储及加载运行策略，再加载 TLS 并绑定监听端口。前端文件缺失只产生警告，服务可能仍能启动，因此需要单独验收页面。
+启动会先检查 TLS 开关与监听地址，再检查其他配置、连接 PG、执行初始化 SQL、校验 ES 存储及加载运行策略，最后按开关加载 TLS 并绑定 HTTPS 或回环 HTTP 端口。前端文件缺失只产生警告，服务可能仍能启动，因此需要单独验收页面。
 
 数据库不存在管理员时，正常启动自动创建默认管理员，用户名通常为 `admin`，随机密码一次性输出到终端。`NM_DEFAULT_ADMIN_USERNAME` 可指定默认名前缀；用户名已被占用时可能带后缀，以实际输出为准。凭据不写入滚动 JSON 日志；首次前台启动便于保存凭据，登录后立即改密。
 
@@ -366,6 +400,7 @@ sudo journalctl -u network-mapping-server -n 100 --no-pager
 | PG 连接或初始化失败 | 实际 TCP 密码认证、库名、角色/schema 所有权、SQL 文件路径和读取权限 |
 | ES 校验失败 | 版本、认证、CA、索引权限及已有回执关联；禁止用空索引掩盖丢失数据 |
 | TLS 加载失败 | PEM 文件、私钥与证书匹配、服务用户权限 |
+| 关闭 TLS 后拒绝启动 | `server.host` 必须为回环 IP 字面量，例如 `127.0.0.1` 或 `::1`；不能沿用 `0.0.0.0` |
 | 页面或资源 404 | `frontend.directory` 下四个入口和 `assets/` 是否来自完整构建 |
 | systemd 反复重启 | 绝对 ExecStart、用户、WorkingDirectory、文件权限及 journal 中首个错误 |
 | 改 TOML 后策略不变 | 该策略可能已入库，应在运行时配置页发布 |

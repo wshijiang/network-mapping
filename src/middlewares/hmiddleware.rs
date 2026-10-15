@@ -54,6 +54,7 @@ where
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let immutable_asset = req.path().starts_with("/assets/");
+        let https = crate::tls::request_uses_https(req.request());
         let fut = self.service.call(req);
 
         Box::pin(async move {
@@ -77,10 +78,12 @@ where
                 header::X_FRAME_OPTIONS,
                 header::HeaderValue::from_static("DENY"),
             );
-            res.headers_mut().insert(
-                header::STRICT_TRANSPORT_SECURITY,
-                header::HeaderValue::from_static("max-age=315360000;"),
-            );
+            if https {
+                res.headers_mut().insert(
+                    header::STRICT_TRANSPORT_SECURITY,
+                    header::HeaderValue::from_static("max-age=315360000;"),
+                );
+            }
             res.headers_mut().insert(
                 header::X_CONTENT_TYPE_OPTIONS,
                 header::HeaderValue::from_static("nosniff"),

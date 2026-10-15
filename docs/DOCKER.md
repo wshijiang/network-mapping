@@ -123,8 +123,20 @@ Web 管理的运行设置继续以数据库为准，env 只提供缺失记录的
 
 准备可信 TLS 文件 `docker/runtime/tls/cert.pem`、`key.pem` 和 `ca.pem`；
 ca.pem 用于容器健康探针，必须能验证 cert.pem。`.env` 的 `SERVER_TLS_NAME` 填证书中的真实 DNS 名，
-`SERVER_IMAGE` 填已批准的版本或完整 digest。服务仍使用 HTTPS，不支持直接改为明文 HTTP。
-通过宿主机代理发布时上游也使用 HTTPS，并按项目说明配置可信代理。
+`SERVER_IMAGE` 填已批准的版本或完整 digest。标准 Compose 默认启用 TLS，宿主机代理的上游使用 HTTPS，并按项目说明配置可信代理。
+
+服务端也支持 `NM__TLS__ENABLED=false`，但必须同时设置 `NM__SERVER__HOST=127.0.0.1` 或 `::1`；此时无需服务端证书和私钥，其他密钥和数据库配置仍必需。文件模式使用 `[tls] enabled = false`。旧配置省略开关仍启用 TLS。
+
+回环绑定限制作用于**容器内部**。普通 bridge 网络中的宿主机端口映射和独立代理容器无法访问该 HTTP 监听，不能通过修改 `SERVER_BIND_ADDRESS` 绕过限制；标准 Compose 应保留 TLS。需要 HTTP 上游时，代理应与服务端共享网络命名空间，或在 Linux 上使用经过配置的 host 网络并由同机代理访问。外部入口继续使用 HTTPS，协议转发头设置见[部署指南](DEPLOYMENT.md#本地-http)。
+
+这类自定义 HTTP 部署还需覆盖镜像默认的 HTTPS 健康探针，例如监听 IPv4 默认端口时：
+
+```yaml
+healthcheck:
+  test: [CMD, curl, --fail, --silent, --show-error, "http://127.0.0.1:9999/login"]
+```
+
+端口和 IPv6 地址应与实际监听一致；该探针仍只验证服务与页面存活。
 
 服务进程 UID/GID 为 10001:10001。配置和私钥要能被该 UID 读取，例如由管理员调整为
 属主 10001、模式 0400；TLS 目录允许该用户遍历。不要通过公开可读权限解决私钥读取问题。

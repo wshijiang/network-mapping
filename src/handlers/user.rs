@@ -31,17 +31,21 @@ use crate::{
 };
 use uuid::Uuid;
 
-fn expired_auth_cookies(session: &str, csrf_token: &str) -> (Cookie<'static>, Cookie<'static>) {
+fn expired_auth_cookies(
+    req: &HttpRequest,
+    session: &str,
+    csrf_token: &str,
+) -> (Cookie<'static>, Cookie<'static>) {
     let session_cookie = Cookie::build("session", session.to_owned())
         .path("/")
         .http_only(true)
-        .secure(true)
+        .secure(crate::tls::request_uses_https(req))
         .same_site(cookie::SameSite::Strict)
         .expires(OffsetDateTime::UNIX_EPOCH)
         .finish();
     let csrf_cookie = Cookie::build("csrf_token", csrf_token.to_owned())
         .path("/")
-        .secure(true)
+        .secure(crate::tls::request_uses_https(req))
         .same_site(cookie::SameSite::Strict)
         .expires(OffsetDateTime::UNIX_EPOCH)
         .finish();
@@ -221,7 +225,7 @@ async fn user_login_h(
     let cookies = Cookie::build("session", &t_session)
         .path("/")
         .http_only(true)
-        .secure(true)
+        .secure(crate::tls::request_uses_https(&req))
         .max_age(cookie::time::Duration::seconds(i64::from(
             session_ttl_seconds,
         )))
@@ -229,7 +233,7 @@ async fn user_login_h(
         .finish();
     let cookie_csrf_token = Cookie::build("csrf_token", &csrf_token)
         .path("/")
-        .secure(true)
+        .secure(crate::tls::request_uses_https(&req))
         .max_age(cookie::time::Duration::seconds(i64::from(
             session_ttl_seconds,
         )))
@@ -302,12 +306,12 @@ async fn user_logout(
             let cookies = Cookie::build("session", &c_s)
                 .path("/")
                 .http_only(true)
-                .secure(true)
+                .secure(crate::tls::request_uses_https(&req))
                 .expires(OffsetDateTime::UNIX_EPOCH)
                 .finish();
             let cookie_csrf_token = Cookie::build("csrf_token", tmp_csrf_t)
                 .path("/")
-                .secure(true)
+                .secure(crate::tls::request_uses_https(&req))
                 .expires(OffsetDateTime::UNIX_EPOCH)
                 .finish();
             HttpResponse::Ok()
@@ -441,7 +445,7 @@ async fn verify_totp_h(
                     .and_then(|value| value.to_str().ok())
                     .unwrap_or("");
                 let (session_cookie, csrf_cookie) =
-                    expired_auth_cookies(&session.session, csrf_token);
+                    expired_auth_cookies(&req, &session.session, csrf_token);
                 HttpResponse::Ok()
                     .cookie(session_cookie)
                     .cookie(csrf_cookie)
@@ -522,7 +526,8 @@ async fn verify_totp_h(
                 .get("X-CSRF-Token")
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or("");
-            let (session_cookie, csrf_cookie) = expired_auth_cookies(&session.session, csrf_token);
+            let (session_cookie, csrf_cookie) =
+                expired_auth_cookies(&req, &session.session, csrf_token);
             return HttpResponse::Forbidden()
                 .cookie(session_cookie)
                 .cookie(csrf_cookie)
@@ -710,7 +715,7 @@ async fn unbind_2fa_h(
                     .and_then(|value| value.to_str().ok())
                     .unwrap_or("");
                 let (session_cookie, csrf_cookie) =
-                    expired_auth_cookies(&session.session, csrf_token);
+                    expired_auth_cookies(&req, &session.session, csrf_token);
                 HttpResponse::Ok()
                     .cookie(session_cookie)
                     .cookie(csrf_cookie)

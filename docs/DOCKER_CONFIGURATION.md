@@ -88,6 +88,7 @@ docker compose --env-file docker/.env -f docker/compose.example.yml up -d --forc
 | `NM__SERVER__ENCRYPT_KEY` | 字符串 | 无可用默认值，必填 | 32 字节 Base64 密钥，通常为 44 字符；用 `openssl rand -base64 32` 生成并长期保存 |
 | `NM__SERVER__MAX_BODY_SIZE` | 整数，字节 | `67108864` | 全局请求体上限，必须大于 0；部分接口有独立上限，见[扫描器诊断](SCANNER_DIAGNOSTICS.md) |
 | `NM__SECURITY__SCANNER_TOKEN_PEPPER` | 字符串 | 无可用默认值，必填 | 去除首尾空白后至少 32 字符，建议 `openssl rand -hex 32`；变更会使已有扫描器令牌失效 |
+| `NM__TLS__ENABLED` | 布尔 | `true` | 服务端 TLS 开关；关闭后只允许回环 IP 监听，证书可省略。 |
 | `NM__TLS__CERTIFICATE_CHAIN_FILE` | 路径字符串 | `/etc/network-mapping/tls/cert.pem` | PEM 证书链，需与私钥匹配 |
 | `NM__TLS__PRIVATE_KEY_FILE` | 路径字符串 | `/etc/network-mapping/tls/key.pem` | PEM 私钥，需允许 UID 10001 读取 |
 

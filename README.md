@@ -46,7 +46,7 @@ flowchart LR
 | Rust / Cargo | 编译服务端；项目使用 edition 2024 |
 | PostgreSQL | 用户、权限、任务、配置、上传回执和分析快照 |
 | Elasticsearch 9.5.x | 必需的扫描结果存储与搜索服务 |
-| TLS 证书与私钥 | 服务端 HTTPS |
+| TLS 证书与私钥 | 启用服务端 TLS 时需要（默认开启） |
 | 前端 `dist/` | 登录、控制台、搜索和资产页面 |
 
 ### 2. 获取并编译
@@ -60,6 +60,8 @@ cargo build --locked --release
 ### 3. 配置并启动
 
 编辑 `config.toml` 中的数据库连接、Elasticsearch、TLS、前端目录及 `security.scanner_token_pepper`。详细字段和路径规则见[部署指南](docs/DEPLOYMENT.md)。Pepper 应长期固定，修改后已有扫描器令牌会失效。
+
+`tls.enabled` 默认 `true`，旧配置继续使用 HTTPS。需要本地 HTTP 或由同机代理终止 TLS 时，设置 `tls.enabled = false`，同时将 `server.host` 改为 `127.0.0.1` 或 `::1`；此时可省略证书和私钥。非回环绑定会拒绝启动，完整示例见[本地 HTTP](docs/DEPLOYMENT.md#本地-http)。
 
 ```sh
 ./target/release/network_mapping_server --config config.toml

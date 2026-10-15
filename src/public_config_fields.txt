@@ -97,4 +97,5 @@ server.port
 templates.templates_directory
 templates.templates_name
 tls.certificate_chain_file
+tls.enabled
 tls.private_key_file
