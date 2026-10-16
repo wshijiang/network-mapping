@@ -83,6 +83,10 @@ pub async fn run(args: Clis) -> io::Result<()> {
     );
     config_check.emit_startup();
     config.check();
+    let human_verification =
+        web::Data::new(crate::human_verification::HumanVerificationService::new(
+            config.human_verification.clone(),
+        )?);
     let request_log_config = config.requests.clone();
     let monitor_config = config.monitor.clone();
     let elasticsearch_config = config.elasticsearch.clone();
@@ -577,6 +581,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
         let monitor_handle = monitor_handle.clone();
 
         App::new()
+            .app_data(human_verification.clone())
             .app_data(health_state.clone())
             .app_data(tls_config.clone())
             .app_data(web::Data::new(config_check.clone()))

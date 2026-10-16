@@ -43,7 +43,12 @@ fn reports(cfg: &mut web::ServiceConfig) {
 }
 
 fn identity(cfg: &mut web::ServiceConfig) {
-    cfg.service(handlers::user::user_login_h);
+    cfg.configure(crate::human_verification::configure);
+    cfg.service(
+        web::resource("/api/login")
+            .app_data(web::JsonConfig::default().limit(crate::human_verification::LOGIN_BODY_LIMIT))
+            .route(web::post().to(handlers::user::user_login_h)),
+    );
     cfg.service(handlers::admin_user::list_users);
     cfg.service(handlers::admin_user::create_user);
     cfg.service(handlers::admin_user::set_user_enabled);

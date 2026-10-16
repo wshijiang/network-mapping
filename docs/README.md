@@ -13,6 +13,7 @@
 | [Docker 完整配置参考](DOCKER_CONFIGURATION.md) | 全部 env 参数、类型、默认值、生效方式、Compose 设置及受限字段 |
 | [服务端功能指南](FEATURES.md) | 功能入口、交互约束与配置示例 |
 | [用户管理 CLI](USER_MANAGEMENT_CLI.md) | 用户、凭据、会话和登录限制的本地管理 |
+| [登录人机验证](HUMAN_VERIFICATION.md) | 可选 Turnstile、部署配置、接口和错误排障 |
 | [资产搜索语法与 API](SEARCH_SYNTAX.md) | 搜索字段、表达式语法与 API 契约 |
 
 ## 外部 API 与开放平台

@@ -69,6 +69,15 @@ elasticsearch.scan_storage
 elasticsearch.url
 elasticsearch.write_wait_for_active_shards
 frontend.directory
+human_verification.actions
+human_verification.connect_timeout_ms
+human_verification.max_in_flight
+human_verification.provider
+human_verification.send_remote_ip
+human_verification.timeout_ms
+human_verification.turnstile.allowed_hostnames
+human_verification.turnstile.secret_key
+human_verification.turnstile.site_key
 log.directory
 log.file_name
 log.file_rolling

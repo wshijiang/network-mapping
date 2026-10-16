@@ -189,6 +189,11 @@ fn normalize_error_body(
             .and_then(|body| body.get("code"))
             .and_then(Value::as_str)
             == Some("system_maintenance");
+    let verification_error = parsed
+        .as_ref()
+        .and_then(|body| body.get("code"))
+        .and_then(Value::as_str)
+        .and_then(|code| crate::human_verification::public_error(status, path, code));
     let statistics_error = (status == StatusCode::SERVICE_UNAVAILABLE
         && matches!(
             path,
@@ -235,7 +240,8 @@ fn normalize_error_body(
     body.insert(
         "code".to_owned(),
         Value::String(
-            statistics_error
+            verification_error
+                .or(statistics_error)
                 .map(|(code, _)| code)
                 .or_else(|| {
                     body.get("code")
@@ -249,7 +255,7 @@ fn normalize_error_body(
 
     let message = if totp_required {
         "请验证 2FA 验证码".to_owned()
-    } else if let Some((_, message)) = statistics_error {
+    } else if let Some((_, message)) = verification_error.or(statistics_error) {
         message.to_owned()
     } else if maintenance {
         "系统维护中，请稍后重试".to_owned()

@@ -427,3 +427,7 @@ sudo journalctl -u network-mapping-server -n 100 --no-pager
 | 扫描器在线但无法领任务 | 本地引擎检查、`accepting_tasks`、地址族/profile 能力、维护状态及授权范围 |
 
 终端默认显示启动摘要、警告和错误。排障可增加 `--verbose`；需要 DEBUG 时使用 `--verbose --debug-model`，或设置 `RUST_LOG`。`--verbose` 不改变滚动 JSON 日志内容或级别。扫描器错误与日志采集见[远程诊断](SCANNER_DIAGNOSTICS.md)。
+
+## 可选登录人机验证
+
+默认关闭。启用 Cloudflare Turnstile 前先部署配套前端，准备 widget 密钥、允许域名和浏览器/服务端出站访问；配置修改后重启，启用后旧客户端必须携带证明。完整参数、CSP、升级与停用步骤见[登录人机验证](HUMAN_VERIFICATION.md)。

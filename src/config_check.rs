@@ -91,10 +91,15 @@ impl ConfigCheck {
             "report_mail" => "report_mail.remote_images_enabled".into(),
             _ => format!("{section}.enabled"),
         };
-        let inactive = lookup(raw, &enabled_path)
-            .or_else(|| lookup(defaults, &enabled_path))
-            .and_then(Value::as_bool)
-            == Some(false);
+        let inactive = (section == "human_verification"
+            && lookup(raw, "human_verification.provider")
+                .or_else(|| lookup(defaults, "human_verification.provider"))
+                .and_then(Value::as_str)
+                == Some("none"))
+            || lookup(raw, &enabled_path)
+                .or_else(|| lookup(defaults, &enabled_path))
+                .and_then(Value::as_bool)
+                == Some(false);
         let optional = inactive && prefix != enabled_path;
         let description = if optional {
             "本地功能未启用，此参数无需补齐；启用时请检查相关配置。"
@@ -240,6 +245,7 @@ pub fn inspect_server(raw: &Value) -> ConfigCheck {
     use crate::config::*;
     // The schema's optional fields and values come from the application's own Defaults.
     let defaults = json!({
+        "human_verification": crate::human_verification::config::HumanVerificationConfig::inspection_defaults(),
         "tls": {"enabled": default_tls_enabled()},
         "server": {"max_body_size": default_max_body_size()},
         "database": {"pool_wait_timeout_ms": default_pool_wait_timeout_ms(),

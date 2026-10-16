@@ -84,6 +84,7 @@ pub use web_support::{
 pub(crate) use web_support::{FrontEndErrorInfo, front_end_error_page};
 
 pub mod http;
+pub mod human_verification;
 pub(crate) mod readiness;
 
 pub mod application;

@@ -212,3 +212,17 @@ p = 2
 # host = "smtp.example.com"
 # account_username = "no-reply@example.com"
 # account_password = "replace-with-smtp-password"
+
+# 可选人机验证。默认关闭；启用前部署配套前端并填写域名与密钥。
+[human_verification]
+provider = "none"
+actions = ["login"]
+timeout_ms = 3000
+connect_timeout_ms = 1000
+max_in_flight = 32
+send_remote_ip = false
+
+[human_verification.turnstile]
+site_key = ""
+secret_key = ""
+allowed_hostnames = []

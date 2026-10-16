@@ -102,6 +102,7 @@ where
                 .map(|assets| assets.has_page_for_path(&path))
                 .unwrap_or(true);
         let need_check = path != "/api/login"
+            && !crate::human_verification::is_public_request(req.method(), &path)
             && !scanner_api_request
             && ((frontend_page && frontend_page_available)
                 || path_list.iter().any(|prefix| path.starts_with(prefix)));

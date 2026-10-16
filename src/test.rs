@@ -45,6 +45,10 @@ async fn login_test() {
 
     let app = test::init_service(
         App::new()
+            .app_data(web::Data::new(
+                crate::human_verification::HumanVerificationService::new(config.human_verification)
+                    .unwrap(),
+            ))
             .app_data(web::Data::new(db_pool.clone()))
             .wrap(AuthMiddleware)
             .configure(config::init_routes),
@@ -56,6 +60,7 @@ async fn login_test() {
         .set_json(ReceiveLoginInfo {
             username: "admin".to_string(),
             password: "1".to_string(),
+            human_verification: None,
         })
         .to_request();
 

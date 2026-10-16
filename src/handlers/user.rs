@@ -85,17 +85,39 @@ struct ChangePasswordRequest {
     new_password: String,
 }
 /// 登录接口
-#[post("/api/login")]
-async fn user_login_h(
+pub(crate) async fn user_login_h(
     req: HttpRequest,
     pool: web::Data<deadpool_postgres::Pool>,
     server_config: web::Data<ServerConfig>,
+    verification: web::Data<crate::human_verification::HumanVerificationService>,
     receiveinfo: web::Json<ReceiveLoginInfo>,
 ) -> impl Responder {
     let total_start = Instant::now(); // 总的开始时间
     let start = Instant::now(); // 登录函数开始时间
     let p = pool.get_ref();
     let source_ip = request_ip(&req);
+    let verification_start = Instant::now();
+    if let Err(error) = verification
+        .verify_login(receiveinfo.human_verification.as_ref(), source_ip)
+        .await
+    {
+        let (_, code, _) = error.public_contract();
+        set_reason(&req, code);
+        tracing::warn!(
+            event = "HumanVerificationDenied", request_id = %AuditContext::from_request(&req).request_id,
+            action = "login", provider = ?verification.provider_kind(), reason_code = error.reason(), code,
+            duration_ms = verification_start.elapsed().as_millis() as u64,
+            "登录人机验证未通过"
+        );
+        return error.response(&req);
+    }
+    if verification.enabled() {
+        tracing::debug!(
+            event = "HumanVerificationPassed",
+            action = "login",
+            duration_ms = verification_start.elapsed().as_millis() as u64
+        );
+    }
     let login_result =
         match user_login(&receiveinfo.username, &receiveinfo.password, source_ip, p).await {
             Ok(value) => value,

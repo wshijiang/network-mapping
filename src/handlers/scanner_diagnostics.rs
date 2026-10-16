@@ -928,6 +928,12 @@ mod tests {
         let server = server_config();
         let app = test::init_service(
             App::new()
+                .app_data(web::Data::new(
+                    crate::human_verification::HumanVerificationService::new(
+                        crate::human_verification::config::HumanVerificationConfig::default(),
+                    )
+                    .unwrap(),
+                ))
                 .app_data(web::Data::new(pool))
                 .app_data(web::JsonConfig::default().limit(server.max_body_size))
                 .app_data(web::Data::new(server))

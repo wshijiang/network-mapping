@@ -1,5 +1,6 @@
 """Keep the public Docker configuration reference in sync without reading secrets."""
 from pathlib import Path
+import json
 import re
 import tomllib
 import unittest
@@ -58,7 +59,8 @@ class ConfigurationDocumentationTests(unittest.TestCase):
             with self.subTest(variable=variable):
                 rows = self.rows.get(variable, [])
                 self.assertEqual(len(rows), 1)
-                expected = str(value).lower() if isinstance(value, bool) else str(value)
+                expected = (json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict))
+                            else str(value).lower() if isinstance(value, bool) else str(value))
                 self.assertEqual(rows[0][2], f'`{expected}`')
 
     def test_compose_and_example_variables_are_documented(self):

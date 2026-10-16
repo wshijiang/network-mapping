@@ -14,7 +14,7 @@ use futures::future::LocalBoxFuture;
 use serde_json::json;
 use tracing::warn;
 
-use super::hmiddleware::CONTENT_SECURITY_POLICY;
+use super::hmiddleware::content_security_policy;
 
 const STALE_ENTRY_AGE: Duration = Duration::from_secs(10 * 60);
 
@@ -111,7 +111,10 @@ where
                 .insert_header((header::X_CONTENT_TYPE_OPTIONS, "nosniff"))
                 .insert_header((header::X_FRAME_OPTIONS, "DENY"))
                 .insert_header((header::STRICT_TRANSPORT_SECURITY, "max-age=315360000;"))
-                .insert_header((header::CONTENT_SECURITY_POLICY, CONTENT_SECURITY_POLICY))
+                .insert_header((
+                    header::CONTENT_SECURITY_POLICY,
+                    content_security_policy(req.request()),
+                ))
                 .json(body);
 
             return Box::pin(async move { Ok(req.into_response(response).map_into_right_body()) });
@@ -138,6 +141,11 @@ fn policy_for_path(path: &str) -> Option<RateLimitPolicy> {
         });
     }
     match path {
+        crate::human_verification::CONFIG_PATH => Some(RateLimitPolicy {
+            max_requests: 60,
+            window: Duration::from_secs(60),
+            message: "验证配置请求过于频繁，请稍后再试",
+        }),
         "/api/scanner/diagnostics/chunk"
         | "/api/scanner/diagnostics/upload-status"
         | "/api/scanner/diagnostics/ack"

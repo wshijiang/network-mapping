@@ -25,6 +25,8 @@ pub trait SelfChecking {
 #[derive(Debug, Deserialize)]
 pub struct Config {
     #[serde(default)]
+    pub human_verification: crate::human_verification::config::HumanVerificationConfig,
+    #[serde(default)]
     pub report_renderer: crate::reports::service::ReportRendererConfig,
     #[serde(default)]
     pub scanner_diagnostics: crate::scanner_diagnostics::DiagnosticsConfig,
@@ -111,6 +113,9 @@ impl TlsConfig {
 
 impl SelfChecking for Config {
     fn check(&self) {
+        self.human_verification
+            .validate()
+            .expect("invalid human verification configuration");
         self.tls
             .validate_listener(&self.server.host)
             .expect("invalid TLS listener configuration");
@@ -137,6 +142,7 @@ impl SelfChecking for Config {
     }
 
     fn try_check(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        self.human_verification.validate()?;
         self.tls.validate_listener(&self.server.host)?;
         self.scanner_diagnostics
             .validate()
@@ -1499,6 +1505,10 @@ impl Config {
             )
         })?;
         config.tls.validate_listener(&config.server.host)?;
+        config
+            .human_verification
+            .validate()
+            .map_err(std::io::Error::other)?;
         config.resolve_paths(&std::env::current_dir()?.join(".environment"));
         Ok((config, report))
     }
@@ -1536,6 +1546,10 @@ impl Config {
             )
         })?;
         config.tls.validate_listener(&config.server.host)?;
+        config
+            .human_verification
+            .validate()
+            .map_err(std::io::Error::other)?;
         config.resolve_paths(path);
         Ok((config, report))
     }
@@ -2597,5 +2611,128 @@ mod cli_tests {
             panic!("unexpected command tree");
         };
         assert_eq!(users, ["alice", "bob"]);
+    }
+}
+
+#[cfg(test)]
+mod human_verification_config_tests {
+    use super::*;
+
+    fn pairs(extra: &[(&str, &str)]) -> Vec<(String, String)> {
+        [
+            (
+                "NM__SERVER__ENCRYPT_KEY",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            ),
+            (
+                "NM__SECURITY__SCANNER_TOKEN_PEPPER",
+                "fixture-pepper-at-least-32-characters",
+            ),
+            ("NM__DATABASE__PASSWORD", "fixture-database-password"),
+        ]
+        .into_iter()
+        .chain(extra.iter().copied())
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect()
+    }
+
+    #[test]
+    fn env_defaults_off_and_enabled_policy_requires_complete_configuration() {
+        let (config, _) = Config::from_env_pairs(pairs(&[])).unwrap();
+        assert_eq!(
+            config.human_verification.provider,
+            crate::human_verification::config::ProviderKind::None
+        );
+        assert!(
+            Config::from_env_pairs(pairs(&[("NM__HUMAN_VERIFICATION__PROVIDER", "turnstile")]))
+                .is_err()
+        );
+        let (config, report) = Config::from_env_pairs(pairs(&[
+            ("NM__HUMAN_VERIFICATION__PROVIDER", "turnstile"),
+            ("NM__HUMAN_VERIFICATION__TURNSTILE__SITE_KEY", "public-key"),
+            (
+                "NM__HUMAN_VERIFICATION__TURNSTILE__SECRET_KEY",
+                "server-only-fixture",
+            ),
+            (
+                "NM__HUMAN_VERIFICATION__TURNSTILE__ALLOWED_HOSTNAMES",
+                "[\"console.example.com\"]",
+            ),
+            ("NM__HUMAN_VERIFICATION__SEND_REMOTE_IP", "true"),
+        ]))
+        .unwrap();
+        assert!(config.human_verification.send_remote_ip);
+        assert!(!format!("{config:?}").contains("server-only-fixture"));
+        assert!(
+            !serde_json::to_string(&report)
+                .unwrap()
+                .contains("server-only-fixture")
+        );
+        assert!(
+            Config::from_env_pairs(pairs(&[("NM__HUMAN_VERIFICATION__PROVIDER", "typo")])).is_err()
+        );
+    }
+
+    #[test]
+    fn env_secret_file_is_supported_and_conflicts_are_rejected() {
+        let path = std::env::temp_dir().join(format!("turnstile-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "00123\n").unwrap();
+        let file = path.to_str().unwrap();
+        let (config, _) = Config::from_env_pairs(pairs(&[(
+            "NM__HUMAN_VERIFICATION__TURNSTILE__SECRET_KEY_FILE",
+            file,
+        )]))
+        .unwrap();
+        assert_eq!(config.human_verification.turnstile.secret_key, "00123");
+        assert!(
+            Config::from_env_pairs(pairs(&[
+                ("NM__HUMAN_VERIFICATION__TURNSTILE__SECRET_KEY_FILE", file),
+                (
+                    "NM__HUMAN_VERIFICATION__TURNSTILE__SECRET_KEY",
+                    "other-secret"
+                ),
+            ]))
+            .is_err()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_file_needs_no_new_section_and_invalid_enabled_file_fails_locally() {
+        let path =
+            std::env::temp_dir().join(format!("turnstile-config-{}.toml", uuid::Uuid::new_v4()));
+        let mut raw: toml::Value =
+            toml::from_str(include_str!("../docker/config.example.toml")).unwrap();
+        raw.as_table_mut().unwrap().remove("human_verification");
+        std::fs::write(&path, toml::to_string(&raw).unwrap()).unwrap();
+        let (config, _) = Config::from_file_with_check(&path).unwrap();
+        assert_eq!(
+            config.human_verification.provider,
+            crate::human_verification::config::ProviderKind::None
+        );
+        raw.as_table_mut().unwrap().insert(
+            "human_verification".into(),
+            toml::from_str::<toml::Value>("provider = 'turnstile'").unwrap(),
+        );
+        std::fs::write(&path, toml::to_string(&raw).unwrap()).unwrap();
+        assert!(Config::from_file_with_check(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn inactive_provider_parameters_are_optional_and_secret_is_not_in_inspection_defaults() {
+        let report = crate::config_check::inspect_server(&serde_json::json!({}));
+        let items: Vec<_> = report
+            .items
+            .iter()
+            .filter(|item| item.field.starts_with("human_verification.turnstile."))
+            .collect();
+        assert!(!items.is_empty());
+        assert!(
+            items
+                .iter()
+                .all(|item| item.kind == crate::config_check::ConfigIssueKind::Optional)
+        );
+        assert!(items.iter().all(|item| !item.field.contains("secret")));
     }
 }

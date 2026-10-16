@@ -99,6 +99,24 @@ docker compose --env-file docker/.env -f docker/compose.example.yml up -d --forc
 端口映射为 `${SERVER_BIND_ADDRESS}:${SERVER_PUBLISH_PORT}:${NM__SERVER__PORT}`。
 例如宿主机 443 转发至容器 9999，只需设置 `SERVER_PUBLISH_PORT=443`，容器仍使用 HTTPS。
 
+### 登录人机验证
+
+默认关闭，启用前必须部署配套前端。所有字段为启动配置，修改后重建容器，不属于运行时 namespace。详细行为见[登录人机验证](HUMAN_VERIFICATION.md)。
+
+| 环境变量 | 类型 | 容器默认值 | 作用与约束 |
+| --- | --- | --- | --- |
+| `NM__HUMAN_VERIFICATION__PROVIDER` | 字符串 | `none` | `none` 或 `turnstile`；关闭时不加载外部组件 |
+| `NM__HUMAN_VERIFICATION__ACTIONS` | JSON 数组 | `["login"]` | 当前必须为 `["login"]` |
+| `NM__HUMAN_VERIFICATION__TIMEOUT_MS` | 整数，毫秒 | `3000` | 完整验证预算，500–10000 |
+| `NM__HUMAN_VERIFICATION__CONNECT_TIMEOUT_MS` | 整数，毫秒 | `1000` | 大于 0 且不超过总预算 |
+| `NM__HUMAN_VERIFICATION__MAX_IN_FLIGHT` | 整数 | `32` | 所有 HTTP worker 共享的单进程并发上限，1–256 |
+| `NM__HUMAN_VERIFICATION__SEND_REMOTE_IP` | 布尔 | `false` | 是否向 Siteverify 发送可信解析的客户端 IP |
+| `NM__HUMAN_VERIFICATION__TURNSTILE__SITE_KEY` | 字符串 | 未设置 | 启用时必填；公开 widget 参数 |
+| `NM__HUMAN_VERIFICATION__TURNSTILE__SECRET_KEY` | 密钥字符串 | 未设置 | 启用时必填，仅服务端保存；支持 `_FILE` |
+| `NM__HUMAN_VERIFICATION__TURNSTILE__ALLOWED_HOSTNAMES` | JSON 数组 | `[]` | 启用时必填；精确 DNS 名，不含协议、端口、路径或通配符 |
+
+数组使用 JSON 编码：`NM__HUMAN_VERIFICATION__ACTIONS='["login"]'`。密钥文件输入例如 `NM__HUMAN_VERIFICATION__TURNSTILE__SECRET_KEY_FILE=/run/secrets/turnstile_secret`，需先只读挂载且不得同时提供直接值。
+
 ### PostgreSQL
 
 | 环境变量 | 类型 | 容器默认值 | 作用与约束 |

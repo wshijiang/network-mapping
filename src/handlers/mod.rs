@@ -31,6 +31,8 @@ use serde::{Deserialize, Serialize};
 pub struct ReceiveLoginInfo {
     pub username: String,
     pub password: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_verification: Option<crate::human_verification::Proof>,
 }
 
 #[derive(Serialize)]
