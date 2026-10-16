@@ -466,7 +466,51 @@ mod tests {
                 .headers()
                 .get("content-security-policy")
                 .and_then(|value| value.to_str().ok()),
-            Some("default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;")
+            Some(
+                "default-src 'self'; connect-src 'self' https://api.github.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+            )
         );
+    }
+
+    #[actix_web::test]
+    async fn html_pages_allow_github_update_connections_without_relaxing_other_resources() {
+        let app = actix_test::init_service(App::new().wrap(SHeaderM).default_service(web::to(
+            || async {
+                HttpResponse::Ok()
+                    .content_type("text/html")
+                    .body("<!doctype html>")
+            },
+        )))
+        .await;
+
+        for path in ["/", "/login", "/search.html", "/asset.html", "/scanner"] {
+            let request = actix_test::TestRequest::get().uri(path).to_request();
+            let response = actix_test::call_service(&app, request).await;
+            let policy = response
+                .headers()
+                .get("content-security-policy")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            let directives: std::collections::HashMap<_, _> = policy
+                .split(';')
+                .filter_map(|directive| {
+                    let mut parts = directive.split_whitespace();
+                    Some((parts.next()?, parts.collect::<Vec<_>>()))
+                })
+                .collect();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                directives["connect-src"],
+                ["'self'", "https://api.github.com"]
+            );
+            assert_eq!(directives["default-src"], ["'self'"]);
+            assert_eq!(response.headers().get("x-frame-options").unwrap(), "DENY");
+            assert_eq!(
+                response.headers().get("x-content-type-options").unwrap(),
+                "nosniff"
+            );
+        }
     }
 }

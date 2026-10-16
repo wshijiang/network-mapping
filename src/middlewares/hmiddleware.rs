@@ -7,8 +7,9 @@ use actix_web::{
 };
 use futures_util::future::LocalBoxFuture;
 
-pub(crate) const CONTENT_SECURITY_POLICY: &str =
-    "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;";
+// Browser update checks read public repository tags from the GitHub API.
+// Keep this exception in connect-src so other resources remain same-origin.
+pub(crate) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; connect-src 'self' https://api.github.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:;";
 
 // There are two steps in middleware processing.
 // 1. Middleware initialization, middleware factory gets called with
