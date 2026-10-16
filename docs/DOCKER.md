@@ -95,7 +95,7 @@ openssl rand -hex 24
 | `SERVER_IMAGE` | 实际存在且可拉取的版本或完整 `@sha256:…`；模板中的占位版本不能使用 |
 | 三个随机值 | Base64 加密密钥、独立 Pepper、PG 密码，填到对应变量 |
 | HTTPS | `cert.pem` 为完整服务证书链，`key.pem` 为匹配私钥，`ca.pem` 为健康探针信任的 CA 链 |
-| 域名/端口 | `SERVER_TLS_NAME` 匹配证书 DNS 名；`SERVER_PUBLISH_PORT` 是宿主机入口，`NM__SERVER__PORT` 是容器监听端口 |
+| 域名/端口 | HTTPS 的 `SERVER_TLS_NAME` 匹配证书 DNS 名（未填默认 `localhost`）；`SERVER_PUBLISH_PORT` 是宿主机入口，`NM__SERVER__PORT` 是容器监听端口 |
 | 外部访问 | 默认仅 `127.0.0.1`；远程扫描节点需要可达的 HTTPS 代理或对外发布地址 |
 | 依赖与资源 | 本地 PG/ES profiles 或已就绪的外部存储；ES 所需内存、磁盘与宿主机内核参数 |
 
@@ -129,14 +129,16 @@ ca.pem 用于容器健康探针，必须能验证 cert.pem。`.env` 的 `SERVER_
 
 回环绑定限制作用于**容器内部**。普通 bridge 网络中的宿主机端口映射和独立代理容器无法访问该 HTTP 监听，不能通过修改 `SERVER_BIND_ADDRESS` 绕过限制；标准 Compose 应保留 TLS。需要 HTTP 上游时，代理应与服务端共享网络命名空间，或在 Linux 上使用经过配置的 host 网络并由同机代理访问。外部入口继续使用 HTTPS，协议转发头设置见[部署指南](DEPLOYMENT.md#本地-http)。
 
-这类自定义 HTTP 部署还需覆盖镜像默认的 HTTPS 健康探针，例如监听 IPv4 默认端口时：
+镜像健康探针自动读取 `NM__TLS__ENABLED`、`NM__SERVER__HOST` 和 `NM__SERVER__PORT`（支持对应 `_FILE`），关闭 TLS 时使用 HTTP 且不读取 CA；开启 TLS 时验证 `SERVER_TLS_NAME` 和 CA 链。`0.0.0.0`、`::` 分别探测对应地址族的回环地址，支持 IPv6 和自定义端口。本地探针不经过容器的出站代理，不会尝试另一协议作为失败回退。`SERVER_TLS_CA_FILE` 可覆盖探针 CA 路径，默认 `/etc/network-mapping/tls/ca.pem`。
+
+使用 `--config-source file` 时，探针不解析 TOML。监听协议、地址和端口与 env 默认值不同时，在 Compose 中显式覆盖探针参数，与 TOML 保持一致，例如 IPv6 HTTP：
 
 ```yaml
 healthcheck:
-  test: [CMD, curl, --fail, --silent, --show-error, "http://127.0.0.1:9999/login"]
+  test: [CMD, /opt/network-mapping/bin/healthcheck, http, "::1", "9999"]
 ```
 
-端口和 IPv6 地址应与实际监听一致；该探针仍只验证服务与页面存活。
+`http` 模式无需 `SERVER_TLS_NAME`、CA 或服务端证书；`https` 模式继续使用证书校验。该探针只验证服务与页面存活，不代表 PG/ES 持续就绪。
 
 服务进程 UID/GID 为 10001:10001。配置和私钥要能被该 UID 读取，例如由管理员调整为
 属主 10001、模式 0400；TLS 目录允许该用户遍历。不要通过公开可读权限解决私钥读取问题。
@@ -190,6 +192,56 @@ NM__ELASTICSEARCH__API_KEY=replace-with-api-key
 数据库需预先创建并授予应用角色建表和升级权限，ES 版本须符合 [ES 指南](ELASTICSEARCH.md)。
 已运行的本地 PG/ES 容器不会因禁用 profile 自动删除；切换前备份数据，迁移并验证外部服务后再停用旧容器。
 
+### NAT/bridge 容器连接宿主机 PostgreSQL
+
+标准 Compose 已为服务端添加 `host.docker.internal:host-gateway` 映射，适用于支持 `host-gateway` 的 Linux Docker Engine（20.10+）。不要把宿主机 Docker 网桥地址写死为 `172.17.0.1`。容器的 `127.0.0.1` 指容器自身，`postgres` 指配套 PG 容器；它们都不表示宿主机数据库。Docker Desktop 使用其支持的宿主机访问机制；rootless 或远程 Docker daemon 应核实实际宿主机地址，远程 daemon 的 host 指 daemon 所在机器。
+
+编辑 `docker/.env`，保留原来的密钥和数据库凭据。例如 PG 在宿主机、ES 仍使用配套容器：
+
+首次安装也可复制 `docker/.env.host-db.example` 到 `docker/.env` 作为此拓扑的完整参数模板，再填写镜像、密钥、PG 凭据及 TLS 证书；已有部署直接编辑原 `.env`，不要覆盖密钥。
+
+```dotenv
+COMPOSE_PROFILES=local-elasticsearch
+NM__DATABASE__HOST=host.docker.internal
+NM__DATABASE__PORT=5432
+```
+
+如果 ES 也在宿主机，清空 `COMPOSE_PROFILES`，同时设置 `NM__ELASTICSEARCH__URL=http://host.docker.internal:9200`，按实际部署改用 HTTPS、认证和可信 CA。`SERVER_BIND_ADDRESS` 和 `ports` 只控制服务端入站连接，不影响访问数据库。
+
+宿主机 PostgreSQL 必须监听容器可达的接口。只监听 `127.0.0.1` 时，添加名称映射仍无法访问。由数据库管理员确认 Docker 网桥接口地址及容器实际来源网段后配置，例如下面的地址仅作演示，必须替换为本机实际值：
+
+```conf
+# postgresql.conf：保留本机回环，同时增加实际宿主机网桥接口；修改后重启 PG
+listen_addresses = '127.0.0.1,172.17.0.1'
+
+# pg_hba.conf：仅授权应用库、角色及实际容器来源网段；修改后 reload
+host network_mapping network_mapping 172.18.0.0/16 scram-sha-256
+```
+
+防火墙同样仅放行需要的容器来源访问实际 PG 端口，无需向公网开放数据库。核对 `ss -lntp 'sport = :5432'`、PG 日志中的来源地址，以及 `pg_hba.conf` 规则顺序。PG 当前使用 NoTls，因此仅允许 `hostssl` 的规则无法匹配，设置 `NM__DATABASE__TLS=true` 不会改变这一点。
+
+应用配置确认后执行 `up -d --force-recreate server`，然后查看服务日志中的 `database_host`、`database_port` 和首个连接错误。名称解析失败通常是目标地址/映射问题，拒绝连接通常是监听/端口问题，超时需检查路由和防火墙，`no pg_hba.conf entry` 或密码失败需检查数据库授权与认证。容器默认使用 env 配置，修改宿主机根目录的 `config.toml` 不会覆盖它。
+
+### Linux host 网络：本地 HTTP、宿主机数据库与代理
+
+新增的 `docker/compose.host.example.yml` 是**独立部署文件**，不要与标准 bridge Compose 合并。它不发布端口、不创建配套 PG/ES、不挂载服务端证书，使用宿主机已就绪的 PG/ES。适用于原生 Linux Docker Engine；Docker Desktop 的 host 网络需要相应版本与显式启用，其他平台请使用受支持的部署方式。
+
+```sh
+cp docker/.env.host.example docker/.env.host
+chmod 0600 docker/.env.host
+# 填写实际 SERVER_IMAGE、长期密钥、PG 凭据和 PG/ES 连接地址，再执行：
+docker compose --env-file docker/.env.host -f docker/compose.host.example.yml config --quiet
+docker compose --env-file docker/.env.host -f docker/compose.host.example.yml up -d
+docker compose --env-file docker/.env.host -f docker/compose.host.example.yml ps
+docker compose --env-file docker/.env.host -f docker/compose.host.example.yml logs --tail=100 server
+```
+
+此模式下 `127.0.0.1` 与宿主机共享：模板默认 `NM__TLS__ENABLED=false`、`NM__SERVER__HOST=127.0.0.1`，数据库和 ES 也使用各自的宿主机回环端口。数据库可以继续只监听本机回环，无需添加容器网段授权。HTTP 探针自动适配，无需证书域名或 CA。宿主机反向代理使用 `http://127.0.0.1:9999`，公网仍由代理提供 HTTPS；代理头设置见[部署指南](DEPLOYMENT.md#本地-http)。
+
+关闭 TLS 仍严格限制回环监听。host 模式下 `SERVER_BIND_ADDRESS`、`SERVER_PUBLISH_PORT` 和 Docker `ports` 不适用；用 `NM__SERVER__PORT` 修改实际宿主机监听端口并避免与其他进程冲突。`postgres`、`elasticsearch` 等 bridge 服务名不能继续作为此模式的默认地址，需改为宿主机或外部可达地址。
+
+从已有部署切换时，先备份、停止旧服务端并保留数据卷，再启动新配置。两个示例沿用同一项目名与服务端数据卷名；需要同时运行多个部署时显式设置不同项目名及端口。复制 `.env.host.example` 只用于首次准备，已有部署必须保留原 `encrypt_key`、Pepper 和数据库凭据。切换到 host 网络不会迁移数据库或自动停止旧 PG/ES 容器；不要执行 `down -v`。
+
 ES 示例关闭认证，只适用于隔离的单宿主机网络。生产应按 [ES 指南](ELASTICSEARCH.md)
 配置认证与 TLS，并调整对应 env 参数、CA 挂载及 ES healthcheck。PG 当前使用 NoTls，跨主机连接不能靠
 `NM__DATABASE__TLS=true` 获得加密。宿主机需满足 ES 内存、文件描述符及 vm.max_map_count 要求，
@@ -198,7 +250,7 @@ ES 示例关闭认证，只适用于隔离的单宿主机网络。生产应按 [
 server-data 保存诊断与可选 MaxMind 数据，server-logs 保存滚动 JSON 日志；数据库分别有独立数据卷。
 docker stdout 日志限制为 3×10MiB，应用文件日志仍需外部保留/轮转管理。
 不要执行 `down -v` 清空生产数据。启动依赖健康检查仅控制启动顺序；服务端健康探针只验证
-TLS 和登录页存活，不代表运行期间 PG/ES 持续就绪。pgBackRest Web 桥接默认关闭，备份由独立服务或宿主机负责。
+HTTP(S) 和登录页存活，不代表运行期间 PG/ES 持续就绪。pgBackRest Web 桥接默认关闭，备份由独立服务或宿主机负责。
 
 ## 首次登录与联调
 
@@ -266,7 +318,7 @@ sudo curl --fail --show-error --silent --cacert docker/runtime/tls/ca.pem \
 
 ## 容器验收范围
 
-CI 从已验证 OCI 产物加载镜像，检查镜像配置 digest 一致后，在临时 PG/ES 下验证初始化、可信 HTTPS、
+CI 从已验证 OCI 产物加载镜像，检查镜像配置 digest 一致后，在临时 PG/ES 下验证初始化、可信 HTTPS、无证书回环 HTTP、镜像健康探针、
 登录页静态资源、缺失路径/文件 404、正常停止及保留数据库的重启。临时网络与容器始终清理。
 冒烟测试的 ES 数据目录使用容量上限为 1 GiB 的 tmpfs，避免 runner 上的构建缓存和 OCI 归档
 使宿主磁盘占用过高而触发 ES 磁盘水位限制；只有集群健康为 green/yellow 且等待未超时才继续启动服务端。
@@ -362,6 +414,7 @@ Skopeo 跨镜像仓库复制对应架构的全部 layers 和构建证明，逐�
 python3 -m unittest discover -s docker -p 'test_*.py'
 python3 docker/ci.py metadata --component server
 shellcheck docker/publish.sh
+sh -n docker/healthcheck.sh
 actionlint .github/workflows/docker.yml .github/workflows/release.yml
 ```
 

@@ -12,6 +12,7 @@
 !src/**
 !docker/
 !docker/config.example.toml
+!docker/healthcheck.sh
 !LICENSE
 
 # Only public documents embedded by Rust; never include arbitrary local docs.

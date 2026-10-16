@@ -9,6 +9,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class EmbeddedInputsTests(unittest.TestCase):
+    def test_healthcheck_is_shipped_without_including_environment_files(self):
+        rules = [line.strip() for line in (ROOT / '.dockerignore').read_text().splitlines()
+                 if line.strip() and not line.lstrip().startswith('#')]
+        for path, expected in [('docker/healthcheck.sh', True), ('docker/.env', False),
+                               ('docker/.env.host', False), ('docker/runtime/tls/key.pem', False)]:
+            included = False
+            for rule in rules:
+                if fnmatch.fnmatch(path, rule.lstrip('!').rstrip('/')):
+                    included = rule.startswith('!')
+            self.assertEqual(included, expected, path)
+        runtime = (ROOT / 'Dockerfile').read_text().split(' AS runtime\n', 1)[1]
+        self.assertIn('COPY --chmod=0555 docker/healthcheck.sh ./bin/healthcheck', runtime)
+        self.assertIn('CMD ["/opt/network-mapping/bin/healthcheck"]', runtime)
+
     def test_every_tracked_sql_is_in_the_runtime_copy_inputs(self):
         paths = subprocess.check_output(['git', 'ls-files', '--', '*.sql'], cwd=ROOT, text=True).splitlines()
         self.assertIn('source/database/init.sql', paths)

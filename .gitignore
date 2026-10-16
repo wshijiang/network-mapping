@@ -17,5 +17,6 @@ CLAUDE.md
 /docker/runtime/
 /docker/output/
 /docker/.env
+/docker/.env.host
 /_frontend/
 /docker/__pycache__/

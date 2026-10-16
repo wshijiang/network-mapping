@@ -68,6 +68,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && install -d -o 10001 -g 10001 /var/lib/network-mapping /var/lib/network-mapping/maxmind /var/lib/network-mapping/scanner-diagnostics /var/log/network-mapping
 WORKDIR /opt/network-mapping
 COPY --from=rust-builder /out/network_mapping_server ./bin/network_mapping_server
+COPY --chmod=0555 docker/healthcheck.sh ./bin/healthcheck
 COPY --from=frontend-builder /frontend/dist ./frontend/dist
 COPY source/database ./source/database
 COPY source/open_source_projects.json ./source/open_source_projects.json
@@ -97,7 +98,7 @@ RUN printf 'server-version=%s\nserver-commit=%s\nfrontend-version=%s\nfrontend-c
 USER 10001:10001
 EXPOSE 9999
 ENV SERVER_TLS_NAME=localhost
-# This checks HTTPS/frontend liveness, not ongoing PG/ES readiness.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 CMD curl --fail --silent --show-error --cacert /etc/network-mapping/tls/ca.pem --resolve "$SERVER_TLS_NAME:${NM__SERVER__PORT:-9999}:127.0.0.1" "https://$SERVER_TLS_NAME:${NM__SERVER__PORT:-9999}/login" > /dev/null || exit 1
+# This checks HTTP(S)/frontend liveness, not ongoing PG/ES readiness.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 CMD ["/opt/network-mapping/bin/healthcheck"]
 ENTRYPOINT ["/opt/network-mapping/bin/network_mapping_server"]
 CMD ["--config-source", "env"]

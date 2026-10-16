@@ -8,7 +8,9 @@ services:
     restart: unless-stopped
     user: "10001:10001"
     environment:
-      SERVER_TLS_NAME: ${SERVER_TLS_NAME:?Set SERVER_TLS_NAME to a certificate DNS name}
+      SERVER_TLS_NAME: ${SERVER_TLS_NAME:-localhost}
+    # Linux Docker Engine needs this alias to reach services on the host.
+    extra_hosts: ["host.docker.internal:host-gateway"]
     # 可选：完整终端日志；自定义 command 时保留配置来源。
     # command: ["--config-source", "env", "--verbose"]
     # 文件模式改为 ["--config-source", "file", "--config", "/etc/network-mapping/config.toml"]，

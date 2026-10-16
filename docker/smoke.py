@@ -67,7 +67,7 @@ def postgres_ready(container):
 
 
 def https_request(container, path, *, body=False):
-    options = ['curl', '--silent', '--show-error', '--max-time', '5', '--cacert',
+    options = ['curl', '--noproxy', '*', '--silent', '--show-error', '--max-time', '5', '--cacert',
                '/etc/network-mapping/tls/ca.pem', '--resolve', 'localhost:9999:127.0.0.1']
     if body:
         options.append('--fail')
@@ -212,7 +212,28 @@ def main():
             docker('start', server)
             wait_until(lambda: https_ready(server), 'Server did not recover after restart',
                        containers=(es_name, pg_name, server))
-            print('Server initialization, verified HTTPS, frontend assets, 404s and database-preserving restart passed.')
+            docker('exec', server, '/opt/network-mapping/bin/healthcheck')
+            docker('stop', '--time', '60', server)
+
+            # Exercise the same image without a TLS mount. Local probes must use
+            # HTTP automatically; the private PG/ES service addresses stay valid.
+            plaintext = namespace+'-http'
+            start(plaintext, image, '--read-only', '--cap-drop', 'ALL',
+                  '--security-opt', 'no-new-privileges:true', '--env-file', str(env_file),
+                  '-e', 'NM__TLS__ENABLED=false', '-e', 'NM__SERVER__HOST=127.0.0.1',
+                  '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m',
+                  '--tmpfs', '/var/lib/network-mapping:rw,uid=10001,gid=10001,mode=0700',
+                  '--tmpfs', '/var/log/network-mapping:rw,uid=10001,gid=10001,mode=0700')
+            wait_until(lambda: docker('exec', plaintext, '/opt/network-mapping/bin/healthcheck',
+                                      check=False, timeout=10).returncode == 0,
+                       'Certificate-free HTTP login did not become ready',
+                       containers=(es_name, pg_name, plaintext))
+            headers = docker('exec', plaintext, 'curl', '--noproxy', '*', '--fail', '--silent',
+                             '--max-time', '5', '--dump-header', '-', '--output', '/dev/null',
+                             'http://127.0.0.1:9999/login').stdout
+            assert 'strict-transport-security:' not in headers.lower()
+            print('Verified HTTPS, certificate-free loopback HTTP, image probes, frontend assets, '
+                  '404s and database-preserving restart passed.')
     except Exception:
         for name in containers:
             state = best_effort_docker('inspect', '--format',

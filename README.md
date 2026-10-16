@@ -63,6 +63,8 @@ cargo build --locked --release
 
 `tls.enabled` 默认 `true`，旧配置继续使用 HTTPS。需要本地 HTTP 或由同机代理终止 TLS 时，设置 `tls.enabled = false`，同时将 `server.host` 改为 `127.0.0.1` 或 `::1`；此时可省略证书和私钥。非回环绑定会拒绝启动，完整示例见[本地 HTTP](docs/DEPLOYMENT.md#本地-http)。
 
+Docker 默认使用 bridge 网络和 TLS。连接宿主机数据库可使用内置的 `host.docker.internal` 映射；Linux 上需要回环 HTTP 与宿主机代理/数据库时，使用独立的 `docker/compose.host.example.yml`。配置和迁移步骤见[Docker 部署指南](docs/DOCKER.md)。
+
 ```sh
 ./target/release/network_mapping_server --config config.toml
 ```

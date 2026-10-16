@@ -236,6 +236,8 @@ location / {
 
 来源 IP 仍需在 Web 的可信代理设置中信任实际回环代理。跨主机代理不能连接此 HTTP 监听，应继续使用服务端 TLS。修改这些启动参数需要重启进程；切换协议后同步修改代理上游和本地探针的 URL。
 
+Docker 的回环地址属于容器网络命名空间。原生 Linux 下需要同机 HTTP 代理与宿主机数据库时，使用独立的 `docker/compose.host.example.yml`；保留 NAT/bridge 时连接宿主机数据库使用 `host.docker.internal`。网络、数据库监听与探针配置见[Docker 部署指南](DOCKER.md)。
+
 ### PostgreSQL 与运行目录
 
 ```toml

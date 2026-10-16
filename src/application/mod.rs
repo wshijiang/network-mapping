@@ -469,7 +469,6 @@ pub async fn run(args: Clis) -> io::Result<()> {
         status_interval_seconds = log.status_duration,
         "服务配置就绪"
     );
-    info!(target: "server::startup", address = %format!("https://{}:{}", server_host, server_port), "HTTPS 服务开始监听");
 
     // 暂时取消等待
     // 计算下一个 2 分钟整点

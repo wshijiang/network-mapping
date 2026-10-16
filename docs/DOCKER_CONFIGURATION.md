@@ -44,6 +44,7 @@ docker compose --env-file docker/.env -f docker/compose.example.yml up -d --forc
 | --- | --- | --- | --- |
 | `SERVER_IMAGE` | 字符串 | 无默认值，必填 | 服务端镜像；模板要求显式指定版本或 digest，`.env.example` 的版本占位符必须替换 |
 | `SERVER_TLS_NAME` | 字符串 | Compose 必填；镜像单独运行默认为 `localhost` | 健康检查使用的证书 DNS 名；不是明文 HTTP 开关，也不会生成证书 |
+| `SERVER_TLS_CA_FILE` | 字符串 | `/etc/network-mapping/tls/ca.pem` | HTTPS 健康探针 CA 路径；HTTP 模式不读取。 |
 | `SERVER_BIND_ADDRESS` | 字符串 | `127.0.0.1` | 宿主机端口绑定地址；直接对外提供服务可显式改为 `0.0.0.0` |
 | `SERVER_PUBLISH_PORT` | 整数 | `9999` | 宿主机发布端口，与容器监听端口可不同 |
 | `COMPOSE_PROFILES` | 逗号分隔字符串 | `.env.example` 为 `local-postgres,local-elasticsearch`；未设置则不启用可选服务 | 选择本地依赖服务，具体组合见下表 |
