@@ -23,7 +23,6 @@
 | [管理与上线](OPEN_API_MANAGEMENT.md) | 管理 Web、审批、密钥、回调、部署和停用 |
 | [实现与回归](OPEN_API_IMPLEMENTATION.md) | 模块、数据模型、事务边界和检查 |
 | [OpenAPI 3.1](open-api/openapi.json) | 可导入工具的机器可读规范 |
-| [实施验证记录](open-api/verification.md) | 构建、隔离回归、浏览器交互及尚需上线验收的内容 |
 
 ## 扫描与资产
 
@@ -59,14 +58,7 @@
 | [pgBackRest 备份管理使用指南](PGBACKREST_BACKUP.md) | 备份部署、权限、执行与恢复验证 |
 | [系统业务时区与常规设置](SYSTEM_TIME.md) | 业务时区与时间展示规则 |
 | [系统资源读取与慢依赖隔离](SYSTEM_RESOURCE_RESILIENCE.md) | 资源读取、缓存与慢依赖处理 |
-| [SQL 热路径优化与对比](SQL_HOT_PATH_OPTIMIZATION.md) | 认证热路径及性能对比 |
 
-## 架构与开发设计
-
-| 文档 | 内容 |
-| --- | --- |
-| [服务端模块化与部分热更新方案](MODULAR_ARCHITECTURE.md) | 领域边界、业务 worker 替换、配置同步、任务一致性与迁移阶段；含独立可运行 Rust 原型 |
-| [模块系统实现规格与接入步骤](MODULE_RUNTIME_IMPLEMENTATION.md) | 当前领域拆分、独立渲染包、生产接入、热更新配置与管理接口 |
 
 ## 文档维护约定
 

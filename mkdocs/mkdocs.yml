@@ -1,0 +1,77 @@
+site_name: Network Mapping Documation
+site_description: 网络测绘系统技术文档
+site_url: https://blog.abdc.world
+
+docs_dir: ../docs
+site_dir: site
+
+theme:
+  name: material
+  language: zh
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.action.edit    # 编辑
+    - content.action.view    # 查看源代码
+
+validation:
+  links:
+    absolute_links: relative_to_docs
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn
+
+plugins:
+  - search
+
+nav:
+  - 首页: README.md
+  - 部署指南:
+    - 直接部署: DEPLOYMENT.md
+    - DOCKER部署: DOCKER.md
+  - OPEN API 文档: OPEN_API.md
+
+hooks:
+  - hooks.py
+
+repo_url: https://github.com/wshijiang/network-mapping
+repo_name: wshijiang/network-mapping
+edit_uri: edit/mkdocs/docs/
+
+markdown_extensions:
+#开启 mermaid插件
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  #保留中文，避免文档内部的锚链接失效
+  - toc:
+      permalink: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+
+extra:
+  # 页脚右侧图标
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/wshijiang/network-mapping
+      name: GitHub 源代码
+
+    - icon: fontawesome/brands/docker
+      link: https://hub.docker.com/
+      name: Docker Hub
+
+    - icon: fontawesome/solid/globe
+      link: https://blog.abdc.world
+      name: 博客
+
+
+# 版权信息
+copyright: >
+  Copyright &copy; 2026 Network Mapping Project.
+  All rights reserved.
+  <br>

@@ -227,21 +227,3 @@ PostgreSQL 模式下 `scan_observation` 是事实来源，`ips`、`ports` 是资
 新版扫描器领取任务，在新服务端上排空协议 3 待上传批次，再回滚扫描器二进制并确认其恢复
 协议 2，最后才能回滚服务端。扫描器会把任务和批次持久化到本地 SQLite；直接降级服务端或
 删除节点状态可能造成持续上传失败或结果丢失。
-
-## 验收与排障
-
-- 漏洞任务一直 pending：检查是否存在在线、地址族就绪并声明 `vulnerability_scan` 的节点；
-- 任务在漏洞阶段失败：检查扫描器的 Nuclei stderr 摘要、模板签名、超时和结果上限；
-- 前端漏洞数为 0：确认查询的是正确 `execution_id`，并检查协议 3 批次是否已提交最终批；
-- PostgreSQL 有记录但页面不可用：确认 PG 旧结果已完成迁移，并检查 Elasticsearch 可用性；
-- 端点服务突然变成 Nuclei：这是异常，检查数据库视图和 ES projection 是否仍排除
-  vulnerability kind。
-
-扫描节点的参数、安全边界、模板治理和详细排障参见 Scanner 仓库的
-`docs/NUCLEI.md`。
-
-升级时，若遗留 `scaninfo` 仍存在，数据库初始化只读取它并幂等回填尚无 observation 的旧
-execution；新安装或用户已手动删除该表时会跳过回填。初始化和服务端运行路径都不会创建、
-清空或删除 `scaninfo`。
-
-资产当前状态和端口历史接口参见 [`ASSET_PORT_HISTORY.md`](ASSET_PORT_HISTORY.md)。
