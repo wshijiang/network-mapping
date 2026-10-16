@@ -18,12 +18,19 @@ class ComposeTests(unittest.TestCase):
         if result.returncode:
             raise unittest.SkipTest('Docker Compose unavailable')
 
-    def config(self, host=False, extra=None, template=None):
+    def config(self, host=False, extra=None, template=None, enable_healthcheck=False):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             name = 'compose.host.example.yml' if host else 'compose.example.yml'
             env_name = '.env.host' if host else '.env'
-            (directory / name).write_text((ROOT / 'docker' / name).read_text())
+            source = (ROOT / 'docker' / name).read_text()
+            if enable_healthcheck:
+                start = source.index('    # healthcheck:\n')
+                end = source.index('\n\n', start)
+                block = '\n'.join(line.replace('    # ', '    ', 1)
+                                  for line in source[start:end].splitlines())
+                source = source[:start] + block + source[end:]
+            (directory / name).write_text(source)
             values = dict(line.split('=', 1) for line in
                           (ROOT / 'docker' / (template or env_name + '.example')).read_text().splitlines()
                           if line and not line.startswith('#'))
@@ -52,6 +59,17 @@ class ComposeTests(unittest.TestCase):
         self.assertIn('host.docker.internal=host-gateway', server['extra_hosts'])
         self.assertEqual(server['ports'][0]['host_ip'], '127.0.0.1')
         self.assertIn('postgres', services)
+
+    def test_enabled_healthcheck_override_uses_the_image_readiness_command(self):
+        directive = next(line for line in (ROOT / 'Dockerfile').read_text().splitlines()
+                         if line.startswith('HEALTHCHECK '))
+        image_command = json.loads(directive.split(' CMD ', 1)[1])
+        for tls in ['true', 'false']:
+            with self.subTest(tls=tls):
+                server = self.config(enable_healthcheck=True,
+                                     extra={'NM__TLS__ENABLED': tls,
+                                            'NM__SERVER__HOST': '127.0.0.1'})['server']
+                self.assertEqual(server['healthcheck']['test'], ['CMD', *image_command])
 
     def test_nat_host_postgres_keeps_only_the_requested_elasticsearch_profile(self):
         services = self.config(template='.env.host-db.example')

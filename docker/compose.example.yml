@@ -43,14 +43,10 @@ services:
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
-    # 可选探针覆盖，以下与镜像默认行为一致；变更证书目录或检查方式时同步调整。
+    # 可选探针覆盖，调用与镜像相同的 /healthz 探针，保留 PG/ES 就绪检查。
+    # 协议、地址、端口及 CA 按环境变量自动选择；文件模式参数见部署文档。
     # healthcheck:
-    #   test:
-    #     - CMD-SHELL
-    #     - >-
-    #       curl --fail --silent --show-error --cacert /etc/network-mapping/tls/ca.pem
-    #       --resolve "$$SERVER_TLS_NAME:$${NM__SERVER__PORT:-9999}:127.0.0.1"
-    #       "https://$$SERVER_TLS_NAME:$${NM__SERVER__PORT:-9999}/login" > /dev/null
+    #   test: [CMD, /opt/network-mapping/bin/healthcheck]
     #   interval: 30s
     #   timeout: 5s
     #   start_period: 120s
