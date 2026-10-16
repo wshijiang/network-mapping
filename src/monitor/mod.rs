@@ -508,11 +508,12 @@ impl MonitorHandle {
     }
 }
 
-/// 将一条已通过冷却去重的告警写入 `health_alert` 历史表；写入失败不影响邮件发送。
-async fn record_health_alert(
+/// Atomically persist history and bot fanout after a cross-instance cooldown check.
+pub(crate) async fn record_health_alert(
     pool: &Pool,
     event: &HealthEvent,
-) -> Result<(), Box<dyn std::error::Error>> {
+    cooldown_seconds: i64,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let details = event
         .details
         .iter()
@@ -521,20 +522,50 @@ async fn record_health_alert(
     let detail = serde_json::json!({ "details": details, "policy": event.applied_rule.as_ref().map(|applied| serde_json::json!({
         "source": applied.source, "revision": applied.revision, "rule": applied.rule
     })) });
-    let conn = pool.get().await?;
-    conn.execute(
-        "INSERT INTO health_alert (alert_type, alert_key, severity, summary, detail) \
-         VALUES ($1, $2, $3, $4, $5);",
-        &[
-            &event.alert_type,
-            &event.key,
-            &event.severity,
-            &event.summary,
-            &detail,
-        ],
+    let mut conn = pool.get().await?;
+    let tx = conn.transaction().await?;
+    let gate = tx.query_opt(
+        "INSERT INTO notification_health_gate(alert_key,severity,admitted_at) VALUES($1,$2,NOW()) \
+         ON CONFLICT(alert_key) DO UPDATE SET severity=EXCLUDED.severity,admitted_at=NOW() \
+         WHERE notification_health_gate.admitted_at<=NOW()-$3::BIGINT*INTERVAL '1 second' \
+         OR ($2='critical' AND notification_health_gate.severity<>'critical') RETURNING alert_key",
+        &[&event.key,&event.severity,&cooldown_seconds],
+    ).await?;
+    if gate.is_none() {
+        return Ok(false);
+    }
+    let row = tx
+        .query_one(
+            "INSERT INTO health_alert (alert_type, alert_key, severity, summary, detail) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING id;",
+            &[
+                &event.alert_type,
+                &event.key,
+                &event.severity,
+                &event.summary,
+                &detail,
+            ],
+        )
+        .await?;
+    let id: i64 = row.get("id");
+    // Group notifications contain a bounded operational summary, not raw SQL, IPs or request details.
+    let title = format!("健康告警：{}", event.alert_type);
+    let body = format!(
+        "告警类型：{}\n告警记录：{}\n请登录平台“健康告警”查看详情。",
+        event.alert_type, id
+    );
+    crate::notification::enqueue(
+        &tx,
+        "health.alert",
+        event.severity,
+        &format!("health:{id}"),
+        &title,
+        &body,
+        None,
     )
     .await?;
-    Ok(())
+    tx.commit().await?;
+    Ok(true)
 }
 
 #[derive(Default)]
@@ -604,23 +635,27 @@ async fn run_notifier(
             }
         }
 
-        if let Err(error) = record_health_alert(&pool, &event).await {
-            let diagnostics = error_diagnostics(error.as_ref());
-            error!(
-                event = "HealthAlertRecordError",
-                operation = "record_health_alert",
-                error_kind = "database",
-                error_code = "health_alert_record_failed",
-                error_message = %diagnostics.error_message,
-                error_chain = %diagnostics.error_chain,
-                root_cause = %diagnostics.root_cause,
-                error_truncated = diagnostics.error_truncated,
-                retryable = false,
-                outcome = "alert_history_missing",
-                alert_type = event.alert_type,
-                key = %event.key,
-                "健康告警历史写入失败"
-            );
+        match record_health_alert(&pool, &event, cooldown.as_secs() as i64).await {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(error) => {
+                let diagnostics = error_diagnostics(error.as_ref());
+                error!(
+                    event = "HealthAlertRecordError",
+                    operation = "record_health_alert",
+                    error_kind = "database",
+                    error_code = "health_alert_record_failed",
+                    error_message = %diagnostics.error_message,
+                    error_chain = %diagnostics.error_chain,
+                    root_cause = %diagnostics.root_cause,
+                    error_truncated = diagnostics.error_truncated,
+                    retryable = false,
+                    outcome = "alert_history_missing",
+                    alert_type = event.alert_type,
+                    key = %event.key,
+                    "健康告警历史写入失败"
+                );
+            }
         }
 
         if let Err(error) = mail_template::send_health_alert(&pool, &encryption_key, &event).await {

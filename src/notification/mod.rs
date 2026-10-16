@@ -1,0 +1,362 @@
+//! Durable, administrator-managed notification channels, independent of SMTP.
+pub mod feishu;
+mod routes;
+#[cfg(test)]
+mod tests;
+mod worker;
+
+use actix_web::http::StatusCode;
+use chrono::{DateTime, Utc};
+use deadpool_postgres::Pool;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tokio_postgres::{Row, Transaction};
+use uuid::Uuid;
+
+use crate::{
+    admin::UserBaseI,
+    audit::{AuditContext, AuditEvent},
+};
+pub use routes::configure;
+pub use worker::run;
+
+pub const EVENT_TYPES: [&str; 3] = ["health.alert", "scanner.offline", "scanner.recovered"];
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug)]
+pub struct Error {
+    pub status: StatusCode,
+    pub message: &'static str,
+}
+impl Error {
+    pub fn bad(message: &'static str) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message,
+        }
+    }
+    pub fn missing() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: "通知渠道或投递记录不存在",
+        }
+    }
+    pub fn conflict() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: "配置已变化或当前状态不可操作，请刷新后重试",
+        }
+    }
+    pub fn internal() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "通知服务暂时不可用",
+        }
+    }
+}
+impl From<tokio_postgres::Error> for Error {
+    fn from(value: tokio_postgres::Error) -> Self {
+        tracing::error!(event="NotificationDatabaseError", code=?value.code(), "通知数据库操作失败");
+        Self::internal()
+    }
+}
+impl From<deadpool_postgres::PoolError> for Error {
+    fn from(_: deadpool_postgres::PoolError) -> Self {
+        Self::internal()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelInput {
+    pub name: String,
+    pub enabled: bool,
+    pub event_types: Vec<String>,
+    pub minimum_severity: String,
+    #[serde(default)]
+    pub webhook_url: String,
+    #[serde(default)]
+    pub signing_secret: String,
+    #[serde(default)]
+    pub clear_signing_secret: bool,
+    pub expected_revision: Option<i64>,
+}
+
+impl ChannelInput {
+    fn validate(&self, creating: bool) -> Result<()> {
+        if self.name.trim().is_empty() || self.name.trim().chars().count() > 80 {
+            return Err(Error::bad("渠道名称须为 1 至 80 个字符"));
+        }
+        if self.event_types.is_empty()
+            || self.event_types.len() > EVENT_TYPES.len()
+            || self
+                .event_types
+                .iter()
+                .any(|v| !EVENT_TYPES.contains(&v.as_str()))
+            || self
+                .event_types
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != self.event_types.len()
+        {
+            return Err(Error::bad("请选择有效且不重复的通知事件"));
+        }
+        if !["warning", "critical"].contains(&self.minimum_severity.as_str()) {
+            return Err(Error::bad("通知级别须为 warning 或 critical"));
+        }
+        if creating || !self.webhook_url.is_empty() {
+            feishu::validate_url(&self.webhook_url).map_err(Error::bad)?;
+        }
+        if self.signing_secret.len() > 512
+            || (self.clear_signing_secret && !self.signing_secret.is_empty())
+        {
+            return Err(Error::bad("签名密钥设置无效"));
+        }
+        if !creating && self.expected_revision.is_none_or(|v| v < 1) {
+            return Err(Error::bad("缺少配置版本"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+pub struct Channel {
+    pub id: Uuid,
+    pub provider: &'static str,
+    pub name: String,
+    pub enabled: bool,
+    pub event_types: Vec<String>,
+    pub minimum_severity: String,
+    pub webhook_configured: bool,
+    pub signing_secret_configured: bool,
+    pub revision: i64,
+    pub updated_at: DateTime<Utc>,
+}
+fn channel(row: &Row) -> Channel {
+    Channel {
+        id: row.get("id"),
+        provider: "feishu",
+        name: row.get("name"),
+        enabled: row.get("enabled"),
+        event_types: row.get("event_types"),
+        minimum_severity: row.get("minimum_severity"),
+        webhook_configured: true,
+        signing_secret_configured: row.get("secret_configured"),
+        revision: row.get("revision"),
+        updated_at: row.get("updated_at"),
+    }
+}
+const CHANNEL_COLUMNS: &str = "id, name, enabled, event_types, minimum_severity, secret_ciphertext IS NOT NULL AS secret_configured, revision, updated_at";
+
+pub fn encrypt(value: &str, encoded_key: &str) -> Result<Vec<u8>> {
+    let key = openssl::base64::decode_block(encoded_key).map_err(|_| Error::internal())?;
+    if key.len() != 32 {
+        return Err(Error::internal());
+    }
+    let (nonce, tag, bytes) =
+        crate::identity::encrypt_data(value.as_bytes(), &key).map_err(|_| Error::internal())?;
+    Ok([nonce, tag, bytes].concat())
+}
+fn decrypt(bytes: &[u8], encoded_key: &str) -> Result<String> {
+    if bytes.len() < 28 {
+        return Err(Error::internal());
+    }
+    let key = openssl::base64::decode_block(encoded_key).map_err(|_| Error::internal())?;
+    if key.len() != 32 {
+        return Err(Error::internal());
+    }
+    let value = crate::identity::decrypt_data(bytes, &key).map_err(|_| Error::internal())?;
+    String::from_utf8(value).map_err(|_| Error::internal())
+}
+
+pub async fn list(pool: &Pool) -> Result<Vec<Channel>> {
+    Ok(pool.get().await?.query(&format!("SELECT {CHANNEL_COLUMNS} FROM notification_channel WHERE deleted_at IS NULL ORDER BY created_at,id"), &[])
+        .await?.iter().map(channel).collect())
+}
+
+async fn audit(
+    tx: &deadpool_postgres::Transaction<'_>,
+    user: &UserBaseI,
+    context: &AuditContext,
+    action: &str,
+    id: Uuid,
+) -> Result<()> {
+    let mut event = AuditEvent::user("configuration", action, "success", user)
+        .resource("notification", id.to_string());
+    event.response_status = Some(200);
+    crate::audit::write(tx, context, &event).await?;
+    Ok(())
+}
+
+pub async fn save(
+    pool: &Pool,
+    key: &str,
+    id: Option<Uuid>,
+    input: ChannelInput,
+    user: &UserBaseI,
+    context: &AuditContext,
+) -> Result<Channel> {
+    input.validate(id.is_none())?;
+    let mut conn = pool.get().await?;
+    let tx = conn.transaction().await?;
+    // Serialize channel count checks, including concurrent creations.
+    tx.query_one("SELECT pg_advisory_xact_lock(728104, 1)", &[])
+        .await?;
+    let target = id.unwrap_or_else(Uuid::now_v7);
+    if let Some(id) = id {
+        let row = tx.query_opt("SELECT revision FROM notification_channel WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", &[&id]).await?.ok_or_else(Error::missing)?;
+        if Some(row.get::<_, i64>("revision")) != input.expected_revision {
+            return Err(Error::conflict());
+        }
+        let url = if input.webhook_url.is_empty() {
+            None
+        } else {
+            Some(encrypt(&input.webhook_url, key)?)
+        };
+        let secret = if input.signing_secret.is_empty() {
+            None
+        } else {
+            Some(encrypt(&input.signing_secret, key)?)
+        };
+        tx.execute("UPDATE notification_channel SET name=$2,enabled=$3,event_types=$4,minimum_severity=$5,webhook_ciphertext=COALESCE($6,webhook_ciphertext),secret_ciphertext=CASE WHEN $8 THEN NULL ELSE COALESCE($7,secret_ciphertext) END,revision=revision+1,destination_revision=destination_revision+CASE WHEN $6::BYTEA IS NULL THEN 0 ELSE 1 END,updated_at=NOW() WHERE id=$1", &[&id,&input.name.trim(),&input.enabled,&input.event_types,&input.minimum_severity,&url,&secret,&input.clear_signing_secret]).await?;
+        // An edit cancels queued work. In-flight requests may already have left the process.
+        tx.execute("UPDATE notification_delivery SET status='cancelled',last_error='channel_changed',finished_at=NOW(),claim_token=NULL,lease_until=NULL WHERE channel_id=$1 AND status IN ('pending','sending')", &[&id]).await?;
+    } else {
+        let count: i64 = tx
+            .query_one(
+                "SELECT COUNT(*) FROM notification_channel WHERE deleted_at IS NULL",
+                &[],
+            )
+            .await?
+            .get(0);
+        if count >= 32 {
+            return Err(Error::bad("最多配置 32 个通知渠道"));
+        }
+        let url = encrypt(&input.webhook_url, key)?;
+        let secret = if input.signing_secret.is_empty() {
+            None
+        } else {
+            Some(encrypt(&input.signing_secret, key)?)
+        };
+        tx.execute("INSERT INTO notification_channel(id,provider,name,enabled,event_types,minimum_severity,webhook_ciphertext,secret_ciphertext) VALUES($1,'feishu',$2,$3,$4,$5,$6,$7)", &[&target,&input.name.trim(),&input.enabled,&input.event_types,&input.minimum_severity,&url,&secret]).await?;
+    }
+    audit(&tx, user, context, "notification.channel_save", target).await?;
+    let row = tx
+        .query_one(
+            &format!("SELECT {CHANNEL_COLUMNS} FROM notification_channel WHERE id=$1"),
+            &[&target],
+        )
+        .await?;
+    tx.commit().await?;
+    Ok(channel(&row))
+}
+
+pub async fn remove(
+    pool: &Pool,
+    id: Uuid,
+    revision: i64,
+    user: &UserBaseI,
+    context: &AuditContext,
+) -> Result<()> {
+    let mut conn = pool.get().await?;
+    let tx = conn.transaction().await?;
+    let changed = tx.execute("UPDATE notification_channel SET enabled=FALSE,deleted_at=NOW(),revision=revision+1,webhook_ciphertext=''::BYTEA,secret_ciphertext=NULL WHERE id=$1 AND revision=$2 AND deleted_at IS NULL", &[&id,&revision]).await?;
+    if changed != 1 {
+        return Err(Error::conflict());
+    }
+    tx.execute("UPDATE notification_delivery SET status='cancelled',last_error='channel_deleted',finished_at=NOW(),claim_token=NULL,lease_until=NULL WHERE channel_id=$1 AND status IN ('pending','sending')", &[&id]).await?;
+    audit(&tx, user, context, "notification.channel_delete", id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(crate) async fn enqueue(
+    tx: &Transaction<'_>,
+    event_type: &str,
+    severity: &str,
+    dedup: &str,
+    title: &str,
+    body: &str,
+    outage: Option<i64>,
+) -> std::result::Result<(), tokio_postgres::Error> {
+    let id = Uuid::now_v7();
+    let inserted = tx.execute("INSERT INTO notification_event(id,dedup_key,event_type,severity,title,body,outage_id) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(dedup_key) DO NOTHING", &[&id,&dedup,&event_type,&severity,&title,&body,&outage]).await?;
+    if inserted == 0 {
+        return Ok(());
+    }
+    // Lock matching channels against concurrent edits/deletion until fanout commits.
+    let rows = tx.query("SELECT id,destination_revision FROM notification_channel WHERE enabled AND deleted_at IS NULL AND $1=ANY(event_types) AND ($2='critical' OR minimum_severity='warning') FOR SHARE", &[&event_type,&severity]).await?;
+    for row in rows {
+        let channel: Uuid = row.get("id");
+        let destination: i64 = row.get("destination_revision");
+        if event_type == "scanner.recovered" {
+            let sent: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE e.outage_id=$1 AND e.event_type='scanner.offline' AND d.channel_id=$2 AND d.destination_revision=$3 AND d.status='sent')", &[&outage,&channel,&destination]).await?.get(0);
+            if !sent {
+                continue;
+            }
+        }
+        tx.execute("INSERT INTO notification_delivery(id,event_id,channel_id,destination_revision) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING", &[&Uuid::now_v7(),&id,&channel,&destination]).await?;
+    }
+    Ok(())
+}
+
+pub async fn test_send(
+    pool: &Pool,
+    id: Uuid,
+    user: &UserBaseI,
+    context: &AuditContext,
+) -> Result<Uuid> {
+    let mut conn = pool.get().await?;
+    let tx = conn.transaction().await?;
+    let channel = tx.query_opt("UPDATE notification_channel SET last_test_at=NOW() WHERE id=$1 AND deleted_at IS NULL AND enabled AND (last_test_at IS NULL OR last_test_at<NOW()-INTERVAL '30 seconds') RETURNING destination_revision", &[&id]).await?.ok_or_else(Error::conflict)?;
+    let event = Uuid::now_v7();
+    let delivery = Uuid::now_v7();
+    tx.execute("INSERT INTO notification_event(id,dedup_key,event_type,severity,title,body) VALUES($1,$2,'notification.test','warning','飞书通知测试','管理员从 Web 控制台发起测试。')", &[&event,&format!("test:{event}")]).await?;
+    tx.execute("INSERT INTO notification_delivery(id,event_id,channel_id,destination_revision) VALUES($1,$2,$3,$4)", &[&delivery,&event,&id,&channel.get::<_,i64>("destination_revision")]).await?;
+    audit(&tx, user, context, "notification.test", id).await?;
+    tx.commit().await?;
+    Ok(delivery)
+}
+
+#[derive(Deserialize)]
+pub struct DeliveryQuery {
+    pub channel_id: Option<Uuid>,
+    pub status: Option<String>,
+    pub before: Option<Uuid>,
+}
+pub async fn deliveries(pool: &Pool, query: DeliveryQuery) -> Result<Value> {
+    if query.status.as_ref().is_some_and(|v| {
+        !["pending", "sending", "sent", "failed", "cancelled"].contains(&v.as_str())
+    }) {
+        return Err(Error::bad("投递状态无效"));
+    }
+    let conn = pool.get().await?;
+    let rows = conn.query("SELECT d.id,d.channel_id,c.name,d.status,d.attempts,d.last_error,d.response_status,d.provider_code,d.created_at,d.finished_at,d.available_at,e.event_type,e.severity,e.title FROM notification_delivery d JOIN notification_channel c ON c.id=d.channel_id JOIN notification_event e ON e.id=d.event_id WHERE ($1::UUID IS NULL OR d.channel_id=$1) AND ($2::TEXT IS NULL OR d.status=$2) AND ($3::UUID IS NULL OR d.id<$3) ORDER BY d.id DESC LIMIT 51", &[&query.channel_id,&query.status,&query.before]).await?;
+    let items: Vec<Value> = rows.iter().take(50).map(|row| json!({
+        "id":row.get::<_,Uuid>("id"),"channel_id":row.get::<_,Uuid>("channel_id"),"channel_name":row.get::<_,String>("name"),
+        "status":row.get::<_,String>("status"),"attempts":row.get::<_,i32>("attempts"),"last_error":row.get::<_,Option<String>>("last_error"),
+        "response_status":row.get::<_,Option<i32>>("response_status"),"provider_code":row.get::<_,Option<i64>>("provider_code"),
+        "created_at":row.get::<_,DateTime<Utc>>("created_at"),"finished_at":row.get::<_,Option<DateTime<Utc>>>("finished_at"),
+        "available_at":row.get::<_,DateTime<Utc>>("available_at"),"event_type":row.get::<_,String>("event_type"),
+        "severity":row.get::<_,String>("severity"),"title":row.get::<_,String>("title")
+    })).collect();
+    let next = if rows.len() > 50 {
+        items.last().and_then(|v| v.get("id")).cloned()
+    } else {
+        None
+    };
+    Ok(json!({"items":items,"next_before":next}))
+}
+
+pub async fn retry(pool: &Pool, id: Uuid, user: &UserBaseI, context: &AuditContext) -> Result<()> {
+    let mut conn = pool.get().await?;
+    let tx = conn.transaction().await?;
+    let changed = tx.execute("UPDATE notification_delivery d SET status='pending',attempts=0,available_at=NOW(),finished_at=NULL,last_error=NULL FROM notification_channel c,notification_event e WHERE d.id=$1 AND d.channel_id=c.id AND d.event_id=e.id AND d.status='failed' AND c.enabled AND c.deleted_at IS NULL AND c.destination_revision=d.destination_revision AND (e.event_type='notification.test' OR (e.event_type=ANY(c.event_types) AND (e.severity='critical' OR c.minimum_severity='warning'))) AND (e.event_type<>'scanner.offline' OR EXISTS(SELECT 1 FROM scanner_outage o JOIN scanner_info s ON s.scanner_id=o.scanner_id WHERE o.id=e.outage_id AND o.recovered_at IS NULL AND s.deleted_at IS NULL AND s.is_enable))", &[&id]).await?;
+    if changed != 1 {
+        return Err(Error::conflict());
+    }
+    audit(&tx, user, context, "notification.retry", id).await?;
+    tx.commit().await?;
+    Ok(())
+}

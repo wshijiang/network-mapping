@@ -32,6 +32,7 @@ nav:
     - 直接部署: DEPLOYMENT.md
     - DOCKER部署: DOCKER.md
   - OPEN API 文档: OPEN_API.md
+  - 通知渠道与飞书: NOTIFICATIONS.md
 
 hooks:
   - hooks.py

@@ -359,6 +359,15 @@ pub async fn run(args: Clis) -> io::Result<()> {
     );
 
     background.spawn_draining(
+        "notification-worker",
+        crate::notification::run(
+            db_pool.clone(),
+            ser_con.encrypt_key.clone(),
+            system_maintenance_state.clone(),
+            background.subscribe(),
+        ),
+    );
+    background.spawn_draining(
         "report-worker",
         crate::reports::run_worker(
             db_pool.clone(),

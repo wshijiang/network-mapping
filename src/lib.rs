@@ -25,6 +25,7 @@ pub mod mail_template;
 pub mod maxmind;
 pub use nm_module_runtime as module_runtime;
 pub mod monitor;
+pub mod notification;
 pub mod target_generated;
 pub mod tls;
 pub mod trusted_proxy;

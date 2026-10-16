@@ -20,7 +20,7 @@ pub async fn record_recovery(
 ) -> Result<(), tokio_postgres::Error> {
     let row = transaction
         .query_opt(
-            "UPDATE scanner_outage SET recovered_at = NOW(), recovery_requested = \
+            "UPDATE scanner_outage SET recovered_at = NOW(), notification_recovery = TRUE, recovery_requested = \
              COALESCE((SELECT value::boolean FROM setting WHERE item_type = 'notification' \
              AND key = 'scanner_recovery_enabled'), TRUE) \
              WHERE scanner_id = $1 AND recovered_at IS NULL RETURNING id;",
@@ -36,6 +36,7 @@ pub async fn record_recovery(
                 &[&outage_id],
             )
             .await?;
+        transaction.execute("UPDATE notification_delivery d SET status='cancelled',last_error='scanner_recovered',finished_at=NOW(),claim_token=NULL,lease_until=NULL FROM notification_event e WHERE d.event_id=e.id AND e.outage_id=$1 AND e.event_type='scanner.offline' AND d.status='pending'", &[&outage_id]).await?;
     }
     Ok(())
 }
@@ -47,7 +48,7 @@ pub async fn close_without_recovery(
 ) -> Result<(), tokio_postgres::Error> {
     let row = transaction
         .query_opt(
-            "UPDATE scanner_outage SET recovered_at = NOW(), recovery_requested = FALSE \
+            "UPDATE scanner_outage SET recovered_at = NOW(), recovery_requested = FALSE, notification_recovery = FALSE \
          WHERE scanner_id = $1 AND recovered_at IS NULL RETURNING id;",
             &[&scanner_id],
         )
@@ -61,6 +62,7 @@ pub async fn close_without_recovery(
                 &[&outage_id],
             )
             .await?;
+        transaction.execute("UPDATE notification_delivery d SET status='cancelled',last_error='scanner_deactivated',finished_at=NOW(),claim_token=NULL,lease_until=NULL FROM notification_event e WHERE d.event_id=e.id AND e.outage_id=$1 AND d.status IN ('pending','sending')", &[&outage_id]).await?;
     }
     Ok(())
 }
@@ -180,6 +182,16 @@ pub(crate) async fn detect_outages(
             .await?;
         if let Some(created) = created {
             let outage_id: i64 = created.get("id");
+            crate::notification::enqueue(
+                &transaction,
+                "scanner.offline",
+                "warning",
+                &format!("outage:{outage_id}:offline"),
+                "Scanner 掉线",
+                &format!("扫描器：{scanner_id}\n最后心跳：{last_seen_at}\n掉线事件：{outage_id}"),
+                Some(outage_id),
+            )
+            .await?;
             for recipient in recipients {
                 transaction
                     .execute(
