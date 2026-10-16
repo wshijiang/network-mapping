@@ -25,7 +25,7 @@ tokio-postgres = { version = "0.7", features = ["array-impls", "with-cidr-0_3", 
 cidr = { version = "0.3", features = ["serde"]}
 deadpool-postgres = { version = "0.14"}
 deadpool = "0.13"
-argon2 = "0.5"
+argon2 = "0.6"
 password-hash = "0.5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "sync", "time"] }
 uuid = { version = "1.18", features = ["v4", "v7", "serde"]}
