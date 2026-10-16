@@ -330,6 +330,15 @@ pub async fn run(args: Clis) -> io::Result<()> {
     let maxmind_state = MaxMindState::from_directory(&maxmind_directory);
 
     let elasticsearch_data = web::Data::new(elasticsearch_service.clone());
+    let health_state = web::Data::new(crate::readiness::HealthState::default());
+    background.spawn(
+        "readiness",
+        crate::readiness::run(
+            health_state.clone(),
+            db_pool.clone(),
+            elasticsearch_service.clone(),
+        ),
+    );
     if elasticsearch_service.enabled() {
         background.spawn(
             "asset-projection",
@@ -568,6 +577,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
         let monitor_handle = monitor_handle.clone();
 
         App::new()
+            .app_data(health_state.clone())
             .app_data(tls_config.clone())
             .app_data(web::Data::new(config_check.clone()))
             .app_data(web::Data::new(pool.clone()))
@@ -629,8 +639,10 @@ pub async fn run(args: Clis) -> io::Result<()> {
                         .and_then(|value| uuid::Uuid::parse_str(value).ok())
                 })
                 .flatten();
-                let capture =
-                    !crate::frontend::is_frontend_resource_path(&path) && !is_scanner_heartbeat;
+                let is_health_probe = path == "/healthz";
+                let capture = !is_health_probe
+                    && !crate::frontend::is_frontend_resource_path(&path)
+                    && !is_scanner_heartbeat;
                 let actor = std::sync::Arc::new(std::sync::Mutex::new(None));
                 req.extensions_mut()
                     .insert(request_log::RequestActor(actor.clone()));
@@ -723,8 +735,8 @@ pub async fn run(args: Clis) -> io::Result<()> {
                             );
                         }
 
-                        // 健康告警：慢请求按匹配路由模板解析规则，5xx 错误独立判定。
-                        {
+                        // 健康探针不重复生成请求告警；依赖变化由 readiness 后台任务记录。
+                        if !is_health_probe {
                             let monitor = &monitor_handle;
                             let monitor_route = route_pattern.as_deref().unwrap_or("(unmatched)");
                             let slow_rule = duration_ms.and_then(|value| {

@@ -43,7 +43,7 @@ docker compose --env-file docker/.env -f docker/compose.example.yml up -d --forc
 | 变量 | 类型 | 默认值 / 示例值 | 作用与约束 |
 | --- | --- | --- | --- |
 | `SERVER_IMAGE` | 字符串 | 无默认值，必填 | 服务端镜像；模板要求显式指定版本或 digest，`.env.example` 的版本占位符必须替换 |
-| `SERVER_TLS_NAME` | 字符串 | Compose 必填；镜像单独运行默认为 `localhost` | 健康检查使用的证书 DNS 名；不是明文 HTTP 开关，也不会生成证书 |
+| `SERVER_TLS_NAME` | 字符串 | 默认 `localhost`；示例 `server.example.com` | HTTPS 健康检查使用的证书 DNS 名；HTTP 模式不需要，也不会生成证书 |
 | `SERVER_TLS_CA_FILE` | 字符串 | `/etc/network-mapping/tls/ca.pem` | HTTPS 健康探针 CA 路径；HTTP 模式不读取。 |
 | `SERVER_BIND_ADDRESS` | 字符串 | `127.0.0.1` | 宿主机端口绑定地址；直接对外提供服务可显式改为 `0.0.0.0` |
 | `SERVER_PUBLISH_PORT` | 整数 | `9999` | 宿主机发布端口，与容器监听端口可不同 |
@@ -93,10 +93,8 @@ docker compose --env-file docker/.env -f docker/compose.example.yml up -d --forc
 | `NM__TLS__CERTIFICATE_CHAIN_FILE` | 路径字符串 | `/etc/network-mapping/tls/cert.pem` | PEM 证书链，需与私钥匹配 |
 | `NM__TLS__PRIVATE_KEY_FILE` | 路径字符串 | `/etc/network-mapping/tls/key.pem` | PEM 私钥，需允许 UID 10001 读取 |
 
-服务端始终提供 HTTPS，没有关闭 TLS 或切换到明文 HTTP 的配置项。
-默认将 `docker/runtime/tls` 挂载到 `/etc/network-mapping/tls`；还需提供 `ca.pem`，
-镜像健康检查固定用 `/etc/network-mapping/tls/ca.pem` 验证服务器证书。
-如果改变证书路径、目录或检查方式，需同时修改 Compose 挂载及 `server.healthcheck`。
+服务端默认提供 HTTPS，旧配置保持 TLS 开启。设置 `NM__TLS__ENABLED=false` 后仅允许回环 IP 监听，证书可省略；Linux 本地 HTTP 使用独立的 `compose.host.example.yml`，标准 bridge 端口映射无法访问容器回环监听。
+标准 Compose 将 `docker/runtime/tls` 挂载到 `/etc/network-mapping/tls`，HTTPS 探针用 `ca.pem` 验证证书；`SERVER_TLS_CA_FILE` 可覆盖该路径。HTTP 探针不读取 CA。改变证书路径或目录时需同步调整挂载。
 
 端口映射为 `${SERVER_BIND_ADDRESS}:${SERVER_PUBLISH_PORT}:${NM__SERVER__PORT}`。
 例如宿主机 443 转发至容器 9999，只需设置 `SERVER_PUBLISH_PORT=443`，容器仍使用 HTTPS。
@@ -288,7 +286,7 @@ Docker Compose 自身的全部通用选项见[官方参考](https://docs.docker.
 | `services.server.init` | `true` | 使用容器 init 处理信号与子进程 |
 | `services.server.restart` | `unless-stopped` | 自动重启策略 |
 | `services.server.user` | `10001:10001` | 非 root 运行；挂载资源需匹配可读/可写权限 |
-| `services.server.environment.SERVER_TLS_NAME` | `${SERVER_TLS_NAME:?…}` | 显式提供健康探针的证书域名 |
+| `services.server.environment.SERVER_TLS_NAME` | `${SERVER_TLS_NAME:-localhost}` | HTTPS 探针使用的证书域名，HTTP 模式不需要 |
 | `services.server.read_only` | `true` | 根文件系统只读，写入位置需使用卷或 tmpfs |
 | `services.server.cap_drop` | `[ALL]` | 丢弃 Linux capabilities |
 | `services.server.security_opt` | `[no-new-privileges:true]` | 禁止提升权限 |
@@ -305,8 +303,8 @@ Docker Compose 自身的全部通用选项见[官方参考](https://docs.docker.
 | `services.server.logging.options.max-file` | `3` | Docker 日志文件保留数量；不控制应用文件日志 |
 
 服务端健康检查来自 Dockerfile：每 30 秒、超时 5 秒、启动宽限 120 秒、连续失败 3 次标记不健康。
-使用 `curl`、固定 CA 路径、`SERVER_TLS_NAME` 与 `NM__SERVER__PORT` 检查 HTTPS `/login`。
-它验证 TLS 和前端存活，不代表 PG/ES 在运行期间持续就绪。
+镜像使用 `/opt/network-mapping/bin/healthcheck` 访问 `/healthz`，按 `NM__TLS__ENABLED`、`NM__SERVER__HOST` 和 `NM__SERVER__PORT` 自动选择 HTTP(S)、IPv4/IPv6 与端口。HTTPS 校验 `SERVER_TLS_NAME` 和 `SERVER_TLS_CA_FILE` 指定的 CA；HTTP 无需证书。
+无需登录，响应仅有 `200`/`503` 状态码、正文为空，表示缓存的 PG/ES 就绪状态，不检查前端资源。每 5 秒检查一次、单项最多 2 秒、15 秒过期；详情见[健康检查 API](DEPLOYMENT.md#健康检查-api)。文件模式的探针参数需与 TOML 一致，覆盖方式见[部署指南](DOCKER.md)。
 
 模板以注释形式提供以下可选覆盖项，使用时按需启用：
 

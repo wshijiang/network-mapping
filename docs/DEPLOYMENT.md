@@ -333,6 +333,24 @@ sudo -u network-mapping ./network_mapping_server --config /etc/network-mapping/c
 
 管理员登录控制台后创建扫描器，保存一次性注册 ID 和 Token。节点配置服务端主机、端口和可信 TLS 后注册，确认心跳在线，再对一个已授权的小范围目标执行首个任务。节点部署与持久化目录见[扫描器项目](https://github.com/wshijiang/Network-Mapping-Scanner)。
 
+### 健康检查 API
+
+`GET /healthz` 和 `HEAD /healthz` 无需登录，仅返回 HTTP 状态码，响应正文始终为空，且设置 `Cache-Control: no-store`：
+
+| 状态码 | 含义 |
+| --- | --- |
+| `200` | 最近一次 PostgreSQL 与 Elasticsearch 检查均通过且状态未过期 |
+| `503` | 首次检查尚未完成、依赖不可用/超时，或检查状态已过期 |
+
+后台每 5 秒并行检查 PG `SELECT 1` 和 ES `/_cluster/health`，每个检查最多 2 秒；ES 必须启用、返回 `green` 或 `yellow` 且 `timed_out=false`。ES 账户/API Key 需允许读取集群健康（例如 cluster `monitor` 权限）。缓存超过 15 秒不再报告就绪。接口请求只读缓存，不会按外部探测次数增加数据库查询；失败及恢复记录在服务端日志，不对外返回地址、凭据或错误信息。
+
+```sh
+# 本地 HTTP 示例；启用 TLS 时使用对应 HTTPS 地址与可信 CA
+curl --silent --output /dev/null --write-out '%{http_code}\n' http://127.0.0.1:9999/healthz
+```
+
+这表示依赖就绪，不验证前端资源、每个业务接口或数据完整性。数据库/ES 在启动阶段不可用导致 HTTP 监听尚未建立时，客户端会连接失败。Docker 镜像健康探针默认使用此地址，页面验收仍需单独访问 `/login`。
+
 ## 服务托管
 
 首次验收通过后，停止前台进程，再交由 systemd，避免端口冲突。仓库中的 [`network-mapping-server.service`](../network-mapping-server.service) 对应上面的用户和目录布局；自定义路径时同步修改 `WorkingDirectory`、`ExecStart` 和 TOML。

@@ -138,7 +138,7 @@ healthcheck:
   test: [CMD, /opt/network-mapping/bin/healthcheck, http, "::1", "9999"]
 ```
 
-`http` 模式无需 `SERVER_TLS_NAME`、CA 或服务端证书；`https` 模式继续使用证书校验。该探针只验证服务与页面存活，不代表 PG/ES 持续就绪。
+`http` 模式无需 `SERVER_TLS_NAME`、CA 或服务端证书；`https` 模式继续使用证书校验。探针访问无需登录的 `/healthz`：PG/ES 就绪返回 `200`，未就绪或状态过期返回 `503`，响应正文为空。检查每 5 秒刷新、单项超时 2 秒、15 秒过期；具体错误只记录在服务端日志。ES 角色需具备读取集群健康的权限。详情见[健康检查 API](DEPLOYMENT.md#健康检查-api)。
 
 服务进程 UID/GID 为 10001:10001。配置和私钥要能被该 UID 读取，例如由管理员调整为
 属主 10001、模式 0400；TLS 目录允许该用户遍历。不要通过公开可读权限解决私钥读取问题。
@@ -249,8 +249,8 @@ ES 示例关闭认证，只适用于隔离的单宿主机网络。生产应按 [
 
 server-data 保存诊断与可选 MaxMind 数据，server-logs 保存滚动 JSON 日志；数据库分别有独立数据卷。
 docker stdout 日志限制为 3×10MiB，应用文件日志仍需外部保留/轮转管理。
-不要执行 `down -v` 清空生产数据。启动依赖健康检查仅控制启动顺序；服务端健康探针只验证
-HTTP(S) 和登录页存活，不代表运行期间 PG/ES 持续就绪。pgBackRest Web 桥接默认关闭，备份由独立服务或宿主机负责。
+不要执行 `down -v` 清空生产数据。启动依赖健康检查仅控制启动顺序；服务端健康探针报告
+`/healthz` 的近期 PG/ES 就绪状态，不检查前端资源或完整业务流程。pgBackRest Web 桥接默认关闭，备份由独立服务或宿主机负责。
 
 ## 首次登录与联调
 
@@ -274,7 +274,7 @@ sudo curl --fail --show-error --silent --cacert docker/runtime/tls/ca.pem \
 
 随后从浏览器和**实际扫描节点**访问正式域名，检查静态资源、管理员登录和 API 鉴权。`SERVER_TLS_NAME` 只用于容器探针，不会创建 DNS 记录，也不会让客户端自动信任证书。使用 443 代理入口时，节点配置的是代理域名及 443，而非 Compose 内部服务名 `server` 或容器监听端口。
 
-在控制台创建扫描器，按[扫描端部署指南](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/DEPLOYMENT.md)完成注册。确认心跳、`accepting_tasks`、地址族/profile、首个授权任务、结果上传及搜索。`healthy` 仅证明 TLS/登录页存活，不替代这组验收。
+在控制台创建扫描器，按[扫描端部署指南](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/DEPLOYMENT.md)完成注册。确认心跳、`accepting_tasks`、地址族/profile、首个授权任务、结果上传及搜索。`healthy` 表示近期 PG/ES 检查通过，不替代这组验收。
 
 ## 升级与恢复
 

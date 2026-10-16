@@ -443,6 +443,29 @@ impl ElasticsearchService {
         self.inner.config.enabled
     }
 
+    pub(crate) async fn health_check(&self) -> Result<(), String> {
+        if !self.enabled() {
+            return Err("required Elasticsearch storage is disabled".into());
+        }
+        let health = self
+            .send_json_request(
+                ElasticsearchOperation::ClusterInfo,
+                Method::GET,
+                "/_cluster/health?filter_path=status,timed_out",
+                |request| request.timeout(Duration::from_secs(2)),
+            )
+            .await?;
+        if matches!(
+            health.get("status").and_then(Value::as_str),
+            Some("green" | "yellow")
+        ) && health.get("timed_out").and_then(Value::as_bool) == Some(false)
+        {
+            Ok(())
+        } else {
+            Err("Elasticsearch cluster is not ready".into())
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn open_api_test_ready(&self) {
         self.inner.runtime.write().unwrap().read_ready = true;
@@ -4326,6 +4349,103 @@ fn index_mapping_update() -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[actix_web::test]
+    async fn readiness_checks_cluster_health_with_configured_authentication() {
+        use super::*;
+        use actix_web::{App, HttpRequest, HttpResponse, HttpServer, http::StatusCode, web};
+        use std::net::TcpListener;
+        let reply = web::Data::new(std::sync::Mutex::new((
+            StatusCode::OK,
+            json!({"status":"green","timed_out":false}),
+        )));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_reply = reply.clone();
+        let server = HttpServer::new(move || {
+            App::new().app_data(server_reply.clone()).route(
+                "/_cluster/health",
+                web::get().to(
+                    |request: HttpRequest,
+                     reply: web::Data<std::sync::Mutex<(StatusCode, Value)>>| async move {
+                        assert_eq!(
+                            request.headers().get("authorization").unwrap(),
+                            "ApiKey fixture-readiness-key"
+                        );
+                        assert_eq!(request.query_string(), "filter_path=status,timed_out");
+                        let (status, body) = reply.lock().unwrap().clone();
+                        HttpResponse::build(status).json(body)
+                    },
+                ),
+            )
+        })
+        .workers(1)
+        .listen(listener)
+        .unwrap()
+        .run();
+        let handle = server.handle();
+        actix_web::rt::spawn(server);
+        let service = ElasticsearchService::new(ElasticsearchConfig {
+            enabled: true,
+            url: format!("http://{address}"),
+            api_key: Some("fixture-readiness-key".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        for (status, body, ready) in [
+            (
+                StatusCode::OK,
+                json!({"status":"green","timed_out":false}),
+                true,
+            ),
+            (
+                StatusCode::OK,
+                json!({"status":"yellow","timed_out":false}),
+                true,
+            ),
+            (
+                StatusCode::OK,
+                json!({"status":"red","timed_out":false}),
+                false,
+            ),
+            (
+                StatusCode::OK,
+                json!({"status":"green","timed_out":true}),
+                false,
+            ),
+            (StatusCode::OK, json!({"status":"green"}), false),
+            (
+                StatusCode::OK,
+                json!({"status":"green","timed_out":"false"}),
+                false,
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                json!({"error":"private authentication details"}),
+                false,
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"status":"green","timed_out":false}),
+                false,
+            ),
+        ] {
+            *reply.lock().unwrap() = (status, body);
+            assert_eq!(service.health_check().await.is_ok(), ready);
+        }
+        handle.stop(true).await;
+        assert!(service.health_check().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn readiness_requires_enabled_elasticsearch_storage() {
+        let service = super::ElasticsearchService::new(crate::config::ElasticsearchConfig {
+            enabled: false,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(service.health_check().await.is_err());
+    }
+
     #[test]
     fn scan_index_paths_split_at_encoded_request_line_budget() {
         use super::*;

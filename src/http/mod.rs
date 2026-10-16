@@ -3,6 +3,7 @@ use crate::handlers;
 use actix_web::web;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
+    crate::readiness::configure(cfg);
     crate::open_api::configure(cfg);
     reports(cfg);
     identity(cfg);

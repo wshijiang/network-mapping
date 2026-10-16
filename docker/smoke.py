@@ -226,11 +226,11 @@ def main():
                   '--tmpfs', '/var/log/network-mapping:rw,uid=10001,gid=10001,mode=0700')
             wait_until(lambda: docker('exec', plaintext, '/opt/network-mapping/bin/healthcheck',
                                       check=False, timeout=10).returncode == 0,
-                       'Certificate-free HTTP login did not become ready',
+                       'Certificate-free HTTP readiness did not become ready',
                        containers=(es_name, pg_name, plaintext))
             headers = docker('exec', plaintext, 'curl', '--noproxy', '*', '--fail', '--silent',
                              '--max-time', '5', '--dump-header', '-', '--output', '/dev/null',
-                             'http://127.0.0.1:9999/login').stdout
+                             'http://127.0.0.1:9999/healthz').stdout
             assert 'strict-transport-security:' not in headers.lower()
             print('Verified HTTPS, certificate-free loopback HTTP, image probes, frontend assets, '
                   '404s and database-preserving restart passed.')

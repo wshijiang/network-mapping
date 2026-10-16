@@ -98,7 +98,7 @@ RUN printf 'server-version=%s\nserver-commit=%s\nfrontend-version=%s\nfrontend-c
 USER 10001:10001
 EXPOSE 9999
 ENV SERVER_TLS_NAME=localhost
-# This checks HTTP(S)/frontend liveness, not ongoing PG/ES readiness.
+# /healthz reports cached PostgreSQL/Elasticsearch readiness without diagnostics.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 CMD ["/opt/network-mapping/bin/healthcheck"]
 ENTRYPOINT ["/opt/network-mapping/bin/network_mapping_server"]
 CMD ["--config-source", "env"]

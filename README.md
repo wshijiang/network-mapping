@@ -65,6 +65,8 @@ cargo build --locked --release
 
 Docker 默认使用 bridge 网络和 TLS。连接宿主机数据库可使用内置的 `host.docker.internal` 映射；Linux 上需要回环 HTTP 与宿主机代理/数据库时，使用独立的 `docker/compose.host.example.yml`。配置和迁移步骤见[Docker 部署指南](docs/DOCKER.md)。
 
+无需登录的 `GET /healthz`（也支持 `HEAD`）仅返回健康状态码：就绪为 `200`，未就绪为 `503`，响应正文为空，不返回错误详情。检查 PostgreSQL 与 Elasticsearch 的可用性，详见[健康检查 API](docs/DEPLOYMENT.md#健康检查-api)。
+
 ```sh
 ./target/release/network_mapping_server --config config.toml
 ```

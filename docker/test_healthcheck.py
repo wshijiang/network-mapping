@@ -1,4 +1,4 @@
-"""Probe behavior, real HTTP/TLS, and certificate failures without a database."""
+"""Probe behavior, real HTTP/TLS, and certificate failures using a local health fixture."""
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
@@ -16,8 +16,10 @@ PROBE = ROOT / 'docker/healthcheck.sh'
 
 
 class Page(BaseHTTPRequestHandler):
+    status = 200
+
     def do_GET(self):
-        self.send_response(200 if self.path == '/login' else 404)
+        self.send_response(self.status if self.path == '/healthz' else 404)
         self.send_header('Content-Length', '0')
         self.end_headers()
 
@@ -26,10 +28,11 @@ class Page(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def page_server(host='127.0.0.1', context=None):
+def page_server(host='127.0.0.1', context=None, status=200):
     class Server(ThreadingHTTPServer):
         address_family = socket.AF_INET6 if ':' in host else socket.AF_INET
-    server = Server((host, 0), Page)
+    handler = type('HealthPage', (Page,), {'status': status})
+    server = Server((host, 0), handler)
     if context:
         server.socket = context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -70,7 +73,7 @@ class HealthcheckTests(unittest.TestCase):
         arguments = result.stdout.splitlines()
         self.assertIn('--cacert', arguments)
         self.assertIn('localhost:9999:127.0.0.1:9999', arguments)
-        self.assertIn('https://localhost:9999/login', arguments)
+        self.assertIn('https://localhost:9999/healthz', arguments)
         self.assertIn('--noproxy', arguments)
         self.assertNotIn('--insecure', arguments)
 
@@ -81,7 +84,7 @@ class HealthcheckTests(unittest.TestCase):
                                      'NM__SERVER__HOST': host, 'NM__SERVER__PORT': '12345'})
                 address = f'[{host}]' if ':' in host else host
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(f'http://{address}:12345/login', result.stdout.splitlines())
+                self.assertIn(f'http://{address}:12345/healthz', result.stdout.splitlines())
                 self.assertNotIn('--cacert', result.stdout)
 
     def test_ipv6_wildcard_https_uses_ipv6_loopback(self):
@@ -91,14 +94,14 @@ class HealthcheckTests(unittest.TestCase):
     def test_file_mode_can_override_protocol_host_and_port(self):
         result = self.probe(args=('http', '::1', '12345'))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('http://[::1]:12345/login', result.stdout)
+        self.assertIn('http://[::1]:12345/healthz', result.stdout)
 
     def test_file_inputs_and_conflicting_values(self):
         switch = self.path / 'enabled'
         switch.write_bytes(b'false\r\n')
         result = self.probe({'NM__TLS__ENABLED_FILE': str(switch)})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('http://127.0.0.1:9999/login', result.stdout)
+        self.assertIn('http://127.0.0.1:9999/healthz', result.stdout)
         self.assertNotEqual(self.probe({'NM__TLS__ENABLED': 'true',
                                        'NM__TLS__ENABLED_FILE': str(switch)}).returncode, 0)
 
@@ -115,6 +118,14 @@ class HealthcheckTests(unittest.TestCase):
             result = self.probe({'NM__TLS__ENABLED': 'false',
                                  'NM__SERVER__PORT': str(port)}, fake=False)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('curl'), 'requires curl')
+    def test_unavailable_health_status_fails_the_probe(self):
+        with page_server(status=503) as port:
+            result = self.probe({'NM__TLS__ENABLED': 'false',
+                                 'NM__SERVER__PORT': str(port)}, fake=False)
+            self.assertEqual(result.returncode, 22)
+            self.assertEqual(result.stdout, '')
 
     @unittest.skipUnless(shutil.which('curl') and shutil.which('openssl'), 'requires curl/openssl')
     def test_real_https_rejects_untrusted_ca_and_hostname_mismatch(self):

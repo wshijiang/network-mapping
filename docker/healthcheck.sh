@@ -1,5 +1,5 @@
 #!/bin/sh
-# Local frontend liveness. Arguments override env-mode settings for file deployments:
+# Cached storage readiness. Arguments override env-mode settings for file deployments:
 # healthcheck.sh [http|https [listen-host [port]]]
 set -eu
 
@@ -51,12 +51,12 @@ esac
 # The probe connects locally even when the container has an outbound HTTP proxy.
 set -- --fail --silent --show-error --connect-timeout 2 --max-time 4 --noproxy '*' --output /dev/null
 case "$scheme" in
-    http) exec curl "$@" "http://$address:$port/login" ;;
+    http) exec curl "$@" "http://$address:$port/healthz" ;;
     https)
         name=${SERVER_TLS_NAME:-localhost}
         ca=${SERVER_TLS_CA_FILE:-/etc/network-mapping/tls/ca.pem}
         exec curl "$@" --cacert "$ca" --connect-to "$name:$port:$address:$port" \
-            "https://$name:$port/login"
+            "https://$name:$port/healthz"
         ;;
     *) echo 'Healthcheck: protocol must be http or https' >&2; exit 1 ;;
 esac
