@@ -659,3 +659,127 @@ async fn worker_drains_expired_backlog_before_waiting_for_the_next_poll() {
     );
     assert_eq!(cancelled, 10);
 }
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn worker_pauses_new_claims_when_maintenance_starts_during_a_batch() {
+    use crate::system_maintenance::{MaintenancePhase, SystemMaintenanceState};
+    use std::time::Duration;
+    let (pool, schema) = database().await;
+    let context = AuditContext::cli("notification-test");
+    let first_channel = save(&pool, &key(), None, input(), &user(1), &context)
+        .await
+        .unwrap();
+    let second_channel = save(&pool, &key(), None, input(), &user(1), &context)
+        .await
+        .unwrap();
+    let first = test_send(&pool, first_channel.id, &user(1), &context)
+        .await
+        .unwrap();
+    let second = test_send(&pool, second_channel.id, &user(1), &context)
+        .await
+        .unwrap();
+    let c = pool.get().await.unwrap();
+    // Use decryption failures instead of sending to a real bot. Both channels are ready.
+    c.execute("UPDATE notification_channel SET webhook_ciphertext=''::BYTEA,next_send_at=NOW()-INTERVAL '1 hour'", &[]).await.unwrap();
+    c.execute(
+        "UPDATE notification_channel SET next_send_at=next_send_at-INTERVAL '1 second' WHERE id=$1",
+        &[&first_channel.id],
+    )
+    .await
+    .unwrap();
+    // Pause completion of the first claim so maintenance begins inside a running batch.
+    let barrier = (Uuid::new_v4().as_u128() & 0x7fff_ffff) as i32;
+    c.query_one("SELECT pg_advisory_lock(728106,$1)", &[&barrier])
+        .await
+        .unwrap();
+    c.batch_execute(&format!(
+        "CREATE FUNCTION pause_first_completion() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM pg_advisory_xact_lock(728106,{barrier}); RETURN NEW; END $$;
+         CREATE TRIGGER pause_first_completion BEFORE UPDATE ON notification_delivery
+         FOR EACH ROW WHEN (NEW.id='{first}' AND NEW.status='failed')
+         EXECUTE FUNCTION pause_first_completion();"
+    ))
+    .await
+    .unwrap();
+    let maintenance = web::Data::new(SystemMaintenanceState::from_database(&pool).await.unwrap());
+    let (stop, stopping) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(super::run(
+        pool.clone(),
+        key(),
+        maintenance.clone(),
+        stopping,
+    ));
+    let blocked = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = c.query_one("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=728106 AND objid=$1::INT::OID AND NOT granted)", &[&barrier]).await.unwrap().get(0);
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let mut snapshot = maintenance.snapshot().await;
+    snapshot.enabled = true;
+    snapshot.phase = MaintenancePhase::Draining;
+    snapshot.revision += 1;
+    maintenance.replace(snapshot).await;
+    c.query_one("SELECT pg_advisory_unlock(728106,$1)", &[&barrier])
+        .await
+        .unwrap();
+    async fn wait_for_failure(c: &tokio_postgres::Client, id: Uuid) {
+        loop {
+            let status: String = c
+                .query_one(
+                    "SELECT status FROM notification_delivery WHERE id=$1",
+                    &[&id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            if status == "failed" {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    let in_flight_finished =
+        tokio::time::timeout(Duration::from_secs(4), wait_for_failure(&c, first)).await;
+    let claimed_during_maintenance =
+        tokio::time::timeout(Duration::from_millis(1200), wait_for_failure(&c, second))
+            .await
+            .is_ok();
+    let paused = c
+        .query_one(
+            "SELECT status,attempts FROM notification_delivery WHERE id=$1",
+            &[&second],
+        )
+        .await
+        .unwrap();
+    let mut snapshot = maintenance.snapshot().await;
+    snapshot.enabled = false;
+    snapshot.phase = MaintenancePhase::Off;
+    snapshot.revision += 1;
+    maintenance.replace(snapshot).await;
+    let resumed = tokio::time::timeout(Duration::from_secs(4), wait_for_failure(&c, second)).await;
+    stop.send_replace(true);
+    worker.await.unwrap();
+    drop(c);
+    cleanup(pool, schema).await;
+    assert!(blocked.is_ok(), "first delivery never reached the barrier");
+    assert!(
+        in_flight_finished.is_ok(),
+        "in-flight delivery did not finish"
+    );
+    assert!(
+        !claimed_during_maintenance,
+        "worker claimed new work during maintenance"
+    );
+    assert_eq!(paused.get::<_, String>("status"), "pending");
+    assert_eq!(paused.get::<_, i32>("attempts"), 0);
+    assert!(
+        resumed.is_ok(),
+        "queued delivery did not resume after maintenance"
+    );
+}

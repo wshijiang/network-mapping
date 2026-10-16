@@ -32,6 +32,9 @@ pub async fn run(
                 if *stopping.borrow() {
                     return;
                 }
+                if maintenance.snapshot().await.enabled {
+                    break;
+                }
                 match deliver_one(&pool, &key, &client).await {
                     Ok(true) => {}
                     Ok(false) => break,
