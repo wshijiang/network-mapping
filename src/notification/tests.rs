@@ -257,7 +257,11 @@ async fn claims_are_exclusive_and_stale_completions_cannot_overwrite_results() {
     let (a, b) = tokio::join!(worker::claim(&pool), worker::claim(&pool));
     let mut claims = vec![a.unwrap(), b.unwrap()]
         .into_iter()
-        .flatten()
+        .filter_map(|outcome| match outcome {
+            worker::ClaimOutcome::Ready(claimed) => Some(claimed),
+            worker::ClaimOutcome::Empty => None,
+            worker::ClaimOutcome::Processed => panic!("no cleanup was expected"),
+        })
         .collect::<Vec<_>>();
     assert_eq!(claims.len(), 1);
     let claim = claims.pop().unwrap();
@@ -302,7 +306,9 @@ async fn claims_are_exclusive_and_stale_completions_cannot_overwrite_results() {
     .unwrap();
     c.execute("UPDATE notification_delivery SET status='sending',claim_token=$2,lease_until=NOW()-INTERVAL '1 second' WHERE id=$1",&[&id,&Uuid::new_v4()]).await.unwrap();
     drop(c);
-    let reclaimed = worker::claim(&pool).await.unwrap().unwrap();
+    let worker::ClaimOutcome::Ready(reclaimed) = worker::claim(&pool).await.unwrap() else {
+        panic!("expired lease was not reclaimed");
+    };
     worker::complete(
         &pool,
         id,
@@ -544,7 +550,9 @@ async fn unsent_outages_and_administrative_deactivation_do_not_create_recovery_n
     crate::scanner_outage::detect_outages(&pool, &[], 90)
         .await
         .unwrap();
-    let claimed = worker::claim(&pool).await.unwrap().unwrap();
+    let worker::ClaimOutcome::Ready(claimed) = worker::claim(&pool).await.unwrap() else {
+        panic!("offline delivery was not claimed");
+    };
     let mut c = pool.get().await.unwrap();
     let tx = c.transaction().await.unwrap();
     crate::scanner_outage::close_without_recovery(&tx, &scanner)
@@ -576,4 +584,78 @@ async fn unsent_outages_and_administrative_deactivation_do_not_create_recovery_n
     assert_eq!(recovery, 0);
     drop(c);
     cleanup(pool, schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn worker_drains_expired_backlog_before_waiting_for_the_next_poll() {
+    use std::time::Duration;
+    let (pool, schema) = database().await;
+    let context = AuditContext::cli("notification-test");
+    let channel = save(&pool, &key(), None, input(), &user(1), &context)
+        .await
+        .unwrap();
+    let c = pool.get().await.unwrap();
+    // Fresh work terminates at decryption, so this test never contacts a real bot.
+    c.execute(
+        "UPDATE notification_channel SET webhook_ciphertext=''::BYTEA WHERE id=$1",
+        &[&channel.id],
+    )
+    .await
+    .unwrap();
+    for n in 0..10 {
+        let event = Uuid::now_v7();
+        c.execute("INSERT INTO notification_event(id,dedup_key,event_type,severity,title,body,occurred_at) VALUES($1,$2,'notification.test','warning','old','old',NOW()-INTERVAL '25 hours')", &[&event,&format!("old:{n}")]).await.unwrap();
+        c.execute("INSERT INTO notification_delivery(id,event_id,channel_id,destination_revision,available_at) VALUES($1,$2,$3,1,NOW()-INTERVAL '25 hours')", &[&Uuid::now_v7(),&event,&channel.id]).await.unwrap();
+    }
+    drop(c);
+    let fresh = test_send(&pool, channel.id, &user(1), &context)
+        .await
+        .unwrap();
+    let maintenance = web::Data::new(
+        crate::system_maintenance::SystemMaintenanceState::from_database(&pool)
+            .await
+            .unwrap(),
+    );
+    let (stop, stopping) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(super::run(pool.clone(), key(), maintenance, stopping));
+    let drained = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let status: String = pool
+                .get()
+                .await
+                .unwrap()
+                .query_one(
+                    "SELECT status FROM notification_delivery WHERE id=$1",
+                    &[&fresh],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            if status == "failed" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    stop.send_replace(true);
+    worker.await.unwrap();
+    let cancelled: i64 = pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT COUNT(*) FROM notification_delivery WHERE status='cancelled'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    cleanup(pool, schema).await;
+    assert!(
+        drained.is_ok(),
+        "expired backlog stopped the batch before fresh work was reached"
+    );
+    assert_eq!(cancelled, 10);
 }

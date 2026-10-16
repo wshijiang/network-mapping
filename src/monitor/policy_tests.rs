@@ -45,6 +45,81 @@ pub(crate) async fn cleanup(pool: &Pool, schema: &str) {
 
 #[tokio::test]
 #[ignore = "requires disposable HEALTH_TEST_DATABASE_URL"]
+async fn shared_gate_rejection_does_not_restart_local_cooldown() {
+    use crate::{config::MonitorConfig, monitor::HealthEvent, runtime_config::Versioned};
+    use std::{
+        sync::{Arc, RwLock},
+        time::Duration,
+    };
+    let (pool, schema) = isolated_pool().await;
+    pool.get().await.unwrap().execute("INSERT INTO notification_health_gate(alert_key,severity,admitted_at) VALUES('shared-late-duplicate','warning',NOW())", &[]).await.unwrap();
+    let config = Arc::new(RwLock::new(Versioned {
+        revision: 1,
+        value: MonitorConfig::default(),
+    }));
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    let worker = tokio::spawn(super::run_notifier(rx, pool.clone(), String::new(), config));
+    let event = |key: &str| HealthEvent {
+        alert_type: "slow_request",
+        severity: "warning",
+        key: key.into(),
+        summary: "regression".into(),
+        details: vec![],
+        applied_rule: None,
+    };
+    async fn wait_for(pool: &Pool, key: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let count: i64 = pool
+                    .get()
+                    .await
+                    .unwrap()
+                    .query_one(
+                        "SELECT COUNT(*) FROM health_alert WHERE alert_key=$1",
+                        &[&key],
+                    )
+                    .await
+                    .unwrap()
+                    .get(0);
+                if count > 0 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("notifier did not finish processing the preceding event");
+    }
+    tx.send(event("shared-late-duplicate")).await.unwrap();
+    tx.send(event("barrier-before-expiry")).await.unwrap();
+    wait_for(&pool, "barrier-before-expiry").await;
+    // Expire only the authoritative gate after the rejected duplicate has been consumed.
+    pool.get().await.unwrap().execute("UPDATE notification_health_gate SET admitted_at=NOW()-INTERVAL '301 seconds' WHERE alert_key='shared-late-duplicate'", &[]).await.unwrap();
+    tx.send(event("shared-late-duplicate")).await.unwrap();
+    tx.send(event("barrier-after-expiry")).await.unwrap();
+    wait_for(&pool, "barrier-after-expiry").await;
+    drop(tx);
+    worker.await.unwrap();
+    let count: i64 = pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT COUNT(*) FROM health_alert WHERE alert_key='shared-late-duplicate'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    cleanup(&pool, &schema).await;
+    assert_eq!(
+        count, 1,
+        "a database-rejected duplicate extended the local cooldown"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable HEALTH_TEST_DATABASE_URL"]
 async fn health_policy_database_publication_presence_and_outage_lifecycle() {
     use crate::runtime_config::{
         PersistError, RuntimeSettings, RuntimeSettingsBootstrap, SCANNER_HEALTH_NAMESPACE, persist,

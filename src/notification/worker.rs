@@ -100,18 +100,24 @@ pub(super) struct Claimed {
     text: String,
 }
 
-pub(super) async fn claim(pool: &Pool) -> Result<Option<Claimed>> {
+pub(super) enum ClaimOutcome {
+    Empty,
+    Processed,
+    Ready(Claimed),
+}
+
+pub(super) async fn claim(pool: &Pool) -> Result<ClaimOutcome> {
     let mut conn = pool.get().await?;
     let tx = conn.transaction().await?;
     // Channel first: shares lock order with edits and enforces one send/second across replicas.
     let row = tx.query_opt("SELECT c.* FROM notification_channel c WHERE c.enabled AND c.deleted_at IS NULL AND c.next_send_at<=NOW() AND EXISTS(SELECT 1 FROM notification_delivery d WHERE d.channel_id=c.id AND ((d.status='pending' AND d.available_at<=NOW()) OR (d.status='sending' AND d.lease_until<NOW()))) ORDER BY c.next_send_at,c.id LIMIT 1 FOR UPDATE OF c SKIP LOCKED", &[]).await?;
     let Some(channel) = row else {
-        return Ok(None);
+        return Ok(ClaimOutcome::Empty);
     };
     let cid: Uuid = channel.get("id");
     let row = tx.query_opt("SELECT d.*,e.event_type,e.severity,e.title,e.body,e.outage_id,e.occurred_at FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE d.channel_id=$1 AND ((d.status='pending' AND d.available_at<=NOW()) OR (d.status='sending' AND d.lease_until<NOW())) ORDER BY d.available_at,d.id LIMIT 1 FOR UPDATE OF d SKIP LOCKED", &[&cid]).await?;
     let Some(row) = row else {
-        return Ok(None);
+        return Ok(ClaimOutcome::Empty);
     };
     let id: Uuid = row.get("id");
     let kind: String = row.get("event_type");
@@ -141,8 +147,8 @@ pub(super) async fn claim(pool: &Pool) -> Result<Option<Claimed>> {
         };
         tx.execute("UPDATE notification_delivery SET status=$2,last_error=$3,finished_at=NOW(),claim_token=NULL,lease_until=NULL WHERE id=$1", &[&id,&status,&reason]).await?;
         tx.commit().await?;
-        // Return no claim; other work is picked up on the next bounded polling cycle.
-        return Ok(None);
+        // Cleanup is progress: continue the bounded batch without using a send slot.
+        return Ok(ClaimOutcome::Processed);
     }
     let token = Uuid::new_v4();
     tx.execute("UPDATE notification_delivery SET status='sending',attempts=attempts+1,claim_token=$2,lease_until=NOW()+INTERVAL '60 seconds' WHERE id=$1", &[&id,&token]).await?;
@@ -164,12 +170,14 @@ pub(super) async fn claim(pool: &Pool) -> Result<Option<Claimed>> {
         text,
     };
     tx.commit().await?;
-    Ok(Some(result))
+    Ok(ClaimOutcome::Ready(result))
 }
 
 pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client) -> Result<bool> {
-    let Some(claimed) = claim(pool).await? else {
-        return Ok(false);
+    let claimed = match claim(pool).await? {
+        ClaimOutcome::Empty => return Ok(false),
+        ClaimOutcome::Processed => return Ok(true),
+        ClaimOutcome::Ready(claimed) => claimed,
     };
     let secrets = decrypt(&claimed.url, key).and_then(|url| {
         let secret = claimed

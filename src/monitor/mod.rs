@@ -574,13 +574,17 @@ struct AlertCooldown {
 }
 
 impl AlertCooldown {
-    fn allow(
-        &mut self,
-        key: &str,
-        severity: &'static str,
-        cooldown: Duration,
-        now: Instant,
-    ) -> bool {
+    fn allows(&self, key: &str, severity: &'static str, cooldown: Duration, now: Instant) -> bool {
+        if let Some((previous, previous_severity)) = self.entries.get(key)
+            && now.duration_since(*previous) < cooldown
+            && !(severity == "critical" && *previous_severity != "critical")
+        {
+            return false;
+        }
+        true
+    }
+
+    fn record_admission(&mut self, key: &str, severity: &'static str, now: Instant) {
         // Keep finite memory even when many SQL query IDs are observed over time.
         if self.entries.len() >= 4096 {
             self.entries
@@ -589,14 +593,7 @@ impl AlertCooldown {
                 self.entries.clear();
             }
         }
-        if let Some((previous, previous_severity)) = self.entries.get(key)
-            && now.duration_since(*previous) < cooldown
-            && !(severity == "critical" && *previous_severity != "critical")
-        {
-            return false;
-        }
         self.entries.insert(key.to_owned(), (now, severity));
-        true
     }
 }
 
@@ -624,12 +621,13 @@ async fn run_notifier(
                 .map(|applied| applied.rule.cooldown_seconds)
                 .unwrap_or(settings.value.alert_cooldown_seconds),
         );
+        // Capture before the database attempt so slow admission cannot extend its window.
+        let now = Instant::now();
         {
-            let mut last = last_alert
+            let last = last_alert
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let now = Instant::now();
-            if !last.allow(&event.key, event.severity, cooldown, now) {
+            if !last.allows(&event.key, event.severity, cooldown, now) {
                 debug!(event = "HealthAlertCooldown", alert_type = event.alert_type, key = %event.key, "告警处于冷却期，已合并丢弃");
                 continue;
             }
@@ -637,7 +635,10 @@ async fn run_notifier(
 
         match record_health_alert(&pool, &event, cooldown.as_secs() as i64).await {
             Ok(false) => continue,
-            Ok(true) => {}
+            Ok(true) => last_alert
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .record_admission(&event.key, event.severity, now),
             Err(error) => {
                 let diagnostics = error_diagnostics(error.as_ref());
                 error!(
@@ -691,27 +692,33 @@ mod tests {
         let mut cooldown = super::AlertCooldown::default();
         let at = std::time::Instant::now();
         let window = std::time::Duration::from_secs(300);
-        assert!(cooldown.allow("operation", "warning", window, at));
-        assert!(!cooldown.allow(
+        assert!(cooldown.allows("operation", "warning", window, at));
+        cooldown.record_admission("operation", "warning", at);
+        assert!(!cooldown.allows(
             "operation",
             "warning",
             window,
             at + std::time::Duration::from_secs(1)
         ));
-        assert!(cooldown.allow(
+        assert!(cooldown.allows(
             "operation",
             "critical",
             window,
             at + std::time::Duration::from_secs(2)
         ));
-        assert!(!cooldown.allow(
+        cooldown.record_admission(
+            "operation",
+            "critical",
+            at + std::time::Duration::from_secs(2),
+        );
+        assert!(!cooldown.allows(
             "operation",
             "critical",
             window,
             at + std::time::Duration::from_secs(3)
         ));
-        assert!(cooldown.allow("different-operation", "warning", window, at));
-        assert!(cooldown.allow(
+        assert!(cooldown.allows("different-operation", "warning", window, at));
+        assert!(cooldown.allows(
             "operation",
             "critical",
             window,
