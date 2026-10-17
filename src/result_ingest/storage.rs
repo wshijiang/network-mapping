@@ -803,6 +803,10 @@ async fn save_scanner_results_inner(
                 .await
                 .map_err(scanner_result_database_error)?;
         }
+        transaction.execute(
+            "INSERT INTO os_detection_outbox(execution_id,ruleset_revision) VALUES($1,$2) ON CONFLICT DO NOTHING",
+            &[&execution_db_id, &crate::os_detection::RULESET_REVISION],
+        ).await.map_err(scanner_result_database_error)?;
         let stage = WriteStage::new("refresh_task_aggregate");
         refresh_task_aggregate(&transaction, task_db_id)
             .await

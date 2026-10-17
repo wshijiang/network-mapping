@@ -66,6 +66,9 @@
           "last_seen": {
             "description": "仅在批准的字段白名单内且有观察值时返回"
           },
+          "os": {
+            "description": "仅在批准的字段白名单内且有观察值时返回"
+          },
           "port": {
             "maximum": 65535,
             "minimum": 1,
@@ -219,6 +222,7 @@
             "service",
             "title",
             "banner",
+            "os",
             "tls_mode",
             "tls_version",
             "tls_cipher_suite",
@@ -244,7 +248,7 @@
           ],
           "type": "string"
         },
-        "maxItems": 28,
+        "maxItems": 29,
         "minItems": 1,
         "type": "array"
       },

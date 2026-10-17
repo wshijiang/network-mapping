@@ -37,6 +37,7 @@ pub mod rir; // 该模块用于从五大 RIR 获取 ASN 和组织等信息
 pub mod middlewares;
 pub mod open_api;
 pub mod open_source;
+mod os_detection;
 pub mod reports;
 pub mod request_log;
 pub mod runtime_config;

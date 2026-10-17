@@ -248,3 +248,10 @@ def verify(raw_body: bytes, headers, signing_secret: str):
 | GET | `/saved-searches/{search_id}` | `saved_searches:manage` | 读取保存的查询 |
 | PATCH | `/saved-searches/{search_id}` | `saved_searches:manage` | 修改保存的查询 |
 | DELETE | `/saved-searches/{search_id}` | `saved_searches:manage` | 删除保存的查询 |
+
+## 操作系统摘要
+
+应用字段白名单批准 `os` 后，资产查询和服务查询可以返回系统摘要，并允许 `os.family`、
+`os.distribution`、`os.version`、`os.confidence`、`os.status`、`os.score` 条件。
+返回对象不包含原始证据、观察索引引用和候选明细。没有批准 `os` 的既有应用保持原权限。
+置信度、未知和过期语义见[操作系统识别](OS_DETECTION.md)。

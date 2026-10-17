@@ -592,3 +592,18 @@ GET /api/search/banner
 
 如果新增 TLS、HTTP、证书等扫描字段，应先将稳定字段加入后端字段注册表并建立对应索引，
 不应直接开放用户控制的 JSON 路径或 SQL 表达式。
+
+## 操作系统线索字段
+
+`os.family`、`os.distribution`、`os.version`、`os.confidence`、`os.status`、`os.score`
+属于端点字段，均支持 `service.os.*` 同义写法。`os.score` 为 0–100 的整数规则得分，
+不表示概率；`os.version` 仅来自明确的服务系统字段，可能为空。
+
+```text
+os.family = linux AND os.distribution = ubuntu
+os.status = conflict
+has_endpoint(os.family = windows) AND has_endpoint(port = 445)
+```
+
+字段含义及过期行为见[操作系统识别](OS_DETECTION.md)。资产级宿主机摘要不作为这些
+端点条件的匹配对象；新数据在后台处理期间可显示 `pending`。
