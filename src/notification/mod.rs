@@ -1,6 +1,10 @@
-//! Durable, administrator-managed notification channels, independent of SMTP.
+//! Durable, administrator-managed notification channels with shared event subscriptions.
+mod email;
+mod outcome;
+pub use outcome::Outcome;
 pub mod feishu;
 mod routes;
+pub mod telegram;
 #[cfg(test)]
 mod tests;
 mod worker;
@@ -20,7 +24,14 @@ use crate::{
 pub use routes::configure;
 pub use worker::run;
 
-pub const EVENT_TYPES: [&str; 3] = ["health.alert", "scanner.offline", "scanner.recovered"];
+pub const EVENT_TYPES: [&str; 6] = [
+    "health.alert",
+    "scanner.offline",
+    "scanner.recovered",
+    "user.login",
+    "report.weekly",
+    "report.monthly",
+];
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
@@ -69,6 +80,8 @@ impl From<deadpool_postgres::PoolError> for Error {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelInput {
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub name: String,
     pub enabled: bool,
     pub event_types: Vec<String>,
@@ -79,7 +92,36 @@ pub struct ChannelInput {
     pub signing_secret: String,
     #[serde(default)]
     pub clear_signing_secret: bool,
+    #[serde(default)]
+    pub bot_token: String,
+    #[serde(default)]
+    pub smtp_password: String,
+    #[serde(default)]
+    pub settings: ChannelSettings,
     pub expected_revision: Option<i64>,
+}
+
+fn default_provider() -> String {
+    "feishu".into()
+}
+fn default_smtp_port() -> u16 {
+    465
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelSettings {
+    #[serde(default)]
+    pub smtp_host: String,
+    #[serde(default = "default_smtp_port")]
+    pub smtp_port: u16,
+    #[serde(default)]
+    pub smtp_sender: String,
+    /// Empty means the currently active administrators, never the legacy SMTP test recipient.
+    #[serde(default)]
+    pub recipients: Vec<String>,
+    #[serde(default)]
+    pub chat_id: String,
 }
 
 impl ChannelInput {
@@ -105,13 +147,47 @@ impl ChannelInput {
         if !["warning", "critical"].contains(&self.minimum_severity.as_str()) {
             return Err(Error::bad("通知级别须为 warning 或 critical"));
         }
-        if creating || !self.webhook_url.is_empty() {
-            feishu::validate_url(&self.webhook_url).map_err(Error::bad)?;
-        }
-        if self.signing_secret.len() > 512
-            || (self.clear_signing_secret && !self.signing_secret.is_empty())
-        {
-            return Err(Error::bad("签名密钥设置无效"));
+        match self.provider.as_str() {
+            "feishu" => {
+                if creating || !self.webhook_url.is_empty() {
+                    feishu::validate_url(&self.webhook_url).map_err(Error::bad)?;
+                }
+                if self.signing_secret.len() > 512
+                    || (self.clear_signing_secret && !self.signing_secret.is_empty())
+                {
+                    return Err(Error::bad("签名密钥设置无效"));
+                }
+            }
+            "telegram" => {
+                if !telegram::validate_chat_id(&self.settings.chat_id)
+                    || ((creating || !self.bot_token.is_empty())
+                        && !telegram::validate_token(&self.bot_token))
+                {
+                    return Err(Error::bad("Telegram Bot Token 或 Chat ID 无效"));
+                }
+            }
+            "email" => {
+                let s = &self.settings;
+                if s.smtp_host.is_empty()
+                    || s.smtp_host.len() > 253
+                    || s.smtp_host
+                        .chars()
+                        .any(|c| c.is_whitespace() || "/\\:@?#".contains(c))
+                    || s.smtp_port == 0
+                    || s.smtp_sender.parse::<lettre::message::Mailbox>().is_err()
+                    || s.recipients.len() > 32
+                    || s.recipients
+                        .iter()
+                        .any(|r| r.parse::<lettre::message::Mailbox>().is_err())
+                    || self.smtp_password.len() > 1024
+                    || (creating && self.smtp_password.is_empty())
+                {
+                    return Err(Error::bad(
+                        "请填写有效的 SMTP 服务器、端口、发件人、密钥和收件人",
+                    ));
+                }
+            }
+            _ => return Err(Error::bad("不支持的通知渠道类型")),
         }
         if !creating && self.expected_revision.is_none_or(|v| v < 1) {
             return Err(Error::bad("缺少配置版本"));
@@ -123,31 +199,36 @@ impl ChannelInput {
 #[derive(Serialize)]
 pub struct Channel {
     pub id: Uuid,
-    pub provider: &'static str,
+    pub provider: String,
     pub name: String,
     pub enabled: bool,
     pub event_types: Vec<String>,
     pub minimum_severity: String,
     pub webhook_configured: bool,
     pub signing_secret_configured: bool,
+    pub credential_configured: bool,
+    pub settings: ChannelSettings,
     pub revision: i64,
     pub updated_at: DateTime<Utc>,
 }
 fn channel(row: &Row) -> Channel {
     Channel {
         id: row.get("id"),
-        provider: "feishu",
+        provider: row.get("provider"),
         name: row.get("name"),
         enabled: row.get("enabled"),
         event_types: row.get("event_types"),
         minimum_severity: row.get("minimum_severity"),
-        webhook_configured: true,
-        signing_secret_configured: row.get("secret_configured"),
+        webhook_configured: row.get::<_, String>("provider") == "feishu",
+        signing_secret_configured: row.get::<_, String>("provider") == "feishu"
+            && row.get("secret_configured"),
+        credential_configured: row.get("secret_configured"),
+        settings: serde_json::from_value(row.get("settings")).unwrap_or_default(),
         revision: row.get("revision"),
         updated_at: row.get("updated_at"),
     }
 }
-const CHANNEL_COLUMNS: &str = "id, name, enabled, event_types, minimum_severity, secret_ciphertext IS NOT NULL AS secret_configured, revision, updated_at";
+const CHANNEL_COLUMNS: &str = "id, provider, settings, name, enabled, event_types, minimum_severity, secret_ciphertext IS NOT NULL AS secret_configured, revision, updated_at";
 
 pub fn encrypt(value: &str, encoded_key: &str) -> Result<Vec<u8>> {
     let key = openssl::base64::decode_block(encoded_key).map_err(|_| Error::internal())?;
@@ -204,22 +285,41 @@ pub async fn save(
     tx.query_one("SELECT pg_advisory_xact_lock(728104, 1)", &[])
         .await?;
     let target = id.unwrap_or_else(Uuid::now_v7);
+    let settings = serde_json::to_value(&input.settings).map_err(|_| Error::internal())?;
+    let credential = match input.provider.as_str() {
+        "email" => &input.smtp_password,
+        "telegram" => &input.bot_token,
+        _ => &input.signing_secret,
+    };
+    let secret = if credential.is_empty() {
+        None
+    } else {
+        Some(encrypt(credential, key)?)
+    };
     if let Some(id) = id {
-        let row = tx.query_opt("SELECT revision FROM notification_channel WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", &[&id]).await?.ok_or_else(Error::missing)?;
+        let row = tx.query_opt("SELECT revision,provider,settings,secret_ciphertext IS NOT NULL AS secret_configured FROM notification_channel WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", &[&id]).await?.ok_or_else(Error::missing)?;
         if Some(row.get::<_, i64>("revision")) != input.expected_revision {
             return Err(Error::conflict());
         }
-        let url = if input.webhook_url.is_empty() {
+        if row.get::<_, String>("provider") != input.provider {
+            return Err(Error::bad("渠道类型不可修改，请创建新渠道"));
+        }
+        if input.provider != "feishu"
+            && secret.is_none()
+            && !row.get::<_, bool>("secret_configured")
+        {
+            return Err(Error::bad("首次配置渠道须填写凭据"));
+        }
+        let url = if input.provider != "feishu" || input.webhook_url.is_empty() {
             None
         } else {
             Some(encrypt(&input.webhook_url, key)?)
         };
-        let secret = if input.signing_secret.is_empty() {
-            None
-        } else {
-            Some(encrypt(&input.signing_secret, key)?)
-        };
-        tx.execute("UPDATE notification_channel SET name=$2,enabled=$3,event_types=$4,minimum_severity=$5,webhook_ciphertext=COALESCE($6,webhook_ciphertext),secret_ciphertext=CASE WHEN $8 THEN NULL ELSE COALESCE($7,secret_ciphertext) END,revision=revision+1,destination_revision=destination_revision+CASE WHEN $6::BYTEA IS NULL THEN 0 ELSE 1 END,updated_at=NOW() WHERE id=$1", &[&id,&input.name.trim(),&input.enabled,&input.event_types,&input.minimum_severity,&url,&secret,&input.clear_signing_secret]).await?;
+        let clear = input.provider == "feishu" && input.clear_signing_secret;
+        let destination_changed = url.is_some()
+            || (input.provider != "feishu" && row.get::<_, Value>("settings") != settings)
+            || (input.provider == "telegram" && secret.is_some());
+        tx.execute("UPDATE notification_channel SET name=$2,enabled=$3,event_types=$4,minimum_severity=$5,webhook_ciphertext=COALESCE($6,webhook_ciphertext),secret_ciphertext=CASE WHEN $8 THEN NULL ELSE COALESCE($7,secret_ciphertext) END,settings=$9,revision=revision+1,destination_revision=destination_revision+CASE WHEN $10 THEN 1 ELSE 0 END,updated_at=NOW() WHERE id=$1", &[&id,&input.name.trim(),&input.enabled,&input.event_types,&input.minimum_severity,&url,&secret,&clear,&settings,&destination_changed]).await?;
         // An edit cancels queued work. In-flight requests may already have left the process.
         tx.execute("UPDATE notification_delivery SET status='cancelled',last_error='channel_changed',finished_at=NOW(),claim_token=NULL,lease_until=NULL WHERE channel_id=$1 AND status IN ('pending','sending')", &[&id]).await?;
     } else {
@@ -233,13 +333,15 @@ pub async fn save(
         if count >= 32 {
             return Err(Error::bad("最多配置 32 个通知渠道"));
         }
-        let url = encrypt(&input.webhook_url, key)?;
-        let secret = if input.signing_secret.is_empty() {
-            None
+        let url = if input.provider == "feishu" {
+            encrypt(&input.webhook_url, key)?
         } else {
-            Some(encrypt(&input.signing_secret, key)?)
+            Vec::new()
         };
-        tx.execute("INSERT INTO notification_channel(id,provider,name,enabled,event_types,minimum_severity,webhook_ciphertext,secret_ciphertext) VALUES($1,'feishu',$2,$3,$4,$5,$6,$7)", &[&target,&input.name.trim(),&input.enabled,&input.event_types,&input.minimum_severity,&url,&secret]).await?;
+        tx.execute("INSERT INTO notification_channel(id,provider,name,enabled,event_types,minimum_severity,webhook_ciphertext,secret_ciphertext,settings) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", &[&target,&input.provider,&input.name.trim(),&input.enabled,&input.event_types,&input.minimum_severity,&url,&secret,&settings]).await?;
+    }
+    if input.provider == "email" {
+        sync_email_transport(&tx).await?;
     }
     audit(&tx, user, context, "notification.channel_save", target).await?;
     let row = tx
@@ -261,13 +363,52 @@ pub async fn remove(
 ) -> Result<()> {
     let mut conn = pool.get().await?;
     let tx = conn.transaction().await?;
+    tx.query_one("SELECT pg_advisory_xact_lock(728104, 1)", &[])
+        .await?;
     let changed = tx.execute("UPDATE notification_channel SET enabled=FALSE,deleted_at=NOW(),revision=revision+1,webhook_ciphertext=''::BYTEA,secret_ciphertext=NULL WHERE id=$1 AND revision=$2 AND deleted_at IS NULL", &[&id,&revision]).await?;
     if changed != 1 {
         return Err(Error::conflict());
     }
+    if tx
+        .query_one(
+            "SELECT provider FROM notification_channel WHERE id=$1",
+            &[&id],
+        )
+        .await?
+        .get::<_, String>(0)
+        == "email"
+    {
+        sync_email_transport(&tx).await?;
+    }
     tx.execute("UPDATE notification_delivery SET status='cancelled',last_error='channel_deleted',finished_at=NOW(),claim_token=NULL,lease_until=NULL WHERE channel_id=$1 AND status IN ('pending','sending')", &[&id]).await?;
     audit(&tx, user, context, "notification.channel_delete", id).await?;
     tx.commit().await?;
+    Ok(())
+}
+
+// Keep explicitly requested report emails and template tests using the first email transport.
+// Notification subscriptions themselves are read exclusively from notification_channel.
+async fn sync_email_transport(tx: &deadpool_postgres::Transaction<'_>) -> Result<()> {
+    let Some(row) = tx.query_opt("SELECT settings,secret_ciphertext FROM notification_channel WHERE provider='email' AND deleted_at IS NULL ORDER BY created_at,id LIMIT 1", &[]).await? else {
+        tx.execute("DELETE FROM setting WHERE item_type='smtp' AND key IN ('host','port','sender','sender_key')", &[]).await?;
+        return Ok(());
+    };
+    let settings: ChannelSettings =
+        serde_json::from_value(row.get("settings")).map_err(|_| Error::internal())?;
+    let encrypted: Option<Vec<u8>> = row.get("secret_ciphertext");
+    for (name, value) in [
+        ("host", settings.smtp_host),
+        ("port", settings.smtp_port.to_string()),
+        ("sender", settings.smtp_sender),
+        (
+            "sender_key",
+            encrypted
+                .map(|bytes| openssl::base64::encode_block(&bytes))
+                .unwrap_or_default(),
+        ),
+    ] {
+        tx.execute("INSERT INTO setting(item_type,key,value) VALUES('smtp',$1,$2) ON CONFLICT(item_type,key) DO UPDATE SET value=EXCLUDED.value,update_at=NOW()", &[&name,&value]).await?;
+    }
     Ok(())
 }
 
@@ -280,8 +421,32 @@ pub(crate) async fn enqueue(
     body: &str,
     outage: Option<i64>,
 ) -> std::result::Result<(), tokio_postgres::Error> {
+    enqueue_with_context(
+        tx,
+        event_type,
+        severity,
+        dedup,
+        title,
+        body,
+        outage,
+        json!({}),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn enqueue_with_context(
+    tx: &Transaction<'_>,
+    event_type: &str,
+    severity: &str,
+    dedup: &str,
+    title: &str,
+    body: &str,
+    outage: Option<i64>,
+    context: Value,
+) -> std::result::Result<(), tokio_postgres::Error> {
     let id = Uuid::now_v7();
-    let inserted = tx.execute("INSERT INTO notification_event(id,dedup_key,event_type,severity,title,body,outage_id) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(dedup_key) DO NOTHING", &[&id,&dedup,&event_type,&severity,&title,&body,&outage]).await?;
+    let inserted = tx.execute("INSERT INTO notification_event(id,dedup_key,event_type,severity,title,body,outage_id,context) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(dedup_key) DO NOTHING", &[&id,&dedup,&event_type,&severity,&title,&body,&outage,&context]).await?;
     if inserted == 0 {
         return Ok(());
     }
@@ -301,6 +466,30 @@ pub(crate) async fn enqueue(
     Ok(())
 }
 
+pub(crate) async fn enqueue_report(
+    tx: &Transaction<'_>,
+    report: Uuid,
+) -> std::result::Result<(), tokio_postgres::Error> {
+    let Some(row) = tx.query_opt("SELECT period_type,period_start,period_end,recipient_ids FROM report_run WHERE id=$1 AND status='ready'", &[&report]).await? else { return Ok(()) };
+    let kind: String = row.get("period_type");
+    let label = if kind == "weekly" { "周报" } else { "月报" };
+    enqueue_with_context(
+        tx,
+        &format!("report.{kind}"),
+        "warning",
+        &format!("report:{report}"),
+        &format!("{label}已生成"),
+        &format!(
+            "报告周期：{} 至 {}\n报告 ID：{report}\n请登录平台报告中心查看。",
+            row.get::<_, DateTime<Utc>>("period_start"),
+            row.get::<_, DateTime<Utc>>("period_end")
+        ),
+        None,
+        json!({"report_id":report,"recipient_ids":row.get::<_,Vec<i32>>("recipient_ids")}),
+    )
+    .await
+}
+
 pub async fn test_send(
     pool: &Pool,
     id: Uuid,
@@ -312,7 +501,7 @@ pub async fn test_send(
     let channel = tx.query_opt("UPDATE notification_channel SET last_test_at=NOW() WHERE id=$1 AND deleted_at IS NULL AND enabled AND (last_test_at IS NULL OR last_test_at<NOW()-INTERVAL '30 seconds') RETURNING destination_revision", &[&id]).await?.ok_or_else(Error::conflict)?;
     let event = Uuid::now_v7();
     let delivery = Uuid::now_v7();
-    tx.execute("INSERT INTO notification_event(id,dedup_key,event_type,severity,title,body) VALUES($1,$2,'notification.test','warning','飞书通知测试','管理员从 Web 控制台发起测试。')", &[&event,&format!("test:{event}")]).await?;
+    tx.execute("INSERT INTO notification_event(id,dedup_key,event_type,severity,title,body) VALUES($1,$2,'notification.test','warning','通知渠道测试','管理员从 Web 控制台发起测试。')", &[&event,&format!("test:{event}")]).await?;
     tx.execute("INSERT INTO notification_delivery(id,event_id,channel_id,destination_revision) VALUES($1,$2,$3,$4)", &[&delivery,&event,&id,&channel.get::<_,i64>("destination_revision")]).await?;
     audit(&tx, user, context, "notification.test", id).await?;
     tx.commit().await?;

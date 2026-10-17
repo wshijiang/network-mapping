@@ -687,7 +687,7 @@ pub async fn restore_template_version(
     save_template_draft(pool, template_key, &source, user_id).await
 }
 
-async fn get_published_source(
+pub(crate) async fn get_published_source(
     pool: &Pool,
     template_key: &str,
 ) -> Result<Option<MailTemplateSource>, Box<dyn std::error::Error>> {
@@ -816,31 +816,18 @@ pub async fn send_template_test(
 
 pub async fn send_login_notification(
     pool: &Pool,
-    encryption_key: &str,
+    _encryption_key: &str,
     user_id: i32,
     username: &str,
     source_ip: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let settings = get_mail_settings_from_database(pool).await?;
-    if !settings.notification_prefs.login_notify_enabled {
-        return Ok(false);
-    }
-    let Some(recipient) = get_user_notification_recipient(pool, user_id).await? else {
-        return Ok(false);
-    };
-    let Some(source) = get_published_source(pool, LOGIN_SUCCESS_TEMPLATE_KEY).await? else {
-        return Ok(false);
-    };
-    let context = login_context(username, source_ip)?;
-    let rendered = render_template(LOGIN_SUCCESS_TEMPLATE_KEY, &source, &context)?;
-    send_rendered_mail(
-        pool,
-        encryption_key,
-        &recipient,
-        rendered,
-        MailRetryPolicy::Background,
-    )
-    .await?;
+    let context = login_context(username, source_ip)?.into_json();
+    let mut conn = pool.get().await?;
+    let tx = conn.transaction().await?;
+    crate::notification::enqueue_with_context(&tx,"user.login","warning",&format!("login:{}",uuid::Uuid::now_v7()),"用户登录",
+        &format!("用户：{username}\n登录时间：{}",Utc::now().to_rfc3339()),None,
+        json!({"user_id":user_id,"mail_template":LOGIN_SUCCESS_TEMPLATE_KEY,"mail_context":context})).await?;
+    tx.commit().await?;
     Ok(true)
 }
 
@@ -971,7 +958,7 @@ pub async fn get_admin_recipients(pool: &Pool) -> Result<Vec<String>, Box<dyn st
     Ok(recipients)
 }
 
-fn health_alert_context(event: &HealthEvent) -> Result<Context, tera::Error> {
+pub(crate) fn health_alert_context(event: &HealthEvent) -> Result<Context, tera::Error> {
     let details = event
         .details
         .iter()

@@ -56,7 +56,7 @@
 | [请求日志与错误识别](REQUEST_LOG.md) | 请求采集、查询与错误分类 |
 | [审计日志](AUDIT_LOG.md) | 操作审计与查询约定 |
 | [健康监控与告警](HEALTH_ALERT.md) | 监控阈值、慢 SQL 和邮件告警 |
-| [通知渠道与飞书接入](NOTIFICATIONS.md) | Web 管理、飞书群机器人、持久投递、重试和排障 |
+| [统一通知渠道](NOTIFICATIONS.md) | 邮件、飞书、Telegram 同级管理、事件订阅、投递与排障 |
 | [pgBackRest 备份管理使用指南](PGBACKREST_BACKUP.md) | 备份部署、权限、执行与恢复验证 |
 | [系统业务时区与常规设置](SYSTEM_TIME.md) | 业务时区与时间展示规则 |
 | [系统资源读取与慢依赖隔离](SYSTEM_RESOURCE_RESILIENCE.md) | 资源读取、缓存与慢依赖处理 |

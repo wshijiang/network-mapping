@@ -26,28 +26,7 @@ pub fn signature(timestamp: i64, secret: &str) -> Result<String, openssl::error:
     Ok(openssl::base64::encode_block(&signer.sign_to_vec()?))
 }
 
-#[derive(Debug, PartialEq)]
-pub struct Outcome {
-    pub sent: bool,
-    pub retryable: bool,
-    pub reason: &'static str,
-    pub http: Option<i32>,
-    pub code: Option<i64>,
-    pub retry_after: i64,
-}
-
-impl Outcome {
-    pub fn failure(reason: &'static str, retryable: bool) -> Self {
-        Self {
-            sent: false,
-            retryable,
-            reason,
-            http: None,
-            code: None,
-            retry_after: 0,
-        }
-    }
-}
+pub use super::Outcome;
 
 pub fn classify(http: u16, value: Option<&Value>) -> Outcome {
     let code = value

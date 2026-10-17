@@ -100,13 +100,18 @@ pub(super) struct Claimed {
     pub(super) attempts: i32,
     url: Vec<u8>,
     secret: Option<Vec<u8>>,
+    provider: String,
+    settings: ChannelSettings,
+    title: String,
+    event_type: String,
+    context: Value,
     text: String,
 }
 
 pub(super) enum ClaimOutcome {
     Empty,
     Processed,
-    Ready(Claimed),
+    Ready(Box<Claimed>),
 }
 
 pub(super) async fn claim(pool: &Pool) -> Result<ClaimOutcome> {
@@ -118,7 +123,7 @@ pub(super) async fn claim(pool: &Pool) -> Result<ClaimOutcome> {
         return Ok(ClaimOutcome::Empty);
     };
     let cid: Uuid = channel.get("id");
-    let row = tx.query_opt("SELECT d.*,e.event_type,e.severity,e.title,e.body,e.outage_id,e.occurred_at FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE d.channel_id=$1 AND ((d.status='pending' AND d.available_at<=NOW()) OR (d.status='sending' AND d.lease_until<NOW())) ORDER BY d.available_at,d.id LIMIT 1 FOR UPDATE OF d SKIP LOCKED", &[&cid]).await?;
+    let row = tx.query_opt("SELECT d.*,e.event_type,e.severity,e.title,e.body,e.outage_id,e.occurred_at,e.context FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE d.channel_id=$1 AND ((d.status='pending' AND d.available_at<=NOW()) OR (d.status='sending' AND d.lease_until<NOW())) ORDER BY d.available_at,d.id LIMIT 1 FOR UPDATE OF d SKIP LOCKED", &[&cid]).await?;
     let Some(row) = row else {
         return Ok(ClaimOutcome::Empty);
     };
@@ -163,17 +168,31 @@ pub(super) async fn claim(pool: &Pool) -> Result<ClaimOutcome> {
     let title: String = row.get("title");
     let body: String = row.get("body");
     let event: Uuid = row.get("event_id");
-    let text = format!("[Network Mapping] {title}\n级别：{severity}\n{body}\n事件 ID：{event}");
+    let short_title: String = title.chars().take(120).collect();
+    let short_body: String = body.chars().take(1400).collect();
+    let text = format!(
+        "[Network Mapping] {short_title}\n级别：{severity}\n{short_body}\n事件 ID：{event}"
+    );
+    let mut context: Value = row.get("context");
+    if let Some(outage) = row.get::<_, Option<i64>>("outage_id") {
+        context["outage_id"] = json!(outage);
+        context["event_type"] = json!(kind);
+    }
     let result = Claimed {
         id,
         token,
         attempts: attempts + 1,
         url: channel.get("webhook_ciphertext"),
         secret: channel.get("secret_ciphertext"),
+        provider: channel.get("provider"),
+        settings: serde_json::from_value(channel.get("settings")).map_err(|_| Error::internal())?,
+        title,
+        event_type: kind,
+        context,
         text,
     };
     tx.commit().await?;
-    Ok(ClaimOutcome::Ready(result))
+    Ok(ClaimOutcome::Ready(Box::new(result)))
 }
 
 pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client) -> Result<bool> {
@@ -182,25 +201,88 @@ pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client
         ClaimOutcome::Processed => return Ok(true),
         ClaimOutcome::Ready(claimed) => claimed,
     };
-    let secrets = decrypt(&claimed.url, key).and_then(|url| {
-        let secret = claimed
-            .secret
-            .as_ref()
-            .map(|bytes| decrypt(bytes, key))
-            .transpose()?;
-        Ok((url, secret))
-    });
-    let outcome = match secrets {
-        Ok((url, secret)) => tokio::time::timeout(
-            Duration::from_secs(20),
-            feishu::send(client, &url, secret.as_deref(), &claimed.text),
-        )
+    let secret = claimed
+        .secret
+        .as_ref()
+        .map(|bytes| decrypt(bytes, key))
+        .transpose();
+    let outcome = match secret {
+        Ok(secret) => tokio::time::timeout(Duration::from_secs(20), async {
+            let outcome = match claimed.provider.as_str() {
+                "feishu" => match decrypt(&claimed.url, key) {
+                    Ok(url) => feishu::send(client, &url, secret.as_deref(), &claimed.text).await,
+                    Err(_) => Outcome::failure("secret_unavailable", false),
+                },
+                "telegram" => {
+                    telegram::send(
+                        client,
+                        secret.as_deref().unwrap_or_default(),
+                        &claimed.settings.chat_id,
+                        &claimed.text,
+                    )
+                    .await
+                }
+                "email" => {
+                    let recipients = if claimed.settings.recipients.is_empty() {
+                        default_recipients(pool, &claimed.event_type, &claimed.context).await?
+                    } else {
+                        claimed.settings.recipients.clone()
+                    };
+                    match email::render(pool, &claimed.context).await {
+                        Ok(rendered) => {
+                            email::send(
+                                &claimed.settings,
+                                secret.as_deref().unwrap_or_default(),
+                                &recipients,
+                                &claimed.title,
+                                &claimed.text,
+                                rendered.as_ref(),
+                            )
+                            .await
+                        }
+                        Err(outcome) => outcome,
+                    }
+                }
+                _ => Outcome::failure("invalid_destination", false),
+            };
+            Ok::<_, Error>(outcome)
+        })
         .await
-        .unwrap_or_else(|_| feishu::Outcome::failure("delivery_timeout", true)),
-        Err(_) => feishu::Outcome::failure("secret_unavailable", false),
+        .unwrap_or_else(|_| Ok(Outcome::failure("delivery_timeout", true)))?,
+        Err(_) => Outcome::failure("secret_unavailable", false),
     };
     complete(pool, claimed.id, claimed.token, claimed.attempts, outcome).await?;
     Ok(true)
+}
+
+async fn default_recipients(pool: &Pool, event_type: &str, context: &Value) -> Result<Vec<String>> {
+    if event_type == "user.login" {
+        let Some(id) = context["user_id"]
+            .as_i64()
+            .and_then(|id| i32::try_from(id).ok())
+        else {
+            return Ok(Vec::new());
+        };
+        return crate::mail_template::get_user_notification_recipient(pool, id)
+            .await
+            .map(|recipient| recipient.into_iter().collect())
+            .map_err(|_| Error::internal());
+    }
+    if event_type.starts_with("report.") {
+        let selected: Vec<i32> = context["recipient_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_i64().and_then(|v| i32::try_from(v).ok()))
+            .collect();
+        return crate::reports::storage::recipients(&pool.get().await?, &selected)
+            .await
+            .map(|recipients| recipients.into_iter().map(|(_, email)| email).collect())
+            .map_err(|_| Error::internal());
+    }
+    crate::mail_template::get_admin_recipients(pool)
+        .await
+        .map_err(|_| Error::internal())
 }
 
 pub(crate) async fn complete(
@@ -208,7 +290,7 @@ pub(crate) async fn complete(
     id: Uuid,
     token: Uuid,
     attempts: i32,
-    outcome: feishu::Outcome,
+    outcome: Outcome,
 ) -> Result<()> {
     let retry = !outcome.sent && outcome.retryable && attempts < 5;
     let status = if outcome.sent {

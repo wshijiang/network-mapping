@@ -20,6 +20,7 @@ fn user(role: i32) -> UserBaseI {
 }
 fn input() -> ChannelInput {
     ChannelInput {
+        provider: "feishu".into(),
         name: "运维".into(),
         enabled: true,
         event_types: EVENT_TYPES.iter().map(|v| v.to_string()).collect(),
@@ -27,8 +28,275 @@ fn input() -> ChannelInput {
         webhook_url: URL.into(),
         signing_secret: "test-signing-secret".into(),
         clear_signing_secret: false,
+        bot_token: String::new(),
+        smtp_password: String::new(),
+        settings: ChannelSettings::default(),
         expected_revision: None,
     }
+}
+fn provider_input(provider: &str) -> ChannelInput {
+    let mut v = input();
+    v.provider = provider.into();
+    if provider != "feishu" {
+        v.webhook_url.clear();
+        v.signing_secret.clear();
+    }
+    if provider == "telegram" {
+        v.bot_token = "123456:abcdefghijklmnopqrstuvwxyz_ABC-123".into();
+        v.settings.chat_id = "-1001234567890".into();
+    }
+    if provider == "email" {
+        v.smtp_password = "smtp-password-secret".into();
+        v.settings.smtp_host = "smtp.example.com".into();
+        v.settings.smtp_port = 465;
+        v.settings.smtp_sender = "notifier@example.com".into();
+    }
+    v
+}
+
+#[test]
+fn all_providers_accept_the_same_event_catalog_and_validate_their_own_credentials() {
+    for provider in ["email", "feishu", "telegram"] {
+        let v = provider_input(provider);
+        assert!(v.validate(true).is_ok(), "{provider}");
+        assert_eq!(v.event_types.len(), EVENT_TYPES.len());
+    }
+    let mut v = provider_input("telegram");
+    v.bot_token.push_str("/another-method");
+    assert!(v.validate(true).is_err());
+    v = provider_input("email");
+    v.settings.smtp_port = 0;
+    assert!(v.validate(true).is_err());
+    v = provider_input("email");
+    v.settings.recipients = vec!["bad-address".into()];
+    assert!(v.validate(true).is_err());
+    v = provider_input("unsupported");
+    assert!(v.validate(true).is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn peer_channels_fan_out_independently_and_secrets_are_preserved_without_echo() {
+    let (pool, schema) = database().await;
+    let audit = AuditContext::cli("notification-test");
+    let mut channels = Vec::new();
+    for provider in ["email", "feishu", "telegram"] {
+        channels.push(
+            save(
+                &pool,
+                &key(),
+                None,
+                provider_input(provider),
+                &user(1),
+                &audit,
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    let listed = serde_json::to_string(&list(&pool).await.unwrap()).unwrap();
+    for secret in [
+        "smtp-password-secret",
+        "abcdefghijklmnopqrstuvwxyz_ABC-123",
+        "test-signing-secret",
+        URL,
+    ] {
+        assert!(!listed.contains(secret));
+    }
+    assert_eq!(
+        crate::admin::get_mail_sender_key_from_database(&pool, &key())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("smtp-password-secret")
+    );
+    let mut c = pool.get().await.unwrap();
+    let tx = c.transaction().await.unwrap();
+    for (i, topic) in [
+        "health.alert",
+        "user.login",
+        "report.weekly",
+        "report.monthly",
+    ]
+    .iter()
+    .enumerate()
+    {
+        enqueue(
+            &tx,
+            topic,
+            "warning",
+            &format!("peer:{i}"),
+            "test",
+            "test",
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    let counts = c.query("SELECT c.provider,COUNT(*) FROM notification_delivery d JOIN notification_channel c ON c.id=d.channel_id GROUP BY c.provider", &[]).await.unwrap();
+    assert_eq!(counts.len(), 3);
+    assert!(counts.iter().all(|r| r.get::<_, i64>(1) == 4));
+    drop(c);
+    let mut edit = provider_input("email");
+    edit.smtp_password.clear();
+    edit.enabled = false;
+    edit.expected_revision = Some(1);
+    let updated = save(&pool, &key(), Some(channels[0].id), edit, &user(1), &audit)
+        .await
+        .unwrap();
+    assert!(updated.credential_configured);
+    let mut edit = provider_input("telegram");
+    edit.bot_token.clear();
+    edit.event_types = vec!["report.weekly".into()];
+    edit.expected_revision = Some(1);
+    save(&pool, &key(), Some(channels[2].id), edit, &user(1), &audit)
+        .await
+        .unwrap();
+    let mut c = pool.get().await.unwrap();
+    let tx = c.transaction().await.unwrap();
+    enqueue(
+        &tx,
+        "health.alert",
+        "warning",
+        "peer:after-edit",
+        "test",
+        "test",
+        None,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let rows = c.query("SELECT c.provider FROM notification_delivery d JOIN notification_channel c ON c.id=d.channel_id JOIN notification_event e ON e.id=d.event_id WHERE e.dedup_key='peer:after-edit'", &[]).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, String>(0), "feishu");
+    let secret: Vec<u8> = c
+        .query_one(
+            "SELECT secret_ciphertext FROM notification_channel WHERE id=$1",
+            &[&channels[2].id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        decrypt(&secret, &key()).unwrap(),
+        provider_input("telegram").bot_token
+    );
+    drop(c);
+    let mut changed = provider_input("email");
+    changed.expected_revision = Some(2);
+    assert!(
+        save(
+            &pool,
+            &key(),
+            Some(channels[2].id),
+            changed,
+            &user(1),
+            &audit
+        )
+        .await
+        .is_err()
+    );
+    cleanup(pool, schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn legacy_smtp_import_is_idempotent_and_does_not_use_the_test_recipient() {
+    let (pool, schema) = database().await;
+    let c = pool.get().await.unwrap();
+    let secret = openssl::base64::encode_block(&encrypt("old-smtp-secret", &key()).unwrap());
+    c.execute("INSERT INTO setting(item_type,key,value) VALUES('smtp','host','smtp.example.com'),('smtp','sender','sender@example.com'),('smtp','port','465'),('smtp','recipient','test-only@example.com'),('smtp','sender_key',$1),('notification','health_alert_enabled','false'),('notification','login_notify_enabled','false'),('notification','report_weekly','false'),('notification','report_monthly','true'),('notification','scanner_offline_enabled','true') ON CONFLICT(item_type,key) DO UPDATE SET value=EXCLUDED.value", &[&secret]).await.unwrap();
+    c.execute(
+        "DELETE FROM notification_upgrade WHERE name='unified_channels_v1'",
+        &[],
+    )
+    .await
+    .unwrap();
+    c.batch_execute(include_str!(
+        "../../source/database/migrate_notifications.sql"
+    ))
+    .await
+    .unwrap();
+    let row = c
+        .query_one(
+            "SELECT id,secret_ciphertext FROM notification_channel WHERE provider='email'",
+            &[],
+        )
+        .await
+        .unwrap();
+    let id: Uuid = row.get("id");
+    assert_eq!(
+        decrypt(&row.get::<_, Vec<u8>>("secret_ciphertext"), &key()).unwrap(),
+        "old-smtp-secret"
+    );
+    c.execute(
+        "UPDATE notification_channel SET enabled=FALSE,name='edited' WHERE id=$1",
+        &[&id],
+    )
+    .await
+    .unwrap();
+    c.batch_execute(include_str!(
+        "../../source/database/migrate_notifications.sql"
+    ))
+    .await
+    .unwrap();
+    drop(c);
+    let channels = list(&pool).await.unwrap();
+    assert_eq!(channels.len(), 1);
+    assert_eq!(channels[0].id, id);
+    assert_eq!(channels[0].name, "edited");
+    assert!(!channels[0].enabled);
+    assert!(channels[0].settings.recipients.is_empty());
+    assert!(channels[0].event_types.contains(&"report.monthly".into()));
+    assert!(channels[0].event_types.contains(&"scanner.offline".into()));
+    assert!(!channels[0].event_types.contains(&"health.alert".into()));
+    cleanup(pool, schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn login_producer_uses_channel_subscriptions_and_keeps_private_context_out_of_bot_messages() {
+    let (pool, schema) = database().await;
+    let audit = AuditContext::cli("notification-test");
+    for provider in ["email", "feishu", "telegram"] {
+        save(
+            &pool,
+            &key(),
+            None,
+            provider_input(provider),
+            &user(1),
+            &audit,
+        )
+        .await
+        .unwrap();
+    }
+    let c = pool.get().await.unwrap();
+    c.batch_execute("UPDATE users SET email='admin@example.com' WHERE id=1; INSERT INTO setting(item_type,key,value) VALUES('notification','login_notify_enabled','false') ON CONFLICT(item_type,key) DO UPDATE SET value='false'").await.unwrap();
+    crate::mail_template::send_login_notification(&pool, &key(), 1, "admin", "192.0.2.99")
+        .await
+        .unwrap();
+    let row = c
+        .query_one(
+            "SELECT body,context FROM notification_event WHERE event_type='user.login'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(!row.get::<_, String>("body").contains("192.0.2.99"));
+    let context: Value = row.get("context");
+    assert_eq!(context["user_id"], 1);
+    let rendered = email::render(&pool, &context).await.unwrap().unwrap();
+    assert!(rendered.text_body.contains("192.0.2.99"));
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM notification_delivery", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        3
+    );
+    drop(c);
+    cleanup(pool, schema).await;
 }
 #[test]
 fn credentials_are_authenticated_encrypted_and_short_ciphertext_is_rejected() {
@@ -410,6 +678,22 @@ async fn scanner_recovery_only_notifies_destinations_that_received_the_outage() 
         .unwrap()
         .get(0);
     assert_eq!(count, 1);
+    let outage: i64 = c
+        .query_one(
+            "SELECT id FROM scanner_outage WHERE scanner_id=$1",
+            &[&scanner],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let rendered = email::render(
+        &pool,
+        &json!({"outage_id":outage,"event_type":"scanner.offline"}),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(rendered.text_body.contains(&scanner));
     c.batch_execute("UPDATE notification_delivery SET status='sent'")
         .await
         .unwrap();

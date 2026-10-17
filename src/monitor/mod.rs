@@ -554,7 +554,7 @@ pub(crate) async fn record_health_alert(
         "告警类型：{}\n告警记录：{}\n请登录平台“健康告警”查看详情。",
         event.alert_type, id
     );
-    crate::notification::enqueue(
+    crate::notification::enqueue_with_context(
         &tx,
         "health.alert",
         event.severity,
@@ -562,6 +562,7 @@ pub(crate) async fn record_health_alert(
         &title,
         &body,
         None,
+        serde_json::json!({"mail_template":mail_template::HEALTH_ALERT_TEMPLATE_KEY,"mail_context":mail_template::health_alert_context(event)?.into_json()}),
     )
     .await?;
     tx.commit().await?;
@@ -601,7 +602,7 @@ impl AlertCooldown {
 async fn run_notifier(
     mut rx: mpsc::Receiver<HealthEvent>,
     pool: Pool,
-    encryption_key: String,
+    _encryption_key: String,
     config: Arc<RwLock<Versioned<MonitorConfig>>>,
 ) {
     let last_alert = Mutex::new(AlertCooldown::default());
@@ -657,25 +658,6 @@ async fn run_notifier(
                     "健康告警历史写入失败"
                 );
             }
-        }
-
-        if let Err(error) = mail_template::send_health_alert(&pool, &encryption_key, &event).await {
-            let diagnostics = error_diagnostics(error.as_ref());
-            error!(
-                event = "HealthAlertSendError",
-                operation = "send_health_alert",
-                error_kind = "email_delivery",
-                error_code = "health_alert_delivery_failed",
-                error_message = %diagnostics.error_message,
-                error_chain = %diagnostics.error_chain,
-                root_cause = %diagnostics.root_cause,
-                error_truncated = diagnostics.error_truncated,
-                retryable = false,
-                outcome = "alert_not_delivered",
-                alert_type = event.alert_type,
-                key = %event.key,
-                "健康告警邮件发送失败"
-            );
         }
     }
 }

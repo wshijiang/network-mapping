@@ -1,7 +1,7 @@
--- Notification channels are separate from SMTP and external-application webhooks.
+-- Notification channels share subscriptions across email, Feishu and Telegram.
 CREATE TABLE IF NOT EXISTS notification_channel (
     id UUID PRIMARY KEY,
-    provider TEXT NOT NULL CHECK (provider IN ('feishu')),
+    provider TEXT NOT NULL CHECK (provider IN ('email', 'feishu', 'telegram')),
     name TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 80),
     enabled BOOLEAN NOT NULL DEFAULT FALSE,
     event_types TEXT[] NOT NULL,
@@ -17,6 +17,13 @@ CREATE TABLE IF NOT EXISTS notification_channel (
     deleted_at TIMESTAMPTZ
 );
 
+ALTER TABLE notification_channel DROP CONSTRAINT IF EXISTS notification_channel_provider_check;
+ALTER TABLE notification_channel ADD CONSTRAINT notification_channel_provider_check
+    CHECK (provider IN ('email', 'feishu', 'telegram'));
+ALTER TABLE notification_channel ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE notification_channel ADD COLUMN IF NOT EXISTS legacy_email BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_legacy_email ON notification_channel(legacy_email) WHERE legacy_email;
+
 CREATE TABLE IF NOT EXISTS notification_event (
     id UUID PRIMARY KEY,
     dedup_key TEXT NOT NULL UNIQUE,
@@ -27,6 +34,7 @@ CREATE TABLE IF NOT EXISTS notification_event (
     outage_id BIGINT REFERENCES scanner_outage(id) ON DELETE CASCADE,
     occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE notification_event ADD COLUMN IF NOT EXISTS context JSONB NOT NULL DEFAULT '{}';
 
 CREATE TABLE IF NOT EXISTS notification_delivery (
     id UUID PRIMARY KEY,
@@ -64,3 +72,39 @@ ALTER TABLE scanner_outage ADD COLUMN IF NOT EXISTS notification_recovery BOOLEA
 ALTER TABLE scanner_outage ADD COLUMN IF NOT EXISTS notification_recovery_prepared BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS idx_scanner_outage_notification_recovery ON scanner_outage(id)
     WHERE notification_recovery AND NOT notification_recovery_prepared AND recovered_at IS NOT NULL;
+
+-- Import legacy SMTP exactly once. The test recipient is deliberately not a notification recipient.
+CREATE TABLE IF NOT EXISTS notification_upgrade (
+    name TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+DO $$
+DECLARE
+    smtp JSONB;
+    prefs JSONB;
+    events TEXT[];
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM notification_upgrade WHERE name='unified_channels_v1') THEN
+        SELECT COALESCE(jsonb_object_agg(key,value),'{}') INTO smtp FROM setting WHERE item_type='smtp';
+        SELECT COALESCE(jsonb_object_agg(key,value),'{}') INTO prefs FROM setting WHERE item_type='notification';
+        events := array_remove(ARRAY[
+            CASE WHEN COALESCE(prefs->>'health_alert_enabled','true')='true' THEN 'health.alert' END,
+            CASE WHEN COALESCE(prefs->>'scanner_offline_enabled','false')='true' THEN 'scanner.offline' END,
+            CASE WHEN COALESCE(prefs->>'scanner_recovery_enabled','true')='true' THEN 'scanner.recovered' END,
+            CASE WHEN COALESCE(prefs->>'login_notify_enabled','true')='true' THEN 'user.login' END,
+            CASE WHEN COALESCE(prefs->>'report_weekly','true')='true' THEN 'report.weekly' END,
+            CASE WHEN COALESCE(prefs->>'report_monthly','false')='true' THEN 'report.monthly' END
+        ],NULL);
+        IF COALESCE(smtp->>'host','')<>'' OR COALESCE(smtp->>'sender','')<>'' THEN
+            INSERT INTO notification_channel(id,provider,name,enabled,event_types,minimum_severity,webhook_ciphertext,secret_ciphertext,settings,legacy_email)
+            VALUES(gen_random_uuid(),'email','邮件通知',cardinality(events)>0 AND COALESCE(smtp->>'host','')<>'' AND COALESCE(smtp->>'sender','')<>'' AND COALESCE(smtp->>'sender_key','')<>'',
+                CASE WHEN cardinality(events)>0 THEN events ELSE ARRAY['health.alert'] END,'warning',''::BYTEA,
+                CASE WHEN COALESCE(smtp->>'sender_key','')<>'' THEN decode(smtp->>'sender_key','base64') END,
+                jsonb_build_object('smtp_host',COALESCE(smtp->>'host',''),'smtp_port',CASE WHEN smtp->>'port' ~ '^[0-9]{1,5}$' THEN (smtp->>'port')::INT ELSE 465 END,'smtp_sender',COALESCE(smtp->>'sender',''),'recipients','[]'::JSONB),TRUE);
+        END IF;
+        -- Old pending scanner mail must not duplicate the imported channel's deliveries.
+        UPDATE scanner_outage_delivery SET status='cancelled',claimed_until=NULL WHERE status='pending';
+        UPDATE report_delivery SET status='cancelled',claim_token=NULL,lease_until=NULL WHERE automatic AND status='pending';
+        INSERT INTO notification_upgrade(name) VALUES('unified_channels_v1');
+    END IF;
+END $$;

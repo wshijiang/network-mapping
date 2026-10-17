@@ -278,10 +278,21 @@ pub(crate) async fn schedules(
                             && !settings.sender.trim().is_empty()
                             && settings.sender_key_configured
                     );
-                    data["notifications"] = json!({"weekly": settings.notification_prefs.report_weekly, "monthly": settings.notification_prefs.report_monthly});
                 }
                 Err(e) => return internal(e),
             }
+            let channels = match crate::notification::list(&pool).await {
+                Ok(channels) => channels,
+                Err(_) => return internal("通知渠道暂不可用"),
+            };
+            let subscribed = |topic: &str| {
+                channels.iter().any(|channel| {
+                    channel.enabled
+                        && channel.minimum_severity == "warning"
+                        && channel.event_types.iter().any(|event| event == topic)
+                })
+            };
+            data["notifications"] = json!({"weekly":subscribed("report.weekly"),"monthly":subscribed("report.monthly")});
             HttpResponse::Ok().json(json!({"success": true, "data": data}))
         }
         Err(e) => internal(e),
@@ -323,7 +334,7 @@ pub(crate) async fn save_schedule(
     selected.dedup();
     let result = async {
         let mut client = pool.get().await.map_err(|e| e.to_string())?; let tx = client.transaction().await.map_err(|e| e.to_string())?;
-        if body.enabled {
+        if body.enabled && !selected.is_empty() {
             let valid = storage::recipients(&tx, &selected).await?;
             if valid.is_empty() || (!selected.is_empty() && valid.len() != selected.len()) { return Ok::<_, String>(Some(bad("收件人必须是有有效邮箱的启用中管理员"))); }
         }
@@ -333,9 +344,6 @@ pub(crate) async fn save_schedule(
             last_period_end = CASE WHEN $2 AND NOT enabled THEN NULL ELSE last_period_end END, revision = revision + 1, updated_at = NOW() \
             WHERE period_type = $1 AND revision = $6;", &[&key, &body.enabled, &body.send_hour, &body.send_minute, &selected, &body.expected_revision]).await.map_err(|e| e.to_string())?;
         if count == 0 { return Ok(Some(conflict("计划已被其他管理员更新，请重新加载"))); }
-        let preference = format!("report_{key}");
-        tx.execute("INSERT INTO setting(item_type, key, value) VALUES ('notification', $1, $2) \
-            ON CONFLICT(item_type, key) DO UPDATE SET value = EXCLUDED.value, update_at = NOW();", &[&preference, &body.enabled.to_string()]).await.map_err(|e| e.to_string())?;
         let mut event = AuditEvent::user("configuration", "report.schedule.update", "success", &user).resource("report_schedule", key);
         event.changes = Some(json!({"enabled": body.enabled, "send_hour": body.send_hour, "send_minute": body.send_minute, "recipient_ids": selected}));
         audit::write(&tx, &AuditContext::from_request(&req), &event).await.map_err(|e| e.to_string())?;

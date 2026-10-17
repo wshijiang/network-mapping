@@ -192,7 +192,9 @@ async fn create_once(
             .await
             .map_err(database_error)?;
             if existing.get::<_, String>("status") == "ready" {
-                enqueue_delivery(&tx, id, &recipient_ids, true, false).await?;
+                crate::notification::enqueue_report(&tx, id)
+                    .await
+                    .map_err(|_| "报告通知入队失败".to_owned())?;
             }
         }
         id

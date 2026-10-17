@@ -100,6 +100,21 @@ pub(crate) async fn run_once(
         return Ok(());
     }
 
+    // All notification providers now use the shared durable queue. Keep legacy receipts as history.
+    if pool
+        .get()
+        .await?
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM notification_upgrade WHERE name='unified_channels_v1')",
+            &[],
+        )
+        .await?
+        .get::<_, bool>(0)
+    {
+        detect_outages(pool, &[], policy.alert_after_seconds).await?;
+        return Ok(());
+    }
+
     let settings = get_mail_settings_from_database(pool)
         .await
         .map_err(|error| std::io::Error::other(error.to_string()))?;

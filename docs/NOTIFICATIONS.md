@@ -1,136 +1,126 @@
-# 通知渠道与飞书接入
+# 通知渠道：邮件、飞书与 Telegram
 
 [返回文档中心](README.md)
 
-## 当前能力与入口
+## 统一管理
 
-管理员在 Web 控制台的「设置 → 通知渠道」（`/setting/notifications`）管理飞书群自定义机器人。
-支持添加、修改、启用、停用、删除、测试发送、按渠道/状态筛选投递记录及重试失败投递。
-通知渠道不依赖 SMTP、管理员邮箱或邮件模板。原有邮件通知开关仍只控制邮件。
+管理员在「设置 → 通知渠道」（`/setting/notifications`）管理全部通知方式。邮件、飞书、Telegram 是同级渠道，使用相同的事件目录、启停、最低级别、测试、投递历史及失败重试功能。可以仅启用任意一种，也可以同时开启多个渠道；一个事件会分别进入每个已启用、已订阅渠道的队列，不按优先级或备用关系选择。
 
-当前可订阅：
+每个渠道可单独选择以下通知类型：
 
-| 事件 | 说明 | 级别 |
+| 事件 | 内容 | 级别 |
 | --- | --- | --- |
-| `health.alert` | 慢请求、5xx、慢 SQL、慢 Elasticsearch 操作及 Elasticsearch 异常 | 沿用健康告警的 warning/critical |
-| `scanner.offline` | 持续无心跳超过掉线策略阈值 | warning |
-| `scanner.recovered` | 已通知掉线的 Scanner 恢复有效心跳 | warning |
-| `notification.test` | 管理员手动测试，仅发往选择的渠道 | 不受订阅及最低级别过滤 |
+| `health.alert` | 慢请求、5xx、慢 SQL、Elasticsearch 异常等健康告警 | warning / critical |
+| `scanner.offline` | Scanner 超过运行策略中的掉线阈值 | warning |
+| `scanner.recovered` | 已成功通知掉线的目标恢复连接 | warning |
+| `user.login` | 用户完成登录 | warning |
+| `report.weekly` | 周报生成并归档完成 | warning |
+| `report.monthly` | 月报生成并归档完成 | warning |
 
-选择「仅严重」会过滤 Scanner 掉线/恢复。健康信号仍受运行策略中的监控开关和规则控制；
-Scanner 检测仍使用现有掉线阈值、检查周期和维护宽限。新增渠道不会补发历史事件。
-登录通知、任务完成/错误、日报、周报/月报摘要及 Telegram 尚未接入此渠道系统。
+「仅严重」只发送 critical 健康告警，登录、Scanner 和报告事件不会通过该级别过滤。健康监控开关、Scanner 检测阈值及维护宽限仍在运行策略中配置。报告生成计划、时间和默认邮件收件管理员仍在报告中心配置；报告计划可在没有邮箱的部署中启用，通知方式由本页面的订阅决定。停用通知渠道不会停用报告归档。
 
-## 配置飞书机器人
+任务错误/完成、日报目前没有落地的事件生产链路，本页面不提供无效开关。新增渠道只接收之后发生的事件，不补发历史消息。
 
-1. 在目标飞书群添加「自定义机器人」，复制 Webhook 地址。
-2. 建议开启签名校验，复制签名密钥。开启后必须在平台填写一致的密钥。
-3. 在「通知渠道」添加渠道，填写名称、Webhook、签名密钥，选择事件和最低级别，保存并启用。
-4. 点击「测试发送」。界面显示「已入队」表示请求已持久化；以投递记录的「发送成功」和群内实际消息为验收依据。
-5. 在运行策略中配置健康监控及 Scanner 状态策略，再观察实际告警。
+## 添加邮件渠道
 
-仅支持 `https://open.feishu.cn/open-apis/bot/v2/hook/<机器人 UUID>`。
-不接受任意 Webhook、Lark 国际版域名、用户名密码、查询参数、片段、非 443 端口或重定向。
-如机器人开启关键词校验，请配置固定前缀 **Network Mapping**；如开启 IP 白名单，应允许服务实际出口 IP。
-所有飞书请求使用继承的代理、受信任 CA 和 TLS 校验；运行环境须允许访问 `open.feishu.cn:443`。
-不需要向公网开放机器人回调入口。
+1. 选择「邮件」，填写渠道名称、SMTP 服务器域名、SMTPS 端口（通常 465）、发件人邮箱和邮箱授权密钥。发件人地址同时作为 SMTP 登录账号。
+2. 可指定收件人，每行一个或用逗号分隔，最多 32 个。留空时使用事件默认收件人：登录通知为该用户本人；报告为报告计划所选管理员（未选则所有有效管理员邮箱）；健康和 Scanner 通知为当前启用的管理员邮箱。
+3. 选择事件与级别，保存并启用后点击「测试发送」。测试使用该渠道收件人，默认收件人为空时使用当前管理员名单。没有有效邮箱时记录会显示失败原因。
 
-飞书签名按官方协议，以 `timestamp + "\n" + secret` 为 HMAC-SHA256 的 key，对空消息计算摘要并 Base64 编码。
-每次尝试重新生成时间戳和签名。HTTP 成功后还必须验证 JSON `code == 0`；兼容旧响应的 `StatusCode`。
-响应缺失业务码、非 JSON、HTTP 429/5xx 及已识别的限流业务码进入有限重试；签名/权限等业务拒绝直接标记失败。
-协议与配额依据：[飞书自定义机器人官方文档](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)。
+邮件使用经证书验证的 SMTPS，不关闭 TLS 验证。登录、健康和 Scanner 邮件沿用已发布模板；报告邮件使用归档正文，机器人接收简短摘要。邮件密钥加密存储、不回显，编辑留空保留。一次投递使用一个 SMTP envelope，其他收件人使用 Bcc，不公开完整名单。
 
-## 编辑、停用和凭据
+原 SMTP 配置会在升级时一次性导入邮件渠道，已实现的通知偏好映射为该渠道订阅；原测试收件人不会变成真实通知收件人。之后重复启动不会覆盖 Web 中的更改。旧设置页只保留统一入口。
 
-- Webhook 和签名密钥均加密保存，列表/API 不回传明文、密文或完整 URL，只显示是否已配置。
-- 编辑时 Webhook、签名密钥留空表示保留；移除签名必须勾选「清除已保存的签名密钥」。
-- 每次保存携带 `expected_revision`，并发编辑版本不符返回 409，应刷新并重新编辑。
-- 修改、停用或删除渠道会取消旧配置下的 pending/sending 记录。已发出的网络请求无法撤回，仍可能到达飞书。
-- 再次启用只处理新事件，不恢复已取消通知。未更换 Webhook 的渠道继续保留同一目标身份；更换 Webhook 后不会沿用旧目标的掉线收据生成恢复消息。
-- 凭据依赖服务现有 `server.encrypt_key`。部署升级应保留此密钥；本功能不自动迁移/轮换主加密密钥。
-- 渠道写操作、测试、重试与操作审计在同一数据库事务提交。只有管理员可以使用这些接口，写操作受现有会话与 CSRF 校验保护。
+报告中心手动发送/重发完整报告邮件、模板测试属于显式邮件操作，继续使用首个未删除邮件渠道的 SMTP 配置；即使仅使用机器人接收自动通知，也可独立配置邮件操作所需的 SMTP。通知订阅不再受旧邮件偏好开关控制。
 
-群消息包含系统前缀、类型/级别、平台告警记录或 Scanner 标识及事件 ID；不发送原始 SQL、请求正文、客户端 IP 或完整健康告警详情。
-Webhook、签名密钥和飞书原始响应正文不写入投递记录或错误日志。
+## 添加飞书渠道
 
-## 投递与恢复语义
+1. 在飞书群添加「自定义机器人」，复制 Webhook；建议启用签名校验并复制签名密钥。
+2. 选择「飞书」，填写名称、Webhook、可选签名密钥及事件订阅，保存并启用。
+3. 若开启关键词校验，允许固定前缀 **Network Mapping**；若开启 IP 白名单，允许服务实际出口 IP。
 
-事件与初始投递在 PostgreSQL 事务内写入。健康告警历史、跨实例冷却门和飞书事件同事务提交；
-Scanner 掉线事件与 incident 同事务提交。投递队列使用 `FOR UPDATE SKIP LOCKED`、领取令牌和 60 秒租约，
-完成更新必须匹配有效领取令牌，进程中断后的过期租约可再次领取。
+仅支持 `https://open.feishu.cn/open-apis/bot/v2/hook/<机器人 UUID>`，不接受任意 Webhook、Lark 国际版域名、查询参数、片段、用户凭据、其他端口和重定向。服务需要允许访问 `open.feishu.cn:443`，无须公开回调入口。
 
-通知已入库后采用**至少一次**交付，不能承诺 exactly-once：飞书接受后、发送成功落库前崩溃或超时，重试可能重复。
-消息附带稳定事件 ID 供定位。健康告警进入数据库前仍使用现有 1024 容量内存队列，满时可能丢弃，服务重启也可能丢失尚未入库事件；
-本功能没有将请求链路改为同步写库。健康告警的数据库冷却在多实例/重启之间生效，并允许从 warning 立即升级 critical。
-本地冷却缓存只记录数据库接纳的事件，共享冷却拒绝的重复事件不会重新开始本地计时。
+签名按官方协议，以 `timestamp + "\n" + secret` 为 HMAC-SHA256 key，对空消息计算摘要并 Base64 编码。HTTP 成功还必须满足 JSON `code == 0`，兼容 `StatusCode`。签名密钥留空保留；移除须明确勾选清除。
 
-默认约束：
+协议参考：[飞书自定义机器人](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)。
 
-| 项目 | 当前值 |
+## 添加 Telegram 渠道
+
+1. 通过 BotFather 创建机器人，取得 Bot Token。不要将 Token 粘贴到日志、截图或公共文档。
+2. 将机器人加入群或频道并授予发消息权限；私聊接收人须先向机器人发送 `/start`。
+3. 选择「Telegram」，填写 Token 和 Chat ID。支持非零数字 ID（包括负数群 ID）或公开频道 `@名称`。
+4. 选择与邮件、飞书相同的事件类型，保存启用并测试。Token 保存后不回显，编辑留空保留。
+
+后端只调用固定的 `https://api.telegram.org/bot<Token>/sendMessage`，不接受自定义服务地址、代理 API 端点或重定向。部署环境需允许 `api.telegram.org:443`。消息为纯文本，关闭链接预览，不拼接 HTML/Markdown 解析指令。请求同时验证 HTTP 状态、`ok` 和消息 ID；限流遵守 `parameters.retry_after`，群权限/目标错误直接记录失败。机器人摘要保留稳定事件 ID，正文按 Telegram 长度限制截短。
+
+协议参考：[Telegram Bot API sendMessage](https://core.telegram.org/bots/api#sendmessage)。
+
+## 启停、编辑与投递记录
+
+- 可同时启用多个同类或不同类渠道；每个渠道有独立的订阅和投递状态。一个渠道失败不会取消其他渠道的任务。
+- 渠道类型创建后不可更改；切换类型应新增渠道。
+- Webhook、邮箱密钥、Bot Token 和签名密钥均加密存储，不在查询响应、审计或投递错误中回显。
+- 保存需带 `expected_revision`。版本冲突返回 409，请刷新后重新编辑。
+- 修改、停用或删除取消旧配置的 pending/sending 任务；已发出的请求无法撤回。重新启用只接收新事件。
+- 更换目标后不沿用旧目标的 Scanner 掉线收据。恢复只发给当前仍订阅恢复、同一渠道目标已成功接收掉线的渠道；尚未发送的掉线记录会取消。
+- 健康告警只在数据库接纳后更新本地冷却，共享闸门拒绝不会延长冷却。
+- 每次领取前检查维护状态。批次中开启维护时允许在途完成，后续记录保持待处理；退出后继续领取。
+- 离开 Web 页面会取消读取请求并清除刷新定时器，迟到响应不会继续轮询或覆盖已卸载状态。
+
+消息摘要不包含原始 SQL、客户端 IP 或请求正文。登录邮件的私有来源 IP 仅用于邮件模板，不发送给机器人。Webhook、Bot Token、SMTP 密钥和服务商原始错误正文不会写入投递历史。
+
+| 约束 | 当前值 |
 | --- | --- |
 | 有效渠道 | 最多 32 个 |
 | 同渠道测试 | 每 30 秒最多入队一次，须已启用 |
-| 同渠道发送 | 数据库协调，最多每秒一次；建议每个机器人只配置一个渠道 |
-| 单次请求/整体投递尝试 | 10 秒 / 20 秒 |
-| 尝试次数 | 每轮最多 5 次，含初次；手动重试开启新一轮 |
-| 自动重试间隔 | 60、120、240、480 秒；有效 Retry-After 更长时按其等待 |
-| 事件有效期 | 24 小时；超过后取消，不无限补发过时告警 |
-| 请求/响应正文上限 | 20 KiB / 16 KiB |
-| 记录保留 | 终态事件通常保留 30 天；未结束的 Scanner incident 收据保留至恢复后 30 天 |
-| 投递列表 | 每页 50 条，`before` 游标翻页 |
+| 同渠道发送 | 数据库协调，每秒最多领取一次真实发送 |
+| 请求 / 投递尝试上限 | 10 秒 / 20 秒 |
+| 尝试次数 | 每轮最多 5 次；手动重试开启新一轮 |
+| 自动重试间隔 | 60、120、240、480 秒；有效服务商限流等待更长时按其等待 |
+| 事件有效期 | 24 小时 |
+| 服务商响应上限 | 16 KiB |
+| 历史保留 | 通常 30 天；未结束 incident 的收据保留至恢复后 30 天 |
+| 历史翻页 | 每页 50 条，`before` 游标 |
 
-每次领取飞书投递前检查维护状态；批次处理中开启维护时，已在途请求允许结束，后续记录保持待处理，退出维护后继续领取。
-过期或失效记录按批次连续清理，不占用真实发送的每秒配额。
-Scanner 恢复会取消尚未发送的掉线通知，恢复通知只发给同一目标已成功收到掉线消息且当前仍订阅恢复的渠道。
-掉线发送尚未完成时，恢复事件对账等待发送状态收敛；停用/删除 Scanner 不发送恢复。
+事件与初始投递在 PostgreSQL 同一事务提交。领取使用 `FOR UPDATE SKIP LOCKED`、领取令牌和 60 秒租约；失效令牌不能覆盖新领取结果。过期/失效任务在有界批次中连续清理，不消耗真实发送配额。
 
-## 排障
+入库后采用至少一次投递，服务商已接受而落库前中断时可能重复。健康信号入库前仍经过现有内存队列，队列满或服务重启可能丢失尚未入库事件；不承诺 exactly-once。
 
-| 现象 | 排查方式 |
-| --- | --- |
-| 测试返回 409 | 渠道是否启用、是否在 30 秒测试间隔内；配置版本是否过时 |
-| HTTP 200 仍失败 | 查看「飞书」业务码；检查签名、关键词、出口 IP 白名单 |
-| 网络或 TLS 失败 | 检查域名出口策略、代理、CA 信任及机器时间，不关闭 TLS 校验 |
-| 一直 pending | 检查计划时间、维护状态、后台 notification-worker 和数据库可用性 |
-| `secret_unavailable` | 检查服务主加密密钥是否与保存凭据时一致，必要时重新保存渠道凭据 |
-| 无 Scanner 恢复通知 | 必须曾向同一目标成功发送掉线；恢复事件须被订阅，且最低级别允许 warning |
-| 改配置后记录 cancelled | 这是取消旧配置投递的预期行为；保存后重新测试 |
+## API、升级与排障
 
-修复配置后可对 failed 记录执行重试。已过期、目标改变、Scanner 已恢复等记录不再具有发送条件时会拒绝或取消。
-
-## 管理接口与部署
-
-所有接口位于 `/api/notifications`，沿用管理员会话，写请求附带 `X-CSRF-Token`。
+所有接口位于 `/api/notifications`，仅管理员可用，写请求沿用会话、CSRF 和事务审计。
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| GET / POST | `/channels` | 列出 / 创建飞书渠道 |
-| PUT / DELETE | `/channels/{id}` | 按版本修改 / 软删除 |
-| POST | `/channels/{id}/test` | 持久化测试投递，返回 202 与 delivery_id |
-| GET | `/deliveries` | channel_id、status、before 筛选及翻页 |
+| GET / POST | `/channels` | 查询 / 创建渠道 |
+| PUT / DELETE | `/channels/{id}` | 按版本编辑 / 删除 |
+| POST | `/channels/{id}/test` | 测试入队，返回 202 和 delivery_id |
+| GET | `/deliveries` | 按 channel_id/status 筛选、游标翻页 |
 | POST | `/deliveries/{id}/retry` | 重试仍符合条件的 failed 记录 |
 
-创建/修改字段：`name,enabled,event_types,minimum_severity,webhook_url,signing_secret,clear_signing_secret,expected_revision`。
-创建时 Webhook 必填；修改时版本必填。DELETE body 为 `{"expected_revision":1}`。
-响应使用 `{success,data}`；错误只返回公开原因，不回显输入凭据。
+共用字段为 `provider,name,enabled,event_types,minimum_severity,expected_revision`。`provider` 支持 `email/feishu/telegram`，旧飞书客户端未传时默认 feishu。
 
-启动迁移自动执行 `source/database/migrate_notifications.sql`；全新 `init.sql` 同步包含这些表。
-后端和前端需配套发布。回滚时先停用新渠道，再回退应用版本；保留新增表和数据，旧版服务可忽略这些表。
-后续 Telegram 应新增渠道 provider 与对应发送适配器，复用事件、订阅、队列、管理员接口和投递记录。
-当前实现没有 Telegram Token/Chat ID 字段，也不会调用 Telegram API。
+- 飞书：`webhook_url,signing_secret,clear_signing_secret`。
+- Telegram：`bot_token,settings.chat_id`。
+- 邮件：`smtp_password,settings.smtp_host,settings.smtp_port,settings.smtp_sender,settings.recipients`。
+
+响应使用 `{success,data}`，仅包含凭据是否配置；DELETE body 为 `{"expected_revision":1}`。编辑凭据留空保留，不可通过 provider 变更复用别类凭据。
+
+升级时先停止仅支持飞书的旧后端实例，再启动新版后端，避免旧 worker 误领新增类型。启动自动执行幂等迁移，`init.sql` 与升级脚本一致。保留 `server.encrypt_key`，否则无法解密历史凭据。回滚前先停用新增的邮件和 Telegram 渠道，再回退前后端；仅支持飞书的旧版本不能处理新 provider。新增表保留即可。SMTP 一次性导入后，以统一页面订阅为准，不从旧偏好重复恢复渠道。
+
+投递一直 pending 时检查计划时间、维护状态、notification-worker 和数据库。`no_recipients` 检查个人/管理员邮箱或指定收件人；`secret_unavailable` 检查服务主密钥；`provider_rejected` 检查机器人目标、权限、签名及访问限制；SMTP 失败检查域名、端口和授权密钥。服务商限流、网络/TLS 和临时故障按有限次数重试，不关闭 TLS 验证。
 
 ## 开发验证
-
-在后端仓库运行：
 
 ```bash
 source /workspace/.cloud/env.sh
 CARGO_TARGET_DIR=/workspace/.cloud/target cargo test --locked --lib notification::
-# 使用可销毁的隔离开发 PostgreSQL；测试为每次运行创建并清理独立 schema。
+# 每个数据库测试创建并清理独立 schema，须使用可销毁的开发 PostgreSQL。
 NOTIFICATION_TEST_DATABASE_URL='host=127.0.0.1 user=network_mapping dbname=network_mapping' \
-  CARGO_TARGET_DIR=/workspace/.cloud/target cargo test --locked --lib notification:: -- --ignored
+  CARGO_TARGET_DIR=/workspace/.cloud/target cargo test --locked --lib notification:: -- --include-ignored
+REPORT_TEST_DATABASE_URL='host=127.0.0.1 user=network_mapping dbname=network_mapping' \
+  CARGO_TARGET_DIR=/workspace/.cloud/target cargo test --locked --lib reports:: -- --include-ignored
 ```
 
-单元检查覆盖签名向量、URL 约束、飞书业务响应、凭据加密、管理员与 CSRF 限制；
-数据库检查覆盖迁移幂等、版本冲突、配置保密、旧队列取消、共享冷却、独占领取、过期租约恢复、重试、Scanner 恢复目标，以及批次中开启维护后暂停领取、允许在途完成和退出后续投。
-没有机器人凭据和允许出口时，不能把这些本地检查当作真实飞书联调成功。
+测试覆盖三类渠道的同级扇出、独立启停和事件选择、凭据保留/不回显、SMTP 导入幂等、登录隐私、报告归档后入队、并发领取、租约、维护切换与旧有 Scanner 恢复。HTTP 使用本地 fixture；没有真实机器人/SMTP 凭据和允许出口时，不将本地检查表述为外部联调成功。

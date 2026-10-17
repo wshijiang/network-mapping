@@ -55,9 +55,6 @@ pub async fn run_worker(
 }
 
 pub(crate) async fn schedule(pool: &Pool) -> Result<(), String> {
-    let settings = get_mail_settings_from_database(pool)
-        .await
-        .map_err(|e| e.to_string())?;
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let rows = client
         .query("SELECT * FROM report_schedule WHERE enabled;", &[])
@@ -72,13 +69,6 @@ pub(crate) async fn schedule(pool: &Pool) -> Result<(), String> {
     let now = Utc::now();
     for row in rows {
         let kind = PeriodType::parse(&row.get::<_, String>("period_type"))?;
-        let notify = match kind {
-            PeriodType::Weekly => settings.notification_prefs.report_weekly,
-            PeriodType::Monthly => settings.notification_prefs.report_monthly,
-        };
-        if !notify {
-            continue;
-        }
         let start: DateTime<Utc> = row
             .get::<_, Option<DateTime<Utc>>>("last_period_end")
             .or(row.get("enabled_at"))
@@ -181,8 +171,6 @@ struct CapturedReport {
     version: i32,
     mail_settings: super::mail_config::ReportMailConfig,
     metadata: super::mail_context::MailMetadata,
-    send_email: bool,
-    recipients: Vec<i32>,
 }
 
 async fn capture(
@@ -290,8 +278,6 @@ async fn capture(
             (None, 0)
         }
     };
-    let send_email = row.get("send_email");
-    let recipients = row.get("recipient_ids");
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(Some(CapturedReport {
         payload,
@@ -302,8 +288,6 @@ async fn capture(
         version,
         mail_settings,
         metadata,
-        send_email,
-        recipients,
     }))
 }
 
@@ -460,9 +444,9 @@ async fn generate(
         asset.commit(&tx, id).await?;
     }
     tx.execute("UPDATE report_run SET status='ready',payload=$2,quality=$3,generated_at=$8,last_error=NULL,content_checksum=$4,template_key=$5,template_version=$6,rendered_mail=$7 WHERE id=$1", &[&id,&input.payload,&input.quality,&input.checksum,&input.key,&input.version,&rendered,&input.metadata.generated_at]).await.map_err(|e|e.to_string())?;
-    if input.send_email {
-        storage::enqueue_delivery(&tx, id, &input.recipients, true, false).await?;
-    }
+    crate::notification::enqueue_report(&tx, id)
+        .await
+        .map_err(|_| "报告通知入队失败".to_owned())?;
     let changed=tx.execute("UPDATE report_job SET status='succeeded',claim_token=NULL,lease_until=NULL,last_error=NULL WHERE report_id=$1 AND claim_token=$2 AND lease_until>clock_timestamp()", &[&id,&token]).await.map_err(|e|e.to_string())?;
     if changed != 1 {
         return Err("报告提交租约已失效".into());

@@ -376,6 +376,82 @@ async fn cleanup(pool: &Pool, schema: String) {
         .expect("cleanup");
 }
 
+async fn subscribe_report_notifications(pool: &Pool) {
+    let key = openssl::base64::encode_block(&[7_u8; 32]);
+    let token =
+        crate::notification::encrypt("123456:abcdefghijklmnopqrstuvwxyz_ABC-123", &key).unwrap();
+    pool.get().await.unwrap().execute("INSERT INTO notification_channel(id,provider,name,enabled,event_types,minimum_severity,webhook_ciphertext,secret_ciphertext,settings) VALUES($1,'telegram','报告群',TRUE,ARRAY['report.weekly','report.monthly'],'warning',''::BYTEA,$2,'{\"chat_id\":\"-1001234567890\"}')", &[&Uuid::new_v4(),&token]).await.unwrap();
+}
+
+#[actix_web::test]
+#[ignore = "requires disposable REPORT_TEST_DATABASE_URL"]
+async fn report_plans_can_be_enabled_without_mailboxes_and_use_channel_subscriptions() {
+    use actix_web::{App, HttpMessage, dev::Service, test, web};
+    let (pool, schema) = isolated_pool().await;
+    pool.get()
+        .await
+        .unwrap()
+        .execute("UPDATE users SET email=NULL", &[])
+        .await
+        .unwrap();
+    subscribe_report_notifications(&pool).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(config()))
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(crate::admin::UserBaseI {
+                    id: 1,
+                    username: "admin".into(),
+                    role: 1,
+                    email: None,
+                    limit_login: false,
+                    enable_2fa: false,
+                });
+                srv.call(req)
+            })
+            .service(crate::handlers::reports::save_schedule)
+            .service(crate::handlers::reports::schedules),
+    )
+    .await;
+    let response=test::call_service(&app,test::TestRequest::put().uri("/api/report-schedules/monthly").set_json(json!({"enabled":true,"send_hour":9,"send_minute":0,"recipient_ids":[],"expected_revision":0})).to_request()).await;
+    assert_eq!(
+        response.status(),
+        200,
+        "Telegram-only deployment can enable report generation"
+    );
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/report-schedules")
+            .to_request(),
+    )
+    .await;
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["data"]["mail_ready"], false);
+    assert_eq!(body["data"]["notifications"]["monthly"], true);
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            "UPDATE notification_channel SET event_types=ARRAY['report.weekly']",
+            &[],
+        )
+        .await
+        .unwrap();
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/report-schedules")
+            .to_request(),
+    )
+    .await;
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["data"]["notifications"]["monthly"], false);
+    assert_eq!(body["data"]["notifications"]["weekly"], true);
+    cleanup(&pool, schema).await;
+}
+
 #[tokio::test]
 #[ignore = "requires disposable REPORT_TEST_DATABASE_URL"]
 async fn timezone_publication_resets_future_schedules_and_preserves_archives() {
@@ -785,6 +861,7 @@ async fn concurrent_creators_return_one_canonical_period_and_distinct_revisions(
 #[ignore = "requires disposable REPORT_TEST_DATABASE_URL"]
 async fn automatic_schedule_catches_up_once_and_does_not_send_before_activation() {
     let (pool, schema) = isolated_pool().await;
+    subscribe_report_notifications(&pool).await;
     let period = Period::last_closed(PeriodType::Weekly, Utc::now()).expect("period");
     let client = pool.get().await.expect("client");
     client
@@ -831,7 +908,10 @@ async fn automatic_schedule_catches_up_once_and_does_not_send_before_activation(
     );
     assert_eq!(
         client
-            .query_one("SELECT COUNT(*)::BIGINT AS n FROM report_delivery;", &[])
+            .query_one(
+                "SELECT COUNT(*)::BIGINT AS n FROM notification_delivery;",
+                &[]
+            )
             .await
             .expect("count")
             .get::<_, i64>("n"),
@@ -1009,11 +1089,13 @@ async fn older_executions_without_result_counters_use_batch_receipts() {
 
 #[tokio::test]
 #[ignore = "requires disposable REPORT_TEST_DATABASE_URL"]
-async fn temporary_renderer_outage_retries_without_archival_and_enqueues_mail_after_recovery() {
+async fn temporary_renderer_outage_retries_without_archival_and_enqueues_notification_after_recovery()
+ {
     use super::render_module::LocalReportRenderModule;
     use super::service::ReportRenderService;
     use std::{sync::Arc, time::Duration};
     let (pool, schema) = isolated_pool().await;
+    subscribe_report_notifications(&pool).await;
     let calendar = crate::system_time::refresh(&pool).await.unwrap();
     let timezone: chrono_tz::Tz = calendar.document.timezone.parse().unwrap();
     let period = Period::containing_in(
@@ -1119,7 +1201,18 @@ async fn temporary_renderer_outage_retries_without_archival_and_enqueues_mail_af
         .unwrap();
     assert_eq!(job.get::<_, String>("status"), "succeeded");
     assert_eq!(job.get::<_, i32>("attempts"), 2);
-    assert_eq!(client.query_one("SELECT COUNT(*) FROM report_delivery WHERE report_id=$1 AND status='pending' AND automatic", &[&id]).await.unwrap().get::<_, i64>(0), 1);
+    assert_eq!(client.query_one("SELECT COUNT(*) FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE e.context->>'report_id'=$1 AND d.status='pending'", &[&id.to_string()]).await.unwrap().get::<_, i64>(0), 1);
+    assert_eq!(
+        client
+            .query_one(
+                "SELECT COUNT(*) FROM report_delivery WHERE report_id=$1",
+                &[&id]
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
     drop(client);
     assert!(
         !worker::process_one_with_renderer(&pool, &config(), &renderer)
