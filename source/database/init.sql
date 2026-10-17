@@ -1511,9 +1511,74 @@ BEGIN
                 CASE WHEN COALESCE(smtp->>'sender_key','')<>'' THEN decode(smtp->>'sender_key','base64') END,
                 jsonb_build_object('smtp_host',COALESCE(smtp->>'host',''),'smtp_port',CASE WHEN smtp->>'port' ~ '^[0-9]{1,5}$' THEN (smtp->>'port')::INT ELSE 465 END,'smtp_sender',COALESCE(smtp->>'sender',''),'recipients','[]'::JSONB),TRUE);
         END IF;
-        -- Old pending scanner mail must not duplicate the imported channel's deliveries.
-        UPDATE scanner_outage_delivery SET status='cancelled',claimed_until=NULL WHERE status='pending';
-        UPDATE report_delivery SET status='cancelled',claim_token=NULL,lease_until=NULL WHERE automatic AND status='pending';
         INSERT INTO notification_upgrade(name) VALUES('unified_channels_v1');
+    END IF;
+END $$;
+
+-- Transfer each legacy recipient independently: a partial success must not be replayed.
+-- Keep successful offline receipts on destination revision 1, never on a replacement SMTP target.
+DO $$
+DECLARE
+    imported UUID;
+    job RECORD;
+    event UUID;
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM notification_upgrade WHERE name='unified_mail_queue_v2') THEN
+        SELECT id INTO imported FROM notification_channel WHERE legacy_email;
+        IF imported IS NOT NULL THEN
+            FOR job IN
+                SELECT d.*,o.detected_at FROM scanner_outage_delivery d
+                JOIN scanner_outage o ON o.id=d.outage_id
+                WHERE d.status IN ('pending','sending') OR (d.kind='offline' AND d.status='sent')
+            LOOP
+                INSERT INTO notification_event(id,dedup_key,event_type,severity,title,body,outage_id,occurred_at,context)
+                VALUES(gen_random_uuid(),'legacy:scanner:'||job.id,'scanner.'||job.kind,'warning',
+                    CASE WHEN job.kind='offline' THEN 'Scanner 掉线' ELSE 'Scanner 恢复连接' END,
+                    '升级前邮件队列；掉线事件：'||job.outage_id,job.outage_id,
+                    CASE WHEN job.status='sent' THEN job.detected_at ELSE GREATEST(NOW(),job.available_at,CASE WHEN job.status='sending' THEN job.claimed_until END) END,
+                    jsonb_build_object('legacy_recipient',job.recipient))
+                ON CONFLICT(dedup_key) DO NOTHING;
+                SELECT id INTO event FROM notification_event WHERE dedup_key='legacy:scanner:'||job.id;
+                INSERT INTO notification_delivery(id,event_id,channel_id,destination_revision,status,attempts,available_at,finished_at)
+                VALUES(gen_random_uuid(),event,imported,1,CASE WHEN job.status='sent' THEN 'sent' ELSE 'pending' END,
+                    job.attempts,GREATEST(job.available_at,CASE WHEN job.status='sending' THEN job.claimed_until END),
+                    CASE WHEN job.status='sent' THEN COALESCE(job.sent_at,job.detected_at) END)
+                ON CONFLICT(event_id,channel_id) DO NOTHING;
+                -- The replacement is durable before relinquishing the old claim/queue entry.
+                UPDATE scanner_outage_delivery SET status='cancelled',claimed_until=NULL
+                    WHERE id=job.id AND status IN ('pending','sending');
+            END LOOP;
+
+            FOR job IN
+                SELECT d.*,r.period_type,r.period_start,r.period_end,r.recipient_ids
+                FROM report_delivery d JOIN report_run r ON r.id=d.report_id
+                WHERE d.automatic AND d.status IN ('pending','sending') AND r.status='ready'
+            LOOP
+                -- Reserve the normal dedup key so reopening a ready report cannot broadcast it again.
+                INSERT INTO notification_event(id,dedup_key,event_type,severity,title,body,context)
+                VALUES(gen_random_uuid(),'report:'||job.report_id,'report.'||job.period_type,'warning','报告已生成',
+                    '报告 ID：'||job.report_id,jsonb_build_object('report_id',job.report_id,'recipient_ids',job.recipient_ids))
+                ON CONFLICT(dedup_key) DO NOTHING;
+                INSERT INTO notification_event(id,dedup_key,event_type,severity,title,body,occurred_at,context)
+                VALUES(gen_random_uuid(),'legacy:report:'||job.id,'report.'||job.period_type,'warning','报告已生成',
+                    '升级前邮件队列；报告 ID：'||job.report_id,
+                    GREATEST(NOW(),job.available_at,CASE WHEN job.status='sending' THEN job.lease_until END),
+                    jsonb_build_object('report_id',job.report_id,'recipient_ids',job.recipient_ids,
+                        'legacy_recipient',job.recipient,'legacy_recipient_user_id',job.recipient_user_id))
+                ON CONFLICT(dedup_key) DO NOTHING;
+                SELECT id INTO event FROM notification_event WHERE dedup_key='legacy:report:'||job.id;
+                INSERT INTO notification_delivery(id,event_id,channel_id,destination_revision,attempts,available_at)
+                VALUES(gen_random_uuid(),event,imported,1,job.attempts,
+                    GREATEST(job.available_at,CASE WHEN job.status='sending' THEN job.lease_until END))
+                ON CONFLICT(event_id,channel_id) DO NOTHING;
+                UPDATE report_delivery SET status='cancelled',claim_token=NULL,lease_until=NULL WHERE id=job.id;
+            END LOOP;
+
+            -- Keep the new preparation marker independent: existing bot channels may still
+            -- need recovery even when the legacy email recovery was already prepared.
+            UPDATE scanner_outage SET notification_recovery=TRUE
+                WHERE recovered_at IS NOT NULL AND recovery_requested;
+        END IF;
+        INSERT INTO notification_upgrade(name) VALUES('unified_mail_queue_v2');
     END IF;
 END $$;

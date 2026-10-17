@@ -108,7 +108,7 @@ fn default_smtp_port() -> u16 {
     465
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelSettings {
     #[serde(default)]
@@ -316,8 +316,12 @@ pub async fn save(
             Some(encrypt(&input.webhook_url, key)?)
         };
         let clear = input.provider == "feishu" && input.clear_signing_secret;
+        // Imported settings may omit optional keys that the Web DTO fills with defaults.
+        // Compare their meaning so renames/subscription edits retain offline receipts.
+        let previous_settings: ChannelSettings =
+            serde_json::from_value(row.get("settings")).map_err(|_| Error::internal())?;
         let destination_changed = url.is_some()
-            || (input.provider != "feishu" && row.get::<_, Value>("settings") != settings)
+            || (input.provider != "feishu" && previous_settings != input.settings)
             || (input.provider == "telegram" && secret.is_some());
         tx.execute("UPDATE notification_channel SET name=$2,enabled=$3,event_types=$4,minimum_severity=$5,webhook_ciphertext=COALESCE($6,webhook_ciphertext),secret_ciphertext=CASE WHEN $8 THEN NULL ELSE COALESCE($7,secret_ciphertext) END,settings=$9,revision=revision+1,destination_revision=destination_revision+CASE WHEN $10 THEN 1 ELSE 0 END,updated_at=NOW() WHERE id=$1", &[&id,&input.name.trim(),&input.enabled,&input.event_types,&input.minimum_severity,&url,&secret,&clear,&settings,&destination_changed]).await?;
         // An edit cancels queued work. In-flight requests may already have left the process.
@@ -451,12 +455,15 @@ pub(crate) async fn enqueue_with_context(
         return Ok(());
     }
     // Lock matching channels against concurrent edits/deletion until fanout commits.
-    let rows = tx.query("SELECT id,destination_revision FROM notification_channel WHERE enabled AND deleted_at IS NULL AND $1=ANY(event_types) AND ($2='critical' OR minimum_severity='warning') FOR SHARE", &[&event_type,&severity]).await?;
+    let rows = tx.query("SELECT id,destination_revision,legacy_email FROM notification_channel WHERE enabled AND deleted_at IS NULL AND $1=ANY(event_types) AND ($2='critical' OR minimum_severity='warning') FOR SHARE", &[&event_type,&severity]).await?;
     for row in rows {
         let channel: Uuid = row.get("id");
         let destination: i64 = row.get("destination_revision");
         if event_type == "scanner.recovered" {
-            let sent: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE e.outage_id=$1 AND e.event_type='scanner.offline' AND d.channel_id=$2 AND d.destination_revision=$3 AND d.status='sent')", &[&outage,&channel,&destination]).await?.get(0);
+            // Prepared legacy email recoveries were transferred separately per recipient.
+            // Other channels still use their own offline receipts to prepare recovery.
+            let legacy = row.get::<_, bool>("legacy_email") && destination == 1;
+            let sent: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE e.outage_id=$1 AND e.event_type='scanner.offline' AND d.channel_id=$2 AND d.destination_revision=$3 AND d.status='sent') AND NOT EXISTS(SELECT 1 FROM scanner_outage WHERE id=$1 AND recovery_delivery_prepared AND $4)", &[&outage,&channel,&destination,&legacy]).await?.get(0);
             if !sent {
                 continue;
             }

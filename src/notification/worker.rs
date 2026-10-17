@@ -223,11 +223,7 @@ pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client
                     .await
                 }
                 "email" => {
-                    let recipients = if claimed.settings.recipients.is_empty() {
-                        default_recipients(pool, &claimed.event_type, &claimed.context).await?
-                    } else {
-                        claimed.settings.recipients.clone()
-                    };
+                    let recipients = email_recipients(pool, &claimed).await?;
                     match email::render(pool, &claimed.context).await {
                         Ok(rendered) => {
                             email::send(
@@ -253,6 +249,42 @@ pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client
     };
     complete(pool, claimed.id, claimed.token, claimed.attempts, outcome).await?;
     Ok(true)
+}
+
+pub(super) async fn email_recipients(pool: &Pool, claimed: &Claimed) -> Result<Vec<String>> {
+    if let Some(recipient) = claimed.context["legacy_recipient"].as_str() {
+        // A transferred per-recipient job must never expand to the current administrator list.
+        // Revalidate the original recipient just as the legacy queue did before sending.
+        let report = claimed.event_type.starts_with("report.");
+        let user = claimed.context["legacy_recipient_user_id"]
+            .as_i64()
+            .and_then(|id| i32::try_from(id).ok());
+        let active: bool = pool.get().await?.query_one("SELECT EXISTS(SELECT 1 FROM users WHERE role=1 AND disabled_at IS NULL AND deleted_at IS NULL AND lower(trim(email))=lower(trim($1)) AND (NOT $2 OR (id=$3 AND NOT limit_login)))", &[&recipient,&report,&user]).await?.get(0);
+        return Ok(if active {
+            vec![recipient.to_owned()]
+        } else {
+            Vec::new()
+        });
+    }
+    let mut recipients = if claimed.settings.recipients.is_empty() {
+        default_recipients(pool, &claimed.event_type, &claimed.context).await?
+    } else {
+        claimed.settings.recipients.clone()
+    };
+    if claimed.event_type == "scanner.recovered" {
+        // Legacy SMTP had one receipt per address. Preserve that boundary when only some
+        // recipients received the offline mail; newly added admins must not get its recovery.
+        let receipts = pool.get().await?.query("SELECT e.context->>'legacy_recipient' AS recipient FROM notification_delivery recovery JOIN notification_delivery offline ON offline.channel_id=recovery.channel_id AND offline.destination_revision=recovery.destination_revision AND offline.status='sent' JOIN notification_event e ON e.id=offline.event_id WHERE recovery.id=$1 AND e.outage_id=$2 AND e.event_type='scanner.offline'", &[&claimed.id,&claimed.context["outage_id"].as_i64()]).await?;
+        let legacy: Option<Vec<String>> = receipts.iter().map(|r| r.get("recipient")).collect();
+        if let Some(legacy) = legacy {
+            recipients.retain(|recipient| {
+                legacy
+                    .iter()
+                    .any(|sent| sent.trim().eq_ignore_ascii_case(recipient.trim()))
+            });
+        }
+    }
+    Ok(recipients)
 }
 
 async fn default_recipients(pool: &Pool, event_type: &str, context: &Value) -> Result<Vec<String>> {

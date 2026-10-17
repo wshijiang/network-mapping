@@ -254,6 +254,359 @@ async fn legacy_smtp_import_is_idempotent_and_does_not_use_the_test_recipient() 
     cleanup(pool, schema).await;
 }
 
+async fn legacy_smtp(pool: &Pool) {
+    let c = pool.get().await.unwrap();
+    let secret = openssl::base64::encode_block(&encrypt("old-smtp-secret", &key()).unwrap());
+    c.execute("INSERT INTO setting(item_type,key,value) VALUES('smtp','host','smtp.example.com'),('smtp','sender','sender@example.com'),('smtp','port','465'),('smtp','sender_key',$1),('notification','scanner_offline_enabled','true') ON CONFLICT(item_type,key) DO UPDATE SET value=EXCLUDED.value", &[&secret]).await.unwrap();
+    c.batch_execute("DELETE FROM notification_upgrade; UPDATE users SET email='first@example.com' WHERE id=1; INSERT INTO users(id,username,password,role,email) VALUES(2,'second','test',1,'second@example.com'),(3,'third','test',1,'third@example.com')").await.unwrap();
+}
+
+async fn legacy_outage(pool: &Pool) -> (String, i64) {
+    let c = pool.get().await.unwrap();
+    let scanner = Uuid::new_v4().to_string();
+    c.execute("INSERT INTO scanner_info(scanner_id,create_user,is_enable,last_seen_at) VALUES($1,1,TRUE,NOW()-INTERVAL '3 days')", &[&scanner]).await.unwrap();
+    let outage = c.query_one("INSERT INTO scanner_outage(scanner_id,last_seen_at,detected_at) VALUES($1,NOW()-INTERVAL '3 days',NOW()-INTERVAL '2 days') RETURNING id", &[&scanner]).await.unwrap().get(0);
+    (scanner, outage)
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn legacy_queued_mail_is_migrated_per_recipient_without_replaying_successes() {
+    let (pool, schema) = database().await;
+    legacy_smtp(&pool).await;
+    let (_, outage) = legacy_outage(&pool).await;
+    let c = pool.get().await.unwrap();
+    c.execute("INSERT INTO scanner_outage_delivery(outage_id,kind,recipient,status,attempts,claimed_until) VALUES($1,'offline','first@example.com','sent',1,NULL),($1,'offline','second@example.com','pending',2,NULL),($1,'offline','third@example.com','sending',1,NOW()+INTERVAL '5 minutes')", &[&outage]).await.unwrap();
+    let report = Uuid::new_v4();
+    c.execute("INSERT INTO report_run(id,period_type,period_start,period_end,source,status,task_snapshot) VALUES($1,'weekly',NOW()-INTERVAL '10 days',NOW()-INTERVAL '3 days','automatic','ready','{}')", &[&report]).await.unwrap();
+    for (user, status, automatic) in [
+        (1_i32, "sent", true),
+        (2, "pending", true),
+        (3, "sending", true),
+        (1, "pending", false),
+    ] {
+        let recipient = [
+            "first@example.com",
+            "second@example.com",
+            "third@example.com",
+        ][(user - 1) as usize];
+        let seq = if automatic { 1_i32 } else { 2 };
+        c.execute("INSERT INTO report_delivery(id,report_id,recipient_user_id,recipient,dispatch_seq,automatic,status,attempts,lease_until) VALUES($1,$2,$3,$4,$5,$6,$7,1,CASE WHEN $7='sending' THEN NOW()+INTERVAL '5 minutes' END)", &[&Uuid::new_v4(),&report,&user,&recipient,&seq,&automatic,&status]).await.unwrap();
+    }
+    c.batch_execute(include_str!(
+        "../../source/database/migrate_notifications.sql"
+    ))
+    .await
+    .unwrap();
+    let pending = c.query("SELECT e.event_type,e.context,d.attempts,d.available_at FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE d.status='pending' ORDER BY e.event_type,e.context->>'legacy_recipient'", &[]).await.unwrap();
+    let queued_scanner = pending
+        .iter()
+        .filter(|r| r.get::<_, String>("event_type") == "scanner.offline")
+        .count();
+    let queued_report = pending
+        .iter()
+        .filter(|r| r.get::<_, String>("event_type") == "report.weekly")
+        .count();
+    let recipients: Vec<String> = pending
+        .iter()
+        .filter_map(|r| {
+            r.get::<_, Value>("context")["legacy_recipient"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect();
+    let manual: String = c
+        .query_one(
+            "SELECT status FROM report_delivery WHERE NOT automatic",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let sent: i64 = c
+        .query_one(
+            "SELECT COUNT(*) FROM scanner_outage_delivery WHERE status='sent'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let count: i64 = c
+        .query_one("SELECT COUNT(*) FROM notification_delivery", &[])
+        .await
+        .unwrap()
+        .get(0);
+    c.batch_execute(include_str!(
+        "../../source/database/migrate_notifications.sql"
+    ))
+    .await
+    .unwrap();
+    let repeated: i64 = c
+        .query_one("SELECT COUNT(*) FROM notification_delivery", &[])
+        .await
+        .unwrap()
+        .get(0);
+    drop(c);
+    for row in &pending {
+        let third = row.get::<_, Value>("context")["legacy_recipient"] == "third@example.com";
+        assert_eq!(
+            row.get::<_, DateTime<Utc>>("available_at") > Utc::now() + chrono::Duration::minutes(4),
+            third,
+            "an unexpired old lease must be respected"
+        );
+    }
+    let worker::ClaimOutcome::Ready(claimed) = worker::claim(&pool).await.unwrap() else {
+        panic!("an old durable job must receive a fresh delivery window at upgrade");
+    };
+    assert_eq!(
+        worker::email_recipients(&pool, &claimed).await.unwrap(),
+        vec!["second@example.com"]
+    );
+    let mut c = pool.get().await.unwrap();
+    c.batch_execute("UPDATE users SET disabled_at=NOW() WHERE id=2")
+        .await
+        .unwrap();
+    assert!(
+        worker::email_recipients(&pool, &claimed)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let tx = c.transaction().await.unwrap();
+    enqueue_report(&tx, report).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM notification_delivery", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        count,
+        "reopening the archived report must not broadcast it again"
+    );
+    // Re-running even the transfer itself must not resurrect completed replacement jobs.
+    c.batch_execute("UPDATE notification_delivery SET status='failed' WHERE status IN ('pending','sending'); DELETE FROM notification_upgrade WHERE name='unified_mail_queue_v2'").await.unwrap();
+    c.batch_execute(include_str!(
+        "../../source/database/migrate_notifications.sql"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        c.query_one(
+            "SELECT COUNT(*) FROM notification_delivery WHERE status IN ('pending','sending')",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+    drop(c);
+    cleanup(pool, schema).await;
+    assert_eq!(
+        queued_scanner, 2,
+        "pending and leased Scanner mail must survive upgrade"
+    );
+    assert_eq!(
+        queued_report, 2,
+        "ready reports must retain their unsent recipients"
+    );
+    assert!(recipients.iter().all(|r| r != "first@example.com"));
+    assert_eq!(manual, "pending");
+    assert_eq!(sent, 1);
+    assert_eq!(count, repeated);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn legacy_successful_offline_receipt_allows_recovery_only_on_imported_destination() {
+    let (pool, schema) = database().await;
+    legacy_smtp(&pool).await;
+    let (scanner, outage) = legacy_outage(&pool).await;
+    let (other_scanner, other_outage) = legacy_outage(&pool).await;
+    let c = pool.get().await.unwrap();
+    // Also cover databases where SMTP was already imported by the first unified release.
+    c.batch_execute(include_str!(
+        "../../source/database/migrate_notifications.sql"
+    ))
+    .await
+    .unwrap();
+    c.execute(
+        "DELETE FROM notification_upgrade WHERE name='unified_mail_queue_v2'",
+        &[],
+    )
+    .await
+    .unwrap();
+    for id in [outage, other_outage] {
+        c.execute("INSERT INTO scanner_outage_delivery(outage_id,kind,recipient,status,sent_at) VALUES($1,'offline','first@example.com','sent',NOW()-INTERVAL '1 day')", &[&id]).await.unwrap();
+    }
+    c.batch_execute(include_str!(
+        "../../source/database/migrate_notifications.sql"
+    ))
+    .await
+    .unwrap();
+    drop(c);
+    let audit = AuditContext::cli("notification-test");
+    let imported = list(&pool).await.unwrap().remove(0);
+    let mut edit = provider_input("email");
+    edit.name = "重命名邮件".into();
+    edit.settings = imported.settings.clone();
+    edit.smtp_password.clear();
+    edit.expected_revision = Some(imported.revision);
+    save(&pool, &key(), Some(imported.id), edit, &user(1), &audit)
+        .await
+        .unwrap();
+    save(
+        &pool,
+        &key(),
+        None,
+        provider_input("email"),
+        &user(1),
+        &audit,
+    )
+    .await
+    .unwrap();
+    save(&pool, &key(), None, input(), &user(1), &audit)
+        .await
+        .unwrap();
+    let mut c = pool.get().await.unwrap();
+    let tx = c.transaction().await.unwrap();
+    crate::scanner_outage::record_recovery(&tx, &scanner)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    drop(c);
+    worker::reconcile_recoveries(&pool).await.unwrap();
+    let rows = pool.get().await.unwrap().query("SELECT c.legacy_email FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id JOIN notification_channel c ON c.id=d.channel_id WHERE e.event_type='scanner.recovered'", &[]).await.unwrap();
+    let worker::ClaimOutcome::Ready(claimed) = worker::claim(&pool).await.unwrap() else {
+        panic!("legacy receipt must remain valid after a rename");
+    };
+    assert_eq!(
+        worker::email_recipients(&pool, &claimed).await.unwrap(),
+        vec!["first@example.com"],
+        "new administrators did not receive the old offline mail"
+    );
+    let mut edit = provider_input("email");
+    edit.settings = imported.settings;
+    edit.settings.smtp_host = "replacement.example.com".into();
+    edit.smtp_password.clear();
+    edit.expected_revision = Some(2);
+    save(&pool, &key(), Some(imported.id), edit, &user(1), &audit)
+        .await
+        .unwrap();
+    let mut c = pool.get().await.unwrap();
+    let tx = c.transaction().await.unwrap();
+    crate::scanner_outage::record_recovery(&tx, &other_scanner)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    drop(c);
+    worker::reconcile_recoveries(&pool).await.unwrap();
+    let count: i64 = pool.get().await.unwrap().query_one("SELECT COUNT(*) FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE e.outage_id=$1 AND e.event_type='scanner.recovered'", &[&other_outage]).await.unwrap().get(0);
+    cleanup(pool, schema).await;
+    assert_eq!(rows.len(), 1, "legacy success must authorize one recovery");
+    assert!(rows[0].get::<_, bool>("legacy_email"));
+    assert_eq!(
+        count, 0,
+        "a changed SMTP destination must not inherit the old receipt"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn legacy_prepared_recovery_keeps_only_the_unsent_recipient() {
+    let (pool, schema) = database().await;
+    legacy_smtp(&pool).await;
+    let (_, outage) = legacy_outage(&pool).await;
+    let bot = save(
+        &pool,
+        &key(),
+        None,
+        input(),
+        &user(1),
+        &AuditContext::cli("notification-test"),
+    )
+    .await
+    .unwrap();
+    let mut c = pool.get().await.unwrap();
+    let tx = c.transaction().await.unwrap();
+    enqueue(
+        &tx,
+        "scanner.offline",
+        "warning",
+        &format!("outage:{outage}:offline"),
+        "offline",
+        "offline",
+        Some(outage),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    c.execute(
+        "UPDATE notification_delivery SET status='sent' WHERE channel_id=$1",
+        &[&bot.id],
+    )
+    .await
+    .unwrap();
+    c.execute(
+        "UPDATE notification_channel SET next_send_at=NOW()+INTERVAL '1 hour' WHERE id=$1",
+        &[&bot.id],
+    )
+    .await
+    .unwrap();
+    drop(c);
+    let c = pool.get().await.unwrap();
+    c.execute("UPDATE scanner_outage SET recovered_at=NOW(),recovery_requested=TRUE,recovery_delivery_prepared=TRUE WHERE id=$1", &[&outage]).await.unwrap();
+    c.execute("INSERT INTO scanner_outage_delivery(outage_id,kind,recipient,status) VALUES($1,'offline','first@example.com','sent'),($1,'offline','second@example.com','sent'),($1,'recovered','first@example.com','sent'),($1,'recovered','second@example.com','pending')", &[&outage]).await.unwrap();
+    c.batch_execute(include_str!(
+        "../../source/database/migrate_notifications.sql"
+    ))
+    .await
+    .unwrap();
+    drop(c);
+    worker::reconcile_recoveries(&pool).await.unwrap();
+    let count: i64 = pool.get().await.unwrap().query_one("SELECT COUNT(*) FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE e.event_type='scanner.recovered'", &[]).await.unwrap().get(0);
+    let worker::ClaimOutcome::Ready(claimed) = worker::claim(&pool).await.unwrap() else {
+        panic!("legacy prepared recovery must be claimable");
+    };
+    assert_eq!(
+        worker::email_recipients(&pool, &claimed).await.unwrap(),
+        vec!["second@example.com"]
+    );
+    cleanup(pool, schema).await;
+    assert_eq!(
+        count, 2,
+        "preserve the unsent email and the independently eligible bot recovery"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn legacy_queue_is_not_cancelled_without_an_imported_email_channel() {
+    let (pool, schema) = database().await;
+    let (_, outage) = legacy_outage(&pool).await;
+    let c = pool.get().await.unwrap();
+    c.batch_execute("DELETE FROM notification_upgrade")
+        .await
+        .unwrap();
+    c.execute("INSERT INTO scanner_outage_delivery(outage_id,kind,recipient) VALUES($1,'offline','first@example.com')", &[&outage]).await.unwrap();
+    c.batch_execute(include_str!(
+        "../../source/database/migrate_notifications.sql"
+    ))
+    .await
+    .unwrap();
+    let status: String = c
+        .query_one("SELECT status FROM scanner_outage_delivery", &[])
+        .await
+        .unwrap()
+        .get(0);
+    drop(c);
+    cleanup(pool, schema).await;
+    assert_eq!(
+        status, "pending",
+        "source work must not be discarded without a durable replacement"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
 async fn login_producer_uses_channel_subscriptions_and_keeps_private_context_out_of_bot_messages() {
