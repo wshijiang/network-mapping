@@ -107,16 +107,51 @@ BEGIN
 END $$;
 
 -- Transfer each legacy recipient independently: a partial success must not be replayed.
--- Keep successful offline receipts on destination revision 1, never on a replacement SMTP target.
-DO $$
+-- Imported SMTP receipts stay on revision 1; a later first email setup uses its configured revision.
+-- The same transaction-safe handoff runs after Web email configuration when SMTP was absent.
+CREATE OR REPLACE FUNCTION notification_transfer_legacy_mail() RETURNS VOID LANGUAGE plpgsql AS $$
 DECLARE
     imported UUID;
+    destination BIGINT := 1;
     job RECORD;
     event UUID;
 BEGIN
+    PERFORM pg_advisory_xact_lock(728104, 1);
+    -- Repair the earlier completion marker if no channel ever took ownership of existing work.
+    IF NOT EXISTS(SELECT 1 FROM notification_channel WHERE legacy_email) AND (
+        EXISTS(SELECT 1 FROM scanner_outage_delivery WHERE status IN ('pending','sending') OR (kind='offline' AND status='sent'))
+        OR EXISTS(SELECT 1 FROM report_delivery WHERE automatic AND status IN ('pending','sending'))
+    ) THEN
+        DELETE FROM notification_upgrade WHERE name='unified_mail_queue_v2';
+    END IF;
     IF NOT EXISTS(SELECT 1 FROM notification_upgrade WHERE name='unified_mail_queue_v2') THEN
         SELECT id INTO imported FROM notification_channel WHERE legacy_email;
+        IF imported IS NULL THEN
+            IF NOT EXISTS(SELECT 1 FROM scanner_outage_delivery WHERE status IN ('pending','sending') OR (kind='offline' AND status='sent'))
+                AND NOT EXISTS(SELECT 1 FROM report_delivery WHERE automatic AND status IN ('pending','sending')) THEN
+                INSERT INTO notification_upgrade(name) VALUES('unified_mail_queue_v2');
+                RETURN;
+            END IF;
+            -- No imported SMTP: the first enabled, configured email channel takes ownership.
+            -- This may be an existing channel whose destination was edited before activation.
+            SELECT id,destination_revision INTO imported,destination FROM notification_channel
+                WHERE provider='email' AND enabled AND deleted_at IS NULL AND secret_ciphertext IS NOT NULL
+                AND COALESCE(settings->>'smtp_host','')<>'' AND COALESCE(settings->>'smtp_sender','')<>''
+                ORDER BY created_at,id LIMIT 1 FOR UPDATE;
+            IF imported IS NULL THEN
+                RETURN; -- No consumer yet: leave source rows and the completion marker untouched.
+            END IF;
+            UPDATE notification_channel SET legacy_email=TRUE WHERE id=imported;
+        END IF;
         IF imported IS NOT NULL THEN
+            -- Recovery may occur while mail configuration is deferred, after bot recovery was
+            -- already prepared. Transfer that email independently instead of reopening bot fanout.
+            INSERT INTO scanner_outage_delivery(outage_id,kind,recipient)
+                SELECT o.id,'recovered',d.recipient FROM scanner_outage o
+                JOIN scanner_outage_delivery d ON d.outage_id=o.id AND d.kind='offline' AND d.status='sent'
+                WHERE o.recovered_at IS NOT NULL AND (o.recovery_requested OR o.notification_recovery)
+                    AND NOT o.recovery_delivery_prepared
+                ON CONFLICT DO NOTHING;
             FOR job IN
                 SELECT d.*,o.detected_at FROM scanner_outage_delivery d
                 JOIN scanner_outage o ON o.id=d.outage_id
@@ -131,7 +166,7 @@ BEGIN
                 ON CONFLICT(dedup_key) DO NOTHING;
                 SELECT id INTO event FROM notification_event WHERE dedup_key='legacy:scanner:'||job.id;
                 INSERT INTO notification_delivery(id,event_id,channel_id,destination_revision,status,attempts,available_at,finished_at)
-                VALUES(gen_random_uuid(),event,imported,1,CASE WHEN job.status='sent' THEN 'sent' ELSE 'pending' END,
+                VALUES(gen_random_uuid(),event,imported,destination,CASE WHEN job.status='sent' THEN 'sent' ELSE 'pending' END,
                     job.attempts,GREATEST(job.available_at,CASE WHEN job.status='sending' THEN job.claimed_until END),
                     CASE WHEN job.status='sent' THEN COALESCE(job.sent_at,job.detected_at) END)
                 ON CONFLICT(event_id,channel_id) DO NOTHING;
@@ -159,17 +194,16 @@ BEGIN
                 ON CONFLICT(dedup_key) DO NOTHING;
                 SELECT id INTO event FROM notification_event WHERE dedup_key='legacy:report:'||job.id;
                 INSERT INTO notification_delivery(id,event_id,channel_id,destination_revision,attempts,available_at)
-                VALUES(gen_random_uuid(),event,imported,1,job.attempts,
+                VALUES(gen_random_uuid(),event,imported,destination,job.attempts,
                     GREATEST(job.available_at,CASE WHEN job.status='sending' THEN job.lease_until END))
                 ON CONFLICT(event_id,channel_id) DO NOTHING;
                 UPDATE report_delivery SET status='cancelled',claim_token=NULL,lease_until=NULL WHERE id=job.id;
             END LOOP;
 
-            -- Keep the new preparation marker independent: existing bot channels may still
-            -- need recovery even when the legacy email recovery was already prepared.
-            UPDATE scanner_outage SET notification_recovery=TRUE
-                WHERE recovered_at IS NOT NULL AND recovery_requested;
+            -- Leave incident flags independent: bot recovery may have already been prepared.
+            -- Transferred per-recipient recovery deliveries also prevent duplicate email fanout.
         END IF;
         INSERT INTO notification_upgrade(name) VALUES('unified_mail_queue_v2');
     END IF;
 END $$;
+SELECT notification_transfer_legacy_mail();

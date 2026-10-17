@@ -345,6 +345,9 @@ pub async fn save(
         tx.execute("INSERT INTO notification_channel(id,provider,name,enabled,event_types,minimum_severity,webhook_ciphertext,secret_ciphertext,settings) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", &[&target,&input.provider,&input.name.trim(),&input.enabled,&input.event_types,&input.minimum_severity,&url,&secret,&settings]).await?;
     }
     if input.provider == "email" {
+        // Deferred legacy work is handed off atomically with the first usable Web email setup.
+        tx.batch_execute("SELECT notification_transfer_legacy_mail()")
+            .await?;
         sync_email_transport(&tx).await?;
     }
     audit(&tx, user, context, "notification.channel_save", target).await?;
@@ -462,8 +465,8 @@ pub(crate) async fn enqueue_with_context(
         if event_type == "scanner.recovered" {
             // Prepared legacy email recoveries were transferred separately per recipient.
             // Other channels still use their own offline receipts to prepare recovery.
-            let legacy = row.get::<_, bool>("legacy_email") && destination == 1;
-            let sent: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE e.outage_id=$1 AND e.event_type='scanner.offline' AND d.channel_id=$2 AND d.destination_revision=$3 AND d.status='sent') AND NOT EXISTS(SELECT 1 FROM scanner_outage WHERE id=$1 AND recovery_delivery_prepared AND $4)", &[&outage,&channel,&destination,&legacy]).await?.get(0);
+            let legacy = row.get::<_, bool>("legacy_email");
+            let sent: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE e.outage_id=$1 AND e.event_type='scanner.offline' AND d.channel_id=$2 AND d.destination_revision=$3 AND d.status='sent') AND NOT EXISTS(SELECT 1 FROM scanner_outage WHERE id=$1 AND recovery_delivery_prepared AND $4) AND NOT EXISTS(SELECT 1 FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE d.channel_id=$2 AND d.destination_revision=$3 AND e.outage_id=$1 AND e.event_type='scanner.recovered' AND e.context ? 'legacy_recipient')", &[&outage,&channel,&destination,&legacy]).await?.get(0);
             if !sent {
                 continue;
             }

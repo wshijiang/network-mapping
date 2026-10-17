@@ -54,6 +54,97 @@ use serde_json::{Value, json};
 use tokio_postgres::NoTls;
 use uuid::Uuid;
 
+#[tokio::test]
+#[ignore = "requires disposable REPORT_TEST_DATABASE_URL"]
+async fn deferred_legacy_reports_wait_for_transfer_while_manual_mail_still_runs() {
+    let (pool, schema) = isolated_pool().await;
+    let c = pool.get().await.unwrap();
+    c.batch_execute("UPDATE users SET email='first@example.com' WHERE id=1; UPDATE users SET email='demoted@example.com',role=2 WHERE id=2").await.unwrap();
+    let report = Uuid::new_v4();
+    let rendered = json!({"subject":"report","html_body":"<p>report</p>","text_body":"report"});
+    c.execute("INSERT INTO report_run(id,period_type,period_start,period_end,source,status,task_snapshot,rendered_mail) VALUES($1,'weekly',NOW()-INTERVAL '10 days',NOW()-INTERVAL '3 days','automatic','ready','{}',$2)", &[&report,&rendered]).await.unwrap();
+    let automatic = Uuid::new_v4();
+    let manual = Uuid::new_v4();
+    c.execute("INSERT INTO report_delivery(id,report_id,recipient_user_id,recipient,automatic,available_at) VALUES($1,$3,1,'first@example.com',TRUE,NOW()-INTERVAL '1 minute'),($2,$3,2,'demoted@example.com',FALSE,NOW())", &[&automatic,&manual,&report]).await.unwrap();
+    c.batch_execute(include_str!(
+        "../../source/database/migrate_notifications.sql"
+    ))
+    .await
+    .unwrap();
+    drop(c);
+    worker::send_one(&pool, "unused").await.unwrap();
+    let c = pool.get().await.unwrap();
+    let auto_status: String = c
+        .query_one(
+            "SELECT status FROM report_delivery WHERE id=$1",
+            &[&automatic],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let manual_status: String = c
+        .query_one("SELECT status FROM report_delivery WHERE id=$1", &[&manual])
+        .await
+        .unwrap()
+        .get(0);
+    drop(c);
+    crate::notification::save(
+        &pool,
+        &openssl::base64::encode_block(&[7_u8; 32]),
+        None,
+        crate::notification::ChannelInput {
+            provider: "email".into(),
+            name: "Report email".into(),
+            enabled: true,
+            event_types: vec!["report.weekly".into()],
+            minimum_severity: "warning".into(),
+            smtp_password: "test-password".into(),
+            webhook_url: String::new(),
+            bot_token: String::new(),
+            signing_secret: String::new(),
+            clear_signing_secret: false,
+            settings: crate::notification::ChannelSettings {
+                smtp_host: "smtp.example.com".into(),
+                smtp_port: 465,
+                smtp_sender: "sender@example.com".into(),
+                ..Default::default()
+            },
+            expected_revision: None,
+        },
+        &crate::admin::UserBaseI {
+            id: 1,
+            username: "admin".into(),
+            role: 1,
+            email: None,
+            limit_login: false,
+            enable_2fa: false,
+        },
+        &crate::audit::AuditContext::cli("report-test"),
+    )
+    .await
+    .unwrap();
+    let rows = pool.get().await.unwrap().query("SELECT d.status,e.context FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE e.context->>'report_id'=$1", &[&report.to_string()]).await.unwrap();
+    cleanup(&pool, schema).await;
+    assert_eq!(
+        auto_status, "pending",
+        "the old worker must not consume deferred automatic mail"
+    );
+    assert_eq!(
+        manual_status, "cancelled",
+        "manual mail keeps its own worker and recipient checks"
+    );
+    assert_eq!(
+        rows.len(),
+        1,
+        "Web configuration must hand the report to the shared queue"
+    );
+    assert_eq!(rows[0].get::<_, String>("status"), "pending");
+    assert_eq!(
+        rows[0].get::<_, Value>("context")["legacy_recipient"],
+        "first@example.com"
+    );
+}
+
 #[actix_web::test]
 #[ignore = "requires disposable REPORT_TEST_DATABASE_URL"]
 async fn remote_mail_images_preserve_archives_and_enforce_capabilities() {

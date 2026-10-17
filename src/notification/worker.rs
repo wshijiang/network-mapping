@@ -66,7 +66,8 @@ pub async fn run(
 pub(crate) async fn reconcile_recoveries(pool: &Pool) -> Result<()> {
     let mut conn = pool.get().await?;
     let tx = conn.transaction().await?;
-    let rows = tx.query("SELECT o.id,o.scanner_id,o.recovered_at FROM scanner_outage o WHERE o.notification_recovery AND NOT o.notification_recovery_prepared AND o.recovered_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE e.outage_id=o.id AND e.event_type='scanner.offline' AND d.status IN ('pending','sending')) ORDER BY o.id LIMIT 100 FOR UPDATE OF o SKIP LOCKED", &[]).await?;
+    // Only non-key flags change here; permit FK references during a Web channel handoff.
+    let rows = tx.query("SELECT o.id,o.scanner_id,o.recovered_at FROM scanner_outage o WHERE (o.notification_recovery OR o.recovery_requested) AND NOT o.notification_recovery_prepared AND o.recovered_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE e.outage_id=o.id AND e.event_type='scanner.offline' AND d.status IN ('pending','sending')) ORDER BY o.id LIMIT 100 FOR NO KEY UPDATE OF o SKIP LOCKED", &[]).await?;
     for row in rows {
         let id: i64 = row.get("id");
         let scanner: String = row.get("scanner_id");
@@ -137,9 +138,9 @@ pub(super) async fn claim(pool: &Pool) -> Result<ClaimOutcome> {
         == channel.get::<_, i64>("destination_revision")
         && (kind == "notification.test" || subscribed);
     if let Some(outage) = row.get::<_, Option<i64>>("outage_id") {
-        permitted &= tx.query_opt("SELECT o.recovered_at,s.is_enable,s.deleted_at,o.notification_recovery FROM scanner_outage o JOIN scanner_info s ON s.scanner_id=o.scanner_id WHERE o.id=$1", &[&outage]).await?.is_some_and(|o| {
+        permitted &= tx.query_opt("SELECT o.recovered_at,s.is_enable,s.deleted_at,o.notification_recovery,o.recovery_requested FROM scanner_outage o JOIN scanner_info s ON s.scanner_id=o.scanner_id WHERE o.id=$1", &[&outage]).await?.is_some_and(|o| {
             o.get::<_,bool>("is_enable") && o.get::<_,Option<DateTime<Utc>>>("deleted_at").is_none()
-                && if kind=="scanner.offline" { o.get::<_,Option<DateTime<Utc>>>("recovered_at").is_none() } else { o.get::<_,bool>("notification_recovery") }
+                && if kind=="scanner.offline" { o.get::<_,Option<DateTime<Utc>>>("recovered_at").is_none() } else { o.get::<_,bool>("notification_recovery") || o.get::<_,bool>("recovery_requested") }
         });
     }
     let expired =

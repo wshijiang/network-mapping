@@ -100,7 +100,8 @@ pub(crate) async fn run_once(
         return Ok(());
     }
 
-    // All notification providers now use the shared durable queue. Keep legacy receipts as history.
+    // Providers use the shared queue. Missing SMTP defers legacy transfer until Web email setup;
+    // do not create or send additional legacy work while that handoff is pending.
     if pool
         .get()
         .await?

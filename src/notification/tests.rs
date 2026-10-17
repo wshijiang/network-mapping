@@ -599,12 +599,202 @@ async fn legacy_queue_is_not_cancelled_without_an_imported_email_channel() {
         .await
         .unwrap()
         .get(0);
+    c.execute("UPDATE users SET email='first@example.com' WHERE id=1", &[])
+        .await
+        .unwrap();
     drop(c);
+    let email = save(
+        &pool,
+        &key(),
+        None,
+        provider_input("email"),
+        &user(1),
+        &AuditContext::cli("notification-test"),
+    )
+    .await
+    .unwrap();
+    let recipients = match worker::claim(&pool).await.unwrap() {
+        worker::ClaimOutcome::Ready(claimed) => {
+            Some(worker::email_recipients(&pool, &claimed).await.unwrap())
+        }
+        _ => None,
+    };
+    let migrated: i64 = pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT COUNT(*) FROM notification_delivery WHERE channel_id=$1",
+            &[&email.id],
+        )
+        .await
+        .unwrap()
+        .get(0);
     cleanup(pool, schema).await;
     assert_eq!(
         status, "pending",
         "source work must not be discarded without a durable replacement"
     );
+    assert_eq!(
+        recipients,
+        Some(vec!["first@example.com".into()]),
+        "Web email configuration must make the retained queue deliverable without a restart"
+    );
+    assert_eq!(migrated, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn deferred_legacy_recovery_is_transferred_without_reopening_bot_delivery() {
+    let (pool, schema) = database().await;
+    let (scanner, outage) = legacy_outage(&pool).await;
+    let audit = AuditContext::cli("notification-test");
+    let bot = save(&pool, &key(), None, input(), &user(1), &audit)
+        .await
+        .unwrap();
+    let mut c = pool.get().await.unwrap();
+    c.batch_execute("UPDATE users SET email='first@example.com' WHERE id=1; INSERT INTO users(id,username,password,role,email) VALUES(2,'new-admin','test',1,'new-admin@example.com')").await.unwrap();
+    c.execute("INSERT INTO scanner_outage_delivery(outage_id,kind,recipient,status,sent_at) VALUES($1,'offline','first@example.com','sent',NOW())", &[&outage]).await.unwrap();
+    let tx = c.transaction().await.unwrap();
+    enqueue(
+        &tx,
+        "scanner.offline",
+        "warning",
+        &format!("outage:{outage}:offline"),
+        "offline",
+        "offline",
+        Some(outage),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    c.execute(
+        "UPDATE notification_delivery SET status='sent' WHERE channel_id=$1",
+        &[&bot.id],
+    )
+    .await
+    .unwrap();
+    let tx = c.transaction().await.unwrap();
+    crate::scanner_outage::record_recovery(&tx, &scanner)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    drop(c);
+    // Bot recovery is allowed to finish preparation even though SMTP is still absent.
+    worker::reconcile_recoveries(&pool).await.unwrap();
+    let c = pool.get().await.unwrap();
+    c.execute(
+        "UPDATE notification_channel SET next_send_at=NOW()+INTERVAL '1 hour' WHERE id=$1",
+        &[&bot.id],
+    )
+    .await
+    .unwrap();
+    c.execute("INSERT INTO notification_upgrade(name) VALUES('unified_mail_queue_v2') ON CONFLICT DO NOTHING", &[]).await.unwrap();
+    drop(c);
+    let mut email = provider_input("email");
+    email.enabled = false;
+    let channel = save(&pool, &key(), None, email, &user(1), &audit)
+        .await
+        .unwrap();
+    let c = pool.get().await.unwrap();
+    assert_eq!(
+        c.query_one(
+            "SELECT COUNT(*) FROM notification_delivery WHERE channel_id=$1",
+            &[&channel.id]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        0,
+        "disabled email must not take ownership"
+    );
+    assert!(
+        !c.query_one(
+            "SELECT EXISTS(SELECT 1 FROM notification_upgrade WHERE name='unified_mail_queue_v2')",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, bool>(0),
+        "repair the previous false completion marker"
+    );
+    drop(c);
+    let mut email = provider_input("email");
+    email.settings.smtp_host = "ready.example.com".into();
+    email.smtp_password.clear();
+    email.expected_revision = Some(channel.revision);
+    // Recovery reconciliation owns a non-key incident lock while it fans out to channels.
+    // Handoff must remain compatible with that lock instead of waiting in the opposite order.
+    let mut c = pool.get().await.unwrap();
+    let tx = c.transaction().await.unwrap();
+    tx.query_one(
+        "SELECT id FROM scanner_outage WHERE id=$1 FOR NO KEY UPDATE",
+        &[&outage],
+    )
+    .await
+    .unwrap();
+    let activation = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        save(&pool, &key(), Some(channel.id), email, &user(1), &audit),
+    )
+    .await;
+    tx.commit().await.unwrap();
+    drop(c);
+    activation
+        .expect("handoff must not block recovery reconciliation")
+        .unwrap();
+    worker::reconcile_recoveries(&pool).await.unwrap();
+    let worker::ClaimOutcome::Ready(claimed) = worker::claim(&pool).await.unwrap() else {
+        panic!("recovery during deferred setup must become deliverable");
+    };
+    assert_eq!(
+        worker::email_recipients(&pool, &claimed).await.unwrap(),
+        vec!["first@example.com"],
+        "only the historical offline recipient receives email recovery"
+    );
+    let c = pool.get().await.unwrap();
+    let revision: i64 = c
+        .query_one(
+            "SELECT destination_revision FROM notification_delivery WHERE id=$1",
+            &[&claimed.id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        revision, 2,
+        "handoff uses the destination configured at activation"
+    );
+    drop(c);
+    // A second channel must not take the same history or trigger another bot recovery.
+    let second = save(
+        &pool,
+        &key(),
+        None,
+        provider_input("email"),
+        &user(1),
+        &audit,
+    )
+    .await
+    .unwrap();
+    let c = pool.get().await.unwrap();
+    let rows = c.query("SELECT d.channel_id,COUNT(*) AS n FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE e.outage_id=$1 AND e.event_type='scanner.recovered' GROUP BY d.channel_id", &[&outage]).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|r| r.get::<_, i64>("n") == 1 && r.get::<_, Uuid>("channel_id") != second.id)
+    );
+    assert!(
+        c.query_one(
+            "SELECT EXISTS(SELECT 1 FROM notification_upgrade WHERE name='unified_mail_queue_v2')",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, bool>(0)
+    );
+    drop(c);
+    cleanup(pool, schema).await;
 }
 
 #[tokio::test]

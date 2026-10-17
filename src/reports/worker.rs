@@ -459,8 +459,9 @@ async fn generate(
 pub(crate) async fn send_one(pool: &Pool, encryption_key: &str) -> Result<bool, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let token = Uuid::new_v4();
-    let row = client.query_opt("WITH picked AS (SELECT id FROM report_delivery WHERE (status = 'pending' AND available_at <= NOW()) \
-        OR (status = 'sending' AND lease_until < NOW()) ORDER BY available_at, id LIMIT 1 FOR UPDATE SKIP LOCKED) \
+    // Unified automatic mail may be waiting for its first SMTP channel; preserve it for transfer.
+    let row = client.query_opt("WITH picked AS (SELECT id FROM report_delivery WHERE ((status = 'pending' AND available_at <= NOW()) \
+        OR (status = 'sending' AND lease_until < NOW())) AND (NOT automatic OR NOT EXISTS(SELECT 1 FROM notification_upgrade WHERE name='unified_channels_v1')) ORDER BY available_at, id LIMIT 1 FOR UPDATE SKIP LOCKED) \
         UPDATE report_delivery d SET status = 'sending', claim_token = $1, lease_until = NOW() + INTERVAL '5 minutes', attempts = attempts + 1 \
         FROM picked WHERE d.id = picked.id RETURNING d.*;", &[&token]).await.map_err(|e| e.to_string())?;
     let Some(row) = row else {
