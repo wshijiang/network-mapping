@@ -1,4 +1,4 @@
-site_name: Network Mapping Documation
+site_name: Network Mapping 文档
 site_description: 网络测绘系统技术文档
 site_url: https://blog.abdc.world
 
@@ -12,11 +12,16 @@ theme:
     - navigation.tabs
     - navigation.sections
     - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
     - content.code.copy
     - content.action.edit    # 编辑
     - content.action.view    # 查看源代码
 
 validation:
+  nav:
+    omitted_files: warn
   links:
     absolute_links: relative_to_docs
     not_found: warn
@@ -24,15 +29,58 @@ validation:
     unrecognized_links: warn
 
 plugins:
-  - search
+  - search:
+      lang:
+        - zh
+        - en
 
 nav:
-  - 首页: README.md
-  - 部署指南:
-    - 直接部署: DEPLOYMENT.md
-    - DOCKER部署: DOCKER.md
-  - OPEN API 文档: OPEN_API.md
-  - 统一通知渠道: NOTIFICATIONS.md
+  - 文档首页: README.md
+  - 入门部署:
+      - 部署选型与原生安装: DEPLOYMENT.md
+      - Docker 部署: DOCKER.md
+      - Docker 配置参考: DOCKER_CONFIGURATION.md
+      - 启动配置检查: CONFIG_CHECK.md
+      - 登录人机验证: HUMAN_VERIFICATION.md
+      - 用户管理 CLI: USER_MANAGEMENT_CLI.md
+  - 功能使用:
+      - 功能概览: FEATURES.md
+      - 资产搜索: SEARCH_SYNTAX.md
+      - 统计分析: STATISTICS.md
+      - 周报与月报: reports.md
+      - 业务时区与常规设置: SYSTEM_TIME.md
+  - 扫描与资产:
+      - 扫描流水线与结果协议: SCAN_PIPELINE.md
+      - 双栈与自动目标: DUAL_STACK_SCANNING.md
+      - 智能目标与扫描器分配: SMART_SCANNING.md
+      - 搜索触发目标更新: SEARCH_TARGET_GENERATION.md
+      - DNS 测绘: DNS_MAPPING.md
+      - 资产端口状态与历史: ASSET_PORT_HISTORY.md
+      - 扫描器任务恢复协议: scanner-recovery.md
+  - 存储与性能:
+      - Elasticsearch 存储: ELASTICSEARCH.md
+      - 扫描写入与资产发布: WRITE_SPEED.md
+      - 扫描分析快照: ANALYTICS_SNAPSHOTS.md
+      - 写入压力测试: SCAN_WRITE_STRESS.md
+  - 运维排障:
+      - 运行时配置: RUNTIME_CONFIGURATION.md
+      - 慢检测与掉线策略: monitoring-policies.md
+      - 健康监控与告警: HEALTH_ALERT.md
+      - 统一通知渠道: NOTIFICATIONS.md
+      - 扫描器错误与日志: SCANNER_DIAGNOSTICS.md
+      - 请求日志: REQUEST_LOG.md
+      - 审计日志: AUDIT_LOG.md
+      - pgBackRest 备份恢复: PGBACKREST_BACKUP.md
+      - 资源读取与慢依赖隔离: SYSTEM_RESOURCE_RESILIENCE.md
+  - 开放平台:
+      - 外部 API v1 接入: OPEN_API.md
+      - 平台管理与上线: OPEN_API_MANAGEMENT.md
+      - 实现与回归: OPEN_API_IMPLEMENTATION.md
+  - 开发参考:
+      - 模块化实现与热更新: MODULE_RUNTIME_IMPLEMENTATION.md
+      - 模块化架构设计: MODULAR_ARCHITECTURE.md
+      - 进程替换原型: examples/modular-hot-update/README.md
+      - 文档维护与本地预览: DOCUMENTATION.md
 
 hooks:
   - hooks.py

@@ -101,8 +101,8 @@ repeat_after_seconds = 604800
 注意事项参见
 [健康监控与告警](HEALTH_ALERT.md)。
 
-Session/CSRF 与扫描器认证的 SQL 热路径范围、软删除审计字段和性能对比矩阵参见
-[SQL 热路径优化与对比](SQL_HOT_PATH_OPTIMIZATION.md)。
+请求级性能观测和错误分类见[请求日志](REQUEST_LOG.md)；资源读取、连接池等待与上传事务的
+排查见[系统资源读取与慢依赖隔离](SYSTEM_RESOURCE_RESILIENCE.md)。
 
 ## PostgreSQL 备份
 
