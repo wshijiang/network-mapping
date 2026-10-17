@@ -43,6 +43,12 @@ enum Field {
     Protocol,
     Service,
     Banner,
+    OsFamily,
+    OsDistribution,
+    OsVersion,
+    OsConfidence,
+    OsStatus,
+    OsScore,
     Title,
     HttpBody,
     TlsMode,
@@ -334,7 +340,7 @@ impl ElasticsearchCompiler {
         match predicate.field {
             Field::Ip => self.compile_ip(operator, &predicate.values),
             Field::Domain => self.compile_domain(operator, &predicate.values),
-            Field::Port | Field::TagId => {
+            Field::Port | Field::TagId | Field::OsScore => {
                 self.compile_integer(predicate.field, operator, &predicate.values)
             }
             Field::FirstSeen | Field::LastSeen | Field::TlsNotBefore | Field::TlsNotAfter => {
@@ -428,6 +434,13 @@ impl ElasticsearchCompiler {
             if field == Field::Port && !(1..=65_535).contains(&parsed) {
                 return Err(SearchSyntaxError::new("端口必须在 1 到 65535 之间", 0, 0));
             }
+            if field == Field::OsScore && !(0..=100).contains(&parsed) {
+                return Err(SearchSyntaxError::new(
+                    "os.score 必须在 0 到 100 之间",
+                    0,
+                    0,
+                ));
+            }
             if field == Field::TagId && parsed <= 0 {
                 return Err(SearchSyntaxError::new("tag.id 必须是正整数", 0, 0));
             }
@@ -519,6 +532,11 @@ impl ElasticsearchCompiler {
             field,
             Field::Protocol
                 | Field::Service
+                | Field::OsFamily
+                | Field::OsDistribution
+                | Field::OsVersion
+                | Field::OsConfidence
+                | Field::OsStatus
                 | Field::Country
                 | Field::Source
                 | Field::Tag
@@ -645,6 +663,13 @@ fn es_field(field: Field) -> &'static str {
         Field::Protocol => "protocol",
         Field::Service => "service",
         Field::Banner => "banner",
+        Field::OsFamily => "os.family",
+        Field::OsDistribution => "os.distribution",
+        Field::OsVersion => "os.version",
+        Field::OsConfidence => "os.confidence",
+        Field::OsStatus => "os.status",
+        Field::OsScore => "os.score",
+
         Field::Title => "title",
         Field::HttpBody => "http_body",
         Field::TlsMode => "tls_mode",
@@ -698,6 +723,13 @@ impl Field {
             "protocol" => Some(Self::Protocol),
             "service" => Some(Self::Service),
             "banner" => Some(Self::Banner),
+            "os.family" | "service.os.family" => Some(Self::OsFamily),
+            "os.distribution" | "service.os.distribution" => Some(Self::OsDistribution),
+            "os.version" | "service.os.version" => Some(Self::OsVersion),
+            "os.confidence" | "service.os.confidence" => Some(Self::OsConfidence),
+            "os.status" | "service.os.status" => Some(Self::OsStatus),
+            "os.score" | "service.os.score" => Some(Self::OsScore),
+
             "title" | "http.title" => Some(Self::Title),
             "http_body" | "http.body" => Some(Self::HttpBody),
             "tls.mode" => Some(Self::TlsMode),
@@ -736,6 +768,13 @@ impl Field {
             Self::Protocol => "protocol",
             Self::Service => "service",
             Self::Banner => "banner",
+            Self::OsFamily => "os.family",
+            Self::OsDistribution => "os.distribution",
+            Self::OsVersion => "os.version",
+            Self::OsConfidence => "os.confidence",
+            Self::OsStatus => "os.status",
+            Self::OsScore => "os.score",
+
             Self::Title => "title",
             Self::HttpBody => "http_body",
             Self::TlsMode => "tls.mode",
@@ -763,6 +802,12 @@ impl Field {
                 | Self::Protocol
                 | Self::Service
                 | Self::Banner
+                | Self::OsFamily
+                | Self::OsDistribution
+                | Self::OsVersion
+                | Self::OsConfidence
+                | Self::OsStatus
+                | Self::OsScore
                 | Self::Title
                 | Self::HttpBody
                 | Self::TlsMode
@@ -794,7 +839,13 @@ impl Field {
             | Self::City
             | Self::Scanner => Operator::Contains,
             Self::Domain => Operator::Contains,
-            Self::Ip
+            Self::OsFamily
+            | Self::OsDistribution
+            | Self::OsVersion
+            | Self::OsConfidence
+            | Self::OsStatus
+            | Self::OsScore
+            | Self::Ip
             | Self::Asn
             | Self::Country
             | Self::Tag
@@ -1573,5 +1624,17 @@ mod tests {
                 panic!("documented query failed: {query}: {}", error.message)
             });
         }
+    }
+    #[test]
+    fn os_fields_compile_on_endpoints_and_scores_are_bounded() {
+        let compiled = parse_and_compile_elasticsearch(
+            "service.os.family = windows AND os.confidence = medium AND os.score >= 60",
+        )
+        .unwrap();
+        let text = format!("{compiled:?}");
+        assert!(text.contains("os.family"));
+        assert!(text.contains("os.score"));
+        assert!(parse_and_compile_elasticsearch("os.score > 101").is_err());
+        assert!(parse_and_compile_elasticsearch("has_endpoint(os.family = linux)").is_ok());
     }
 }

@@ -145,7 +145,14 @@ fn validate_fields(value: &Value, p: &Principal) -> Result<()> {
                         {
                             return Err(ApiError::forbidden());
                         }
-                    } else if !p.policy.fields.iter().any(|f| f == field) && field != "domain" {
+                    } else if !p.policy.fields.iter().any(|f| {
+                        f == if field.starts_with("os.") {
+                            "os"
+                        } else {
+                            field
+                        }
+                    }) && field != "domain"
+                    {
                         return Err(ApiError::forbidden());
                     }
                 }

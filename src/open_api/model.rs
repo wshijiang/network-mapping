@@ -37,6 +37,7 @@ pub const FIELDS: &[&str] = &[
     "service",
     "title",
     "banner",
+    "os",
     "tls_mode",
     "tls_version",
     "tls_cipher_suite",
@@ -319,6 +320,22 @@ impl Principal {
                             .cloned()
                             .collect::<Vec<_>>()
                     )
+                } else if field == "os" {
+                    let os = serde_json::from_value(v.clone()).ok();
+                    let os = crate::os_detection::endpoint_view(
+                        os,
+                        source
+                            .get("observed_at_ms")
+                            .and_then(Value::as_i64)
+                            .unwrap_or_default(),
+                        Utc::now().timestamp_millis(),
+                    );
+                    let mut value = json!(os);
+                    if let Some(object) = value.as_object_mut() {
+                        object.remove("evidence");
+                        object.remove("candidates");
+                    }
+                    value
                 } else {
                     v.clone()
                 };

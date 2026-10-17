@@ -1106,3 +1106,26 @@ async fn scoped_queries_cursors_dns_and_export_worker() {
     handle.stop(true).await;
     cleanup(pool, schema).await;
 }
+
+#[test]
+fn os_fields_require_approval_and_external_projection_hides_raw_evidence() {
+    let mut p = principal();
+    p.policy.fields.retain(|field| field != "os");
+    assert!(query::compile("os.family = linux", &p).is_err());
+    let os = crate::os_detection::infer(
+        Some("ssh"),
+        Some("SSH-2.0-OpenSSH_9.6 Ubuntu"),
+        None,
+        22,
+        Utc::now().timestamp_millis(),
+        Some("private-index/observation-id"),
+    );
+    let source = json!({"os":os,"observed_at_ms":Utc::now().timestamp_millis()});
+    assert!(p.project_endpoint(&source, None).get("os").is_none());
+    p.policy.fields.push("os".into());
+    assert!(query::compile("os.family = linux", &p).is_ok());
+    let result = p.project_endpoint(&source, None);
+    assert_eq!(result["os"]["family"], "linux");
+    assert!(result["os"].get("evidence").is_none());
+    assert!(!result.to_string().contains("private-index"));
+}

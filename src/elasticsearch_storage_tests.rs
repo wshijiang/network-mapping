@@ -1652,13 +1652,23 @@ fn failed_service_probe_does_not_advance_successful_service_clock() {
     );
 }
 
+pub(super) fn live_test_elasticsearch_config() -> crate::config::ElasticsearchConfig {
+    if let Ok(url) = std::env::var("OS_TEST_ELASTICSEARCH_URL") {
+        crate::config::ElasticsearchConfig {
+            url,
+            ..Default::default()
+        }
+    } else {
+        let path = std::env::var("STORAGE_TEST_CONFIG_PATH")
+            .expect("real ES config or OS_TEST_ELASTICSEARCH_URL");
+        crate::config::Config::from_file(path).elasticsearch
+    }
+}
+
 #[tokio::test]
-#[ignore = "requires STORAGE_TEST_CONFIG_PATH and creates an isolated ES index"]
+#[ignore = "requires real ES via STORAGE_TEST_CONFIG_PATH or OS_TEST_ELASTICSEARCH_URL"]
 async fn live_elasticsearch_preserves_successful_web_evidence_after_failed_probes() {
-    let config_path = std::env::var("STORAGE_TEST_CONFIG_PATH").expect("test config path");
-    let service =
-        ElasticsearchService::new(crate::config::Config::from_file(config_path).elasticsearch)
-            .unwrap();
+    let service = ElasticsearchService::new(live_test_elasticsearch_config()).unwrap();
     let index = format!("nm-test-web-projection-{}", Uuid::new_v4().simple());
     let context = dns_test_context();
     let test = async {

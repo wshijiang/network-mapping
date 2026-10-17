@@ -48,12 +48,14 @@ struct AssetPortCurrent {
     last_seen_at: i64,
     service_observed_at: Option<i64>,
     service_stale: bool,
+    os: Option<crate::os_detection::OsInference>,
     execution_id: String,
     task_id: String,
 }
 
 #[derive(Serialize)]
 struct AssetSummary {
+    os: crate::os_detection::OsInference,
     ip: String,
     asn: Option<String>,
     isp: Option<String>,
@@ -274,6 +276,11 @@ fn asset_summary_current_search_body(filters: Vec<Value>) -> Value {
         "track_total_hits": true,
         "query": {"bool": {"filter": filters}},
         "aggs": {
+            "os_by_status": {"terms":{"field":"os.status","size":8}, "aggs":{
+                "families":{"terms":{"field":"os.family","missing":"unknown","size":8}, "aggs":{
+                    "samples":{"top_hits":{"size":8,"sort":[{"os.observed_at":{"order":"desc","missing":"_last"}},{"port":"asc"}],"_source":["os","port","scanner_id","observed_at_ms"]}}
+                }}
+            }},
             "services": {"cardinality": {"field": "service", "precision_threshold": 40000}},
             "scanners": {"cardinality": {"field": "scanner_id", "precision_threshold": 40000}},
             "latest": {"top_hits": {"size": 1, "sort": [
@@ -352,7 +359,44 @@ async fn get_asset_summary_from_elasticsearch(
             .and_then(|source| source.get(field))
             .and_then(Value::as_f64)
     };
+    let mut os_sources = Vec::new();
+    if let Some(statuses) = current
+        .pointer("/aggregations/os_by_status/buckets")
+        .and_then(Value::as_array)
+    {
+        for status in statuses {
+            if let Some(families) = status
+                .pointer("/families/buckets")
+                .and_then(Value::as_array)
+            {
+                for family in families {
+                    if let Some(hits) = family
+                        .pointer("/samples/hits/hits")
+                        .and_then(Value::as_array)
+                    {
+                        os_sources
+                            .extend(hits.iter().filter_map(|hit| hit.get("_source")).cloned());
+                    }
+                }
+            }
+        }
+    }
+    let mut host_os =
+        crate::os_detection::summarize(&os_sources, chrono::Utc::now().timestamp_millis());
+    if current
+        .pointer("/aggregations/scanners/value")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+        > 1.0
+        && host_os.confidence == "high"
+    {
+        host_os.confidence = "medium".into();
+    }
+    if es_total(&current) > os_sources.len() as i64 {
+        host_os.distribution = None;
+    }
     let summary = AssetSummary {
+        os: host_os,
         ip: ip.to_owned(),
         asn: text("asn"),
         isp: text("isp"),
@@ -461,6 +505,14 @@ async fn get_asset_ports_from_elasticsearch(
                 last_seen_at,
                 service_observed_at,
                 service_stale: service_observed_at.is_some_and(|time| time < last_seen_at),
+                os: crate::os_detection::endpoint_view(
+                    source
+                        .get("os")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok()),
+                    last_seen_at,
+                    chrono::Utc::now().timestamp_millis(),
+                ),
                 execution_id: source
                     .get("execution_id")
                     .and_then(Value::as_str)
