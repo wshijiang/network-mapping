@@ -406,7 +406,24 @@ pub(crate) fn summarize(sources: &[Value], now_ms: i64) -> OsInference {
     });
     let mut result = decide(evidence, "host_estimate");
     result.version = None; // Service releases do not establish a host release.
-    result.evidence.truncate(MAX_EVIDENCE);
+    // Keep at least one explanation for every family before applying the
+    // display limit. A large family must not hide the conflicting minority.
+    let mut retained = Vec::new();
+    let mut families = BTreeSet::new();
+    for item in &result.evidence {
+        if families.insert(item.family.clone()) {
+            retained.push(item.clone());
+        }
+    }
+    for item in std::mem::take(&mut result.evidence) {
+        if retained.len() == MAX_EVIDENCE {
+            break;
+        }
+        if !retained.contains(&item) {
+            retained.push(item);
+        }
+    }
+    result.evidence = retained;
     result.observed_at = latest;
     result.stale = stale;
     if result.status == "unknown" && pending {
@@ -624,5 +641,39 @@ mod tests {
             summarize(&[json!({"os":pending})], 31 * 86_400_000).status,
             "unknown"
         );
+    }
+
+    #[test]
+    fn summary_display_limit_keeps_the_conflicting_minority_family() {
+        let mut sources = Vec::new();
+        for port in 1..40 {
+            let os = infer(
+                Some("ssh"),
+                Some("SSH-2.0-OpenSSH FreeBSD"),
+                None,
+                port,
+                1000,
+                None,
+            );
+            sources.push(json!({"os":os}));
+        }
+        let windows = detect(
+            "http",
+            "",
+            "http",
+            json!({"response":{"headers":{"server":"Microsoft-IIS/10.0"}}}),
+        );
+        sources.push(json!({"os":windows}));
+        let summary = summarize(&sources, 2000);
+        assert_eq!(summary.status, "conflict");
+        assert_eq!(summary.evidence.len(), MAX_EVIDENCE);
+        for candidate in &summary.candidates {
+            assert!(
+                summary
+                    .evidence
+                    .iter()
+                    .any(|item| item.family == candidate.family)
+            );
+        }
     }
 }
