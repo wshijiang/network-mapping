@@ -914,5 +914,275 @@
     "pattern": "(?i)^GitLab$",
     "confidence": "high",
     "usage": "response_marker"
+  },
+  {
+    "id": "alpinejs-package",
+    "technology": "alpinejs",
+    "name": "Alpine.js",
+    "category": "javascript_library",
+    "source": "selector",
+    "confidence": "high",
+    "usage": "referenced_resource",
+    "selector": "script[src]",
+    "attribute": "src",
+    "pattern": "(?i)/alpinejs@([0-9]+(?:\\.[0-9]+){0,3}(?:[-+][A-Za-z0-9.-]+)?)/",
+    "version_group": 1
+  },
+  {
+    "id": "alpinejs-script",
+    "technology": "alpinejs",
+    "name": "Alpine.js",
+    "category": "javascript_library",
+    "source": "selector",
+    "confidence": "medium",
+    "usage": "referenced_resource",
+    "selector": "script[src]",
+    "attribute": "src",
+    "pattern": "(?i)/alpine(?:\\.min)?\\.js$"
+  },
+  {
+    "id": "htmx-package",
+    "technology": "htmx",
+    "name": "htmx",
+    "category": "javascript_library",
+    "source": "selector",
+    "confidence": "high",
+    "usage": "referenced_resource",
+    "selector": "script[src]",
+    "attribute": "src",
+    "pattern": "(?i)/htmx\\.org@([0-9]+(?:\\.[0-9]+){0,3}(?:[-+][A-Za-z0-9.-]+)?)/",
+    "version_group": 1
+  },
+  {
+    "id": "htmx-script",
+    "technology": "htmx",
+    "name": "htmx",
+    "category": "javascript_library",
+    "source": "selector",
+    "confidence": "medium",
+    "usage": "referenced_resource",
+    "selector": "script[src]",
+    "attribute": "src",
+    "pattern": "(?i)/htmx(?:\\.min)?\\.js$"
+  },
+  {
+    "id": "alpinejs-dom",
+    "technology": "alpinejs",
+    "name": "Alpine.js",
+    "category": "javascript_library",
+    "source": "composite",
+    "confidence": "medium",
+    "usage": "response_marker",
+    "all": [
+      {
+        "source": "selector",
+        "pattern": "^$",
+        "selector": "[x-data]"
+      }
+    ],
+    "any": [
+      {
+        "source": "selector",
+        "pattern": "^$",
+        "selector": "[x-init]"
+      },
+      {
+        "source": "selector",
+        "pattern": "^$",
+        "selector": "[x-show]"
+      },
+      {
+        "source": "selector",
+        "pattern": "^$",
+        "selector": "[x-bind]"
+      }
+    ]
+  },
+  {
+    "id": "htmx-dom",
+    "technology": "htmx",
+    "name": "htmx",
+    "category": "javascript_library",
+    "source": "composite",
+    "confidence": "medium",
+    "usage": "response_marker",
+    "all": [
+      {
+        "source": "selector",
+        "pattern": "^$",
+        "selector": "[hx-get],[hx-post],[hx-put],[hx-patch],[hx-delete]"
+      }
+    ],
+    "any": [
+      {
+        "source": "selector",
+        "pattern": "^$",
+        "selector": "[hx-target]"
+      },
+      {
+        "source": "selector",
+        "pattern": "^$",
+        "selector": "[hx-swap]"
+      }
+    ]
+  },
+  {
+    "id": "phpmyadmin-login",
+    "technology": "phpmyadmin",
+    "name": "phpMyAdmin",
+    "category": "application",
+    "source": "composite",
+    "confidence": "high",
+    "usage": "response_marker",
+    "all": [
+      {
+        "source": "selector",
+        "pattern": "^$",
+        "selector": "form#login_form input[name=\"pma_username\"]"
+      },
+      {
+        "source": "selector",
+        "pattern": "^$",
+        "selector": "form#login_form input[name=\"pma_password\"]"
+      }
+    ]
+  },
+  {
+    "id": "swagger-ui-resources",
+    "technology": "swagger-ui",
+    "name": "Swagger UI",
+    "category": "api_documentation",
+    "source": "composite",
+    "confidence": "high",
+    "usage": "response_marker",
+    "all": [
+      {
+        "source": "selector",
+        "pattern": "^$",
+        "selector": "#swagger-ui"
+      }
+    ],
+    "any": [
+      {
+        "source": "resource",
+        "pattern": "(?i)/swagger-ui-(?:bundle|standalone-preset)(?:\\.min)?\\.js$",
+        "selector": "script[src]",
+        "attribute": "src"
+      },
+      {
+        "source": "resource",
+        "pattern": "(?i)/swagger-ui(?:\\.min)?\\.css$",
+        "selector": "link[rel=\"stylesheet\" i][href]",
+        "attribute": "href"
+      },
+      {
+        "source": "resource",
+        "pattern": "(?i)/swagger-ui-dist@([0-9]+(?:\\.[0-9]+){0,3}(?:[-+][A-Za-z0-9.-]+)?)/",
+        "selector": "script[src]",
+        "attribute": "src",
+        "version_group": 1
+      }
+    ]
+  },
+  {
+    "id": "minio-console",
+    "technology": "minio",
+    "name": "MinIO",
+    "category": "object_storage",
+    "source": "composite",
+    "confidence": "high",
+    "usage": "response_marker",
+    "all": [
+      {
+        "source": "title",
+        "pattern": "(?i)^MinIO Console$"
+      },
+      {
+        "source": "selector",
+        "pattern": "(?i)^MinIO Console$",
+        "selector": "meta[name=\"description\" i]",
+        "attribute": "content"
+      }
+    ]
+  },
+  {
+    "id": "minio-proxy-headers",
+    "technology": "minio",
+    "name": "MinIO",
+    "category": "object_storage",
+    "source": "composite",
+    "confidence": "high",
+    "usage": "response_marker",
+    "all": [
+      {
+        "source": "header_name",
+        "pattern": "^x-minio-deployment-id$",
+        "field": "x-minio-deployment-id"
+      },
+      {
+        "source": "header_name",
+        "pattern": "^x-amz-request-id$",
+        "field": "x-amz-request-id"
+      }
+    ]
+  },
+  {
+    "id": "s3-structured-response",
+    "technology": "s3",
+    "name": "S3-compatible storage",
+    "category": "object_storage",
+    "source": "composite",
+    "confidence": "high",
+    "usage": "response_marker",
+    "all": [
+      {
+        "source": "s3_xml",
+        "pattern": "^(?:ListBucketResult|ListAllMyBucketsResult|Error/[A-Za-z]+)$"
+      },
+      {
+        "source": "header_name",
+        "pattern": "^x-amz-request-id$",
+        "field": "x-amz-request-id"
+      },
+      {
+        "source": "header",
+        "pattern": "(?i)^(?:application|text)/xml(?:$|;)",
+        "field": "content-type"
+      }
+    ],
+    "any": [
+      {
+        "source": "header_name",
+        "pattern": "^x-amz-id-2$",
+        "field": "x-amz-id-2"
+      },
+      {
+        "source": "header_name",
+        "pattern": "^x-amz-bucket-region$",
+        "field": "x-amz-bucket-region"
+      },
+      {
+        "source": "header_name",
+        "pattern": "^x-minio-deployment-id$",
+        "field": "x-minio-deployment-id"
+      }
+    ]
+  },
+  {
+    "id": "git-smart-http",
+    "technology": "git",
+    "name": "Git smart HTTP",
+    "category": "version_control",
+    "source": "git_advertisement",
+    "confidence": "high",
+    "usage": "response_marker",
+    "pattern": "^git-(?:upload|receive)-pack$",
+    "all": [
+      {
+        "source": "header",
+        "pattern": "(?i)^application/x-git-(?:upload|receive)-pack-advertisement(?:$|;)",
+        "field": "content-type"
+      }
+    ]
   }
 ]

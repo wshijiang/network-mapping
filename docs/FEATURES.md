@@ -130,3 +130,5 @@ repeat_after_seconds = 604800
 服务端异步解析已有 HTTP/HTTPS 证据，识别服务器、框架、CMS 和前端组件及明确版本。
 搜索、任务详情和资产端口列表展示可追溯结果；支持版本关联搜索和历史重算。
 识别对象为 IP 端点，详见 [Web 框架与组件识别](WEB_DETECTION.md)。
+
+技术覆盖、MinIO/S3 与 GitLab/Git 服务区分及分批扩展见 [Web 技术目录](WEB_TECHNOLOGY_CATALOG.md)。

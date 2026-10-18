@@ -625,3 +625,6 @@ web.status = partial
 名称与版本由同一 ES nested 查询关联。否定条件包含尚未识别的端点；需要时附加
 `web.status = identified`。不支持 `tech ~` 或独立的非关联版本字段。
 证据范围与过期语义见 [Web 框架与组件识别](WEB_DETECTION.md)。
+
+Web 技术目录现支持 `tech = minio`、`tech = s3`、`tech = gitlab` 和 `tech = git`；
+产品身份与协议能力分别判断，证据要求见 [技术目录](WEB_TECHNOLOGY_CATALOG.md)。

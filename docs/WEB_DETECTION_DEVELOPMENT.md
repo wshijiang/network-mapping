@@ -10,19 +10,64 @@ HTML 使用 scraper 解析 DOM，不把页面正文当作产品名称词典。
 `data.result` envelope；未知 schema 返回 `unsupported`，不会递归搜索 JSON 字符串。
 
 每份正文最多 256 KiB，单值最多 4096 字节，每份 evidence 数组最多 32 项；
-每条选择器规则最多处理 512 个元素，最多返回 64 个组件、每组件 8 条去重证据。
-资源规则只匹配 URL path；Cookie 只匹配名称。派生证据只保留命中特征或选择器，
-不复制完整响应头、Cookie 值、资源查询参数或原始正文。
-规则在进程首次使用时校验、编译，验证失败使测试/启动识别失败，不从远程下载或执行规则。
+每份响应最多处理 512 个头值，每条选择器最多处理 512 个元素，最多返回 64 个组件、
+每组件 8 条去重证据。资源只匹配 HTTP(S) URL path，Cookie 只匹配名称。
+超长标量不根据被截断的前缀作精确判断；派生证据不保留 ID 值、资源查询参数、桶名或 Git refs。
+规则首次使用时校验、编译，不从远程下载或执行。非法规则会使验证失败。
 
-规则包含 `id`、`technology`、`name`、`category`、`source`、`pattern`、`confidence` 和 `usage`。
-`header` 规则指定 `field`；`selector` 规则指定 CSS `selector` 和可选 `attribute`；
-`cookie_name` 仅接收 Cookie 名称。`version_group` 指向正则捕获组。
-同一组件多条规则合并，不因重复命中累计置信度；多版本返回冲突标记。
+### 原子条件与组合条件
 
-技术目录与分批交付见 [Web 技术目录](WEB_TECHNOLOGY_CATALOG.md)。
-`src/web_detection/fixtures.json` 为新增产品的合成正例，测试核对整个技术集合及明确版本，
-并保证每个扩展组件都有样本。新增规则需附加误报反例，不能由产品关系直接推断隐藏依赖。
+既有扁平规则继续兼容。原子条件支持：
+
+| source | 检查范围 |
+| --- | --- |
+| `header` | 指定名称的响应头值；禁止直接读取 Set-Cookie 值 |
+| `header_name` | 指定响应头是否出现，只记录头名称 |
+| `cookie_name` | Cookie 名称 |
+| `selector` | 指定 DOM 元素存在性或属性 |
+| `resource` | src/href 中 HTTP(S) 资源的 path |
+| `title` | title 的有界文本，不能选择任意页面正文 |
+| `s3_xml` | XML 媒体类型下已验证的 S3 结构标记 |
+| `git_advertisement` | 媒体类型与 pkt-line 一致的 Git 广告标记 |
+
+`source=composite` 使用 `all`、`any`、`not` 数组。all 全部满足，非空 any 至少一项满足，
+not 必须全部不匹配。每条规则含主条件在内最多 8 个原子条件，不允许递归组合或仅有 not。
+有主条件的扁平规则也可增加条件组。条件在同一 HTTP 响应视图中匹配；通过全部条件后才提交正向证据。
+不完整输入无法通过 not；协议解析失败不能作为否定证明，所以协议来源不允许出现在 not。
+
+```json
+{
+  "id": "minio-console",
+  "technology": "minio",
+  "name": "MinIO",
+  "category": "object_storage",
+  "source": "composite",
+  "all": [
+    { "source": "title", "pattern": "(?i)^MinIO Console$" },
+    { "source": "selector", "selector": "meta[name=description]", "attribute": "content", "pattern": "(?i)^MinIO Console$" }
+  ],
+  "confidence": "high",
+  "usage": "response_marker"
+}
+```
+
+`version_group` 指向正则捕获组；协议和头名称条件不能提取软件版本。同一组件合并去重，
+不因重复命中累计置信度；多个明确版本返回冲突标记。资源和 DOM 同时参与时显示为多种证据。
+
+### 协议解析
+
+`src/web_detection/protocol.rs` 仅解析内存中的响应，既不访问目标也不解析外部实体。
+S3 使用 quick-xml 解析有效的列表/错误 envelope，核对命名空间、必要字段与响应头；
+拒绝 DTD、未知实体、嵌套 Code/RequestId、多个根和未闭合 XML，深度上限 32、事件上限 16384。
+仅输出固定结构名和允许的错误码，不复制桶名、对象名、RequestId 或 HostId。
+
+Git 校验广告媒体类型、十六进制 pkt-line 长度、操作名和 flush；v2 还要求 ls-refs 与 fetch
+能力，最多检查 128 条能力行。仅输出 upload-pack/receive-pack 标记，不保留 refs 或 agent。
+普通 GitLab 页面、`.git` 路径和通用 SSH 服务不能证明 Git smart HTTP 能力。
+
+目录与分批状态见 [Web 技术目录](WEB_TECHNOLOGY_CATALOG.md)。
+`fixtures.json` 为合成正例，测试核对每个扩展组件的技术集合、版本与敏感值不泄漏；
+另测缺少条件、跨响应拼接、截断、否定、DTD、命名空间及非法 pkt-line。
 
 ## 队列、存储与更新
 

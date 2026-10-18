@@ -104,6 +104,168 @@ fn new_technologies_are_not_guessed_from_text_queries_or_python_servers() {
     }
 }
 
+#[test]
+fn composite_markers_require_both_product_structure_and_supporting_evidence() {
+    for body in [
+        "<title>MinIO Console</title>",
+        "<meta name='description' content='MinIO Console'>",
+        "<p>MinIO Console</p><meta name='description' content='MinIO Console'>",
+        "<form id='login_form'><input name='pma_username'></form>",
+        "<form id='login_form'><input name='pma_password'></form>",
+        "<div id='swagger-ui'></div>",
+        "<script src='/swagger-ui-bundle.js'></script>",
+        "<div x-data='{}'></div>",
+        "<div x-show='open'></div>",
+        "<button hx-get='/search'></button>",
+        "<div hx-target='#results'></div>",
+        "<p>GitLab Git git-upload-pack https://host/project.git</p>",
+    ] {
+        assert!(identify(json!({}), body).technologies.is_empty(), "{body}");
+    }
+    let body = format!(
+        "<meta name='description' content='MinIO Console'><title>MinIO Console{}OTHER</title>",
+        " ".repeat(MAX_TEXT)
+    );
+    let web = identify(json!({}), &body);
+    assert!(web.technologies.is_empty());
+    assert_eq!(web.status, "partial");
+}
+
+#[test]
+fn conditions_cannot_borrow_evidence_from_a_different_response_or_protocol() {
+    for (first, second) in [
+        (
+            json!({"headers":{},"body":"<title>MinIO Console</title>"}),
+            json!({"headers":{},"body":"<meta name='description' content='MinIO Console'>"}),
+        ),
+        (
+            json!({"headers":{"content-type":"application/x-git-upload-pack-advertisement"},"body":""}),
+            json!({"headers":{},"body":"001e# service=git-upload-pack\n0000"}),
+        ),
+        (
+            json!({"headers":{"x-minio-deployment-id":"PRIVATE"},"body":""}),
+            json!({"headers":{"x-amz-request-id":"PRIVATE"},"body":""}),
+        ),
+    ] {
+        let web = infer(
+            Some("http"),
+            None,
+            Some(
+                &json!({"schema_version":2,"evidence":[{"module":"http","result":{"response":first}},{"module":"https","result":{"response":second}}]}),
+            ),
+            80,
+            1000,
+            None,
+        );
+        assert!(web.technologies.is_empty());
+    }
+    let web = infer(
+        Some("ssh"),
+        None,
+        Some(
+            &json!({"schema_version":2,"evidence":[{"module":"ssh","result":{"response":{"headers":{"server":"MinIO"},"body":""}}}]}),
+        ),
+        22,
+        1000,
+        None,
+    );
+    assert!(web.technologies.is_empty());
+}
+
+#[test]
+fn s3_and_git_reject_generic_headers_and_malformed_or_mismatched_payloads() {
+    let headers = json!({"Content-Type":"application/xml","X-Amz-Request-Id":"PRIVATE","X-Amz-Id-2":"PRIVATE"});
+    for body in [
+        "<Other><Code>AccessDenied</Code><RequestId>PRIVATE</RequestId></Other>",
+        "<Error><Code>AccessDenied</Code></Error>",
+        r#"<ListBucketResult xmlns="urn:other"><Name>bucket</Name><MaxKeys>1</MaxKeys></ListBucketResult>"#,
+        r#"<!DOCTYPE Error [<!ENTITY leak SYSTEM "https://example.invalid/private">]><Error><Code>AccessDenied</Code><RequestId>&leak;</RequestId></Error>"#,
+    ] {
+        assert!(identify(headers.clone(), body).technologies.is_empty());
+    }
+    let xml = "<Error><Code>AccessDenied</Code><RequestId>PRIVATE</RequestId></Error>";
+    assert!(
+        identify(
+            json!({"Content-Type":"application/xml","X-Amz-Request-Id":"PRIVATE"}),
+            xml
+        )
+        .technologies
+        .is_empty()
+    );
+    assert!(
+        identify(
+            json!({"Content-Type":"text/html","X-Amz-Request-Id":"PRIVATE","X-Amz-Id-2":"PRIVATE"}),
+            xml
+        )
+        .technologies
+        .is_empty()
+    );
+    let git_headers = json!({"Content-Type":"application/x-git-upload-pack-advertisement"});
+    for body in [
+        "",
+        "001f# service=git-upload-pack\n0000",
+        "001f# service=git-receive-pack\n0000",
+        "# service=git-upload-pack\n",
+        "<p>Git service</p>",
+    ] {
+        assert!(identify(git_headers.clone(), body).technologies.is_empty());
+    }
+}
+
+#[test]
+fn grouped_rules_apply_all_any_and_safe_negative_conditions() {
+    let rule = json!([{"id":"grouped-fixture","technology":"fixture","name":"Fixture","category":"application","source":"composite","confidence":"high","usage":"response_marker",
+        "all":[{"source":"selector","selector":"#app","pattern":"^$"}],
+        "any":[{"source":"header_name","field":"x-product","pattern":"^x-product$"},{"source":"selector","selector":"meta[name=product]","attribute":"content","pattern":"^Fixture$"}],
+        "not":[{"source":"selector","selector":"meta[name=preview]","pattern":"^$"}]}]);
+    let rules = compile_rules(&rule.to_string()).unwrap();
+    for (headers, body, truncated, expected) in [
+        (
+            json!({"X-Product":"PRIVATE"}),
+            "<div id='app'></div>",
+            false,
+            true,
+        ),
+        (
+            json!({}),
+            "<div id='app'></div><meta name='product' content='Fixture'>",
+            false,
+            true,
+        ),
+        (json!({}), "<div id='app'></div>", false, false),
+        (
+            json!({"X-Product":"PRIVATE"}),
+            "<div id='app'></div><meta name='preview'>",
+            false,
+            false,
+        ),
+        (
+            json!({"X-Product":"PRIVATE"}),
+            "<div id='app'></div>",
+            true,
+            false,
+        ),
+    ] {
+        let response = json!({"headers":headers,"body":body});
+        let view = ResponseView::new(response.as_object().unwrap(), "/data/result", truncated);
+        let mut out = Accumulator::default();
+        apply_rules(&mut out, &rules, &view, "http", "/data/result", None);
+        assert_eq!(out.technologies.contains_key("fixture"), expected);
+        assert!(
+            !serde_json::to_string(&out.technologies)
+                .unwrap()
+                .contains("PRIVATE")
+        );
+    }
+    // Invalid rules fail validation instead of silently weakening a composite.
+    for invalid in [
+        json!([{"id":"bad","technology":"bad","name":"Bad","category":"application","source":"composite","confidence":"high","usage":"response_marker","not":[{"source":"title","pattern":"^Bad$"}]}]),
+        json!([{"id":"bad","technology":"bad","name":"Bad","category":"application","source":"header","field":"set-cookie","pattern":".*","confidence":"high","usage":"response_marker"}]),
+    ] {
+        assert!(compile_rules(&invalid.to_string()).is_err());
+    }
+}
+
 fn identify(headers: Value, body: &str) -> WebInference {
     infer(
         Some("https"),

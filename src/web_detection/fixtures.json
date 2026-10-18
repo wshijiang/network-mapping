@@ -203,5 +203,152 @@
     "expected": {
       "gitlab": null
     }
+  },
+  {
+    "id": "alpine-dom",
+    "headers": {},
+    "body": "<div x-data=\"{ open: false }\"><button x-show=\"open\">Open</button></div>",
+    "expected": {
+      "alpinejs": null
+    }
+  },
+  {
+    "id": "alpine-package",
+    "headers": {},
+    "body": "<script src=\"/npm/alpinejs@3.14.8/dist/cdn.min.js?token=PRIVATE\"></script>",
+    "expected": {
+      "alpinejs": "3.14.8"
+    }
+  },
+  {
+    "id": "htmx-dom",
+    "headers": {},
+    "body": "<button hx-get=\"/search\" hx-target=\"#results\">Search</button>",
+    "expected": {
+      "htmx": null
+    }
+  },
+  {
+    "id": "htmx-package",
+    "headers": {},
+    "body": "<script src=\"/npm/htmx.org@2.0.4/dist/htmx.min.js\"></script>",
+    "expected": {
+      "htmx": "2.0.4"
+    }
+  },
+  {
+    "id": "phpmyadmin-login",
+    "headers": {},
+    "body": "<form id=\"login_form\"><input name=\"pma_username\"><input name=\"pma_password\" type=\"password\"></form>",
+    "expected": {
+      "phpmyadmin": null
+    }
+  },
+  {
+    "id": "swagger-ui",
+    "headers": {},
+    "body": "<div id=\"swagger-ui\"></div><script src=\"/swagger-ui-dist@5.18.2/swagger-ui-bundle.js\"></script>",
+    "expected": {
+      "swagger-ui": "5.18.2"
+    }
+  },
+  {
+    "id": "minio-console",
+    "headers": {},
+    "body": "<title>MinIO Console</title><meta name=\"description\" content=\"MinIO Console\"><div id=\"root\"></div>",
+    "expected": {
+      "minio": null
+    }
+  },
+  {
+    "id": "minio-proxy",
+    "headers": {
+      "X-Minio-Deployment-Id": "PRIVATE",
+      "X-Amz-Request-Id": "PRIVATE"
+    },
+    "body": "",
+    "expected": {
+      "minio": null
+    }
+  },
+  {
+    "id": "s3-bucket-list",
+    "headers": {
+      "Content-Type": "application/xml",
+      "X-Amz-Request-Id": "PRIVATE",
+      "X-Amz-Id-2": "PRIVATE"
+    },
+    "body": "<s:ListBucketResult xmlns:s=\"http://s3.amazonaws.com/doc/2006-03-01/\"><s:Name>PRIVATE</s:Name><s:MaxKeys>1000</s:MaxKeys></s:ListBucketResult>",
+    "expected": {
+      "s3": null
+    }
+  },
+  {
+    "id": "s3-error",
+    "headers": {
+      "Content-Type": "application/xml",
+      "X-Amz-Request-Id": "PRIVATE",
+      "X-Amz-Id-2": "PRIVATE"
+    },
+    "body": "<Error><Code>AccessDenied</Code><Message>PRIVATE</Message><RequestId>PRIVATE</RequestId><HostId>PRIVATE</HostId></Error>",
+    "expected": {
+      "s3": null
+    }
+  },
+  {
+    "id": "s3-list-buckets",
+    "headers": {
+      "Content-Type": "application/xml",
+      "X-Amz-Request-Id": "PRIVATE",
+      "X-Amz-Id-2": "PRIVATE"
+    },
+    "body": "<ListAllMyBucketsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Buckets/></ListAllMyBucketsResult>",
+    "expected": {
+      "s3": null
+    }
+  },
+  {
+    "id": "minio-and-s3",
+    "headers": {
+      "Content-Type": "application/xml",
+      "X-Amz-Request-Id": "PRIVATE",
+      "X-Amz-Id-2": "PRIVATE",
+      "Server": "MinIO"
+    },
+    "body": "<Error><Code>AccessDenied</Code><RequestId>PRIVATE</RequestId></Error>",
+    "expected": {
+      "minio": null,
+      "s3": null
+    }
+  },
+  {
+    "id": "git-upload-advertisement",
+    "headers": {
+      "Content-Type": "application/x-git-upload-pack-advertisement"
+    },
+    "body": "001e# service=git-upload-pack\n0000",
+    "expected": {
+      "git": null
+    }
+  },
+  {
+    "id": "git-receive-advertisement",
+    "headers": {
+      "Content-Type": "application/x-git-receive-pack-advertisement"
+    },
+    "body": "001f# service=git-receive-pack\n0000",
+    "expected": {
+      "git": null
+    }
+  },
+  {
+    "id": "git-v2",
+    "headers": {
+      "Content-Type": "application/x-git-upload-pack-advertisement"
+    },
+    "body": "000eversion 2\n000cls-refs\n000afetch\n0000",
+    "expected": {
+      "git": null
+    }
   }
 ]
