@@ -51,7 +51,7 @@
 
 仅支持 `https://open.feishu.cn/open-apis/bot/v2/hook/<机器人 UUID>`，不接受任意 Webhook、Lark 国际版域名、查询参数、片段、用户凭据、其他端口和重定向。服务需要允许访问 `open.feishu.cn:443`，无须公开回调入口。
 
-飞书模板支持纯文本或转换为 `post` 的受限富文本；默认使用参考邮件信息结构的富文本。
+飞书模板支持纯文本或自动转换为 JSON 2.0 消息卡片（`interactive`）的受限 HTML 富文本；默认使用参考邮件信息结构的消息卡片，包含按事件和级别着色的标题、正文和事件 ID。支持粗体、斜体、删除线和链接，下划线按普通文本显示。
 
 签名按官方协议，以 `timestamp + "\n" + secret` 为 HMAC-SHA256 key，对空消息计算摘要并 Base64 编码。HTTP 成功还必须满足 JSON `code == 0`，兼容 `StatusCode`。签名密钥留空保留；移除须明确勾选清除。
 

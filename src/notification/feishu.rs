@@ -266,6 +266,32 @@ mod tests {
             "payload_too_large"
         );
     }
+
+    #[test]
+    fn interactive_card_encoding_preserves_card_and_adds_signature() {
+        let rendered = super::super::template_render::render(
+            "feishu",
+            &super::super::template_render::event_default_source("health.alert"),
+            &super::super::template_render::sample_context("health.alert"),
+        )
+        .unwrap();
+        for secret in [None, Some("demo")] {
+            let encoded: Value = serde_json::from_slice(
+                &encode_payload(rendered.payload.clone(), secret, 1599360473).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(encoded["msg_type"], "interactive");
+            assert_eq!(encoded["card"], rendered.payload["card"]);
+            assert!(encoded.get("content").is_none());
+            if secret.is_some() {
+                assert_eq!(encoded["timestamp"], "1599360473");
+                assert_eq!(
+                    encoded["sign"],
+                    "l1N0gAcBjdwBvGm1xMjOF0XSyaLRpR7tuO5dHfhAYc8="
+                );
+            }
+        }
+    }
     #[test]
     fn signature_uses_timestamp_and_secret_as_key_and_empty_message() {
         // Independent Python hmac test vector, not the platform's webhook signature format.
@@ -282,6 +308,28 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = HttpServer::new(|| {
             App::new()
+                .route(
+                    "/card",
+                    web::post().to(|payload: web::Json<Value>| async move {
+                        let card = &payload["card"];
+                        let valid = payload["msg_type"] == "interactive"
+                            && payload.get("content").is_none()
+                            && card["schema"] == "2.0"
+                            && card["header"]["title"]["tag"] == "plain_text"
+                            && card["header"]["title"]["content"].is_string()
+                            && card["body"]["elements"].as_array().is_some_and(|elements| {
+                                !elements.is_empty()
+                                    && elements.iter().all(|element| {
+                                        element["tag"] == "hr"
+                                            || (element["tag"] == "markdown"
+                                                && element["content"]
+                                                    .as_str()
+                                                    .is_some_and(|text| !text.is_empty()))
+                                    })
+                            });
+                        HttpResponse::Ok().json(json!({"code":if valid {0} else {19002}}))
+                    }),
+                )
                 .route(
                     "/post",
                     web::post().to(|payload: web::Json<Value>| async move {
@@ -352,6 +400,7 @@ mod tests {
         )
         .await;
         assert!(retried.sent);
+        let card_url = reqwest::Url::parse(&format!("http://{address}/card")).unwrap();
         // Exercise the same renderer used by template tests and normal event deliveries.
         for event in super::super::EVENT_TYPES {
             for severity in ["warning", "critical"] {
@@ -365,7 +414,7 @@ mod tests {
                 .unwrap();
                 let outcome = transmit(
                     &client,
-                    post_url.clone(),
+                    card_url.clone(),
                     encode_payload(rendered.payload, None, 0).unwrap(),
                 )
                 .await;

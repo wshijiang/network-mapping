@@ -163,6 +163,7 @@ fn decode(s: &str) -> Result<String> {
 struct Tag {
     name: String,
     href: Option<String>,
+    card_content: String,
 }
 
 fn tag(value: &str, provider: &str) -> Result<Tag> {
@@ -214,14 +215,60 @@ fn tag(value: &str, provider: &str) -> Result<Tag> {
     Ok(Tag {
         name: name.into(),
         href,
+        card_content: String::new(),
     })
 }
 
-fn fragment(input: &str, provider: &str) -> Result<(String, String, Vec<Vec<Value>>)> {
+/// Escape literal content before embedding it in Feishu card Markdown.
+fn card_text(input: &str) -> String {
+    let mut escaped = String::new();
+    for character in input.chars() {
+        if character.is_ascii_punctuation() {
+            escaped.push_str(&format!("&#{};", u32::from(character)));
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
+fn card_link(url: &str) -> String {
+    let mut escaped = String::new();
+    for character in url.chars() {
+        if character.is_ascii_whitespace() || "()<>\"'\\[]".contains(character) {
+            escaped.push_str(&format!("%{:02X}", u32::from(character)));
+        } else if character == '&' {
+            escaped.push_str("&amp;");
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
+fn card_wrap(input: &str, prefix: &str, suffix: &str) -> String {
+    input
+        .split("<br>")
+        .map(|line| {
+            let content = line.trim();
+            if content.is_empty() {
+                return line.to_owned();
+            }
+            format!(
+                "{}{prefix}{content}{suffix}{}",
+                &line[..line.len() - line.trim_start().len()],
+                &line[line.trim_end().len()..]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("<br>")
+}
+
+fn fragment(input: &str, provider: &str) -> Result<(String, String, String)> {
     let mut stack: Vec<Tag> = Vec::new();
     let mut html = String::new();
     let mut plain = String::new();
-    let mut lines = vec![Vec::new()];
+    let mut markdown = String::new();
     let mut rest = input;
     while !rest.is_empty() {
         if let Some(after) = rest.strip_prefix('<') {
@@ -236,6 +283,7 @@ fn fragment(input: &str, provider: &str) -> Result<(String, String, Vec<Vec<Valu
                         Ok(Tag {
                             name: "a".into(),
                             href: None,
+                            card_content: String::new(),
                         })
                     } else {
                         Err(Error::bad("HTML 结束标签无效"))
@@ -247,7 +295,25 @@ fn fragment(input: &str, provider: &str) -> Result<(String, String, Vec<Vec<Valu
                 if opened.name != closing.name {
                     return Err(Error::bad("HTML 标签嵌套不匹配"));
                 }
-                if provider != "feishu" || opened.name == "a" {
+                let content = opened.card_content;
+                let content = if let Some(url) = &opened.href {
+                    card_wrap(&content, "[", &format!("]({})", card_link(url)))
+                } else if stack.iter().any(|tag| tag.name == opened.name) {
+                    content
+                } else {
+                    match opened.name.as_str() {
+                        "b" => card_wrap(&content, "**", "**"),
+                        "i" => card_wrap(&content, "*", "*"),
+                        "s" => card_wrap(&content, "~~", "~~"),
+                        _ => content,
+                    }
+                };
+                stack
+                    .last_mut()
+                    .map(|tag| &mut tag.card_content)
+                    .unwrap_or(&mut markdown)
+                    .push_str(&content);
+                if provider != "feishu" || opened.name != "u" {
                     html.push_str(&format!("</{}>", opened.name));
                 }
             } else {
@@ -269,7 +335,7 @@ fn fragment(input: &str, provider: &str) -> Result<(String, String, Vec<Vec<Valu
                         "code/pre/blockquote 在此编辑器中须单独使用，不能嵌套其他标签",
                     ));
                 }
-                if provider != "feishu" || opened.name == "a" {
+                if provider != "feishu" || opened.name != "u" {
                     html.push_str(&format!(
                         "<{}{}>",
                         opened.name,
@@ -288,32 +354,18 @@ fn fragment(input: &str, provider: &str) -> Result<(String, String, Vec<Vec<Valu
             let text = decode(&rest[..end])?;
             plain.push_str(&text);
             html.push_str(&escape(&text));
-            for (index, part) in text.split('\n').enumerate() {
-                if index > 0 {
-                    lines.push(Vec::new());
-                }
-                if part.is_empty() {
-                    continue;
-                }
-                let node = if let Some(link) = stack.iter().find(|t| t.name == "a") {
-                    json!({"tag":"a","text":part,"href":link.href})
-                } else {
-                    json!({"tag":"text","text":part})
-                };
-                lines.last_mut().unwrap().push(node);
-            }
+            stack
+                .last_mut()
+                .map(|tag| &mut tag.card_content)
+                .unwrap_or(&mut markdown)
+                .push_str(&card_text(&text).replace('\n', "<br>"));
             rest = &rest[end..];
         }
     }
     if !stack.is_empty() {
         return Err(Error::bad("HTML 标签未闭合"));
     }
-    for line in &mut lines {
-        if line.is_empty() {
-            line.push(json!({"tag":"text","text":" "}));
-        }
-    }
-    Ok((html, plain, lines))
+    Ok((html, plain, markdown))
 }
 
 pub fn render(provider: &str, source: &Source, c: &Context) -> Result<Rendered> {
@@ -359,13 +411,22 @@ pub fn render(provider: &str, source: &Source, c: &Context) -> Result<Rendered> 
             .and_then(Value::as_str)
             .unwrap_or_default()
     );
-    let (html, plain, mut lines) = if source.format == "html" {
+    let (html, plain, markdown) = if source.format == "html" {
         fragment(&body, provider)?
     } else {
-        (escape(&body), body.clone(), vec![])
+        (escape(&body), body.clone(), String::new())
     };
+    if plain.trim().is_empty() {
+        return Err(Error::bad("渲染后的正文不能为空"));
+    }
     let text_body = format!("{subject}\n{plain}{footer}");
-    let html_body = if source.format == "html" {
+    let html_body = if provider == "feishu" && source.format == "html" {
+        format!(
+            "<b>{}</b>\n{html}<hr>{}",
+            escape(&subject),
+            escape(footer.trim_start())
+        )
+    } else if source.format == "html" {
         format!("<b>{}</b>\n{html}{}", escape(&subject), escape(&footer))
     } else {
         escape(&text_body)
@@ -380,8 +441,31 @@ pub fn render(provider: &str, source: &Source, c: &Context) -> Result<Rendered> 
             json!({"text":text_body,"link_preview_options":{"is_disabled":true}})
         }
     } else if source.format == "html" {
-        lines.push(vec![json!({"tag":"text","text":footer.trim_start()})]);
-        json!({"msg_type":"post","content":{"post":{"zh_cn":{"title":subject,"content":lines}}}})
+        let event = c
+            .get("event_type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let color = if event == "scanner.recovered" {
+            "green"
+        } else if c.get("severity").and_then(Value::as_str) == Some("critical") {
+            "red"
+        } else if matches!(event, "health.alert" | "scanner.offline") {
+            "orange"
+        } else {
+            "blue"
+        };
+        json!({
+            "msg_type":"interactive",
+            "card":{
+                "schema":"2.0",
+                "header":{"template":color,"title":{"tag":"plain_text","content":subject}},
+                "body":{"elements":[
+                    {"tag":"markdown","content":markdown},
+                    {"tag":"hr"},
+                    {"tag":"markdown","content":card_text(footer.trim_start())}
+                ]}
+            }
+        })
     } else {
         json!({"msg_type":"text","content":{"text":text_body}})
     };
@@ -456,19 +540,23 @@ mod tests {
             "now",
         );
         let feishu = render("feishu", &source, &c).unwrap();
-        assert_eq!(feishu.payload["msg_type"], "post");
+        assert_eq!(feishu.payload["msg_type"], "interactive");
+        assert_eq!(feishu.payload["card"]["schema"], "2.0");
         assert_eq!(
-            feishu.payload["content"]["post"]["zh_cn"]["content"][0][0]["text"],
-            "<script>&危险"
+            feishu.payload["card"]["header"]["title"],
+            json!({"tag":"plain_text","content":"登录"})
         );
-        assert!(
-            feishu.payload["content"]["post"]["zh_cn"]["content"][0][0]
-                .get("style")
-                .is_none()
+        assert_eq!(
+            feishu.payload["card"]["body"]["elements"][0],
+            json!({
+                "tag":"markdown",
+            "content":"**&#60;script&#62;&#38;危险**<br>[*查看*](https://example.com?a=1&amp;b=2)"
+            })
         );
+        assert!(feishu.payload.get("content").is_none());
         assert_eq!(
             feishu.html_body,
-            "<b>登录</b>\n&lt;script&gt;&amp;危险\n<a href=\"https://example.com?a=1&amp;b=2\">查看</a>\n事件 ID：id"
+            "<b>登录</b>\n<b>&lt;script&gt;&amp;危险</b>\n<a href=\"https://example.com?a=1&amp;b=2\"><i>查看</i></a><hr>事件 ID：id"
         );
         assert!(!feishu.html_body.contains("<script>"));
         let tg = render("telegram", &source, &c).unwrap();
@@ -478,6 +566,83 @@ mod tests {
         assert!(tg.html_body.contains("<b>&lt;script&gt;&amp;危险</b>"));
         assert!(tg.html_body.contains("<i>查看</i>"));
     }
+
+    #[test]
+    fn card_styles_nesting_line_breaks_and_links_preserve_literal_data() {
+        let source = Source {
+            format: "html".into(),
+            title_template: "{{ title }}".into(),
+            body_template: "<strong>  标题 <em>斜体</em> </strong>\n\n<del>删除</del> <ins>下划线</ins>\n<b>一\n二</b>\n<a href=\"https://example.com/a_(b)?q=[x]&amp;v=2\">{{ body }}</a>".into(),
+        };
+        let c = context(
+            "health.alert",
+            "<标题> [test]",
+            "**普通文本** <at id=all></at> [伪链接](https://evil.example) ![图片](x)",
+            "critical",
+            "id",
+            "now",
+        );
+        let rendered = render("feishu", &source, &c).unwrap();
+        let markdown = rendered.payload["card"]["body"]["elements"][0]["content"]
+            .as_str()
+            .unwrap();
+        assert!(
+            markdown
+                .starts_with("  **标题 *斜体*** <br><br>~~删除~~ 下划线<br>**一**<br>**二**<br>")
+        );
+        assert!(markdown.contains("&#42;&#42;普通文本&#42;&#42;"));
+        assert!(markdown.contains("&#60;at id&#61;all&#62;&#60;&#47;at&#62;"));
+        assert!(!markdown.contains("<at"));
+        assert!(!markdown.contains("!["));
+        assert!(!markdown.contains("[伪链接]"));
+        assert!(markdown.ends_with("](https://example.com/a_%28b%29?q=%5Bx%5D&amp;v=2)"));
+        assert!(!rendered.html_body.contains("<u>"));
+        assert!(rendered.html_body.contains("<s>删除</s>"));
+        assert_eq!(
+            rendered.payload["card"]["header"]["title"]["content"],
+            "<标题> [test]"
+        );
+        assert_eq!(rendered.payload["card"]["body"]["elements"][1]["tag"], "hr");
+        assert_eq!(
+            rendered.payload["card"]["body"]["elements"][2]["content"],
+            "事件 ID：id"
+        );
+    }
+
+    #[test]
+    fn card_header_colors_follow_event_and_severity_and_plain_text_stays_literal() {
+        for (event, severity, color) in [
+            ("health.alert", "warning", "orange"),
+            ("health.alert", "critical", "red"),
+            ("scanner.offline", "warning", "orange"),
+            ("scanner.recovered", "critical", "green"),
+            ("user.login", "warning", "blue"),
+            ("report.weekly", "warning", "blue"),
+        ] {
+            let mut c = sample_context(event);
+            c.insert("severity", severity);
+            let rendered = render("feishu", &event_default_source(event), &c).unwrap();
+            assert_eq!(rendered.payload["card"]["header"]["template"], color);
+        }
+        let source = Source {
+            body_template: "<b>literal</b> **literal**".into(),
+            ..default_source()
+        };
+        let rendered = render("feishu", &source, &sample_context("health.alert")).unwrap();
+        assert_eq!(rendered.payload["msg_type"], "text");
+        assert!(
+            rendered.payload["content"]["text"]
+                .as_str()
+                .unwrap()
+                .contains(&source.body_template)
+        );
+        let source = Source {
+            format: "html".into(),
+            body_template: "#".repeat(4000),
+            ..default_source()
+        };
+        assert!(render("feishu", &source, &sample_context("health.alert")).is_err());
+    }
     #[test]
     fn rejects_unsupported_styles_bad_nesting_and_unsafe_links() {
         for body in [
@@ -486,6 +651,7 @@ mod tests {
             "<b><i>x</b></i>",
             "<a href=\"javascript:alert(1)\">x</a>",
             "<b>x",
+            "<b> </b>",
             "&bogus;",
             "<a href=\"https://a\" onclick=\"x\">x</a>",
             "<a href=\"https://a\"><a href=\"https://b\">x</a></a>",
@@ -495,10 +661,12 @@ mod tests {
                 body_template: body.into(),
                 ..default_source()
             };
-            assert!(
-                render("telegram", &source, &sample_context("health.alert")).is_err(),
-                "{body}"
-            );
+            for provider in ["feishu", "telegram"] {
+                assert!(
+                    render(provider, &source, &sample_context("health.alert")).is_err(),
+                    "{provider}: {body}"
+                );
+            }
         }
     }
     #[test]

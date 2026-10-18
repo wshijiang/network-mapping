@@ -7,7 +7,7 @@
 ## 配置、发布与恢复
 
 1. 选择渠道类型和事件。飞书和 Telegram 各有健康告警、Scanner 掉线、Scanner 恢复、登录、周报、月报六个独立模板；邮件保留既有事件模板，Scanner 掉线/恢复共用邮件模板。
-2. 选择纯文本或 HTML 富文本，填写标题、正文。飞书的 HTML 是便于编辑的受限语法，后端会转换为飞书原生 `post` JSON。
+2. 选择纯文本或 HTML 富文本，填写标题、正文。飞书的 HTML 是便于编辑的受限语法，后端会自动转换为 JSON 2.0 消息卡片（`msg_type: interactive`）。
 3. 编辑后自动在线预览，也可手动刷新。查看效果、文本和最终消息数据，校验错误会直接显示。机器人模板在预览、保存、发布及历史恢复时同时验证 `warning`、`critical` 两种示例，避免严重告警的条件分支漏检；预览和模板测试可选择 `warning` 或 `critical` 示例。邮件继续使用原有「校验并预览」。
 4. 保存草稿不改变实际通知。发布时先保存未保存修改，再发布该草稿。历史版本可恢复为新草稿，重新发布后生效。
 
@@ -20,12 +20,14 @@
 | 渠道 | 本功能支持的格式 | 样式与限制 |
 | --- | --- | --- |
 | 邮件 | HTML + 备用纯文本 | CSS 内联及允许的样式属性；不加载远程样式表，最终以邮件客户端为准 |
-| 飞书 | text / post | 保留标题、换行和 `a` 超链接；自定义机器人不支持节点 `style` 字段，已有 `b/strong/i/em/u/ins/s/strike/del` 标签兼容解析为普通文本，预览与发送一致 |
+| 飞书 | text / interactive 消息卡片 | `b/strong` 粗体、`i/em` 斜体、`s/strike/del` 删除线、`a` 超链接转换为卡片 Markdown；`u/ins` 下划线兼容显示为普通文本，预览与发送一致 |
 | Telegram | text / HTML parse_mode | `b/strong` 粗体、`i/em` 斜体、`u/ins` 下划线、`s/strike/del` 删除线、`a` 超链接，另支持 `code`、`pre`、`blockquote`、`tg-spoiler`；本编辑器要求 code/pre/blockquote 单独使用，不能与其他标签嵌套 |
 
-HTML 换行直接输入换行符，不使用 `<br>`、`<p>` 或 `<div>`。链接仅支持带引号的 `href`，且地址必须为不含账号密码的 HTTP/HTTPS URL。HTML 实体支持 `amp/lt/gt/quot/apos` 和有效数字实体。富文本不支持 CSS、任意 HTML 属性、图片、卡片 JSON 或 Telegram 新版 `sendRichMessage`；这些属于平台的其他消息能力，不在本次模板编辑范围内。除上述飞书旧样式标签兼容处理外，遇到不支持的格式会拒绝保存/发布。
+HTML 换行直接输入换行符，不使用 `<br>`、`<p>` 或 `<div>`。链接仅支持带引号的 `href`，且地址必须为不含账号密码的 HTTP/HTTPS URL。HTML 实体支持 `amp/lt/gt/quot/apos` 和有效数字实体。富文本不支持 CSS、任意 HTML 属性、图片、自定义卡片 JSON 或 Telegram 新版 `sendRichMessage`。除上述飞书下划线标签兼容处理外，遇到不支持的格式会拒绝保存/发布。
 
-飞书应用机器人接口的富文本 `style` 能力不适用于自定义机器人 Webhook。旧版本包含该字段的消息可能返回 HTTP 200、服务码 `19002`；当前版本发送前也会清理已入队测试快照中的 `style`，有效期内的失败投递可手动重试，无需重建渠道或重新发布模板。服务码 `19002` / `9499` 记录为 `invalid_payload`（消息格式无效），不再提示检查凭据。
+飞书卡片使用纯文本标题、Markdown 正文、分隔线和事件 ID。健康告警和 Scanner 掉线使用橙色标题，严重级别使用红色，Scanner 恢复使用绿色，其他普通通知使用蓝色。现有 HTML 模板自动适配卡片，无需重新发布或重建渠道；纯文本模板继续发送 `text` 消息。变量和正文中的 Markdown 特殊字符按字面转义，链接目标单独编码，换行转换为卡片支持的换行。
+
+飞书应用机器人接口的富文本 `style` 能力不适用于自定义机器人 Webhook。旧版本包含该字段的消息可能返回 HTTP 200、服务码 `19002`；发送前仍会清理已入队旧 `post` 测试快照中的 `style`，这些快照保持原消息类型，有效期内的失败投递可手动重试。新建富文本测试和真实事件使用卡片。服务码 `19002` / `9499` 记录为 `invalid_payload`（消息格式无效）。
 
 例如选择 HTML 富文本：
 
@@ -59,7 +61,7 @@ HTML 换行直接输入换行符，不使用 `<br>`、`<p>` 或 `<div>`。链接
 
 ## 在线预览的边界
 
-三个渠道都支持在线预览。邮件使用经过安全处理的浏览器 HTML 预览；飞书、Telegram 使用与实际发送相同的服务端模板渲染结果，浏览器模拟展示字体样式、链接和换行。
+三个渠道都支持在线预览。邮件使用经过安全处理的浏览器 HTML 预览；飞书、Telegram 使用与实际发送相同的服务端模板渲染结果，浏览器模拟展示字体样式、链接和换行。飞书卡片预览额外显示卡片边框、标题底色和事件 ID 分隔线。
 
 **飞书、Telegram 没有在本项目中接入可嵌入的官方客户端原样预览服务。** 模拟预览不能保证客户端字体、主题、链接确认提示、引用和剧透显示完全一致，页面会明确提示。预览采用固定示例数据，不访问真实用户数据、不发送消息、不打开链接，也不加载外部资源。最终效果应在真实客户端确认。
 
@@ -101,4 +103,4 @@ API 仅管理员可用，写请求受既有 CSRF 校验保护。模板变更与�
 
 验证命令：`cargo test --locked notification::`；使用可丢弃 PostgreSQL 并设置 `NOTIFICATION_TEST_DATABASE_URL` 后运行 `cargo test --locked notification:: -- --ignored`。前端运行 `pnpm test:notifications` 和 `pnpm build`。
 
-协议参考：[飞书消息结构](https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json)、[飞书自定义机器人](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)、[Telegram HTML](https://core.telegram.org/bots/api#html-style)。
+协议参考：[飞书卡片 Markdown](https://open.feishu.cn/document/feishu-cards/card-json-v2-components/content-components/rich-text)、[飞书自定义机器人](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)、[Telegram HTML](https://core.telegram.org/bots/api#html-style)。
