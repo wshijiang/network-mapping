@@ -133,7 +133,8 @@ pub(crate) fn infer(
         }
     }
     if let Some(data) = data {
-        if data.get("schema_version").and_then(Value::as_u64) == Some(2) {
+        let legacy = data.get("schema_version").is_none();
+        if legacy || data.get("schema_version").and_then(Value::as_u64) == Some(2) {
             if let Some(items) = data.get("evidence").and_then(Value::as_array) {
                 for (index, item) in items.iter().take(MAX_EVIDENCE).enumerate() {
                     let module = item.get("module").and_then(Value::as_str).unwrap_or("");
@@ -149,9 +150,8 @@ pub(crate) fn infer(
                     }
                 }
             }
-        } else if data.get("schema_version").is_none() {
-            // Older nodes retained the zgrab module envelope directly.
-            if let Some(result) = data.get("result") {
+            // Older nodes used both evidence arrays and direct zgrab envelopes.
+            if legacy && let Some(result) = data.get("result") {
                 extract(
                     &mut evidence,
                     service.unwrap_or(""),
@@ -538,6 +538,47 @@ mod tests {
             .status,
             "unknown"
         );
+    }
+    #[test]
+    fn legacy_probe_arrays_keep_system_fields_without_a_banner() {
+        for (module, result, family) in [
+            (
+                "http",
+                json!({"response":{"headers":{"Server":["Microsoft-IIS/10.0"]}}}),
+                "windows",
+            ),
+            ("smb", json!({"native_os":"Windows Server 2019"}), "windows"),
+            ("rdp", json!({"server_os":"Ubuntu 22.04.3 LTS"}), "linux"),
+        ] {
+            let data = json!({"evidence":[{"module":module,"result":result}]});
+            let os = infer(
+                None,
+                None,
+                Some(&data),
+                8080,
+                1000,
+                Some("legacy-observation"),
+            );
+            assert_eq!(os.family.as_deref(), Some(family), "{module}");
+            assert!(
+                os.evidence[0]
+                    .field_path
+                    .starts_with("/data/evidence/0/result/")
+            );
+            assert_eq!(
+                os.evidence[0].observation_ref.as_deref(),
+                Some("legacy-observation")
+            );
+
+            // Direct zgrab envelopes from older nodes remain supported too.
+            let direct = json!({"result":result});
+            assert_eq!(
+                infer(Some(module), None, Some(&direct), 8080, 1000, None)
+                    .family
+                    .as_deref(),
+                Some(family)
+            );
+        }
     }
     #[test]
     fn conflict_and_correlated_fields_are_preserved() {

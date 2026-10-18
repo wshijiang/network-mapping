@@ -279,19 +279,8 @@ impl ElasticsearchService {
             {
                 return Err("OS bulk update failed or incomplete".into());
             }
-            let refreshed = self
-                .send_json_request(
-                    ElasticsearchOperation::IndexAdmin,
-                    Method::POST,
-                    &format!(
-                        "/{},{}/_refresh",
-                        self.inner.config.execution_endpoint_index,
-                        self.inner.config.current_endpoint_index
-                    ),
-                    |r| r,
-                )
-                .await?;
-            validate_scan_search_response(&refreshed)?;
+            // Later pages read immutable observations, not endpoint search
+            // results. Leave visibility to the configured refresh interval.
         }
         Ok((cursor, hits.len() < size))
     }
@@ -300,6 +289,76 @@ impl ElasticsearchService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn paged_os_enrichment_does_not_force_index_refreshes() {
+        let fixture = super::super::storage_tests::EsFixture::start();
+        let service = ElasticsearchService::new(ElasticsearchConfig {
+            url: fixture.url.clone(),
+            projection_page_size: 2,
+            bulk_max_retries: 0,
+            ..ElasticsearchConfig::default()
+        })
+        .unwrap();
+        service.open_api_test_ready();
+        let hit = |port: u16| {
+            json!({
+                "_index":"network-mapping-scan-observations-2026.10", "_id":format!("service-{port}"),
+                "_source":{"ip_address":"192.0.2.1", "port":port, "observed_at":1000,
+                    "service":"ssh", "banner":"SSH-2.0-OpenSSH_9.6 Ubuntu"},
+                "sort":["192.0.2.1",port,1000,format!("service-{port}")]
+            })
+        };
+        fixture.state.lock().unwrap().search_responses = [
+            json!({"hits":{"hits":[hit(22),hit(2222)]},"_shards":{"failed":0}}),
+            json!({"hits":{"hits":[hit(2223)]},"_shards":{"failed":0}}),
+        ]
+        .into();
+        let mut job = OsJob {
+            execution_id: 1,
+            token: Uuid::new_v4(),
+            attempts: 1,
+            cursor: None,
+            api_client_id: None,
+            context: ScanBatchContext {
+                task_id: "task".into(),
+                execution_id: "execution".into(),
+                user_id: 1,
+                task_source: "manual".into(),
+                scanner_id: "scanner".into(),
+                scanner_name: None,
+                upload_id: "upload".into(),
+                batch_index: 0,
+                is_final: true,
+            },
+        };
+        let (cursor, done) = service.enrich_os_page(&job).await.unwrap();
+        assert!(!done);
+        assert_eq!(
+            cursor,
+            Some(json!(["192.0.2.1", 2222, 1000, "service-2222"]))
+        );
+        job.cursor = cursor;
+        let (_, done) = service.enrich_os_page(&job).await.unwrap();
+        assert!(done);
+        let state = fixture.state.lock().unwrap();
+        assert_eq!(state.query_bodies.len(), 2);
+        assert_eq!(state.query_bodies[1].1["search_after"], job.cursor.unwrap());
+        assert_eq!(
+            state
+                .requests
+                .iter()
+                .filter(|path| path.contains("/_bulk"))
+                .count(),
+            2
+        );
+        assert!(
+            state
+                .requests
+                .iter()
+                .all(|path| !path.contains("_refresh") && !path.contains("refresh="))
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
     async fn os_jobs_wait_for_publication_and_recover_expired_leases() {
@@ -409,6 +468,10 @@ mod tests {
             for _ in 0..5 {
                 if !service.process_os_detection_outbox(&pool).await? { break; }
             }
+            // Production uses normal near-real-time refresh. Make this test's
+            // search visibility deterministic without refreshing each page.
+            service.send_json_request(ElasticsearchOperation::IndexAdmin,Method::POST,
+                &format!("/{},{}/_refresh",service.inner.config.execution_endpoint_index,service.inner.config.current_endpoint_index),|r|r).await?;
             let job=OsJob { execution_id:1, token:Uuid::new_v4(),attempts:1,cursor:None,context:context.clone(),api_client_id:Some(77) };
             let results=service.scan_query(ScanQueryIndex::CurrentEndpoints,&json!({"size":10,"query":{"match_all":{}}})).await?;
             let hits=results.pointer("/hits/hits").and_then(Value::as_array).ok_or("missing enriched hits")?;

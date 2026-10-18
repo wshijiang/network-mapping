@@ -12,6 +12,7 @@ pub(super) struct FixtureState {
     pub(super) fail_path: Option<String>,
     pub(super) max_request_line_bytes: Option<usize>,
     pub(super) count_responses: std::collections::VecDeque<Value>,
+    pub(super) search_responses: std::collections::VecDeque<Value>,
     pub(super) delay_path: Option<String>,
     pub(super) delay_ms: u64,
     pub(super) projection_bulk_sizes: Vec<usize>,
@@ -252,6 +253,9 @@ fn fixture_response(state: &mut FixtureState, _method: &str, path: &str, body: &
     if path.contains("_search") {
         let request: Value = serde_json::from_str(body).unwrap();
         state.query_bodies.push((path.into(), request.clone()));
+        if let Some(response) = state.search_responses.pop_front() {
+            return response;
+        }
         if path.contains("network-mapping-dns-observations/_search")
             && request.pointer("/query/bool/filter").is_some()
         {

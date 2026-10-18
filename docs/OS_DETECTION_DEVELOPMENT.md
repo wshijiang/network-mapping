@@ -11,7 +11,8 @@
 识别工作由现有 ES 后台循环调度，每轮处理一个有界页面，与资产发布和标签任务轮流执行。
 
 扫描器上传协议保持兼容。当前 `ServiceObservation.data.schema_version = 2` 使用
-`evidence[].module` / `evidence[].result`；解析器也兼容不带 schema 版本的旧模块 envelope。
+`evidence[].module` / `evidence[].result`；解析器也兼容无 schema 版本的旧 `evidence` 数组
+及直接 `result` 模块 envelope。
 未知 schema 版本不进行递归字符串匹配，仍可使用独立的协议 Banner。
 
 只读取协议所属的白名单字段：SSH `server_id.raw/software`、HTTP `response.headers` 中的
@@ -37,8 +38,10 @@
 已发布。`SKIP LOCKED`、claim token 和租约防止并发领取；过期任务可恢复。
 
 每个 ES 页面最多 64 条 service observation，游标由 IP、端口、观察时间与 observation key
-组成。PG 连接不会跨越 ES 请求；ES 请求期间单独续租。每项 Bulk 结果和刷新后的分片状态
-通过验证后才推进游标，失败保留游标并退避重试。
+组成。PG 连接不会跨越 ES 请求；ES 请求期间单独续租。每项 Bulk 结果通过验证后才推进
+游标，失败保留游标并退避重试。后续页面仅读取原始观察，不依赖端点投影立即可搜索；
+识别阶段不主动刷新索引，结果遵循 ES 配置的正常刷新周期。任务完成表示写入已确认，
+查询可见性可能稍晚；若运维禁用自动刷新，需要按维护策略自行恢复或刷新。
 
 ## 原始事实与投影
 
