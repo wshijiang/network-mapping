@@ -18,6 +18,11 @@
 置信等级、证据类型、规则 ID、字段路径、原始观察引用及证据时间。
 搜索页导出当前页 CSV 时同时导出技术栈、识别状态、证据时间、过期标记和规则版本。
 
+控制台在技术名称前展示本地 SVG，搜索、资产详情及任务详情共用相同组件。品牌或家族
+图标与通用服务符号的范围、来源和许可见
+[Web 技术标签图标](https://github.com/wshijiang/network-mapping-vue/blob/feat/web-technology-detection/docs/WEB_TECHNOLOGY_ICONS.md)。
+图标不参与服务端识别，不改变 `tech` 搜索语义；通用 S3 使用存储符号，不表示 AWS 产品身份。
+
 | 状态 | 含义 |
 | --- | --- |
 | `pending` | 后台等待处理已有服务证据 |
