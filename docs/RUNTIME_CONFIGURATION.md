@@ -60,6 +60,14 @@
 
 `general` 另有每 5 秒刷新数据库的后台循环。其他运行策略目前没有通用的 15 秒 revision 轮询，也没有 PostgreSQL `NOTIFY` 同步机制。多实例部署时不能假定一次发布会自动同步所有实例；其他实例需重新启动加载数据库中的配置。直接修改数据库也不会立即更新这些域的进程内快照。
 
+## 登录保护配置
+
+`human_verification` 复用配置及修订表，通过独立的 `GET/PUT /api/config/human-verification` 管理，页面入口为“设置 → 登录保护”。它不属于上面的通用运行配置接口，写入字段使用 `expected_revision`、`document`、`secret_key`、`clear_secret` 和 `change_reason`。
+
+TOML/env 只初始化缺失记录；保存后的数据库记录优先。Secret 使用 `server.encrypt_key` 进行 AES-256-GCM 加密，接口只返回 `secret_key_configured` 状态。留空保留，显式清除或填写新值才变更密钥。完整配置、修订和审计在同一事务中保存，并检查 revision，冲突返回 409。
+
+每次新的登录页、公开配置和密码登录都读取数据库权威版本，各实例按版本复用已校验的验证器，不需要轮询或重启。读库失败、记录丢失或配置无效时拒绝新的登录，不回退到旧的关闭策略。已开始的请求使用该请求取得的配置，已登录会话沿用原规则。完整字段、CSP 和停用步骤见[登录人机验证](HUMAN_VERIFICATION.md)。
+
 ## 扫描器运行配置
 
 扫描器运行参数是另一套独立配置，按扫描器保存到 `scanner_runtime_configuration` 及其修订表，不属于上面的全局 namespace：

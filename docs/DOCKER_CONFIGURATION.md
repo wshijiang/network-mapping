@@ -101,7 +101,7 @@ docker compose --env-file docker/.env -f docker/compose.example.yml up -d --forc
 
 ### 登录人机验证
 
-默认关闭，启用前必须部署配套前端。所有字段为启动配置，修改后重建容器，不属于运行时 namespace。详细行为见[登录人机验证](HUMAN_VERIFICATION.md)。
+默认关闭，启用前必须部署配套前端。管理员通过“设置 → 登录保护”保存后，对新的登录请求生效，无需重建容器。下面的环境变量仅在数据库缺少配置时作为初始化种子；已有记录不会被文件、环境变量或重启覆盖。该域复用配置表，通过独立管理 API 保存，Secret 使用 `server.encrypt_key` 加密。多实例需共享数据库和相同加密主密钥。详细行为见[登录人机验证](HUMAN_VERIFICATION.md)。
 
 | 环境变量 | 类型 | 容器默认值 | 作用与约束 |
 | --- | --- | --- | --- |

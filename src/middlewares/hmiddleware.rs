@@ -12,12 +12,7 @@ use futures_util::future::LocalBoxFuture;
 pub(crate) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; connect-src 'self' https://api.github.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:;";
 
 pub(crate) fn content_security_policy(req: &actix_web::HttpRequest) -> &'static str {
-    let provider = req
-        .app_data::<actix_web::web::Data<crate::human_verification::HumanVerificationService>>()
-        .map_or(
-            crate::human_verification::config::ProviderKind::None,
-            |service| service.provider_kind(),
-        );
+    let provider = crate::human_verification::request_provider_kind(req);
     match provider {
         crate::human_verification::config::ProviderKind::None => CONTENT_SECURITY_POLICY,
         crate::human_verification::config::ProviderKind::Turnstile => {
@@ -71,13 +66,13 @@ where
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let immutable_asset = req.path().starts_with("/assets/");
         let https = crate::tls::request_uses_https(req.request());
-        let csp = content_security_policy(req.request());
         let fut = self.service.call(req);
 
         Box::pin(async move {
             // 可以在此之前拦截请求
 
             let mut res = fut.await?;
+            let csp = content_security_policy(res.request());
 
             // 在此拦截响应
 

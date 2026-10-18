@@ -430,4 +430,4 @@ sudo journalctl -u network-mapping-server -n 100 --no-pager
 
 ## 可选登录人机验证
 
-默认关闭。启用 Cloudflare Turnstile 前先部署配套前端，准备 widget 密钥、允许域名和浏览器/服务端出站访问；配置修改后重启，启用后旧客户端必须携带证明。完整参数、CSP、升级与停用步骤见[登录人机验证](HUMAN_VERIFICATION.md)。
+默认关闭。启用 Cloudflare Turnstile 前先部署配套前端，准备 widget 密钥、允许域名和浏览器/服务端出站访问；管理员在“设置 → 登录保护”保存，对新登录生效，已打开的登录页需刷新。文件/env 只初始化缺失记录，Secret 在数据库中加密，需保管并备份 `server.encrypt_key`；多实例共用数据库及主密钥。启用后旧客户端必须携带证明。完整参数、CSP、升级与停用步骤见[登录人机验证](HUMAN_VERIFICATION.md)。

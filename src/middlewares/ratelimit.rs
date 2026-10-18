@@ -141,11 +141,13 @@ fn policy_for_path(path: &str) -> Option<RateLimitPolicy> {
         });
     }
     match path {
-        crate::human_verification::CONFIG_PATH => Some(RateLimitPolicy {
-            max_requests: 60,
-            window: Duration::from_secs(60),
-            message: "验证配置请求过于频繁，请稍后再试",
-        }),
+        crate::human_verification::CONFIG_PATH | "/login" | "/login.html" => {
+            Some(RateLimitPolicy {
+                max_requests: 60,
+                window: Duration::from_secs(60),
+                message: "验证配置请求过于频繁，请稍后再试",
+            })
+        }
         "/api/scanner/diagnostics/chunk"
         | "/api/scanner/diagnostics/upload-status"
         | "/api/scanner/diagnostics/ack"

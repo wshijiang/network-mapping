@@ -236,7 +236,7 @@ fn sensitive(path: &str) -> bool {
 fn source_for(section: &str) -> &'static str {
     match section {
         "requests" | "monitor" | "automatic_target" | "dns_follow_up" | "analytics_snapshot"
-        | "report_mail" => "database_seed",
+        | "report_mail" | "human_verification" => "database_seed",
         _ => "startup",
     }
 }
@@ -439,6 +439,7 @@ max_output_bytes = 1048576
             "dns_follow_up",
             "analytics_snapshot",
             "report_mail",
+            "human_verification",
         ] {
             assert!(
                 !report

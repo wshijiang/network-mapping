@@ -83,10 +83,6 @@ pub async fn run(args: Clis) -> io::Result<()> {
     );
     config_check.emit_startup();
     config.check();
-    let human_verification =
-        web::Data::new(crate::human_verification::HumanVerificationService::new(
-            config.human_verification.clone(),
-        )?);
     let request_log_config = config.requests.clone();
     let monitor_config = config.monitor.clone();
     let elasticsearch_config = config.elasticsearch.clone();
@@ -240,6 +236,15 @@ pub async fn run(args: Clis) -> io::Result<()> {
         println!("分析快照重建完成：已处理 {processed} 个扫描执行");
         return Ok(());
     }
+    let human_verification = web::Data::new(
+        crate::human_verification::settings::ManagedVerification::initialize(
+            db_pool.clone(),
+            &ser_con.encrypt_key,
+            config.human_verification.clone(),
+        )
+        .await
+        .map_err(|_| io::Error::other("无法加载登录保护配置"))?,
+    );
     let runtime_settings = RuntimeSettings::load(
         &db_pool,
         RuntimeSettingsBootstrap {

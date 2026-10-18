@@ -2720,19 +2720,18 @@ mod human_verification_config_tests {
     }
 
     #[test]
-    fn inactive_provider_parameters_are_optional_and_secret_is_not_in_inspection_defaults() {
+    fn web_managed_provider_parameters_do_not_generate_bootstrap_file_notices() {
         let report = crate::config_check::inspect_server(&serde_json::json!({}));
         let items: Vec<_> = report
             .items
             .iter()
             .filter(|item| item.field.starts_with("human_verification.turnstile."))
             .collect();
-        assert!(!items.is_empty());
+        assert!(items.is_empty());
         assert!(
-            items
-                .iter()
-                .all(|item| item.kind == crate::config_check::ConfigIssueKind::Optional)
+            !crate::human_verification::config::HumanVerificationConfig::inspection_defaults()
+                .to_string()
+                .contains("secret_key")
         );
-        assert!(items.iter().all(|item| !item.field.contains("secret")));
     }
 }

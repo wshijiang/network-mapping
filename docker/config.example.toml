@@ -213,7 +213,8 @@ p = 2
 # account_username = "no-reply@example.com"
 # account_password = "replace-with-smtp-password"
 
-# 可选人机验证。默认关闭；启用前部署配套前端并填写域名与密钥。
+# 可选人机验证的首次初始化种子。已有数据库记录不会被文件覆盖。
+# 默认关闭；部署配套前端后在“设置 → 登录保护”管理，保存后对新登录生效。
 [human_verification]
 provider = "none"
 actions = ["login"]

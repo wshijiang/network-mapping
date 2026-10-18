@@ -1,10 +1,12 @@
 //! Optional browser proof validation. The server owns policy; clients only carry tokens.
 pub mod config;
 mod provider;
+mod routes;
+pub mod settings;
 mod turnstile;
 
 use actix_web::{
-    HttpRequest, HttpResponse,
+    HttpMessage, HttpRequest, HttpResponse,
     http::{StatusCode, header},
     web,
 };
@@ -148,6 +150,7 @@ impl HumanVerificationService {
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
+    cfg.configure(routes::configure);
     cfg.service(
         web::resource(CONFIG_PATH)
             .route(web::get().to(public_config))
@@ -155,10 +158,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     );
 }
 
-async fn public_config(
-    req: HttpRequest,
-    service: web::Data<HumanVerificationService>,
-) -> HttpResponse {
+async fn public_config(req: HttpRequest) -> HttpResponse {
+    let service = match for_request(&req).await {
+        Ok(service) => service,
+        Err(error) => return error.response(&req),
+    };
     let mut response = HttpResponse::Ok();
     response.insert_header((header::CACHE_CONTROL, "no-store"));
     if req.method() == actix_web::http::Method::HEAD {
@@ -166,6 +170,44 @@ async fn public_config(
     } else {
         response.json(service.public_config())
     }
+}
+
+#[derive(Clone)]
+struct RequestVerification(Arc<HumanVerificationService>);
+
+/// Resolve once per request so a concurrent publication cannot split verification and CSP.
+pub async fn for_request(
+    req: &HttpRequest,
+) -> Result<Arc<HumanVerificationService>, VerificationError> {
+    if let Some(value) = req.extensions().get::<RequestVerification>() {
+        return Ok(value.0.clone());
+    }
+    let service = if let Some(settings) = req.app_data::<web::Data<settings::ManagedVerification>>()
+    {
+        settings
+            .fresh()
+            .await
+            .map_err(|_| VerificationError::Unavailable("configuration_unavailable"))?
+    } else if let Some(service) = req.app_data::<web::Data<HumanVerificationService>>() {
+        // Static embedding remains supported for isolated consumers and provider tests.
+        Arc::new(service.get_ref().clone())
+    } else {
+        return Err(VerificationError::Unavailable("configuration_missing"));
+    };
+    req.extensions_mut()
+        .insert(RequestVerification(service.clone()));
+    Ok(service)
+}
+
+pub(crate) fn request_provider_kind(req: &HttpRequest) -> ProviderKind {
+    if let Some(value) = req.extensions().get::<RequestVerification>() {
+        return value.0.provider_kind();
+    }
+    if let Some(settings) = req.app_data::<web::Data<settings::ManagedVerification>>() {
+        return settings.cached().provider_kind();
+    }
+    req.app_data::<web::Data<HumanVerificationService>>()
+        .map_or(ProviderKind::None, |service| service.provider_kind())
 }
 
 pub fn is_public_request(method: &actix_web::http::Method, path: &str) -> bool {

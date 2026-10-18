@@ -29,6 +29,7 @@ const SPA_ROUTES: &[&str] = &[
     "/setting/maintenance",
     "/setting/scan",
     "/setting/runtime",
+    "/setting/human-verification",
     "/setting/mail-templates",
     "/user/info",
     "/user/security",
@@ -276,6 +277,13 @@ async fn login_page(
     req: HttpRequest,
     assets: web::Data<FrontendAssets>,
 ) -> actix_web::Result<HttpResponse> {
+    if req
+        .app_data::<web::Data<crate::human_verification::settings::ManagedVerification>>()
+        .is_some()
+        && let Err(error) = crate::human_verification::for_request(&req).await
+    {
+        return Ok(error.response(&req));
+    }
     html_response(&req, &assets, "login.html").await
 }
 

@@ -89,13 +89,19 @@ pub(crate) async fn user_login_h(
     req: HttpRequest,
     pool: web::Data<deadpool_postgres::Pool>,
     server_config: web::Data<ServerConfig>,
-    verification: web::Data<crate::human_verification::HumanVerificationService>,
     receiveinfo: web::Json<ReceiveLoginInfo>,
 ) -> impl Responder {
     let total_start = Instant::now(); // 总的开始时间
     let start = Instant::now(); // 登录函数开始时间
     let p = pool.get_ref();
     let source_ip = request_ip(&req);
+    let verification = match crate::human_verification::for_request(&req).await {
+        Ok(service) => service,
+        Err(error) => {
+            set_reason(&req, "human_verification_unavailable");
+            return error.response(&req);
+        }
+    };
     let verification_start = Instant::now();
     if let Err(error) = verification
         .verify_login(receiveinfo.human_verification.as_ref(), source_ip)
