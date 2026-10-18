@@ -8,9 +8,10 @@ use crate::admin::{UserBaseI, smtp_send_error_message};
 use crate::audit::{AuditContext, AuditEvent, write_standalone};
 use crate::config::ServerConfig;
 use crate::mail_template::{
-    MailTemplateSource, audit_source_metadata, get_template_detail, list_template_versions,
-    list_templates, publish_template, restore_template_version, save_template_draft,
-    send_template_test, validate_template, validation_error_message,
+    MailTemplateSource, ScannerNotificationState, audit_source_metadata, get_template_detail,
+    list_template_versions, list_templates, preview_template, publish_template,
+    restore_template_version, save_template_draft, send_template_test, validate_template,
+    validation_error_message,
 };
 
 #[derive(Deserialize)]
@@ -18,6 +19,13 @@ use crate::mail_template::{
 pub struct TemplateTestRequest {
     recipient: String,
     source: MailTemplateSource,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateSampleOptions {
+    #[serde(default)]
+    notification_state: ScannerNotificationState,
 }
 
 // Callers immediately return the response, so preserving the unboxed type
@@ -105,12 +113,13 @@ pub async fn validate_mail_template(
 pub async fn preview_mail_template(
     path: web::Path<String>,
     source: web::Json<MailTemplateSource>,
+    options: web::Query<TemplateSampleOptions>,
     user: UserBaseI,
 ) -> impl Responder {
     if let Err(response) = require_admin(&user) {
         return response;
     }
-    match validate_template(&path.into_inner(), &source) {
+    match preview_template(&path.into_inner(), &source, options.notification_state) {
         Ok(rendered) => HttpResponse::Ok().json(json!({"success": true, "data": rendered})),
         Err(error_value) => HttpResponse::BadRequest().json(json!({
             "success": false,
@@ -251,6 +260,7 @@ pub async fn test_mail_template(
     req: HttpRequest,
     path: web::Path<String>,
     body: web::Json<TemplateTestRequest>,
+    options: web::Query<TemplateSampleOptions>,
     pool: web::Data<Pool>,
     server_config: web::Data<ServerConfig>,
     user: UserBaseI,
@@ -274,6 +284,7 @@ pub async fn test_mail_template(
         &template_key,
         body.recipient.trim(),
         &body.source,
+        options.notification_state,
     )
     .await
     {
@@ -308,5 +319,29 @@ pub async fn test_mail_template(
                 "detail": error_value.to_string()
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ScannerNotificationState, TemplateSampleOptions};
+
+    #[test]
+    fn sample_options_default_to_offline_and_reject_unknown_states() {
+        let defaults: TemplateSampleOptions = serde_json::from_str("{}").unwrap();
+        assert!(matches!(
+            defaults.notification_state,
+            ScannerNotificationState::Offline
+        ));
+        let recovered: TemplateSampleOptions =
+            serde_json::from_str(r#"{"notificationState":"recovered"}"#).unwrap();
+        assert!(matches!(
+            recovered.notification_state,
+            ScannerNotificationState::Recovered
+        ));
+        assert!(
+            serde_json::from_str::<TemplateSampleOptions>(r#"{"notificationState":"invalid"}"#)
+                .is_err()
+        );
     }
 }

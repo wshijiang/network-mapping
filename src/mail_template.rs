@@ -9,7 +9,7 @@ pub use nm_report_renderer::{
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use lettre::{Message, message::Mailbox, message::MultiPart};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tera::Context;
 
@@ -30,6 +30,14 @@ const DEFAULT_SCANNER_OUTAGE_SUBJECT: &str =
     "{{ system_name }} 扫描器{{ event_label }}：{{ scanner_name }}";
 const DEFAULT_SCANNER_OUTAGE_HTML: &str = include_str!("../templates/mail/scanner_outage.html");
 const DEFAULT_SCANNER_OUTAGE_TEXT: &str = include_str!("../templates/mail/scanner_outage.txt");
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScannerNotificationState {
+    #[default]
+    Offline,
+    Recovered,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -409,7 +417,32 @@ pub fn validate_template(
     template_key: &str,
     source: &MailTemplateSource,
 ) -> Result<RenderedMailTemplate, Box<dyn std::error::Error>> {
-    let context = sample_context(template_key)?;
+    preview_template(template_key, source, ScannerNotificationState::default())
+}
+
+fn sample_context_for_state(
+    template_key: &str,
+    state: ScannerNotificationState,
+) -> Result<Context, Box<dyn std::error::Error>> {
+    let mut context = sample_context(template_key)?;
+    if template_key == SCANNER_OUTAGE_TEMPLATE_KEY {
+        context.insert(
+            "event_label",
+            match state {
+                ScannerNotificationState::Offline => "掉线",
+                ScannerNotificationState::Recovered => "恢复",
+            },
+        );
+    }
+    Ok(context)
+}
+
+pub fn preview_template(
+    template_key: &str,
+    source: &MailTemplateSource,
+    state: ScannerNotificationState,
+) -> Result<RenderedMailTemplate, Box<dyn std::error::Error>> {
+    let context = sample_context_for_state(template_key, state)?;
     render_template(template_key, source, &context)
 }
 
@@ -787,8 +820,9 @@ pub async fn send_template_test(
     template_key: &str,
     recipient: &str,
     source: &MailTemplateSource,
+    state: ScannerNotificationState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut context = sample_context(template_key)?;
+    let mut context = sample_context_for_state(template_key, state)?;
     if matches!(
         template_key,
         REPORT_WEEKLY_TEMPLATE_KEY | REPORT_MONTHLY_TEMPLATE_KEY
@@ -1074,8 +1108,9 @@ pub(crate) async fn send_archived_report(
 mod tests {
     use super::{
         LOGIN_SUCCESS_TEMPLATE_KEY, MailTemplateSource, SCANNER_OUTAGE_TEMPLATE_KEY,
-        default_source, login_context, normalize_user_notification_recipient, render_template,
-        sample_context, sanitize_email_html, template_definition, validate_template,
+        ScannerNotificationState, default_source, login_context,
+        normalize_user_notification_recipient, preview_template, render_template, sample_context,
+        sanitize_email_html, template_definition, validate_template,
     };
 
     #[test]
@@ -1106,6 +1141,45 @@ mod tests {
         assert!(rendered.subject.contains("扫描器掉线"));
         assert!(rendered.html_body.contains("/scanner/01952f0c"));
         assert!(rendered.text_body.contains("最后心跳"));
+    }
+
+    #[test]
+    fn scanner_preview_uses_selected_state_in_subject_and_both_bodies() {
+        let source = MailTemplateSource {
+            subject_template: "扫描器{{ event_label }}".into(),
+            html_template: "<b>{{ event_label }}</b>".into(),
+            text_template: "{{ event_label }}".into(),
+        };
+        for (state, label) in [
+            (ScannerNotificationState::Offline, "掉线"),
+            (ScannerNotificationState::Recovered, "恢复"),
+        ] {
+            let rendered = preview_template(SCANNER_OUTAGE_TEMPLATE_KEY, &source, state).unwrap();
+            assert_eq!(rendered.subject, format!("扫描器{label}"));
+            assert!(rendered.html_body.contains(label));
+            assert_eq!(rendered.text_body, label);
+        }
+        assert_eq!(
+            validate_template(SCANNER_OUTAGE_TEMPLATE_KEY, &source)
+                .unwrap()
+                .text_body,
+            "掉线"
+        );
+    }
+
+    #[test]
+    fn scanner_preview_state_does_not_change_other_mail_samples() {
+        let source = default_source(template_definition(LOGIN_SUCCESS_TEMPLATE_KEY).unwrap());
+        let before = validate_template(LOGIN_SUCCESS_TEMPLATE_KEY, &source).unwrap();
+        let after = preview_template(
+            LOGIN_SUCCESS_TEMPLATE_KEY,
+            &source,
+            ScannerNotificationState::Recovered,
+        )
+        .unwrap();
+        assert_eq!(before.subject, after.subject);
+        assert_eq!(before.html_body, after.html_body);
+        assert_eq!(before.text_body, after.text_body);
     }
 
     #[test]
