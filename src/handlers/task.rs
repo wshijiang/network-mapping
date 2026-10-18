@@ -622,6 +622,7 @@ pub struct TaskDetailQuery {
 #[derive(Serialize)]
 struct TaskResultPort {
     os: Option<crate::os_detection::OsInference>,
+    web: Option<crate::web_detection::WebInference>,
     port: i32,
     protocol: Option<String>,
     service: Option<String>,
@@ -741,6 +742,17 @@ async fn load_execution_results_from_elasticsearch(
                     })
                 };
                 asset.ports.push(TaskResultPort {
+                    web: crate::web_detection::endpoint_view(
+                        source
+                            .get("web")
+                            .cloned()
+                            .and_then(|v| serde_json::from_value(v).ok()),
+                        source
+                            .get("observed_at_ms")
+                            .and_then(Value::as_i64)
+                            .unwrap_or_default(),
+                        chrono::Utc::now().timestamp_millis(),
+                    ),
                     os: crate::os_detection::endpoint_view(
                         source
                             .get("os")

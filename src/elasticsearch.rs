@@ -13,6 +13,7 @@ use tokio::sync::{Notify, Semaphore};
 
 mod os_detection;
 mod projection;
+mod web_detection;
 use os_detection::service_observation_reference;
 use tokio::time::{interval, sleep, timeout};
 use tracing::{error, info, warn};
@@ -38,7 +39,7 @@ struct BulkTiming {
 
 const OUTBOX_LOCK_TIMEOUT_MINUTES: i64 = 5;
 const SCAN_INDEX_SCHEMA_VERSION: &str = "5";
-const ENDPOINT_INDEX_SCHEMA_VERSION: &str = "6";
+const ENDPOINT_INDEX_SCHEMA_VERSION: &str = "7";
 // Leave headroom beneath Elasticsearch's default 4 KiB HTTP request-line limit.
 const SCAN_REQUEST_LINE_BUDGET: usize = 3 * 1024;
 const SCAN_INDEX_OPTIONS: &str = "allow_no_indices=true&ignore_unavailable=true";
@@ -275,6 +276,7 @@ struct SearchSource {
     tls_fingerprint_sha256: Option<String>,
     tls_self_signed: Option<bool>,
     os: Option<crate::os_detection::OsInference>,
+    web: Option<crate::web_detection::WebInference>,
     scanner_name: Option<String>,
     last_seen: DateTime<Utc>,
     asn: Option<String>,
@@ -308,6 +310,7 @@ pub(crate) struct ElasticsearchSearchItem {
     pub(crate) tls_fingerprint_sha256: Option<String>,
     pub(crate) tls_self_signed: Option<bool>,
     pub(crate) os: Option<crate::os_detection::OsInference>,
+    pub(crate) web: Option<crate::web_detection::WebInference>,
     pub(crate) scanner_name: Option<String>,
     pub(crate) scan_time: i64,
     pub(crate) asn: Option<String>,
@@ -2064,6 +2067,11 @@ impl ElasticsearchService {
                     source.last_seen.timestamp_millis(),
                     Utc::now().timestamp_millis(),
                 ),
+                web: crate::web_detection::endpoint_view(
+                    source.web,
+                    source.last_seen.timestamp_millis(),
+                    Utc::now().timestamp_millis(),
+                ),
                 scanner_name: source.scanner_name,
                 scan_time: source.last_seen.timestamp_millis(),
                 asn: source.asn,
@@ -3095,6 +3103,10 @@ pub async fn run_worker(service: ElasticsearchService, pool: Pool) {
             warn!(event = "OsDetectionWorkerError", error_message = %message, retryable = true);
         }
 
+        if let Err(message) = service.process_web_detection_outbox(&pool).await {
+            warn!(event = "WebDetectionWorkerError", error_message = %message, retryable = true);
+        }
+
         let event = match claim_ip_event(&pool).await {
             Ok(value) => value,
             Err(message) => {
@@ -4114,6 +4126,7 @@ fn scan_endpoint_index_definition(replicas: u32) -> Value {
                 "service_observed_at_ms": {"type": "long"},
                 "service_observation_ref": {"type": "object", "enabled": false},
                 "os": crate::os_detection::mapping(),
+            "web": crate::web_detection::mapping(),
                 "asn": {"type": "keyword", "normalizer": "lowercase_normalizer"},
                 "asn_number": {"type": "long"},
                 "isp": {"type": "wildcard"},
@@ -4221,6 +4234,7 @@ fn endpoint_projection_document(
         "service_observed_at_ms": if is_service { json!(observed_at_ms) } else { Value::Null },
         "service_observation_ref": if is_service { service_observation_reference(context, observation, observed_at_ms) } else { Value::Null },
         "os": if is_service { json!(crate::os_detection::OsInference::pending(observed_at_ms)) } else { Value::Null },
+        "web": if is_service { json!(crate::web_detection::WebInference::pending(observed_at_ms)) } else { Value::Null },
         "asn": asn,
         "asn_number": asn_number,
         "isp": observation.get("isp").cloned().unwrap_or(Value::Null),
@@ -4265,6 +4279,7 @@ fn append_projection_update(
             def serviceObserved = ctx._source.service_observed_at_ms;
             def serviceReference = ctx._source.service_observation_ref;
             def os = ctx._source.os;
+            def web = ctx._source.web;
             def incomingServiceObserved = params.doc.service_observed_at_ms;
             boolean replaceService = incomingServiceObserved != null &&
                 (serviceObserved == null || incomingServiceObserved >= serviceObserved);
@@ -4297,6 +4312,7 @@ fn append_projection_update(
                     ctx._source.service_observed_at_ms = serviceObserved;
                     ctx._source.service_observation_ref = serviceReference;
                     ctx._source.os = os;
+                    ctx._source.web = web;
                 }
             }
             if (replaceService) {
@@ -4320,6 +4336,7 @@ fn append_projection_update(
                 ctx._source.service_observation_ref = params.doc.service_observation_ref;
                 boolean sameEvidence = serviceReference != null && params.doc.service_observation_ref != null && serviceReference.id == params.doc.service_observation_ref.id;
                 ctx._source.os = sameEvidence && os != null && os.status != 'pending' && (params.doc.os == null || params.doc.os.status == 'pending' || os.ruleset_revision >= params.doc.os.ruleset_revision) ? os : params.doc.os;
+                ctx._source.web = sameEvidence && web != null && web.status != 'pending' && (params.doc.web == null || params.doc.web.status == 'pending' || web.ruleset_revision >= params.doc.web.ruleset_revision) ? web : params.doc.web;
             }
         }
     "#;
@@ -4358,6 +4375,7 @@ fn index_mapping_update() -> Value {
         "properties": {
             "service_observation_ref": {"type":"object", "enabled":false},
             "os": crate::os_detection::mapping(),
+            "web": crate::web_detection::mapping(),
             "tls_mode": {"type": "keyword", "normalizer": "lowercase_normalizer"},
             "tls_version": {"type": "keyword", "normalizer": "lowercase_normalizer"},
             "tls_cipher_suite": {"type": "keyword", "normalizer": "lowercase_normalizer"},

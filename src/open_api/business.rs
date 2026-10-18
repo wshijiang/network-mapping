@@ -316,6 +316,7 @@ pub(crate) async fn dispatch_at(
                                 "title",
                                 "banner",
                                 "os",
+                                "web",
                                 "service_observed_at_ms",
                             ]
                         } else {

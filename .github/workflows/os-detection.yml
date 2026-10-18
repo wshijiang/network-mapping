@@ -1,4 +1,4 @@
-name: Operating system inference
+name: Service evidence inference
 
 on:
   pull_request:
@@ -66,3 +66,8 @@ jobs:
         run: cargo test --locked --lib live_os_enrichment_preserves_raw_checksums_and_newer_service_evidence -- --ignored --test-threads=1
       - name: Verify service clocks and repeated publication on real Elasticsearch
         run: cargo test --locked --lib live_elasticsearch_preserves_successful_web_evidence_after_failed_probes -- --ignored --test-threads=1
+
+      - name: Verify Web enrichment job recovery
+        run: cargo test --locked --lib web_jobs_wait_for_publication_and_recover_expired_leases -- --ignored --test-threads=1
+      - name: Verify real Web technology mappings, queries and immutable evidence
+        run: cargo test --locked --lib live_web_enrichment_preserves_raw_checksums_and_newer_service_evidence -- --ignored --test-threads=1

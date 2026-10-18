@@ -46,6 +46,7 @@ nav:
   - 功能使用:
       - 功能概览: FEATURES.md
       - 操作系统识别: OS_DETECTION.md
+      - Web 框架与组件识别: WEB_DETECTION.md
       - 资产搜索: SEARCH_SYNTAX.md
       - 统计分析: STATISTICS.md
       - 周报与月报: reports.md
@@ -79,6 +80,7 @@ nav:
       - 实现与回归: OPEN_API_IMPLEMENTATION.md
   - 开发参考:
       - 操作系统识别维护: OS_DETECTION_DEVELOPMENT.md
+      - Web 技术栈识别维护: WEB_DETECTION_DEVELOPMENT.md
       - 模块化实现与热更新: MODULE_RUNTIME_IMPLEMENTATION.md
       - 模块化架构设计: MODULAR_ARCHITECTURE.md
       - 进程替换原型: examples/modular-hot-update/README.md
