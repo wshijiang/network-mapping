@@ -107,6 +107,7 @@ pub(super) struct Claimed {
     event_type: String,
     context: Value,
     text: String,
+    bot_context: tera::Context,
 }
 
 pub(super) enum ClaimOutcome {
@@ -188,8 +189,16 @@ pub(super) async fn claim(pool: &Pool) -> Result<ClaimOutcome> {
         provider: channel.get("provider"),
         settings: serde_json::from_value(channel.get("settings")).map_err(|_| Error::internal())?,
         title,
-        event_type: kind,
+        event_type: kind.clone(),
         context,
+        bot_context: templates::context(
+            &kind,
+            &short_title,
+            &short_body,
+            &severity,
+            &event.to_string(),
+            &row.get::<_, DateTime<Utc>>("occurred_at").to_rfc3339(),
+        ),
         text,
     };
     tx.commit().await?;
@@ -210,18 +219,41 @@ pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client
     let outcome = match secret {
         Ok(secret) => tokio::time::timeout(Duration::from_secs(20), async {
             let outcome = match claimed.provider.as_str() {
-                "feishu" => match decrypt(&claimed.url, key) {
-                    Ok(url) => feishu::send(client, &url, secret.as_deref(), &claimed.text).await,
-                    Err(_) => Outcome::failure("secret_unavailable", false),
-                },
-                "telegram" => {
-                    telegram::send(
-                        client,
-                        secret.as_deref().unwrap_or_default(),
-                        &claimed.settings.chat_id,
-                        &claimed.text,
-                    )
-                    .await
+                "feishu" | "telegram" => {
+                    match templates::published(pool, &claimed.provider, &claimed.event_type).await {
+                        Err(_) => Outcome::failure("notification_source_unavailable", true),
+                        Ok(source) => match templates::render(
+                            &claimed.provider,
+                            &source,
+                            &claimed.bot_context,
+                        ) {
+                            Err(_) => Outcome::failure("notification_template_invalid", false),
+                            Ok(rendered) => {
+                                if claimed.provider == "feishu" {
+                                    match decrypt(&claimed.url, key) {
+                                        Ok(url) => {
+                                            feishu::send_payload(
+                                                client,
+                                                &url,
+                                                secret.as_deref(),
+                                                rendered.payload,
+                                            )
+                                            .await
+                                        }
+                                        Err(_) => Outcome::failure("secret_unavailable", false),
+                                    }
+                                } else {
+                                    telegram::send_payload(
+                                        client,
+                                        secret.as_deref().unwrap_or_default(),
+                                        &claimed.settings.chat_id,
+                                        rendered.payload,
+                                    )
+                                    .await
+                                }
+                            }
+                        },
+                    }
                 }
                 "email" => {
                     let recipients = email_recipients(pool, &claimed).await?;

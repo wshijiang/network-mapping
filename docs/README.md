@@ -67,6 +67,7 @@
 | [运行时配置](RUNTIME_CONFIGURATION.md) | 配置来源、发布接口、生效方式和实现边界 |
 | [慢检测与掉线策略](monitoring-policies.md) | 在线策略管理、冲突恢复及性能统计 |
 | [健康监控与告警](HEALTH_ALERT.md) | 监控阈值、慢 SQL 和通知联动 |
+| [分渠道通知模板](NOTIFICATION_TEMPLATES.md) | 邮件、飞书、Telegram 的独立模板、样式、在线预览和版本发布 |
 | [统一通知渠道](NOTIFICATIONS.md) | 邮件、飞书、Telegram 的事件订阅、投递与排障 |
 | [扫描器错误与日志](SCANNER_DIAGNOSTICS.md) | 远程错误事件、日志采集与服务端治理 |
 | [请求日志](REQUEST_LOG.md) | 请求采集、查询、错误分类和保留策略 |

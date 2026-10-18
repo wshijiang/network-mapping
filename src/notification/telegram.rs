@@ -59,12 +59,32 @@ pub async fn send(client: &reqwest::Client, token: &str, chat_id: &str, text: &s
     if text.encode_utf16().count() > 4096 {
         return Outcome::failure("payload_too_large", false);
     }
+    send_payload(
+        client,
+        token,
+        chat_id,
+        json!({"text":text,"link_preview_options":{"is_disabled":true}}),
+    )
+    .await
+}
+
+pub(super) async fn send_payload(
+    client: &reqwest::Client,
+    token: &str,
+    chat_id: &str,
+    mut payload: Value,
+) -> Outcome {
+    if !validate_token(token) || !validate_chat_id(chat_id) {
+        return Outcome::failure("invalid_destination", false);
+    }
+    if serde_json::to_vec(&payload).map_or(true, |bytes| bytes.len() > 20 * 1024) {
+        return Outcome::failure("payload_too_large", false);
+    }
+    payload["chat_id"] = json!(chat_id);
     transmit(
         client,
         &format!("https://api.telegram.org/bot{token}/sendMessage"),
-        json!({
-            "chat_id": chat_id, "text": text, "link_preview_options": {"is_disabled": true}
-        }),
+        payload,
     )
     .await
 }

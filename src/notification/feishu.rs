@@ -59,10 +59,24 @@ pub async fn send(
     secret: Option<&str>,
     text: &str,
 ) -> Outcome {
+    send_payload(
+        client,
+        url,
+        secret,
+        json!({"msg_type":"text","content":{"text":text}}),
+    )
+    .await
+}
+
+pub(super) async fn send_payload(
+    client: &reqwest::Client,
+    url: &str,
+    secret: Option<&str>,
+    mut payload: Value,
+) -> Outcome {
     let Ok(url) = validate_url(url) else {
         return Outcome::failure("invalid_destination", false);
     };
-    let mut payload = json!({"msg_type":"text","content":{"text":text}});
     if let Some(secret) = secret {
         let timestamp = chrono::Utc::now().timestamp();
         let Ok(sign) = signature(timestamp, secret) else {

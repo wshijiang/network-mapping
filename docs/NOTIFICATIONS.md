@@ -41,6 +41,8 @@
 
 报告中心手动发送/重发完整报告邮件、模板测试属于显式邮件操作，继续使用首个未删除邮件渠道的 SMTP 配置；即使仅使用机器人接收自动通知，也可独立配置邮件操作所需的 SMTP。通知订阅不再受旧邮件偏好开关控制。
 
+模板格式、在线预览、独立发布及版本恢复见[分渠道通知模板](NOTIFICATION_TEMPLATES.md)。
+
 ## 添加飞书渠道
 
 1. 在飞书群添加「自定义机器人」，复制 Webhook；建议启用签名校验并复制签名密钥。
@@ -48,6 +50,8 @@
 3. 若开启关键词校验，允许固定前缀 **Network Mapping**；若开启 IP 白名单，允许服务实际出口 IP。
 
 仅支持 `https://open.feishu.cn/open-apis/bot/v2/hook/<机器人 UUID>`，不接受任意 Webhook、Lark 国际版域名、查询参数、片段、用户凭据、其他端口和重定向。服务需要允许访问 `open.feishu.cn:443`，无须公开回调入口。
+
+飞书模板支持纯文本或转换为 `post` 的受限富文本；默认保持纯文本。
 
 签名按官方协议，以 `timestamp + "\n" + secret` 为 HMAC-SHA256 key，对空消息计算摘要并 Base64 编码。HTTP 成功还必须满足 JSON `code == 0`，兼容 `StatusCode`。签名密钥留空保留；移除须明确勾选清除。
 
@@ -60,7 +64,7 @@
 3. 选择「Telegram」，填写 Token 和 Chat ID。支持非零数字 ID（包括负数群 ID）或公开频道 `@名称`。
 4. 选择与邮件、飞书相同的事件类型，保存启用并测试。Token 保存后不回显，编辑留空保留。
 
-后端只调用固定的 `https://api.telegram.org/bot<Token>/sendMessage`，不接受自定义服务地址、代理 API 端点或重定向。部署环境需允许 `api.telegram.org:443`。消息为纯文本，关闭链接预览，不拼接 HTML/Markdown 解析指令。请求同时验证 HTTP 状态、`ok` 和消息 ID；限流遵守 `parameters.retry_after`，群权限/目标错误直接记录失败。机器人摘要保留稳定事件 ID，正文按 Telegram 长度限制截短。
+后端只调用固定的 `https://api.telegram.org/bot<Token>/sendMessage`，不接受自定义服务地址、代理 API 端点或重定向。部署环境需允许 `api.telegram.org:443`。消息由当前事件的已发布 Telegram 模板渲染，支持纯文本或 HTML，始终关闭链接预览；未发布自定义模板时使用内置纯文本。请求同时验证 HTTP 状态、`ok` 和消息 ID；限流遵守 `parameters.retry_after`，群权限/目标错误直接记录失败。机器人摘要保留稳定事件 ID，事件摘要会预先截短；完整模板渲染结果仍超限时记录模板错误，不发送损坏内容。
 
 协议参考：[Telegram Bot API sendMessage](https://core.telegram.org/bots/api#sendmessage)。
 

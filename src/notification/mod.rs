@@ -5,6 +5,8 @@ pub use outcome::Outcome;
 pub mod feishu;
 mod routes;
 pub mod telegram;
+mod template_render;
+mod templates;
 #[cfg(test)]
 mod tests;
 mod worker;

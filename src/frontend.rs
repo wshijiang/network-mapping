@@ -31,6 +31,7 @@ const SPA_ROUTES: &[&str] = &[
     "/setting/runtime",
     "/setting/human-verification",
     "/setting/mail-templates",
+    "/setting/notification-templates",
     "/user/info",
     "/user/security",
     "/open-platform",

@@ -949,6 +949,11 @@ async fn database() -> (Pool, String) {
     // Upgrade path is deliberately run twice to verify idempotence alongside fresh installation.
     for _ in 0..2 {
         c.batch_execute(include_str!(
+            "../../source/database/migrate_notification_templates.sql"
+        ))
+        .await
+        .unwrap();
+        c.batch_execute(include_str!(
             "../../source/database/migrate_notifications.sql"
         ))
         .await
@@ -1609,4 +1614,204 @@ async fn worker_pauses_new_claims_when_maintenance_starts_during_a_batch() {
         resumed.is_ok(),
         "queued delivery did not resume after maintenance"
     );
+}
+
+#[actix_web::test]
+async fn template_preview_is_admin_only_and_checks_provider_format_without_database() {
+    use crate::notification::template_render::default_source;
+    let app = http_test::init_service(
+        App::new()
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(user(2));
+                srv.call(req)
+            })
+            .configure(configure),
+    )
+    .await;
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::post()
+            .uri("/api/notifications/templates/feishu/health.alert/preview")
+            .set_json(default_source())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let app = http_test::init_service(
+        App::new()
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(user(1));
+                srv.call(req)
+            })
+            .configure(configure),
+    )
+    .await;
+    for (provider, expected) in [
+        ("feishu", StatusCode::OK),
+        ("telegram", StatusCode::OK),
+        ("unknown", StatusCode::BAD_REQUEST),
+    ] {
+        let response = http_test::call_service(
+            &app,
+            http_test::TestRequest::post()
+                .uri(&format!(
+                    "/api/notifications/templates/{provider}/health.alert/preview"
+                ))
+                .set_json(default_source())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), expected);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn notification_templates_isolate_providers_events_and_publish_restore_with_conflicts() {
+    use super::template_render::{Source, default_source};
+    let (pool, schema) = database().await;
+    // Publishing must release its connection before fetching the response, even in a small pool.
+    pool.resize(1);
+    let audit = AuditContext::cli("notification-template-test");
+    let change = |revision, source: Option<Source>, version: Option<i32>| {
+        serde_json::from_value::<templates::Change>(
+            json!({"expectedRevision":revision,"source":source,"version":version}),
+        )
+        .unwrap()
+    };
+    let source = Source {
+        format: "html".into(),
+        body_template: "<b>自定义 {{ body }}</b>".into(),
+        ..default_source()
+    };
+    let draft = templates::change(
+        &pool,
+        "feishu",
+        "health.alert",
+        "draft",
+        change(0, Some(source.clone()), None),
+        &user(1),
+        &audit,
+    )
+    .await
+    .unwrap();
+    assert_eq!(draft["revision"], 1);
+    assert_eq!(draft["status"], "draft");
+    assert_eq!(
+        templates::published(&pool, "feishu", "health.alert")
+            .await
+            .unwrap()
+            .format,
+        "text"
+    );
+    assert!(
+        templates::change(
+            &pool,
+            "feishu",
+            "health.alert",
+            "publish",
+            change(0, None, None),
+            &user(1),
+            &audit
+        )
+        .await
+        .is_err()
+    );
+    let published = templates::change(
+        &pool,
+        "feishu",
+        "health.alert",
+        "publish",
+        change(1, None, None),
+        &user(1),
+        &audit,
+    )
+    .await
+    .unwrap();
+    assert_eq!(published["activeVersion"], 1);
+    assert_eq!(
+        templates::published(&pool, "feishu", "health.alert")
+            .await
+            .unwrap()
+            .format,
+        "html"
+    );
+    assert_eq!(
+        templates::published(&pool, "telegram", "health.alert")
+            .await
+            .unwrap()
+            .format,
+        "text"
+    );
+    assert_eq!(
+        templates::published(&pool, "feishu", "user.login")
+            .await
+            .unwrap()
+            .format,
+        "text"
+    );
+    templates::change(
+        &pool,
+        "feishu",
+        "health.alert",
+        "draft",
+        change(2, Some(default_source()), None),
+        &user(1),
+        &audit,
+    )
+    .await
+    .unwrap();
+    // Saving a replacement never changes the active publication.
+    assert_eq!(
+        templates::published(&pool, "feishu", "health.alert")
+            .await
+            .unwrap()
+            .format,
+        "html"
+    );
+    templates::change(
+        &pool,
+        "feishu",
+        "health.alert",
+        "publish",
+        change(3, None, None),
+        &user(1),
+        &audit,
+    )
+    .await
+    .unwrap();
+    let restored = templates::change(
+        &pool,
+        "feishu",
+        "health.alert",
+        "restore",
+        change(4, None, Some(1)),
+        &user(1),
+        &audit,
+    )
+    .await
+    .unwrap();
+    assert_eq!(restored["status"], "draft");
+    assert_eq!(restored["source"]["format"], "html");
+    assert_eq!(restored["activeVersion"], 2);
+    assert_eq!(
+        templates::published(&pool, "feishu", "health.alert")
+            .await
+            .unwrap()
+            .format,
+        "text"
+    );
+    assert_eq!(restored["versions"].as_array().unwrap().len(), 3);
+    let c = pool.get().await.unwrap();
+    let audits: i64 = c
+        .query_one(
+            "SELECT COUNT(*) FROM audit_event WHERE resource_type='notification_template'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(audits, 5);
+    drop(c);
+    cleanup(pool, schema).await;
 }

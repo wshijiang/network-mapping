@@ -170,6 +170,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     }),
             )
             .service(channels)
+            .configure(templates::configure)
             .service(create)
             .service(update)
             .service(destroy)
