@@ -20,6 +20,10 @@ HTML 使用 scraper 解析 DOM，不把页面正文当作产品名称词典。
 `cookie_name` 仅接收 Cookie 名称。`version_group` 指向正则捕获组。
 同一组件多条规则合并，不因重复命中累计置信度；多版本返回冲突标记。
 
+技术目录与分批交付见 [Web 技术目录](WEB_TECHNOLOGY_CATALOG.md)。
+`src/web_detection/fixtures.json` 为新增产品的合成正例，测试核对整个技术集合及明确版本，
+并保证每个扩展组件都有样本。新增规则需附加误报反例，不能由产品关系直接推断隐藏依赖。
+
 ## 队列、存储与更新
 
 `src/elasticsearch/web_detection.rs` 复用 OS 识别的队列机制，独立维护

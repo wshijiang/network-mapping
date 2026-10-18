@@ -32,10 +32,9 @@
 
 ## 覆盖范围与边界
 
-内置规则覆盖 Nginx、Apache、OpenResty、Caddy、IIS、LiteSpeed、PHP、ASP.NET、Express、
-Laravel、WordPress、Drupal、Joomla、Next.js、Nuxt、Angular、Vue、React、jQuery、
-Bootstrap、Element Plus、Ant Design、Grafana 和 Jenkins 的部分明确特征。
-规则清单以 [rules.json](../src/web_detection/rules.json) 为准；列表不代表每个产品在所有部署下都可被识别。
+当前内置 74 条规则，覆盖 47 种技术。完整类别、组件 ID、MinIO/S3 区分及分批状态见
+[Web 技术目录](WEB_TECHNOLOGY_CATALOG.md)。规则清单以 [rules.json](../src/web_detection/rules.json) 为准；
+列表不代表每个产品在所有部署下都可被识别。
 
 识别来源包括白名单响应头、Cookie **名称**、HTML generator、明确 DOM 标记及脚本/样式资源路径。
 普通正文中提及产品名称、注释、未知协议内容、资源 URL 的主机名及查询参数不参与技术匹配。
@@ -50,6 +49,9 @@ Bootstrap、Element Plus、Ant Design、Grafana 和 Jenkins 的部分明确特�
 
 ```text
 tech = nginx
+tech = minio
+tech = s3
+tech = gitlab
 tech = "jquery@3.7.1"
 tech IN (wordpress, drupal)
 tech != jquery

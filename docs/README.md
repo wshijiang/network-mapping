@@ -35,6 +35,7 @@
 | [功能概览](FEATURES.md) | 服务端功能入口、交互约束和专题导读 |
 | [操作系统识别](OS_DETECTION.md) | 系统线索、证据、置信度、搜索和升级排障 |
 | [Web 框架与组件识别](WEB_DETECTION.md) | 基于 HTTP 证据的技术栈、版本、搜索与边界 |
+| [Web 技术目录](WEB_TECHNOLOGY_CATALOG.md) | 支持清单、MinIO/S3/Git 边界及分批扩展 |
 | [资产搜索](SEARCH_SYNTAX.md) | 搜索字段、表达式语法、结果语义和 API 契约 |
 | [统计分析](STATISTICS.md) | 自定义汇总、图表以及图片和数据导出 |
 | [周报与月报](reports.md) | 报表指标、发送计划、归档与恢复 |

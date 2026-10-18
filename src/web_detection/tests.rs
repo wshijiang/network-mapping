@@ -1,5 +1,109 @@
 use super::*;
 
+#[derive(Deserialize)]
+struct TechnologyFixture {
+    id: String,
+    headers: Value,
+    body: String,
+    expected: BTreeMap<String, Option<String>>,
+}
+
+#[test]
+fn catalog_fixtures_identify_each_new_technology_and_explicit_version() {
+    // Synthetic protocol/HTML cases, not transcripts from scanned live targets.
+    let fixtures: Vec<TechnologyFixture> =
+        serde_json::from_str(include_str!("fixtures.json")).unwrap();
+    let mut covered = BTreeSet::new();
+    for fixture in fixtures {
+        let web = identify(fixture.headers, &fixture.body);
+        assert_eq!(web.status, "identified", "{}", fixture.id);
+        let actual: BTreeMap<_, _> = web
+            .technologies
+            .iter()
+            .map(|t| (t.id.clone(), t.version.clone()))
+            .collect();
+        assert_eq!(actual, fixture.expected, "{}", fixture.id);
+        assert!(!serde_json::to_string(&web).unwrap().contains("PRIVATE"));
+        covered.extend(actual.into_keys());
+    }
+    let initial: BTreeSet<_> = [
+        "nginx",
+        "apache",
+        "openresty",
+        "caddy",
+        "microsoft-iis",
+        "litespeed",
+        "express",
+        "php",
+        "aspnet",
+        "jenkins",
+        "wordpress",
+        "drupal",
+        "joomla",
+        "laravel",
+        "nextjs",
+        "nuxt",
+        "angular",
+        "vue",
+        "react",
+        "jquery",
+        "bootstrap",
+        "element-plus",
+        "antd",
+        "grafana",
+    ]
+    .into_iter()
+    .collect();
+    let additions: BTreeSet<_> = RULES
+        .iter()
+        .map(|r| r.rule.technology.as_str())
+        .filter(|t| !initial.contains(t))
+        .collect();
+    assert_eq!(
+        covered.iter().map(String::as_str).collect::<BTreeSet<_>>(),
+        additions
+    );
+}
+
+#[test]
+fn minio_requires_its_product_identity_not_s3_compatibility_or_a_port() {
+    for headers in [
+        json!({"Server":"AmazonS3","X-Amz-Request-Id":"PRIVATE","X-Amz-Id-2":"PRIVATE"}),
+        json!({"Server":"nginx","X-Amz-Bucket-Region":"us-east-1"}),
+        json!({"Server":"NotMinIO"}),
+    ] {
+        let web = identify(
+            headers,
+            "<Error><Code>AccessDenied</Code><Message>MinIO S3 compatible storage</Message></Error>",
+        );
+        assert!(web.technologies.iter().all(|t| t.id != "minio"));
+    }
+    let web = infer(Some("http"), None, None, 9000, 1000, None);
+    assert!(web.technologies.is_empty());
+    assert_eq!(
+        identify(json!({"server":"MinIO"}), "").technologies[0].version,
+        None
+    );
+}
+
+#[test]
+fn new_technologies_are_not_guessed_from_text_queries_or_python_servers() {
+    let web = identify(
+        json!({}),
+        r#"<p>MinIO Astro SvelteKit Ghost ECharts</p><script src="https://minio.example/app.js?name=echarts@5.6.0/dist/echarts.js"></script><div class="vuetify layui"></div>"#,
+    );
+    assert!(web.technologies.is_empty());
+    for server in ["gunicorn", "uvicorn", "Werkzeug/3.1.3 Python/3.13.1"] {
+        let web = identify(json!({"server":server}), "");
+        assert_eq!(web.technologies.len(), 1);
+        assert!(
+            !web.technologies
+                .iter()
+                .any(|t| matches!(t.id.as_str(), "django" | "flask" | "fastapi"))
+        );
+    }
+}
+
 fn identify(headers: Value, body: &str) -> WebInference {
     infer(
         Some("https"),

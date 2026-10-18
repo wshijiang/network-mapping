@@ -47,6 +47,7 @@ nav:
       - 功能概览: FEATURES.md
       - 操作系统识别: OS_DETECTION.md
       - Web 框架与组件识别: WEB_DETECTION.md
+      - Web 技术目录: WEB_TECHNOLOGY_CATALOG.md
       - 资产搜索: SEARCH_SYNTAX.md
       - 统计分析: STATISTICS.md
       - 周报与月报: reports.md
