@@ -1815,3 +1815,175 @@ async fn notification_templates_isolate_providers_events_and_publish_restore_wit
     drop(c);
     cleanup(pool, schema).await;
 }
+
+#[actix_web::test]
+async fn template_preview_rejects_errors_hidden_in_critical_conditions() {
+    use super::template_render::{Source, default_source};
+    let app = http_test::init_service(
+        App::new()
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(user(1));
+                srv.call(req)
+            })
+            .configure(configure),
+    )
+    .await;
+    for provider in ["feishu", "telegram"] {
+        for critical in [
+            "<unsupported>x</unsupported>",
+            "{{ missing_variable }}",
+            "<a href=\"javascript:alert(1)\">x</a>",
+        ] {
+            let source = Source {
+                format: "html".into(),
+                body_template: format!(
+                    "{{% if severity == \"critical\" %}}{critical}{{% else %}}ok{{% endif %}}"
+                ),
+                ..default_source()
+            };
+            let response = http_test::call_service(
+                &app,
+                http_test::TestRequest::post()
+                    .uri(&format!(
+                        "/api/notifications/templates/{provider}/health.alert/preview"
+                    ))
+                    .set_json(source)
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{provider}: {critical}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn notification_templates_reject_invalid_critical_branches_without_changing_publication() {
+    use super::template_render::{Source, default_source, render, sample_context};
+    let (pool, schema) = database().await;
+    pool.resize(1);
+    let audit = AuditContext::cli("notification-template-severity-test");
+    let change = |revision, source: Option<Source>, version: Option<i32>| {
+        serde_json::from_value::<templates::Change>(
+            json!({"expectedRevision":revision,"source":source,"version":version}),
+        )
+        .unwrap()
+    };
+    let invalid = Source {
+        format: "html".into(),
+        body_template:
+            "{% if severity == \"critical\" %}<unsupported>x</unsupported>{% else %}ok{% endif %}"
+                .into(),
+        ..default_source()
+    };
+    let valid = Source {
+        format: "html".into(),
+        body_template:
+            "{% if severity == \"critical\" %}<b>严重告警</b>{% else %}<i>普通告警</i>{% endif %}"
+                .into(),
+        ..default_source()
+    };
+    for provider in ["feishu", "telegram"] {
+        let error = templates::change(
+            &pool,
+            provider,
+            "health.alert",
+            "draft",
+            change(0, Some(invalid.clone()), None),
+            &user(1),
+            &audit,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        let untouched = templates::detail(&pool, provider, "health.alert")
+            .await
+            .unwrap();
+        assert_eq!(untouched["revision"], 0);
+        assert!(untouched["versions"].as_array().unwrap().is_empty());
+        templates::change(
+            &pool,
+            provider,
+            "health.alert",
+            "draft",
+            change(0, Some(valid.clone()), None),
+            &user(1),
+            &audit,
+        )
+        .await
+        .unwrap();
+        templates::change(
+            &pool,
+            provider,
+            "health.alert",
+            "publish",
+            change(1, None, None),
+            &user(1),
+            &audit,
+        )
+        .await
+        .unwrap();
+        let published = templates::published(&pool, provider, "health.alert")
+            .await
+            .unwrap();
+        let mut critical = sample_context("health.alert");
+        critical.insert("severity", "critical");
+        assert!(
+            render(provider, &published, &critical)
+                .unwrap()
+                .text_body
+                .contains("严重告警")
+        );
+        templates::change(
+            &pool,
+            provider,
+            "health.alert",
+            "draft",
+            change(2, Some(valid.clone()), None),
+            &user(1),
+            &audit,
+        )
+        .await
+        .unwrap();
+        // Simulate drafts and historical versions accepted before the severity validation fix.
+        let c = pool.get().await.unwrap();
+        c.execute("UPDATE notification_template_version SET source=$2 WHERE provider=$1 AND event_type='health.alert' AND status='draft'",&[&provider,&json!(invalid)]).await.unwrap();
+        c.execute("INSERT INTO notification_template_version(provider,event_type,version,status,source) VALUES($1,'health.alert',3,'archived',$2)",&[&provider,&json!(invalid)]).await.unwrap();
+        drop(c);
+        let before = templates::detail(&pool, provider, "health.alert")
+            .await
+            .unwrap();
+        for (action, version) in [("publish", None), ("restore", Some(3))] {
+            let error = templates::change(
+                &pool,
+                provider,
+                "health.alert",
+                action,
+                change(3, None, version),
+                &user(1),
+                &audit,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                templates::detail(&pool, provider, "health.alert")
+                    .await
+                    .unwrap(),
+                before
+            );
+            assert_eq!(
+                templates::published(&pool, provider, "health.alert")
+                    .await
+                    .unwrap()
+                    .body_template,
+                valid.body_template
+            );
+        }
+    }
+    cleanup(pool, schema).await;
+}

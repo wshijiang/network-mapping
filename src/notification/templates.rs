@@ -1,5 +1,5 @@
 pub use super::template_render::{Source, context, render};
-use super::template_render::{VARIABLES, default_source, sample_context};
+use super::template_render::{VARIABLES, default_source, validate_source};
 use super::{AuditContext, AuditEvent, EVENT_TYPES, Error, Pool, Result, UserBaseI};
 use actix_web::{HttpRequest, HttpResponse, get, post, web};
 use serde::Deserialize;
@@ -84,13 +84,13 @@ pub async fn change(
     }
     // Validate before taking locks. Only fixed, public sample data is accepted by preview/save.
     if action == "draft" {
-        render(
+        validate_source(
             provider,
             input
                 .source
                 .as_ref()
                 .ok_or_else(|| Error::bad("缺少模板内容"))?,
-            &sample_context(event),
+            event,
         )?;
     }
     let mut c = pool.get().await?;
@@ -104,7 +104,7 @@ pub async fn change(
         let row = tx.query_opt("SELECT version,source FROM notification_template_version WHERE provider=$1 AND event_type=$2 AND status='draft'", &[&provider,&event]).await?.ok_or_else(|| Error::bad("没有可发布的草稿"))?;
         let source: Source =
             serde_json::from_value(row.get(1)).map_err(|_| Error::bad("模板内容无效"))?;
-        render(provider, &source, &sample_context(event))?;
+        validate_source(provider, &source, event)?;
         let version: i32 = row.get(0);
         tx.execute("UPDATE notification_template_version SET status='archived' WHERE provider=$1 AND event_type=$2 AND status='published'", &[&provider,&event]).await?;
         tx.execute("UPDATE notification_template_version SET status='published',published_at=NOW() WHERE provider=$1 AND event_type=$2 AND version=$3", &[&provider,&event,&version]).await?;
@@ -117,7 +117,7 @@ pub async fn change(
         } else {
             input.source.unwrap()
         };
-        render(provider, &source, &sample_context(event))?;
+        validate_source(provider, &source, event)?;
         let version: i32 = tx.query_one("SELECT COALESCE(MAX(version),0)+1 FROM notification_template_version WHERE provider=$1 AND event_type=$2", &[&provider,&event]).await?.get(0);
         tx.execute("UPDATE notification_template_version SET status='archived' WHERE provider=$1 AND event_type=$2 AND status='draft'", &[&provider,&event]).await?;
         tx.execute("INSERT INTO notification_template_version(provider,event_type,version,status,source,created_by) VALUES($1,$2,$3,'draft',$4,$5)", &[&provider,&event,&version,&json!(source),&user.id]).await?;
@@ -175,8 +175,7 @@ async fn preview(
     }
     let (provider, event) = path.into_inner();
     respond(
-        validate_key(&provider, &event)
-            .and_then(|_| render(&provider, &source, &sample_context(&event))),
+        validate_key(&provider, &event).and_then(|_| validate_source(&provider, &source, &event)),
     )
 }
 #[post("/templates/{provider}/{event}/{action}")]

@@ -85,6 +85,15 @@ pub fn sample_context(event: &str) -> Context {
     )
 }
 
+/// Check both severity branches before accepting a template; keep the warning preview stable.
+pub fn validate_source(provider: &str, source: &Source, event: &str) -> Result<Rendered> {
+    let mut context = sample_context(event);
+    let preview = render(provider, source, &context)?;
+    context.insert("severity", "critical");
+    render(provider, source, &context)?;
+    Ok(preview)
+}
+
 pub fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
