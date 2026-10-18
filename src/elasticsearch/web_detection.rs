@@ -11,11 +11,14 @@ struct WebJob {
     api_client_id: Option<i32>,
 }
 
+// The endpoint execution tracks the latest port observation, not necessarily
+// its preserved service evidence. Legacy matches use the service clock and
+// contents; a valid, different service reference must never use this fallback.
 const UPDATE_WEB: &str = r#"
     boolean matches = ctx._source.service_observation_ref != null &&
         ctx._source.service_observation_ref.id == params.reference.id && ctx._source.service_observed_at_ms == params.observed_at;
     boolean legacy = (ctx._source.service_observation_ref == null || ctx._source.service_observation_ref.observed_at != ctx._source.service_observed_at_ms) &&
-        ctx._source.execution_id == params.execution_id && ctx._source.user_id == params.user_id &&
+        ctx._source.user_id == params.user_id &&
         ctx._source.service_observed_at_ms == params.observed_at &&
         ctx._source.service == params.service && ctx._source.banner == params.banner;
     if ((matches || legacy) && (ctx._source.web == null ||
@@ -478,13 +481,45 @@ mod tests {
             let response=service.send_bulk_with_retry("/_bulk",&bulk,false).await?; assert_eq!(response["errors"],false);
             let current=service.send_json_request(ElasticsearchOperation::ScanQuery,Method::GET,&format!("/{}/_doc/{current_id}",service.inner.config.current_endpoint_index),|r|r).await?;
             assert_eq!(current["_source"]["web"]["status"],"identified");
-            // A later port observation preserves the service and derived evidence.
+            // Upgrade a legacy endpoint before a different port-only execution.
+            // The service clock and contents survive, but the endpoint execution
+            // advances and must not prevent the older service job from matching.
+            let update_path=format!("/{}/_update/{current_id}",service.inner.config.current_endpoint_index);
+            service.send_json_request(ElasticsearchOperation::BulkWrite,Method::POST,&update_path,|r|r.json(&json!({"script":{"source":"ctx._source.remove('service_observation_ref'); ctx._source.remove('web');"}}))).await?;
             let port=json!({"kind":"port","ip_address":"192.0.2.1","port":2222,"protocol":"tcp","observed_at":at+500,"source":"masscan"});
-            let event=endpoint_projection_document(&context,&port,at+500);
+            let mut port_context=context.clone();
+            port_context.execution_id="newer-port-only-execution".into();
+            let event=endpoint_projection_document(&port_context,&port,at+500);
             let mut bulk=String::new(); append_projection_update(&mut bulk,&service.inner.config.current_endpoint_index,&current_id,&event)?;
             service.send_bulk_with_retry("/_bulk",&bulk,false).await?;
             let current=service.send_json_request(ElasticsearchOperation::ScanQuery,Method::GET,&format!("/{}/_doc/{current_id}",service.inner.config.current_endpoint_index),|r|r).await?;
+            assert_eq!(current["_source"]["execution_id"],port_context.execution_id);
+            assert_eq!(current["_source"]["service_observed_at_ms"],at);
+            assert!(current["_source"]["service_observation_ref"].is_null());
+            assert!(current["_source"]["web"].is_null());
+            // Removing the endpoint execution guard must not weaken evidence
+            // or user matching, or replace a valid reference to another service.
+            for (field,value) in [
+                ("user_id",json!(2)),
+                ("service",json!("ssh")),
+                ("banner",json!("different banner")),
+                ("service_observed_at_ms",json!(at-1)),
+                ("service_observation_ref",json!({"id":"different-service","observed_at":at})),
+            ] {
+                let mut changed=serde_json::Map::new();changed.insert(field.into(),value);
+                service.send_json_request(ElasticsearchOperation::BulkWrite,Method::POST,&update_path,|r|r.json(&json!({"doc":changed}))).await?;
+                service.enrich_web_page(&job).await?;
+                let unchanged=service.send_json_request(ElasticsearchOperation::ScanQuery,Method::GET,&format!("/{}/_doc/{current_id}",service.inner.config.current_endpoint_index),|r|r).await?;
+                assert!(unchanged["_source"]["web"].is_null(),"legacy guard failed: {field}");
+                let mut restored=serde_json::Map::new();restored.insert(field.into(),current["_source"][field].clone());
+                service.send_json_request(ElasticsearchOperation::BulkWrite,Method::POST,&update_path,|r|r.json(&json!({"doc":restored}))).await?;
+            }
+            service.enrich_web_page(&job).await?;
+            let current=service.send_json_request(ElasticsearchOperation::ScanQuery,Method::GET,&format!("/{}/_doc/{current_id}",service.inner.config.current_endpoint_index),|r|r).await?;
             assert_eq!(current["_source"]["web"]["status"],"identified");
+            assert_eq!(current["_source"]["execution_id"],port_context.execution_id);
+            assert_eq!(current["_source"]["service_observation_ref"]["id"],raw_id);
+            assert_eq!(current["_source"]["service_observation_ref"]["observed_at"],at);
             let view=crate::web_detection::endpoint_view(serde_json::from_value(current["_source"]["web"].clone()).ok(),at+500,at+500).unwrap();
             assert!(view.stale);
 

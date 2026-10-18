@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
-pub(crate) const RULESET_REVISION: i64 = 3;
-pub(crate) const RULESET_VERSION: &str = "2026-10-18.3";
+pub(crate) const RULESET_REVISION: i64 = 4;
+pub(crate) const RULESET_VERSION: &str = "2026-10-18.4";
 const MAX_BODY: usize = 256 * 1024;
 const MAX_FEATURES: usize = 512;
 const MAX_TEXT: usize = 4096;

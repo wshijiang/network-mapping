@@ -81,7 +81,10 @@ Git 校验广告媒体类型、十六进制 pkt-line 长度、操作名和 flush
 `observation_rows`、文档 checksum 或上传 checksum。现有 `(IP, port)` 模型保留，
 `inference_scope=ip_endpoint` 明确当前精度；此版本没有完整的独立域名 Web 资产索引。
 
-更新同时检查 service observation 引用和时间，旧投影回填还需匹配执行、用户、服务及 Banner。
+更新同时检查 service observation 引用和时间，旧投影回填还需匹配用户、服务时间、服务及 Banner。
+端点的最新执行 ID 可能来自后续端口扫描，不能用于限制旧服务证据的回填；已有有效引用但指向
+其他服务证据时，不使用旧投影匹配回退。修订版 4 创建独立回填水位，重新处理旧版本已完成但
+漏写当前端点的任务，不修改扫描事实或要求重新扫描。
 旧证据不能覆盖新服务，低规则版本不能覆盖高版本；重复发布同份证据保留已经完成的派生结果。
 新服务观察重置为 pending，端口观察保留原服务结论和服务时钟。不同权限范围独立更新。
 没有 upsert，已删除的端点不会通过重算复活。
@@ -92,7 +95,7 @@ Git 校验广告媒体类型、十六进制 pkt-line 长度、操作名和 flush
 
 ## 修改规则与排障
 
-规则或解析行为变更时，同时递增 `RULESET_REVISION` 和更新 `RULESET_VERSION`。
+规则、解析行为或需要重新回填的派生写入逻辑变更时，同时递增 `RULESET_REVISION` 和更新 `RULESET_VERSION`。
 新版本自动创建独立回填水位，历史数据只能根据仍保留的证据重算，截断部分无法恢复。
 检查 `WebDetectionWorkerError`、`WebDetectionPageCompleted` 和队列中的 `last_error`、
 `available_at`、租约及游标。ES 结果遵循正常刷新周期，完成写入不代表搜索立即可见。
