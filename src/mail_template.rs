@@ -148,7 +148,7 @@ fn default_source(definition: MailTemplateDefinition) -> MailTemplateSource {
     }
 }
 
-fn template_variables(template_key: &str) -> Vec<MailTemplateVariable> {
+pub(crate) fn template_variables(template_key: &str) -> Vec<MailTemplateVariable> {
     match template_key {
         LOGIN_SUCCESS_TEMPLATE_KEY => vec![
             MailTemplateVariable {
@@ -340,6 +340,10 @@ fn template_variables(template_key: &str) -> Vec<MailTemplateVariable> {
         ],
         _ => Vec::new(),
     }
+}
+
+pub(crate) fn builtin_source(template_key: &str) -> Option<MailTemplateSource> {
+    template_definition(template_key).map(default_source)
 }
 
 pub fn sample_context(template_key: &str) -> Result<Context, Box<dyn std::error::Error>> {

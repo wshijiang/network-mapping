@@ -5,6 +5,7 @@ pub use outcome::Outcome;
 pub mod feishu;
 mod routes;
 pub mod telegram;
+mod template_context;
 mod template_render;
 mod templates;
 #[cfg(test)]
@@ -560,4 +561,12 @@ pub async fn retry(pool: &Pool, id: Uuid, user: &UserBaseI, context: &AuditConte
     audit(&tx, user, context, "notification.retry", id).await?;
     tx.commit().await?;
     Ok(())
+}
+
+pub async fn delivery_detail(pool: &Pool, id: Uuid) -> Result<Value> {
+    let conn = pool.get().await?;
+    let row = conn.query_opt("SELECT d.id,d.channel_id,d.status,d.last_error,d.attempts,d.finished_at,e.title FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE d.id=$1", &[&id]).await?.ok_or_else(Error::missing)?;
+    Ok(
+        json!({"id":row.get::<_,Uuid>("id"),"channel_id":row.get::<_,Uuid>("channel_id"),"status":row.get::<_,String>("status"),"last_error":row.get::<_,Option<String>>("last_error"),"attempts":row.get::<_,i32>("attempts"),"finished_at":row.get::<_,Option<DateTime<Utc>>>("finished_at"),"title":row.get::<_,String>("title")}),
+    )
 }

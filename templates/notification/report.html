@@ -1,0 +1,21 @@
+<b>{{ report_label }} · 修订 #{{ report_meta.revision }}</b>
+周期：{{ period_label }}
+归档于：{{ report_meta.generated_at }} · {{ report_meta.timezone }}
+
+<b>核心指标与任务完成情况</b>
+新建任务：{{ tasks.created }}
+成功 / 失败 / 部分完成 / 取消：{{ tasks.succeeded }} / {{ tasks.failed }} / {{ tasks.partial }} / {{ tasks.cancelled }}
+任务成功率：{% if tasks.success_rate is number %}{{ tasks.success_rate }}%{% else %}--（无完成任务）{% endif %}
+去重 IP：{{ scan_output.unique_ips }}
+端口 / 服务观测次数：{{ scan_output.port_observations }} / {{ scan_output.service_observations }}
+
+<b>与上一周期比较</b>
+{% if previous_available %}{% for row in comparison_rows %}{{ row.label }}：{{ row.value }}
+{% endfor %}{% else %}上期历史或统计不完整，暂不提供环比。
+{% endif %}
+<b>处理建议</b>
+{% for item in recommendations | slice(end=3) %}{{ item | truncate(length=160) }}
+{% else %}本期未发现需要提示的任务异常。
+{% endfor %}
+统计完成：{{ quality_summary.ready }} / {{ quality_summary.expected }}
+登录平台查看完整报告：{% if detail_url %}<a href="{{ detail_url }}">打开报告</a>{% else %}{{ detail_path }}{% endif %}

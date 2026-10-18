@@ -153,6 +153,17 @@ async fn retry_delivery(
         .await,
     )
 }
+#[get("/deliveries/{id}")]
+async fn delivery_detail(
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    id: web::Path<Uuid>,
+) -> HttpResponse {
+    if let Err(response) = admin(&user) {
+        return response;
+    }
+    respond(super::delivery_detail(&pool, id.into_inner()).await)
+}
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api/notifications")
@@ -176,6 +187,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .service(destroy)
             .service(test)
             .service(history)
+            .service(delivery_detail)
             .service(retry_delivery),
     );
 }

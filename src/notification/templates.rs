@@ -1,9 +1,32 @@
 pub use super::template_render::{Source, context, render};
-use super::template_render::{VARIABLES, default_source, validate_source};
+use super::template_render::{
+    default_source, event_default_source, sample_context, validate_source,
+};
 use super::{AuditContext, AuditEvent, EVENT_TYPES, Error, Pool, Result, UserBaseI};
 use actix_web::{HttpRequest, HttpResponse, get, post, web};
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PreviewOptions {
+    severity: String,
+}
+impl Default for PreviewOptions {
+    fn default() -> Self {
+        Self {
+            severity: "warning".into(),
+        }
+    }
+}
+fn sample(event: &str, severity: &str) -> Result<tera::Context> {
+    if !matches!(severity, "warning" | "critical") {
+        return Err(Error::bad("示例级别仅支持 warning / critical"));
+    }
+    let mut c = sample_context(event);
+    c.insert("severity", severity);
+    Ok(c)
+}
 
 fn validate_key(provider: &str, event: &str) -> Result<()> {
     if !matches!(provider, "feishu" | "telegram") || !EVENT_TYPES.contains(&event) {
@@ -38,18 +61,18 @@ pub async fn detail(pool: &Pool, provider: &str, event: &str) -> Result<Value> {
         });
     let source = selected
         .map(|r| r.get::<_, Value>("source"))
-        .unwrap_or_else(|| json!(default_source()));
+        .unwrap_or_else(|| json!(event_default_source(event)));
     let status = selected
         .map(|r| r.get::<_, String>("status"))
         .unwrap_or_else(|| "default".into());
     let versions: Vec<_> = rows.iter().map(|r| json!({"version":r.get::<_,i32>("version"),"status":r.get::<_,String>("status"),"createdAt":r.get::<_,chrono::DateTime<chrono::Utc>>("created_at"),"publishedAt":r.get::<_,Option<chrono::DateTime<chrono::Utc>>>("published_at")})).collect();
     tx.commit().await?;
     Ok(
-        json!({"provider":provider,"eventType":event,"revision":revision,"activeVersion":active,"status":status,"source":source,"defaultSource":default_source(),"variables":VARIABLES,"versions":versions}),
+        json!({"provider":provider,"eventType":event,"revision":revision,"activeVersion":active,"status":status,"source":source,"defaultSource":event_default_source(event),"variables":super::template_context::variables(event),"versions":versions}),
     )
 }
 
-/// No saved publication means the legacy plain-text template, including after saving a draft.
+/// No saved publication means the built-in event template, including after saving a draft.
 pub async fn published(pool: &Pool, provider: &str, event: &str) -> Result<Source> {
     if event == "notification.test" {
         return Ok(default_source());
@@ -58,7 +81,44 @@ pub async fn published(pool: &Pool, provider: &str, event: &str) -> Result<Sourc
     let c = pool.get().await?;
     let row = c.query_opt("SELECT v.source FROM notification_template t JOIN notification_template_version v ON v.provider=t.provider AND v.event_type=t.event_type AND v.version=t.active_version WHERE t.provider=$1 AND t.event_type=$2 AND v.status='published'", &[&provider,&event]).await?;
     row.map(|r| serde_json::from_value(r.get(0)).map_err(|_| Error::bad("已发布通知模板无效")))
-        .unwrap_or_else(|| Ok(default_source()))
+        .unwrap_or_else(|| Ok(event_default_source(event)))
+}
+
+/// Resolve the same event fields used by mail, while retaining old bot summary variables.
+pub(super) async fn delivery_payload(
+    pool: &Pool,
+    provider: &str,
+    event: &str,
+    stored: &Value,
+    base: &tera::Context,
+) -> std::result::Result<Value, super::Outcome> {
+    if let Some(test) = stored.get("template_test") {
+        if event != "notification.test"
+            || test["provider"] != provider
+            || !test["payload"].is_object()
+        {
+            return Err(super::Outcome::failure("invalid_payload", false));
+        }
+        return Ok(test["payload"].clone());
+    }
+    let source = published(pool, provider, event)
+        .await
+        .map_err(|_| super::Outcome::failure("notification_source_unavailable", true))?;
+    let mut context = base.clone();
+    let shared = super::template_context::resolve(pool, event, stored).await?;
+    // Older summary-only events do not have mail_context; use their real summary, never samples.
+    if shared.as_object().is_some_and(|v| v.is_empty()) && event == "health.alert" {
+        context.insert("alert_type", event);
+        context.insert("summary", base.get("body").unwrap_or(&Value::Null));
+        context.insert("details", &Vec::<Value>::new());
+    }
+    context.extend(
+        tera::Context::from_serialize(shared)
+            .map_err(|_| super::Outcome::failure("invalid_payload", false))?,
+    );
+    render(provider, &source, &context)
+        .map(|r| r.payload)
+        .map_err(|_| super::Outcome::failure("notification_template_invalid", false))
 }
 
 #[derive(Deserialize)]
@@ -169,14 +229,88 @@ async fn preview(
     user: UserBaseI,
     path: web::Path<(String, String)>,
     source: web::Json<Source>,
+    options: web::Query<PreviewOptions>,
 ) -> HttpResponse {
     if let Some(r) = forbidden(&user) {
         return r;
     }
     let (provider, event) = path.into_inner();
-    respond(
-        validate_key(&provider, &event).and_then(|_| validate_source(&provider, &source, &event)),
+    respond(validate_key(&provider, &event).and_then(|_| {
+        validate_source(&provider, &source, &event)?;
+        render(&provider, &source, &sample(&event, &options.severity)?)
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct TemplateTest {
+    channel_id: uuid::Uuid,
+    source: Source,
+    #[serde(default = "warning")]
+    severity: String,
+}
+fn warning() -> String {
+    "warning".into()
+}
+
+pub(super) async fn enqueue_test(
+    pool: &Pool,
+    provider: &str,
+    event: &str,
+    input: TemplateTest,
+    user: &UserBaseI,
+    audit: &AuditContext,
+) -> Result<uuid::Uuid> {
+    validate_key(provider, event)?;
+    validate_source(provider, &input.source, event)?;
+    let mut c = sample(event, &input.severity)?;
+    let event_id = uuid::Uuid::now_v7();
+    c.insert("event_id", &event_id.to_string());
+    let rendered = render(provider, &input.source, &c)?;
+    let mut conn = pool.get().await?;
+    let tx = conn.transaction().await?;
+    let channel = tx.query_opt("UPDATE notification_channel SET last_test_at=NOW() WHERE id=$1 AND provider=$2 AND deleted_at IS NULL AND enabled AND (last_test_at IS NULL OR last_test_at<NOW()-INTERVAL '30 seconds') RETURNING destination_revision", &[&input.channel_id,&provider]).await?.ok_or_else(Error::conflict)?;
+    let delivery = uuid::Uuid::now_v7();
+    let context = json!({"template_test":{"provider":provider,"event_type":event,"payload":rendered.payload}});
+    tx.execute("INSERT INTO notification_event(id,dedup_key,event_type,severity,title,body,context) VALUES($1,$2,'notification.test',$3,$4,'模板测试使用固定示例数据。',$5)", &[&event_id,&format!("template-test:{event_id}"),&input.severity,&format!("模板测试：{}",rendered.subject),&context]).await?;
+    tx.execute("INSERT INTO notification_delivery(id,event_id,channel_id,destination_revision) VALUES($1,$2,$3,$4)", &[&delivery,&event_id,&input.channel_id,&channel.get::<_,i64>("destination_revision")]).await?;
+    let audit_event = AuditEvent::user(
+        "configuration",
+        "notification.template_test",
+        "success",
+        user,
     )
+    .resource("notification_channel", input.channel_id.to_string());
+    crate::audit::write(&tx, audit, &audit_event).await?;
+    tx.commit().await?;
+    Ok(delivery)
+}
+
+#[post("/templates/{provider}/{event}/test")]
+async fn test_template(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    path: web::Path<(String, String)>,
+    input: web::Json<TemplateTest>,
+) -> HttpResponse {
+    if let Some(r) = forbidden(&user) {
+        return r;
+    }
+    let (provider, event) = path.into_inner();
+    match enqueue_test(
+        &pool,
+        &provider,
+        &event,
+        input.into_inner(),
+        &user,
+        &AuditContext::from_request(&req),
+    )
+    .await
+    {
+        Ok(id) => HttpResponse::Accepted().json(json!({"success":true,"data":{"delivery_id":id}})),
+        Err(error) => respond::<()>(Err(error)),
+    }
 }
 #[post("/templates/{provider}/{event}/{action}")]
 async fn mutate(
@@ -204,5 +338,8 @@ async fn mutate(
     )
 }
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(get_detail).service(preview).service(mutate);
+    cfg.service(get_detail)
+        .service(preview)
+        .service(test_template)
+        .service(mutate);
 }

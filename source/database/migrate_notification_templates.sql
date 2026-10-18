@@ -22,3 +22,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_template_draft
     ON notification_template_version(provider,event_type) WHERE status='draft';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_template_published
     ON notification_template_version(provider,event_type) WHERE status='published';
+
+-- Preserve the exact report variable values used by archived mail.
+ALTER TABLE report_run ADD COLUMN IF NOT EXISTS notification_context JSONB;

@@ -369,37 +369,37 @@ async fn generate(
     let image_url = asset.as_ref().map(|asset| asset.url.as_str()).unwrap_or("");
     let mut lease = None;
     let mut rendered = None;
-    if input.quality.get("mail_error").is_none() {
-        let context = super::mail_context::build(
-            &input.payload,
-            &input.quality,
-            id,
-            &input.metadata,
-            &input.mail_settings,
-            image_url,
-        )?;
-        if let Some(source) = input.source.take() {
-            let document = serde_json::to_value(ReportRenderInput {
-                template_key: input.key.into(),
-                template_version: input.version,
-                source,
-                context,
-            })
-            .map_err(|e| e.to_string())?;
-            let input_checksum =
-                super::assets::digest(&serde_json::to_vec(&document).map_err(|e| e.to_string())?)?;
-            // Propagate infrastructure failure before opening the archival
-            // transaction, so neither ready/succeeded nor delivery is saved.
-            let attempt = render_mail(renderer.registry(), document, input.version).await?;
-            match attempt.rendered {
-                Ok(mail) => {
-                    input.quality["renderer"] = serde_json::json!({"release_id":attempt.lease.release_id(),"generation":attempt.lease.generation(),"input_checksum":input_checksum});
-                    rendered = Some(mail);
-                }
-                Err(error) => input.quality["mail_error"] = serde_json::json!(error),
+    let notification_context = super::mail_context::build(
+        &input.payload,
+        &input.quality,
+        id,
+        &input.metadata,
+        &input.mail_settings,
+        image_url,
+    )?;
+    if input.quality.get("mail_error").is_none()
+        && let Some(source) = input.source.take()
+    {
+        let document = serde_json::to_value(ReportRenderInput {
+            template_key: input.key.into(),
+            template_version: input.version,
+            source,
+            context: notification_context.clone(),
+        })
+        .map_err(|e| e.to_string())?;
+        let input_checksum =
+            super::assets::digest(&serde_json::to_vec(&document).map_err(|e| e.to_string())?)?;
+        // Propagate infrastructure failure before opening the archival
+        // transaction, so neither ready/succeeded nor delivery is saved.
+        let attempt = render_mail(renderer.registry(), document, input.version).await?;
+        match attempt.rendered {
+            Ok(mail) => {
+                input.quality["renderer"] = serde_json::json!({"release_id":attempt.lease.release_id(),"generation":attempt.lease.generation(),"input_checksum":input_checksum});
+                rendered = Some(mail);
             }
-            lease = Some(attempt.lease);
+            Err(error) => input.quality["mail_error"] = serde_json::json!(error),
         }
+        lease = Some(attempt.lease);
     }
     let keep_asset = rendered.as_ref().is_some_and(|mail| {
         !image_url.is_empty()
@@ -443,7 +443,7 @@ async fn generate(
     if keep_asset && let Some(asset) = &asset {
         asset.commit(&tx, id).await?;
     }
-    tx.execute("UPDATE report_run SET status='ready',payload=$2,quality=$3,generated_at=$8,last_error=NULL,content_checksum=$4,template_key=$5,template_version=$6,rendered_mail=$7 WHERE id=$1", &[&id,&input.payload,&input.quality,&input.checksum,&input.key,&input.version,&rendered,&input.metadata.generated_at]).await.map_err(|e|e.to_string())?;
+    tx.execute("UPDATE report_run SET status='ready',payload=$2,quality=$3,generated_at=$8,last_error=NULL,content_checksum=$4,template_key=$5,template_version=$6,rendered_mail=$7,notification_context=$9 WHERE id=$1", &[&id,&input.payload,&input.quality,&input.checksum,&input.key,&input.version,&rendered,&input.metadata.generated_at,&notification_context]).await.map_err(|e|e.to_string())?;
     crate::notification::enqueue_report(&tx, id)
         .await
         .map_err(|_| "报告通知入队失败".to_owned())?;

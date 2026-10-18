@@ -799,7 +799,7 @@ async fn deferred_legacy_recovery_is_transferred_without_reopening_bot_delivery(
 
 #[tokio::test]
 #[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
-async fn login_producer_uses_channel_subscriptions_and_keeps_private_context_out_of_bot_messages() {
+async fn login_producer_uses_channel_subscriptions_and_shared_template_context() {
     let (pool, schema) = database().await;
     let audit = AuditContext::cli("notification-test");
     for provider in ["email", "feishu", "telegram"] {
@@ -1701,8 +1701,8 @@ async fn notification_templates_isolate_providers_events_and_publish_restore_wit
         templates::published(&pool, "feishu", "health.alert")
             .await
             .unwrap()
-            .format,
-        "text"
+            .body_template,
+        super::template_render::event_default_source("health.alert").body_template
     );
     assert!(
         templates::change(
@@ -1740,15 +1740,15 @@ async fn notification_templates_isolate_providers_events_and_publish_restore_wit
         templates::published(&pool, "telegram", "health.alert")
             .await
             .unwrap()
-            .format,
-        "text"
+            .body_template,
+        super::template_render::event_default_source("health.alert").body_template
     );
     assert_eq!(
         templates::published(&pool, "feishu", "user.login")
             .await
             .unwrap()
-            .format,
-        "text"
+            .body_template,
+        super::template_render::event_default_source("user.login").body_template
     );
     templates::change(
         &pool,
@@ -1986,4 +1986,206 @@ async fn notification_templates_reject_invalid_critical_branches_without_changin
         }
     }
     cleanup(pool, schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn bot_template_tests_queue_unsaved_snapshot_and_validate_targets_and_rate_limits() {
+    use super::template_render::Source;
+    let (pool, schema) = database().await;
+    let audit = AuditContext::cli("template-send-test");
+    for provider in ["feishu", "telegram"] {
+        let channel = save(
+            &pool,
+            &key(),
+            None,
+            provider_input(provider),
+            &user(1),
+            &audit,
+        )
+        .await
+        .unwrap();
+        let source = Source {
+            format: "html".into(),
+            title_template: "{{ system_name }} 登录测试".into(),
+            body_template: "<b>{{ username }}</b> {{ source_ip }} · {{ severity }}".into(),
+        };
+        let input = || {
+            serde_json::from_value::<templates::TemplateTest>(
+                json!({"channelId":channel.id,"source":source,"severity":"critical"}),
+            )
+            .unwrap()
+        };
+        let wrong = if provider == "feishu" {
+            "telegram"
+        } else {
+            "feishu"
+        };
+        assert!(
+            templates::enqueue_test(&pool, wrong, "user.login", input(), &user(1), &audit)
+                .await
+                .is_err()
+        );
+        let delivery =
+            templates::enqueue_test(&pool, provider, "user.login", input(), &user(1), &audit)
+                .await
+                .unwrap();
+        assert!(
+            templates::enqueue_test(&pool, provider, "user.login", input(), &user(1), &audit)
+                .await
+                .is_err()
+        );
+        let c = pool.get().await.unwrap();
+        let row=c.query_one("SELECT e.context,e.event_type,e.severity FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE d.id=$1",&[&delivery]).await.unwrap();
+        assert_eq!(row.get::<_, String>("event_type"), "notification.test");
+        assert_eq!(row.get::<_, String>("severity"), "critical");
+        let stored: Value = row.get("context");
+        let snapshot = stored["template_test"]["payload"].clone();
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        assert!(encoded.contains("admin"));
+        assert!(encoded.contains("192.0.2.10"));
+        assert!(encoded.contains("critical"));
+        assert!(!encoded.contains("titleTemplate"));
+        assert!(!encoded.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert_eq!(
+            c.query_one("SELECT COUNT(*) FROM notification_template_version", &[])
+                .await
+                .unwrap()
+                .get::<_, i64>(0),
+            0
+        );
+        c.execute("UPDATE notification_channel SET last_test_at=NOW()-INTERVAL '31 seconds',enabled=FALSE WHERE id=$1",&[&channel.id]).await.unwrap();
+        assert!(
+            templates::enqueue_test(&pool, provider, "user.login", input(), &user(1), &audit)
+                .await
+                .is_err()
+        );
+        drop(c);
+        // Rendering later uses the queued snapshot, not any edited/published template or real user data.
+        let actual = templates::delivery_payload(
+            &pool,
+            provider,
+            "notification.test",
+            &stored,
+            &super::template_render::sample_context("user.login"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(actual, snapshot);
+        assert!(
+            templates::delivery_payload(
+                &pool,
+                wrong,
+                "notification.test",
+                &stored,
+                &super::template_render::sample_context("user.login")
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            delivery_detail(&pool, delivery).await.unwrap()["status"],
+            "pending"
+        );
+    }
+    cleanup(pool, schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn bot_real_event_variables_match_mail_and_report_snapshot() {
+    let (pool, schema) = database().await;
+    let login = crate::mail_template::login_context("real-user", "198.51.100.72")
+        .unwrap()
+        .into_json();
+    let resolved = super::template_context::resolve(
+        &pool,
+        "user.login",
+        &json!({"mail_context":login,"bot_token":"never-project"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resolved, login);
+    assert_eq!(resolved["source_ip"], "198.51.100.72");
+    let scanner: Uuid = Uuid::now_v7();
+    let (_, outage) = legacy_outage(&pool).await;
+    let offline =
+        super::template_context::resolve(&pool, "scanner.offline", &json!({"outage_id":outage}))
+            .await
+            .unwrap();
+    let mail = email::render(
+        &pool,
+        &json!({"outage_id":outage,"event_type":"scanner.offline"}),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        mail.text_body
+            .contains(offline["scanner_id"].as_str().unwrap())
+    );
+    let snapshot = crate::reports::mail_context::sample();
+    let c = pool.get().await.unwrap();
+    c.execute("INSERT INTO report_run(id,period_type,period_start,period_end,source,status,task_snapshot,payload,notification_context,generated_at) VALUES($1,'weekly',NOW()-INTERVAL '7 days',NOW(),'manual','ready','{}','{}',$2,NOW())",&[&scanner,&snapshot]).await.unwrap();
+    drop(c);
+    let report =
+        super::template_context::resolve(&pool, "report.weekly", &json!({"report_id":scanner}))
+            .await
+            .unwrap();
+    assert_eq!(report, snapshot);
+    cleanup(pool, schema).await;
+}
+
+#[actix_web::test]
+async fn bot_template_test_and_delivery_status_require_administrator_and_csrf() {
+    let pool = Pool::builder(Manager::new(
+        "host=127.0.0.1 user=unused".parse().unwrap(),
+        NoTls,
+    ))
+    .build()
+    .unwrap();
+    let app = http_test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(user(2));
+                srv.call(req)
+            })
+            .configure(configure),
+    )
+    .await;
+    let request = json!({"channelId":Uuid::nil(),"source":super::template_render::event_default_source("user.login")});
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::post()
+            .uri("/api/notifications/templates/feishu/user.login/test")
+            .set_json(&request)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::get()
+            .uri(&format!("/api/notifications/deliveries/{}", Uuid::nil()))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let app = http_test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool))
+            .wrap(crate::middlewares::csrfmiddleware::CsrfMiddleware)
+            .configure(configure),
+    )
+    .await;
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::post()
+            .uri("/api/notifications/templates/telegram/user.login/test")
+            .set_json(request)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }

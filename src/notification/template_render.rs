@@ -21,21 +21,31 @@ pub struct Rendered {
     pub payload: Value,
 }
 
-pub const VARIABLES: [&str; 7] = [
-    "system_name",
-    "title",
-    "body",
-    "severity",
-    "event_type",
-    "event_id",
-    "occurred_at",
-];
-
 pub fn default_source() -> Source {
     Source {
         format: "text".into(),
         title_template: "[{{ system_name }}] {{ title }}".into(),
         body_template: "级别：{{ severity }}\n{{ body }}".into(),
+    }
+}
+
+pub fn event_default_source(event: &str) -> Source {
+    let Some(mail) =
+        super::template_context::key(event).and_then(crate::mail_template::builtin_source)
+    else {
+        return default_source();
+    };
+    let body = if event.starts_with("report.") {
+        include_str!("../../templates/notification/report.html").to_owned()
+    } else {
+        let text = mail.text_template.replace("此邮件", "此通知");
+        let (heading, rest) = text.split_once('\n').unwrap_or((&text, ""));
+        format!("<b>{heading}</b>\n{rest}")
+    };
+    Source {
+        format: "html".into(),
+        title_template: mail.subject_template,
+        body_template: body,
     }
 }
 
@@ -47,7 +57,7 @@ pub fn context(
     id: &str,
     at: &str,
 ) -> Context {
-    // Never expose the email context, source IPs, recipients, SQL or credentials to bot templates.
+    // Legacy summary variables remain available alongside the shared event-specific mail fields.
     let mut c = Context::new();
     for (key, value) in [
         ("system_name", "Network Mapping"),
@@ -75,14 +85,23 @@ pub fn sample_context(event: &str) -> Context {
         "report.monthly" => ("月报已生成", "报告周期：示例周期\n请登录平台报告中心查看。"),
         _ => ("系统健康告警", "告警类型：慢请求\n详情：示例告警内容。"),
     };
-    context(
+    let mut context = context(
         event,
         title,
         body,
         "warning",
         "00000000-0000-4000-8000-000000000001",
         "2026-01-01 08:00:00 UTC",
-    )
+    );
+    if let Some(key) = super::template_context::key(event)
+        && let Ok(mail) = crate::mail_template::sample_context(key)
+    {
+        context.extend(mail);
+    }
+    if event == "scanner.recovered" {
+        context.insert("event_label", "恢复");
+    }
+    context
 }
 
 /// Check both severity branches before accepting a template; keep the warning preview stable.
@@ -391,6 +410,40 @@ pub fn render(provider: &str, source: &Source, c: &Context) -> Result<Rendered> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn event_defaults_and_parameter_catalog_match_mail_for_every_provider() {
+        for event in crate::notification::EVENT_TYPES {
+            let key = super::super::template_context::key(event).unwrap();
+            let variables = super::super::template_context::variables(event);
+            assert_eq!(
+                serde_json::to_value(&variables).unwrap(),
+                serde_json::to_value(crate::mail_template::template_variables(key)).unwrap()
+            );
+            let sample = sample_context(event);
+            for variable in variables {
+                assert!(
+                    sample.get(variable.key).is_some(),
+                    "{event}: {}",
+                    variable.key
+                );
+            }
+            for provider in ["feishu", "telegram"] {
+                let rendered =
+                    validate_source(provider, &event_default_source(event), event).unwrap();
+                assert!(rendered.text_body.contains("Network Mapping"));
+                if event == "user.login" {
+                    assert!(rendered.text_body.contains("192.0.2.10"));
+                }
+                if event == "scanner.recovered" {
+                    assert!(rendered.text_body.contains("恢复"));
+                }
+                if event.starts_with("report.") {
+                    assert!(rendered.text_body.contains("核心指标"));
+                }
+            }
+        }
+    }
+
     #[test]
     fn same_render_drives_native_payload_and_safe_preview() {
         let source = Source {

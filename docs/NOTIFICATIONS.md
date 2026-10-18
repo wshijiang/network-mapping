@@ -51,7 +51,7 @@
 
 仅支持 `https://open.feishu.cn/open-apis/bot/v2/hook/<机器人 UUID>`，不接受任意 Webhook、Lark 国际版域名、查询参数、片段、用户凭据、其他端口和重定向。服务需要允许访问 `open.feishu.cn:443`，无须公开回调入口。
 
-飞书模板支持纯文本或转换为 `post` 的受限富文本；默认保持纯文本。
+飞书模板支持纯文本或转换为 `post` 的受限富文本；默认使用参考邮件信息结构的富文本。
 
 签名按官方协议，以 `timestamp + "\n" + secret` 为 HMAC-SHA256 key，对空消息计算摘要并 Base64 编码。HTTP 成功还必须满足 JSON `code == 0`，兼容 `StatusCode`。签名密钥留空保留；移除须明确勾选清除。
 
@@ -64,7 +64,7 @@
 3. 选择「Telegram」，填写 Token 和 Chat ID。支持非零数字 ID（包括负数群 ID）或公开频道 `@名称`。
 4. 选择与邮件、飞书相同的事件类型，保存启用并测试。Token 保存后不回显，编辑留空保留。
 
-后端只调用固定的 `https://api.telegram.org/bot<Token>/sendMessage`，不接受自定义服务地址、代理 API 端点或重定向。部署环境需允许 `api.telegram.org:443`。消息由当前事件的已发布 Telegram 模板渲染，支持纯文本或 HTML，始终关闭链接预览；未发布自定义模板时使用内置纯文本。请求同时验证 HTTP 状态、`ok` 和消息 ID；限流遵守 `parameters.retry_after`，群权限/目标错误直接记录失败。机器人摘要保留稳定事件 ID，事件摘要会预先截短；完整模板渲染结果仍超限时记录模板错误，不发送损坏内容。
+后端只调用固定的 `https://api.telegram.org/bot<Token>/sendMessage`，不接受自定义服务地址、代理 API 端点或重定向。部署环境需允许 `api.telegram.org:443`。消息由当前事件的已发布 Telegram 模板渲染，支持纯文本或 HTML，始终关闭链接预览；未发布自定义模板时使用参考邮件的事件默认模板。请求同时验证 HTTP 状态、`ok` 和消息 ID；限流遵守 `parameters.retry_after`，群权限/目标错误直接记录失败。机器人摘要保留稳定事件 ID，事件摘要会预先截短；完整模板渲染结果仍超限时记录模板错误，不发送损坏内容。
 
 协议参考：[Telegram Bot API sendMessage](https://core.telegram.org/bots/api#sendmessage)。
 
@@ -80,7 +80,7 @@
 - 每次领取前检查维护状态。批次中开启维护时允许在途完成，后续记录保持待处理；退出后继续领取。
 - 离开 Web 页面会取消读取请求并清除刷新定时器，迟到响应不会继续轮询或覆盖已卸载状态。
 
-消息摘要不包含原始 SQL、客户端 IP 或请求正文。登录邮件的私有来源 IP 仅用于邮件模板，不发送给机器人。Webhook、Bot Token、SMTP 密钥和服务商原始错误正文不会写入投递历史。
+通用消息摘要不包含原始 SQL、客户端 IP 或请求正文。登录事件另外提供与邮件共享的 `source_ip` 参数，飞书和 Telegram 默认模板也会展示登录来源地址；测试使用固定示例。Webhook、Bot Token、SMTP 密钥和服务商原始错误正文不会写入投递历史。
 
 | 约束 | 当前值 |
 | --- | --- |
@@ -107,7 +107,9 @@
 | --- | --- | --- |
 | GET / POST | `/channels` | 查询 / 创建渠道 |
 | PUT / DELETE | `/channels/{id}` | 按版本编辑 / 删除 |
-| POST | `/channels/{id}/test` | 测试入队，返回 202 和 delivery_id |
+| POST | `/channels/{id}/test` | 固定连通性测试入队，返回 202 和 delivery_id |
+| POST | `/templates/{provider}/{event}/test` | 当前模板及所选级别的示例数据入队，不保存或发布 |
+| GET | `/deliveries/{id}` | 查询单条测试投递结果 |
 | GET | `/deliveries` | 按 channel_id/status 筛选、游标翻页 |
 | POST | `/deliveries/{id}/retry` | 重试仍符合条件的 failed 记录 |
 

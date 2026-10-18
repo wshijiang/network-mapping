@@ -11,26 +11,15 @@ pub async fn render(
     context: &serde_json::Value,
 ) -> Result<Option<crate::mail_template::RenderedMailTemplate>, Outcome> {
     let mut context = context.clone();
-    if let Some(outage) = context["outage_id"].as_i64() {
-        let c = pool
-            .get()
-            .await
-            .map_err(|_| Outcome::failure("notification_source_unavailable", true))?;
-        let row=c.query_opt("SELECT o.scanner_id,o.last_seen_at,o.detected_at,o.recovered_at,s.name,s.location FROM scanner_outage o JOIN scanner_info s ON s.scanner_id=o.scanner_id WHERE o.id=$1", &[&outage]).await.map_err(|_| Outcome::failure("notification_source_unavailable",true))?.ok_or_else(|| Outcome::failure("notification_source_unavailable",false))?;
-        let scanner: String = row.get("scanner_id");
-        let offline = context["event_type"] == "scanner.offline";
-        let at: chrono::DateTime<chrono::Utc> = if offline {
-            row.get("detected_at")
-        } else {
-            row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("recovered_at")
-                .unwrap_or_else(chrono::Utc::now)
-        };
-        context = serde_json::json!({"mail_template":crate::mail_template::SCANNER_OUTAGE_TEMPLATE_KEY,"mail_context":{
-            "system_name":"Network Mapping","event_label":if offline {"掉线"} else {"恢复"},
-            "scanner_id":scanner,"scanner_name":row.get::<_,Option<String>>("name").filter(|s| !s.is_empty()).unwrap_or_else(||scanner.clone()),
-            "location":row.get::<_,Option<String>>("location").unwrap_or_default(),"last_seen_at":row.get::<_,chrono::DateTime<chrono::Utc>>("last_seen_at").format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-            "event_at":at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),"detail_path":format!("/scanner/{scanner}")
-        }});
+    if context["outage_id"].is_i64() {
+        context["mail_template"] =
+            serde_json::json!(crate::mail_template::SCANNER_OUTAGE_TEMPLATE_KEY);
+        context["mail_context"] = super::template_context::resolve(
+            pool,
+            context["event_type"].as_str().unwrap_or("scanner.offline"),
+            &context,
+        )
+        .await?;
     }
     if let Some(report) = context["report_id"].as_str() {
         let id = report
