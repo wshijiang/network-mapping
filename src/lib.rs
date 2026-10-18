@@ -90,3 +90,5 @@ pub mod human_verification;
 pub(crate) mod readiness;
 
 pub mod application;
+
+mod web_detection;

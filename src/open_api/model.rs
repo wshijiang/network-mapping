@@ -38,6 +38,7 @@ pub const FIELDS: &[&str] = &[
     "title",
     "banner",
     "os",
+    "web",
     "tls_mode",
     "tls_version",
     "tls_cipher_suite",
@@ -320,6 +321,25 @@ impl Principal {
                             .cloned()
                             .collect::<Vec<_>>()
                     )
+                } else if field == "web" {
+                    let web = crate::web_detection::endpoint_view(
+                        serde_json::from_value(v.clone()).ok(),
+                        source
+                            .get("observed_at_ms")
+                            .and_then(Value::as_i64)
+                            .unwrap_or_default(),
+                        Utc::now().timestamp_millis(),
+                    );
+                    let mut value = json!(web);
+                    if let Some(items) = value.get_mut("technologies").and_then(Value::as_array_mut)
+                    {
+                        for item in items {
+                            if let Some(obj) = item.as_object_mut() {
+                                obj.remove("evidence");
+                            }
+                        }
+                    }
+                    value
                 } else if field == "os" {
                     let os = serde_json::from_value(v.clone()).ok();
                     let os = crate::os_detection::endpoint_view(

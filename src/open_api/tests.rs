@@ -1129,3 +1129,31 @@ fn os_fields_require_approval_and_external_projection_hides_raw_evidence() {
     assert!(result["os"].get("evidence").is_none());
     assert!(!result.to_string().contains("private-index"));
 }
+
+#[test]
+fn web_fields_require_approval_and_external_projection_hides_component_evidence() {
+    let mut p = principal();
+    p.policy.fields.retain(|field| field != "web");
+    assert!(query::compile("tech = nginx", &p).is_err());
+    assert!(query::compile("web.status = identified", &p).is_err());
+    let at = Utc::now().timestamp_millis();
+    let web = crate::web_detection::infer(
+        Some("http"),
+        None,
+        Some(
+            &json!({"schema_version":2,"evidence":[{"module":"http","result":{"response":{"headers":{"server":"nginx/1.26.2"},"body":""}}}]}),
+        ),
+        80,
+        at,
+        Some("private-index/observation"),
+    );
+    let source = json!({"web":web,"observed_at_ms":at});
+    assert!(p.project_endpoint(&source, None).get("web").is_none());
+    p.policy.fields.push("web".into());
+    assert!(query::compile("tech = nginx", &p).is_ok());
+    assert!(query::compile("tech = \"nginx@1.26.2\"", &p).is_ok());
+    let result = p.project_endpoint(&source, None);
+    assert_eq!(result["web"]["technologies"][0]["id"], "nginx");
+    assert!(result["web"]["technologies"][0].get("evidence").is_none());
+    assert!(!result.to_string().contains("private-index"));
+}

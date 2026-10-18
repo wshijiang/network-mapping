@@ -49,6 +49,7 @@ struct AssetPortCurrent {
     service_observed_at: Option<i64>,
     service_stale: bool,
     os: Option<crate::os_detection::OsInference>,
+    web: Option<crate::web_detection::WebInference>,
     execution_id: String,
     task_id: String,
 }
@@ -505,6 +506,14 @@ async fn get_asset_ports_from_elasticsearch(
                 last_seen_at,
                 service_observed_at,
                 service_stale: service_observed_at.is_some_and(|time| time < last_seen_at),
+                web: crate::web_detection::endpoint_view(
+                    source
+                        .get("web")
+                        .cloned()
+                        .and_then(|v| serde_json::from_value(v).ok()),
+                    last_seen_at,
+                    chrono::Utc::now().timestamp_millis(),
+                ),
                 os: crate::os_detection::endpoint_view(
                     source
                         .get("os")

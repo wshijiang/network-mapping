@@ -607,3 +607,24 @@ has_endpoint(os.family = windows) AND has_endpoint(port = 445)
 
 字段含义及过期行为见[操作系统识别](OS_DETECTION.md)。资产级宿主机摘要不作为这些
 端点条件的匹配对象；新数据在后台处理期间可显示 `pending`。
+
+## Web 技术栈字段
+
+`tech`（别名 `web.tech`）属于端点字段，支持 `=`、`!=`、`IN`、`NOT IN` 和 `EXISTS`。
+使用组件 ID，或 `ID@版本` 精确限定同一组件。版本大小写保持原样，组件 ID 大小写不敏感。
+`web.status` 查询 `pending/identified/unknown/partial/unsupported/not_web`。
+
+```text
+tech = nginx
+tech = "jquery@3.7.1"
+tech IN (wordpress, drupal)
+has_endpoint(port = 8443 AND tech = nextjs)
+web.status = partial
+```
+
+名称与版本由同一 ES nested 查询关联。否定条件包含尚未识别的端点；需要时附加
+`web.status = identified`。不支持 `tech ~` 或独立的非关联版本字段。
+证据范围与过期语义见 [Web 框架与组件识别](WEB_DETECTION.md)。
+
+Web 技术目录现支持 `tech = minio`、`tech = s3`、`tech = gitlab` 和 `tech = git`；
+产品身份与协议能力分别判断，证据要求见 [技术目录](WEB_TECHNOLOGY_CATALOG.md)。

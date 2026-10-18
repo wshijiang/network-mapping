@@ -34,6 +34,8 @@
 | --- | --- |
 | [功能概览](FEATURES.md) | 服务端功能入口、交互约束和专题导读 |
 | [操作系统识别](OS_DETECTION.md) | 系统线索、证据、置信度、搜索和升级排障 |
+| [Web 框架与组件识别](WEB_DETECTION.md) | 基于 HTTP 证据的技术栈、版本、搜索与边界 |
+| [Web 技术目录](WEB_TECHNOLOGY_CATALOG.md) | 支持清单、MinIO/S3/Git 边界及分批扩展 |
 | [资产搜索](SEARCH_SYNTAX.md) | 搜索字段、表达式语法、结果语义和 API 契约 |
 | [统计分析](STATISTICS.md) | 自定义汇总、图表以及图片和数据导出 |
 | [周报与月报](reports.md) | 报表指标、发送计划、归档与恢复 |
@@ -88,6 +90,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [操作系统识别维护](OS_DETECTION_DEVELOPMENT.md) | 特征字段、异步队列、投影、规则回填与验证 |
+| [Web 技术栈识别维护](WEB_DETECTION_DEVELOPMENT.md) | 内置规则、派生队列、回填、验证与后续阶段 |
 | [模块化实现与热更新](MODULE_RUNTIME_IMPLEMENTATION.md) | 当前实现：Workspace、报表渲染 Worker、版本切换和回滚 |
 | [模块化架构设计](MODULAR_ARCHITECTURE.md) | 整体目标架构与后续设计；已实现能力以实现说明为准 |
 | [进程替换原型](examples/modular-hot-update/README.md) | 独立实验：验证进程替换生命周期，未集成生产服务 |

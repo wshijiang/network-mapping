@@ -267,6 +267,11 @@ pub async fn init_database_table(
             "../../source/database/migrate_notification_templates.sql"
         ))
         .await?;
+    transaction
+        .batch_execute(include_str!(
+            "../../source/database/migrate_web_detection.sql"
+        ))
+        .await?;
     transaction.commit().await?;
 
     Ok(())

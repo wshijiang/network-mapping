@@ -255,3 +255,10 @@ def verify(raw_body: bytes, headers, signing_secret: str):
 `os.distribution`、`os.version`、`os.confidence`、`os.status`、`os.score` 条件。
 返回对象不包含原始证据、观察索引引用和候选明细。没有批准 `os` 的既有应用保持原权限。
 置信度、未知和过期语义见[操作系统识别](OS_DETECTION.md)。
+
+## Web 技术栈字段
+
+字段白名单增加 `web`，需要单独审批。获批后可返回 IP 端点技术栈摘要，并使用
+`tech`、`web.tech`、`web.status` 条件；`tech = "jquery@3.7.1"` 在同一组件中关联版本。
+返回摘要移除每个组件的证据及观察索引引用，原有应用不会自动获得新权限。
+状态和识别边界见 [Web 框架与组件识别](WEB_DETECTION.md)。

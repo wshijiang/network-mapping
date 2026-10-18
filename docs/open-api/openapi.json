@@ -136,6 +136,9 @@
           },
           "tls_version": {
             "description": "仅在批准的字段白名单内且有观察值时返回"
+          },
+          "web": {
+            "description": "仅在批准的字段白名单内且有观察值时返回"
           }
         },
         "type": "object"
@@ -223,6 +226,7 @@
             "title",
             "banner",
             "os",
+            "web",
             "tls_mode",
             "tls_version",
             "tls_cipher_suite",
@@ -248,7 +252,7 @@
           ],
           "type": "string"
         },
-        "maxItems": 29,
+        "maxItems": 30,
         "minItems": 1,
         "type": "array"
       },

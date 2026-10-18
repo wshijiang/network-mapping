@@ -49,6 +49,8 @@ enum Field {
     OsConfidence,
     OsStatus,
     OsScore,
+    Technology,
+    WebStatus,
     Title,
     HttpBody,
     TlsMode,
@@ -331,6 +333,42 @@ impl ElasticsearchCompiler {
         if predicate.field == Field::Domain && operator == Operator::Exists {
             return Err(SearchSyntaxError::new("字段 domain 不支持 EXISTS", 0, 0));
         }
+        if predicate.field == Field::Technology {
+            let path = "web.technologies";
+            if operator == Operator::Exists {
+                return Ok(
+                    json!({"nested":{"path":path,"query":{"exists":{"field":"web.technologies.id"}}}}),
+                );
+            }
+            if !matches!(
+                operator,
+                Operator::Eq | Operator::NotEq | Operator::In | Operator::NotIn
+            ) {
+                return Err(unsupported_operator(predicate.field));
+            }
+            let mut terms = Vec::new();
+            for value in &predicate.values {
+                validate_text_value(predicate.field, value)?;
+                let (id, version) = value
+                    .split_once('@')
+                    .map_or((value.as_str(), None), |(id, v)| (id, Some(v)));
+                if id.is_empty() || version.is_some_and(str::is_empty) {
+                    return Err(SearchSyntaxError::new("tech 使用组件 ID 或 ID@版本", 0, 0));
+                }
+                let mut filters =
+                    vec![json!({"term":{"web.technologies.id":id.to_ascii_lowercase()}})];
+                if let Some(version) = version {
+                    filters.push(json!({"term":{"web.technologies.version":version}}));
+                }
+                terms.push(json!({"bool":{"filter":filters}}));
+            }
+            let query = json!({"nested":{"path":path,"query":{"bool":{"should":terms,"minimum_should_match":1}}}});
+            return Ok(if matches!(operator, Operator::NotEq | Operator::NotIn) {
+                json!({"bool":{"must_not":[query]}})
+            } else {
+                query
+            });
+        }
         if operator == Operator::Exists {
             return Ok(json!({"exists": {"field": es_field(predicate.field)}}));
         }
@@ -537,6 +575,7 @@ impl ElasticsearchCompiler {
                 | Field::OsVersion
                 | Field::OsConfidence
                 | Field::OsStatus
+                | Field::WebStatus
                 | Field::Country
                 | Field::Source
                 | Field::Tag
@@ -669,6 +708,8 @@ fn es_field(field: Field) -> &'static str {
         Field::OsConfidence => "os.confidence",
         Field::OsStatus => "os.status",
         Field::OsScore => "os.score",
+        Field::Technology => "web.technologies.id",
+        Field::WebStatus => "web.status",
 
         Field::Title => "title",
         Field::HttpBody => "http_body",
@@ -729,6 +770,8 @@ impl Field {
             "os.confidence" | "service.os.confidence" => Some(Self::OsConfidence),
             "os.status" | "service.os.status" => Some(Self::OsStatus),
             "os.score" | "service.os.score" => Some(Self::OsScore),
+            "tech" | "web.tech" => Some(Self::Technology),
+            "web.status" => Some(Self::WebStatus),
 
             "title" | "http.title" => Some(Self::Title),
             "http_body" | "http.body" => Some(Self::HttpBody),
@@ -774,6 +817,8 @@ impl Field {
             Self::OsConfidence => "os.confidence",
             Self::OsStatus => "os.status",
             Self::OsScore => "os.score",
+            Self::Technology => "tech",
+            Self::WebStatus => "web.status",
 
             Self::Title => "title",
             Self::HttpBody => "http_body",
@@ -808,6 +853,8 @@ impl Field {
                 | Self::OsConfidence
                 | Self::OsStatus
                 | Self::OsScore
+                | Self::Technology
+                | Self::WebStatus
                 | Self::Title
                 | Self::HttpBody
                 | Self::TlsMode
@@ -845,6 +892,8 @@ impl Field {
             | Self::OsConfidence
             | Self::OsStatus
             | Self::OsScore
+            | Self::Technology
+            | Self::WebStatus
             | Self::Ip
             | Self::Asn
             | Self::Country
@@ -1636,5 +1685,30 @@ mod tests {
         assert!(text.contains("os.score"));
         assert!(parse_and_compile_elasticsearch("os.score > 101").is_err());
         assert!(parse_and_compile_elasticsearch("has_endpoint(os.family = linux)").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod web_tests {
+    use super::*;
+    #[test]
+    fn technology_version_is_correlated_and_negation_is_outside_nested() {
+        let ElasticsearchCompilation::Supported(q) =
+            parse_and_compile_elasticsearch("tech = \"jquery@3.7.1\"").unwrap()
+        else {
+            panic!("unsupported")
+        };
+        let text = q.to_string();
+        assert!(text.contains("nested"));
+        assert!(text.contains("web.technologies.id"));
+        assert!(text.contains("web.technologies.version"));
+        let ElasticsearchCompilation::Supported(q) =
+            parse_and_compile_elasticsearch("tech != \"jquery@3.7.1\"").unwrap()
+        else {
+            panic!("unsupported")
+        };
+        assert!(q.pointer("/bool/must_not/0/nested").is_some());
+        assert!(parse_and_compile_elasticsearch("tech ~ jquery").is_err());
+        assert!(parse_and_compile_elasticsearch("web.status = partial").is_ok());
     }
 }

@@ -234,3 +234,9 @@ PostgreSQL 模式下 `scan_observation` 是事实来源，`ips`、`ports` 是资
 或 checksum。扫描计划和上传协议不增加 OS 阶段；本地关闭服务识别的节点仍可上传端口。
 服务证据截断时可带 `evidence[].truncated`，缺失系统字段应保持未知。
 字段、重算和存储约束见[识别维护说明](OS_DETECTION_DEVELOPMENT.md)。
+
+## Web 技术栈派生识别
+
+服务端在执行成功、端点发布后异步处理已有 HTTP/HTTPS 服务证据，独立保存技术栈派生结果。
+本版本不增加扫描阶段或改变结果协议；仅端口任务不会生成新的 Web 证据。
+原始事实和上传 checksum 不含识别结果。见 [使用说明](WEB_DETECTION.md)与[维护说明](WEB_DETECTION_DEVELOPMENT.md)。
