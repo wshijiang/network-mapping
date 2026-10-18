@@ -247,7 +247,9 @@ fn fragment(input: &str, provider: &str) -> Result<(String, String, Vec<Vec<Valu
                 if opened.name != closing.name {
                     return Err(Error::bad("HTML 标签嵌套不匹配"));
                 }
-                html.push_str(&format!("</{}>", opened.name));
+                if provider != "feishu" || opened.name == "a" {
+                    html.push_str(&format!("</{}>", opened.name));
+                }
             } else {
                 let opened = tag(raw, provider)?;
                 if stack.len() >= 16 {
@@ -267,15 +269,17 @@ fn fragment(input: &str, provider: &str) -> Result<(String, String, Vec<Vec<Valu
                         "code/pre/blockquote 在此编辑器中须单独使用，不能嵌套其他标签",
                     ));
                 }
-                html.push_str(&format!(
-                    "<{}{}>",
-                    opened.name,
-                    opened
-                        .href
-                        .as_ref()
-                        .map(|u| format!(" href=\"{}\"", escape(u)))
-                        .unwrap_or_default()
-                ));
+                if provider != "feishu" || opened.name == "a" {
+                    html.push_str(&format!(
+                        "<{}{}>",
+                        opened.name,
+                        opened
+                            .href
+                            .as_ref()
+                            .map(|u| format!(" href=\"{}\"", escape(u)))
+                            .unwrap_or_default()
+                    ));
+                }
                 stack.push(opened);
             }
             rest = &after[end + 1..];
@@ -284,16 +288,6 @@ fn fragment(input: &str, provider: &str) -> Result<(String, String, Vec<Vec<Valu
             let text = decode(&rest[..end])?;
             plain.push_str(&text);
             html.push_str(&escape(&text));
-            let styles: Vec<_> = [
-                ("b", "bold"),
-                ("i", "italic"),
-                ("u", "underline"),
-                ("s", "lineThrough"),
-            ]
-            .into_iter()
-            .filter(|(tag, _)| stack.iter().any(|t| t.name == *tag))
-            .map(|(_, style)| style)
-            .collect();
             for (index, part) in text.split('\n').enumerate() {
                 if index > 0 {
                     lines.push(Vec::new());
@@ -302,9 +296,9 @@ fn fragment(input: &str, provider: &str) -> Result<(String, String, Vec<Vec<Valu
                     continue;
                 }
                 let node = if let Some(link) = stack.iter().find(|t| t.name == "a") {
-                    json!({"tag":"a","text":part,"href":link.href,"style":styles})
+                    json!({"tag":"a","text":part,"href":link.href})
                 } else {
-                    json!({"tag":"text","text":part,"style":styles})
+                    json!({"tag":"text","text":part})
                 };
                 lines.last_mut().unwrap().push(node);
             }
@@ -467,15 +461,22 @@ mod tests {
             feishu.payload["content"]["post"]["zh_cn"]["content"][0][0]["text"],
             "<script>&危险"
         );
+        assert!(
+            feishu.payload["content"]["post"]["zh_cn"]["content"][0][0]
+                .get("style")
+                .is_none()
+        );
         assert_eq!(
-            feishu.payload["content"]["post"]["zh_cn"]["content"][0][0]["style"][0],
-            "bold"
+            feishu.html_body,
+            "<b>登录</b>\n&lt;script&gt;&amp;危险\n<a href=\"https://example.com?a=1&amp;b=2\">查看</a>\n事件 ID：id"
         );
         assert!(!feishu.html_body.contains("<script>"));
         let tg = render("telegram", &source, &c).unwrap();
         assert_eq!(tg.payload["parse_mode"], "HTML");
         assert!(tg.text_body.contains("事件 ID：id"));
         assert_eq!(tg.payload["text"], tg.html_body);
+        assert!(tg.html_body.contains("<b>&lt;script&gt;&amp;危险</b>"));
+        assert!(tg.html_body.contains("<i>查看</i>"));
     }
     #[test]
     fn rejects_unsupported_styles_bad_nesting_and_unsafe_links() {

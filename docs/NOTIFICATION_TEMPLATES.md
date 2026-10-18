@@ -20,10 +20,12 @@
 | 渠道 | 本功能支持的格式 | 样式与限制 |
 | --- | --- | --- |
 | 邮件 | HTML + 备用纯文本 | CSS 内联及允许的样式属性；不加载远程样式表，最终以邮件客户端为准 |
-| 飞书 | text / post | `b/strong` 粗体、`i/em` 斜体、`u/ins` 下划线、`s/strike/del` 删除线、`a` 超链接；转换为 `style` 和链接节点 |
-| Telegram | text / HTML parse_mode | 上述样式，另支持 `code`、`pre`、`blockquote`、`tg-spoiler`；本编辑器要求 code/pre/blockquote 单独使用，不能与其他标签嵌套 |
+| 飞书 | text / post | 保留标题、换行和 `a` 超链接；自定义机器人不支持节点 `style` 字段，已有 `b/strong/i/em/u/ins/s/strike/del` 标签兼容解析为普通文本，预览与发送一致 |
+| Telegram | text / HTML parse_mode | `b/strong` 粗体、`i/em` 斜体、`u/ins` 下划线、`s/strike/del` 删除线、`a` 超链接，另支持 `code`、`pre`、`blockquote`、`tg-spoiler`；本编辑器要求 code/pre/blockquote 单独使用，不能与其他标签嵌套 |
 
-HTML 换行直接输入换行符，不使用 `<br>`、`<p>` 或 `<div>`。链接仅支持带引号的 `href`，且地址必须为不含账号密码的 HTTP/HTTPS URL。HTML 实体支持 `amp/lt/gt/quot/apos` 和有效数字实体。富文本不支持 CSS、任意 HTML 属性、图片、卡片 JSON 或 Telegram 新版 `sendRichMessage`；这些属于平台的其他消息能力，不在本次模板编辑范围内。遇到不支持的格式会拒绝保存/发布，而不会悄悄删除样式。
+HTML 换行直接输入换行符，不使用 `<br>`、`<p>` 或 `<div>`。链接仅支持带引号的 `href`，且地址必须为不含账号密码的 HTTP/HTTPS URL。HTML 实体支持 `amp/lt/gt/quot/apos` 和有效数字实体。富文本不支持 CSS、任意 HTML 属性、图片、卡片 JSON 或 Telegram 新版 `sendRichMessage`；这些属于平台的其他消息能力，不在本次模板编辑范围内。除上述飞书旧样式标签兼容处理外，遇到不支持的格式会拒绝保存/发布。
+
+飞书应用机器人接口的富文本 `style` 能力不适用于自定义机器人 Webhook。旧版本包含该字段的消息可能返回 HTTP 200、服务码 `19002`；当前版本发送前也会清理已入队测试快照中的 `style`，有效期内的失败投递可手动重试，无需重建渠道或重新发布模板。服务码 `19002` / `9499` 记录为 `invalid_payload`（消息格式无效），不再提示检查凭据。
 
 例如选择 HTML 富文本：
 
