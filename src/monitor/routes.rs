@@ -36,6 +36,7 @@ pub const WEB_OPERATIONS: &[(&str, &str)] = &[
     ("GET /api/audit/events/{event_id}", "读取审计事件详情"),
     ("GET /api/audit/export", "读取审计事件导出"),
     ("GET /api/config/get", "读取系统基础配置"),
+    ("GET /api/config/human-verification", "读取登录保护配置"),
     ("GET /api/config/mail", "读取邮件配置"),
     ("GET /api/config/monitor/operations", "慢检测操作目录"),
     ("GET /api/config/runtime/{namespace}", "运行时配置"),
@@ -239,6 +240,7 @@ pub const WEB_OPERATIONS: &[(&str, &str)] = &[
         "PUT /api/admin/users/{user_id}/login-ip-allowlist",
         "更新用户登录白名单",
     ),
+    ("PUT /api/config/human-verification", "保存登录保护配置"),
     (
         "PUT /api/mail/templates/{template_key}/draft",
         "更新邮件模板草稿",
