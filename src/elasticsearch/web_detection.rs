@@ -17,7 +17,7 @@ struct WebJob {
 const UPDATE_WEB: &str = r#"
     boolean matches = ctx._source.service_observation_ref != null &&
         ctx._source.service_observation_ref.id == params.reference.id && ctx._source.service_observed_at_ms == params.observed_at;
-    boolean legacy = (ctx._source.service_observation_ref == null || ctx._source.service_observation_ref.observed_at != ctx._source.service_observed_at_ms) &&
+    boolean legacy = params.allow_legacy && (ctx._source.service_observation_ref == null || ctx._source.service_observation_ref.observed_at != ctx._source.service_observed_at_ms) &&
         ctx._source.user_id == params.user_id &&
         ctx._source.service_observed_at_ms == params.observed_at &&
         ctx._source.service == params.service && ctx._source.banner == params.banner;
@@ -29,6 +29,42 @@ const UPDATE_WEB: &str = r#"
 "#;
 
 impl ElasticsearchService {
+    /// A legacy endpoint has no stable service identity. Timestamp and banner
+    /// equality cannot distinguish observations from different executions, so
+    /// only enable that fallback when no other service observation exists at
+    /// the same user's endpoint and service time. Ignore content equality:
+    /// rejecting more old matches is preferable to installing the wrong ref.
+    async fn web_legacy_evidence_is_unique(
+        &self,
+        user_id: i32,
+        ip: &str,
+        port: u16,
+        at: i64,
+        observation_id: &str,
+    ) -> Result<bool, String> {
+        let query = json!({
+            "size": 1, "track_total_hits": false, "_source": false,
+            "query": {"bool": {
+                "filter": [
+                    {"term": {"user_id": user_id}},
+                    {"term": {"ip_address": ip}},
+                    {"term": {"port": port}},
+                    {"term": {"kind": "service"}},
+                    {"term": {"observed_at": at}}
+                ],
+                "must_not": [{"ids": {"values": [observation_id]}}]
+            }}
+        });
+        let result = self
+            .scan_query(ScanQueryIndex::Observations, &query)
+            .await?;
+        let hits = result
+            .pointer("/hits/hits")
+            .and_then(Value::as_array)
+            .ok_or("Web legacy evidence uniqueness search missing hits")?;
+        Ok(hits.is_empty())
+    }
+
     /// Backfills old successful executions in bounded slices. A new rule
     /// revision creates new jobs without changing immutable observations.
     async fn enqueue_web_backfill(&self, pool: &Pool) -> Result<(), String> {
@@ -208,7 +244,10 @@ impl ElasticsearchService {
                 at,
                 Some(&reference),
             );
-            let params = json!({"reference":{"id":id,"index":index,"observed_at":at},"execution_id":job.context.execution_id,"user_id":job.context.user_id,"observed_at":at,"service":service,"banner":banner,"revision":RULESET_REVISION,"web":web});
+            let allow_legacy = self
+                .web_legacy_evidence_is_unique(job.context.user_id, ip, port, at, id)
+                .await?;
+            let params = json!({"reference":{"id":id,"index":index,"observed_at":at},"allow_legacy":allow_legacy,"execution_id":job.context.execution_id,"user_id":job.context.user_id,"observed_at":at,"service":service,"banner":banner,"revision":RULESET_REVISION,"web":web});
             let mut targets = vec![(
                 self.inner.config.execution_endpoint_index.as_str(),
                 sha256_hex(format!("{}\0{ip}\0{port}", job.context.execution_id).as_bytes()),
@@ -298,7 +337,10 @@ mod tests {
         };
         fixture.state.lock().unwrap().search_responses = [
             json!({"hits":{"hits":[hit(22),hit(2222)]},"_shards":{"failed":0}}),
+            json!({"hits":{"hits":[]},"_shards":{"failed":0}}),
+            json!({"hits":{"hits":[]},"_shards":{"failed":0}}),
             json!({"hits":{"hits":[hit(2223)]},"_shards":{"failed":0}}),
+            json!({"hits":{"hits":[]},"_shards":{"failed":0}}),
         ]
         .into();
         let mut job = WebJob {
@@ -329,8 +371,18 @@ mod tests {
         let (_, done) = service.enrich_web_page(&job).await.unwrap();
         assert!(done);
         let state = fixture.state.lock().unwrap();
-        assert_eq!(state.query_bodies.len(), 2);
-        assert_eq!(state.query_bodies[1].1["search_after"], job.cursor.unwrap());
+        assert_eq!(state.query_bodies.len(), 5);
+        assert_eq!(state.query_bodies[3].1["search_after"], job.cursor.unwrap());
+        let uniqueness = &state.query_bodies[1].1;
+        assert_eq!(uniqueness["size"], 1);
+        assert_eq!(
+            uniqueness["query"]["bool"]["filter"][0]["term"]["user_id"],
+            1
+        );
+        assert_eq!(
+            uniqueness["query"]["bool"]["must_not"][0]["ids"]["values"][0],
+            "service-22"
+        );
         assert_eq!(
             state
                 .requests
@@ -522,6 +574,38 @@ mod tests {
             assert_eq!(current["_source"]["service_observation_ref"]["observed_at"],at);
             let view=crate::web_detection::endpoint_view(serde_json::from_value(current["_source"]["web"].clone()).ok(),at+500,at+500).unwrap();
             assert!(view.stale);
+
+            // The caller's millisecond timestamp, service and banner are not a
+            // unique identity: another execution can have different HTTP data.
+            let mut other_context=context.clone();
+            other_context.execution_id="ambiguous-service-execution".into();
+            other_context.upload_id="ambiguous-service-upload".into();
+            let mut other=observation.clone();
+            other["data"]=json!({"schema_version":2,"evidence":[{"module":"http","result":{"response":{"headers":{"server":"Apache/2.4.62"},"body":""}}}]});
+            service.persist_scan_batch_prepared(&other_context,std::slice::from_ref(&other),None).await?;
+            service.send_json_request(ElasticsearchOperation::IndexAdmin,Method::POST,&format!("/{raw_index}/_refresh"),|r|r).await?;
+            service.send_json_request(ElasticsearchOperation::BulkWrite,Method::POST,&update_path,|r|r.json(&json!({"script":{"source":"ctx._source.remove('service_observation_ref'); ctx._source.remove('web');"}}))).await?;
+            let other_job=WebJob { execution_id:1, token:Uuid::new_v4(),attempts:1,cursor:None,context:other_context.clone(),api_client_id:Some(77) };
+            for replay in [&other_job,&job] {
+                service.enrich_web_page(replay).await?;
+                let ambiguous=service.send_json_request(ElasticsearchOperation::ScanQuery,Method::GET,&format!("/{}/_doc/{current_id}",service.inner.config.current_endpoint_index),|r|r).await?;
+                assert!(ambiguous["_source"]["web"].is_null(),"ambiguous legacy response must not be selected");
+                assert!(ambiguous["_source"]["service_observation_ref"].is_null());
+                assert_eq!(ambiguous["_source"]["execution_id"],port_context.execution_id);
+            }
+            // A real observation publication supplies an exact reference, which
+            // remains authoritative even when timestamps and banners collide.
+            let event=endpoint_projection_document(&context,&observation,at);
+            let mut bulk=String::new();append_projection_update(&mut bulk,&service.inner.config.current_endpoint_index,&current_id,&event)?;
+            service.send_bulk_with_retry("/_bulk",&bulk,false).await?;
+            service.enrich_web_page(&job).await?;
+            service.enrich_web_page(&other_job).await?;
+            let exact=service.send_json_request(ElasticsearchOperation::ScanQuery,Method::GET,&format!("/{}/_doc/{current_id}",service.inner.config.current_endpoint_index),|r|r).await?;
+            assert_eq!(exact["_source"]["web"]["status"],"identified");
+            assert_eq!(exact["_source"]["service_observation_ref"]["id"],raw_id);
+            let technologies=exact["_source"]["web"]["technologies"].as_array().unwrap();
+            assert!(technologies.iter().any(|technology|technology["id"]=="nginx"));
+            assert!(!technologies.iter().any(|technology|technology["id"]=="apache"));
 
             // A newer successful service result must invalidate the previous
             // Web conclusion, and replaying the older job must not restore it.
