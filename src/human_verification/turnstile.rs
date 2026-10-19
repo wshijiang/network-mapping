@@ -115,7 +115,12 @@ impl Turnstile {
                 .turnstile
                 .allowed_hostnames
                 .iter()
-                .any(|allowed| hostname(allowed) == actual_hostname)
+                .filter_map(|allowed| hostname(allowed))
+                .any(|allowed| {
+                    actual_hostname.as_ref().is_some_and(|actual| {
+                        actual == &allowed || actual.ends_with(&format!(".{allowed}"))
+                    })
+                })
         {
             return Err(VerificationError::Rejected("hostname_mismatch"));
         }

@@ -113,7 +113,7 @@ docker compose --env-file docker/.env -f docker/compose.example.yml up -d --forc
 | `NM__HUMAN_VERIFICATION__SEND_REMOTE_IP` | 布尔 | `false` | 是否向 Siteverify 发送可信解析的客户端 IP |
 | `NM__HUMAN_VERIFICATION__TURNSTILE__SITE_KEY` | 字符串 | 未设置 | 启用时必填；公开 widget 参数 |
 | `NM__HUMAN_VERIFICATION__TURNSTILE__SECRET_KEY` | 密钥字符串 | 未设置 | 启用时必填，仅服务端保存；支持 `_FILE` |
-| `NM__HUMAN_VERIFICATION__TURNSTILE__ALLOWED_HOSTNAMES` | JSON 数组 | `[]` | 启用时必填；精确 DNS 名，不含协议、端口、路径或通配符 |
+| `NM__HUMAN_VERIFICATION__TURNSTILE__ALLOWED_HOSTNAMES` | JSON 数组 | `[]` | 启用时必填；DNS 名及其所有层级子域，不含协议、端口、路径或通配符 |
 
 数组使用 JSON 编码：`NM__HUMAN_VERIFICATION__ACTIONS='["login"]'`。密钥文件输入例如 `NM__HUMAN_VERIFICATION__TURNSTILE__SECRET_KEY_FILE=/run/secrets/turnstile_secret`，需先只读挂载且不得同时提供直接值。
 

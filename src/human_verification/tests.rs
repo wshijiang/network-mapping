@@ -126,6 +126,36 @@ async fn validates_siteverify_and_sends_only_expected_fields() {
 }
 
 #[actix_web::test]
+async fn hostnames_allow_descendants_with_label_boundaries_only() {
+    for (actual, accepted) in [
+        ("console.example.com", true),
+        ("www.console.example.com", true),
+        ("A.B.CONSOLE.EXAMPLE.COM", true),
+        ("example.com", false),
+        ("sibling.example.com", false),
+        ("notconsole.example.com", false),
+        ("console.example.com.evil.test", false),
+        ("https://console.example.com", false),
+        ("console.example.com:443", false),
+        ("*.console.example.com", false),
+    ] {
+        let mock = mock(
+            StatusCode::OK,
+            json!({"success":true,"hostname":actual,"action":"login"}).to_string(),
+            Duration::ZERO,
+        );
+        assert_eq!(
+            service(enabled_config(), mock.url.clone())
+                .verify_login(Some(&proof()), None)
+                .await
+                .is_ok(),
+            accepted,
+            "{actual}"
+        );
+    }
+}
+
+#[actix_web::test]
 async fn rejected_or_malformed_responses_never_pass() {
     for (body, expected) in [
         (

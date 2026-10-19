@@ -29,7 +29,7 @@ secret_key = "replace-with-server-secret"
 allowed_hostnames = ["console.example.com"]
 ```
 
-`actions` 当前必须为 `["login"]`。域名精确匹配（忽略 ASCII 大小写），不接受协议、路径、端口或通配符。开启时 site key、secret key、域名列表均必填，配置错误会拒绝启动。旧配置缺少整个段时默认关闭。
+`actions` 当前必须为 `["login"]`。允许域名按标签边界匹配其本身和所有层级子域名（忽略 ASCII 大小写），与 Cloudflare Hostname Management 一致。例如 `example.com` 包含 `console.example.com` 和 `a.console.example.com`；`console.example.com` 不包含父域、兄弟域或 `notconsole.example.com`。不接受协议、路径、端口或通配符。开启时 site key、secret key、域名列表均必填，配置错误会拒绝启动。旧配置缺少整个段时默认关闭。升级后原有允许域会覆盖其后代；需要缩小范围时请配置具体的登录域。仍严格校验 Siteverify 的 success、hostname 和 action。
 
 `timeout_ms` 为整个外部验证流程的预算，范围 500–10000ms；`connect_timeout_ms` 必须大于零且不超过总预算。`max_in_flight` 为所有 HTTP worker 共享的单进程并发上限，范围 1–256。达到并发上限立即拒绝，不无限排队。在页面保存后对新请求生效，已经开始的验证按原配置完成。
 
