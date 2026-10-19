@@ -6,6 +6,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     crate::readiness::configure(cfg);
     crate::open_api::configure(cfg);
     crate::notification::configure(cfg);
+    crate::domain_discovery::configure(cfg);
     reports(cfg);
     identity(cfg);
     analytics(cfg);

@@ -88,3 +88,5 @@ dns_observation_retention_days = 180
 ## 域名任务排除
 
 运行策略“DNS 排除与解析后扫描”中的 `excluded_domains` 对所有 DNS 任务生效，支持精确项和左侧 `*.` 各级子域项。该策略独立于 DNS 后续端口扫描开关；OpenAPI 仍需满足应用自己的允许范围。详细语义与旧域名白名单迁移见[搜索触发目标更新](SEARCH_TARGET_GENERATION.md#域名排除与升级)。
+
+证书透明度线索与 DNS 事实分开保存，见[域名发现](DOMAIN_DISCOVERY.md)。

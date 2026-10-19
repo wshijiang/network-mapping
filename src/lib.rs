@@ -15,6 +15,7 @@ pub mod db;
 pub mod dns;
 pub mod dns_follow_up;
 pub mod dns_resolvers;
+pub mod domain_discovery;
 pub mod elasticsearch;
 pub mod frontend;
 pub mod handlers;

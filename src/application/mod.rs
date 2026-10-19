@@ -467,6 +467,14 @@ pub async fn run(args: Clis) -> io::Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     });
+    background.spawn(
+        "domain-discovery",
+        crate::domain_discovery::run(
+            db_pool.clone(),
+            elasticsearch_service.clone(),
+            system_maintenance_state.clone(),
+        ),
+    );
     let rate_limiter = RateLimitMiddleware::default();
     background.spawn(
         "open-api",

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, Semaphore};
 
+mod domain_discovery;
 mod os_detection;
 mod projection;
 mod web_detection;
