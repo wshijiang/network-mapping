@@ -265,7 +265,7 @@ pub fn encrypt(value: &str, encoded_key: &str) -> Result<Vec<u8>> {
         crate::identity::encrypt_data(value.as_bytes(), &key).map_err(|_| Error::internal())?;
     Ok([nonce, tag, bytes].concat())
 }
-fn decrypt(bytes: &[u8], encoded_key: &str) -> Result<String> {
+pub(crate) fn decrypt(bytes: &[u8], encoded_key: &str) -> Result<String> {
     if bytes.len() < 28 {
         return Err(Error::internal());
     }

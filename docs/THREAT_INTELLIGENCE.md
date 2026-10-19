@@ -87,7 +87,21 @@ IPv4 抓取按精确特殊用途前缀拒绝文档示例、基准测试、共享
 保留地址，并对 IPv4 映射 IPv6 执行同一判断；例如拒绝 `192.0.0.0/24`，不会扩大到整个
 `192.0.0.0/16`。这只限制抓取地址，IOC 自身仍可保存这些网段作为离线证据。
 
-凭据仅通过服务端环境变量引用提供，名称须以 `NM_INTEL_` 开头。例如：
+凭据支持 Web 写入数据库加密保存，也支持服务端环境变量引用。每个来源与 AI 设置分别
+保存 `credential_ciphertext BYTEA`，复用通知渠道的 AES-256-GCM 封装和现有
+`server.encrypt_key`（Base64 编码的 32 字节主密钥），不新增另一套加密密钥或算法。
+主密钥不写入情报表；备份、恢复及多实例部署必须保持原主密钥一致。
+
+数据库凭据优先；未保存数据库凭据时读取环境变量。`credential` 为只写字段，留空或省略
+保留已有值；`clear_credential=true` 显式清除，清除后可使用环境变量备用来源。替换和清除
+不能同时提交。保存与轮换受来源/设置 revision 检查保护，AI worker 不会用旧接口配置读取
+新版本密钥。解密失败返回 `intel_credential_crypto_failed`，不自动回退到环境变量。
+
+来源列表与 AI 设置只返回 `credential_configured`、`database_credential_configured` 及
+`credential_source`（database/environment/none）；不返回明文或密文。凭据不会进入设置
+JSON、同步摘要、文章/模型输入或审计元数据。切换本地来源会清除该来源的数据库凭据。
+
+环境变量名称须以 `NM_INTEL_` 开头。例如：
 
 ```text
 NM_INTEL_LOCAL_ROOT=/var/lib/network-mapping/intel
@@ -95,9 +109,9 @@ NM_INTEL_THREATFOX_AUTH_KEY=<由部署环境注入>
 NM_INTEL_AI_API_KEY=<由部署环境注入>
 ```
 
-Web 只保存变量名称、显示是否已配置，不返回密钥值。ThreatFox API 使用 `Auth-Key`；
-其他结构化 HTTPS 来源若配置 auth_env，值用作 Authorization 请求头。需 Bearer 的来源
-应在该变量中提供完整 `Bearer …` 值。AI 凭据变量保存原始密钥，由客户端添加 Bearer。
+ThreatFox API 使用 `Auth-Key`；其他结构化 HTTPS 来源的凭据用作 Authorization 请求头。
+需 Bearer 的来源应提供完整 `Bearer …` 值。AI 填写原始 API Key，由客户端添加 Bearer。
+这些约定对数据库与环境变量两种凭据来源相同。
 ThreatFox 导出地址可使用路径占位符 `{AUTH_KEY}`，运行时以 URL 编码后的密钥替换。
 不要将实际密钥直接写入 URL、文档或 Git。
 
@@ -177,7 +191,8 @@ Network activity、Artifacts dropped、Payload delivery 类别的目标 IP、域
 
 ## AI 配置与审核
 
-管理页面填写兼容 Chat Completions 的完整 HTTPS 接口地址、模型名称和凭据环境变量，
+管理页面填写兼容 Chat Completions 的完整 HTTPS 接口地址、模型名称，并保存数据库凭据
+或填写凭据环境变量，
 然后开启 AI。接口需要支持 JSON 对象输出。首版提取只有一个独立 worker，单次正文
 最多 100,000 字节、输出最多 200 条 IOC，模型回复预算 8,000 tokens；文章和模型回复
 HTTP 读取上限各为 2 MiB，RSS/Atom 解析上限 4 MiB；单次 HTTP
@@ -257,6 +272,16 @@ TLS SAN、相同证书、ASN、软件家族均不用于扩大标记。
 AI 设置请求为 `{"expected_revision":1,"settings":{"ai_enabled":false,...}}`。来源和
 设置修改采用乐观版本检查。固定 AI 审核字段不可在请求中修改，未知字段拒绝。
 
+来源创建/更新请求可附加 `credential` 或 `clear_credential`；AI 更新请求则放在
+`settings` 对象内。它们仅用于写入加密字段，不包含在后续配置响应中。例如：
+
+```json
+{"expected_revision":2,"settings":{"ai_enabled":false,"ai_endpoint":"https://api.example/chat","ai_model":"model-name","ai_key_env":"","credential":"<本次新密钥>"}}
+```
+
+省略 credential 保留数据库密钥；清除时省略 credential 并传 `clear_credential:true`。
+凭据最多 8192 字节，拒绝纯空白与控制字符。Web 密码框保存后清空，读取接口不支持取回。
+
 同步作业使用 PostgreSQL 租约和 claim token；网络及 LLM 调用期间不持有 PG 连接。
 停用/修改来源及作业租约失效后，旧 worker 不能继续提交新证据。原始扫描 observation、
 上传回执和 payload checksum 保持独立，未增加扫描器协议字段。
@@ -285,4 +310,6 @@ cargo test --locked threat_intel --lib -- --include-ignored
 
 回归覆盖可信低置信度数据免审、AI 关闭时的结构化同步、不可绕过的 AI 审核、版本冲突、
 重复接纳、并发审核、撤销、精确端点范围、RSS/Atom/Markdown、ZIP 和本地路径边界。
+另覆盖旧文章取消与重新发现、特殊用途 IPv4 边界、凭据随机 nonce/认证失败、数据库密文、
+空值保留/替换/清除、陈旧版本冲突和 API/审计不泄露凭据。
 真实 LLM 调用需要实际配置的服务和密钥；解析器 fixture 测试不代表已调用真实模型。

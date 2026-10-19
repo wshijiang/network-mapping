@@ -8,6 +8,7 @@ pub(super) struct Source {
     pub revision: i64,
     pub input: SourceInput,
     pub fence: Option<Fence>,
+    pub credential_ciphertext: Option<Vec<u8>>,
 }
 #[derive(Clone, Copy)]
 pub(super) enum Fence {
@@ -54,12 +55,15 @@ pub(super) fn source(row: &tokio_postgres::Row) -> Source {
             location: row.get("location"),
             allowed_hosts: row.get("allowed_hosts"),
             auth_env: row.get("auth_env"),
+            credential: String::new(),
+            clear_credential: false,
             enabled: row.get("enabled"),
             require_review: row.get("require_review"),
             interval_seconds: Some(row.get("interval_seconds")),
             expected_revision: Some(row.get("revision")),
         },
         fence: None,
+        credential_ciphertext: row.get("credential_ciphertext"),
     }
 }
 pub(super) async fn get_source(pool: &Pool, id: Uuid) -> Result<Source> {
@@ -82,8 +86,11 @@ pub(super) async fn sources(pool: &Pool) -> Result<Value> {
             v["revision"] = json!(s.revision);
             v["next_check_at"] =
                 json!(row.get::<_, chrono::DateTime<chrono::Utc>>("next_check_at"));
-            v["credential_configured"] =
-                json!(s.input.auth_env.is_empty() || client::secret(&s.input.auth_env).is_ok());
+            let (kind, configured) =
+                credentials::status(s.credential_ciphertext.is_some(), &s.input.auth_env);
+            v["credential_configured"] = json!(configured);
+            v["credential_source"] = json!(kind);
+            v["database_credential_configured"] = json!(s.credential_ciphertext.is_some());
             v["last_run"] = row
                 .get::<_, Option<Value>>("last_run")
                 .unwrap_or(Value::Null);
@@ -100,9 +107,13 @@ pub(super) async fn save_source(
     mut input: SourceInput,
     user: &UserBaseI,
     context: &AuditContext,
+    encryption_key: &str,
 ) -> Result<Value> {
     admin(user)?;
     input.validate()?;
+    let encrypted =
+        credentials::encrypt_update(&input.credential, input.clear_credential, encryption_key)?;
+    let clear = input.clear_credential || input.transport == "local";
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
     let id = id.unwrap_or_else(Uuid::now_v7);
@@ -135,7 +146,8 @@ pub(super) async fn save_source(
         tx.execute("INSERT INTO intel_source(id,name,kind,transport,location,allowed_hosts,auth_env,enabled,require_review,interval_seconds) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",&[&id,&input.name,&input.kind,&input.transport,&input.location,&input.allowed_hosts,&input.auth_env,&input.enabled,&input.require_review,&input.interval_seconds.unwrap()]).await?;
         1
     };
-    audit(&tx,user,context,"intel.source.save",&id.to_string(),json!({"revision":revision,"kind":input.kind,"enabled":input.enabled,"require_review":input.require_review,"interval_seconds":input.interval_seconds})).await?;
+    tx.execute("UPDATE intel_source SET credential_ciphertext=CASE WHEN $2 THEN NULL ELSE COALESCE($3,credential_ciphertext) END WHERE id=$1", &[&id,&clear,&encrypted]).await?;
+    audit(&tx,user,context,"intel.source.save",&id.to_string(),json!({"revision":revision,"kind":input.kind,"enabled":input.enabled,"require_review":input.require_review,"interval_seconds":input.interval_seconds,"credential_changed":clear||encrypted.is_some()})).await?;
     tx.commit().await?;
     Ok(json!({"id":id,"revision":revision}))
 }
@@ -154,10 +166,33 @@ pub(super) async fn settings(pool: &Pool) -> Result<(Settings, i64)> {
     ))
 }
 pub(super) async fn settings_json(pool: &Pool) -> Result<Value> {
-    let (s, revision) = settings(pool).await?;
+    let row=pool.get().await?.query_one("SELECT document,revision,credential_ciphertext IS NOT NULL AS stored FROM intel_settings WHERE singleton",&[]).await?;
+    let s: Settings =
+        serde_json::from_value(row.get("document")).map_err(|_| Error::unavailable())?;
+    let stored: bool = row.get("stored");
+    let (kind, configured) = credentials::status(stored, &s.ai_key_env);
     Ok(
-        json!({"settings":s,"revision":revision,"ai_review_required":true,"credential_configured":client::secret(&s.ai_key_env).is_ok()}),
+        json!({"settings":s,"revision":row.get::<_,i64>("revision"),"ai_review_required":true,"credential_configured":configured,"credential_source":kind,"database_credential_configured":stored}),
     )
+}
+pub(super) async fn ai_credential(
+    pool: &Pool,
+    s: &Settings,
+    revision: i64,
+    key: &str,
+) -> Result<String> {
+    let row = pool
+        .get()
+        .await?
+        .query_opt(
+            "SELECT credential_ciphertext FROM intel_settings WHERE singleton AND revision=$1",
+            &[&revision],
+        )
+        .await?
+        .ok_or_else(Error::conflict)?;
+    let ciphertext: Option<Vec<u8>> = row.get(0);
+    credentials::resolve(ciphertext.as_deref(), &s.ai_key_env, key)?
+        .ok_or_else(|| Error::bad("intel_credential_missing"))
 }
 pub(super) async fn save_settings(
     pool: &Pool,
@@ -165,12 +200,14 @@ pub(super) async fn save_settings(
     expected: i64,
     user: &UserBaseI,
     context: &AuditContext,
+    encryption_key: &str,
 ) -> Result<Value> {
     admin(user)?;
     s.validate()?;
+    let encrypted = credentials::encrypt_update(&s.credential, s.clear_credential, encryption_key)?;
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
-    let row=tx.query_opt("UPDATE intel_settings SET document=$1,revision=revision+1,updated_at=NOW() WHERE singleton AND revision=$2 RETURNING revision",&[&json!(s),&expected]).await?.ok_or_else(Error::conflict)?;
+    let row=tx.query_opt("UPDATE intel_settings SET document=$1,revision=revision+1,updated_at=NOW(),credential_ciphertext=CASE WHEN $3 THEN NULL ELSE COALESCE($4,credential_ciphertext) END WHERE singleton AND revision=$2 RETURNING revision",&[&json!(s),&expected,&s.clear_credential,&encrypted]).await?.ok_or_else(Error::conflict)?;
     let revision: i64 = row.get(0);
     audit(
         &tx,
@@ -178,7 +215,7 @@ pub(super) async fn save_settings(
         context,
         "intel.settings.save",
         "settings",
-        json!({"revision":revision,"ai_enabled":s.ai_enabled,"ai_review_required":true}),
+        json!({"revision":revision,"ai_enabled":s.ai_enabled,"ai_review_required":true,"credential_changed":s.clear_credential||encrypted.is_some()}),
     )
     .await?;
     tx.commit().await?;

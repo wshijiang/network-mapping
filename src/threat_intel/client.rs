@@ -126,11 +126,18 @@ pub(super) async fn request_bounded(
     }
     Ok(bytes)
 }
-pub(super) async fn source_bytes(source: &storage::Source) -> Result<Vec<u8>> {
+pub(super) async fn source_bytes(
+    source: &storage::Source,
+    encryption_key: &str,
+) -> Result<Vec<u8>> {
     if source.input.transport == "local" {
         return local_bytes(&source.input.location).await;
     }
-    let key = secret(&source.input.auth_env)?;
+    let key = credentials::resolve(
+        source.credential_ciphertext.as_deref(),
+        &source.input.auth_env,
+        encryption_key,
+    )?;
     let post = (source.input.kind == "threatfox").then(|| json!({"query":"get_iocs","days":7}));
     let auth = key.as_deref().map(|k| {
         (

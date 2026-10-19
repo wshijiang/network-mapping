@@ -6,7 +6,7 @@ pub(super) const MAX_BYTES: usize = 96 * 1024 * 1024;
 pub(super) const MAX_ARTICLE: usize = 100_000;
 pub(super) const PROMPT_VERSION: &str = "ioc-evidence-v1";
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SourceInput {
     pub name: String,
@@ -17,6 +17,10 @@ pub(super) struct SourceInput {
     pub allowed_hosts: Vec<String>,
     #[serde(default)]
     pub auth_env: String,
+    #[serde(default, skip_serializing)]
+    pub credential: String,
+    #[serde(default, skip_serializing)]
+    pub clear_credential: bool,
     #[serde(default = "yes")]
     pub enabled: bool,
     #[serde(default)]
@@ -75,6 +79,7 @@ impl SourceInput {
                         .components()
                         .any(|v| !matches!(v, Component::Normal(_)))
                     || !self.auth_env.is_empty()
+                    || !self.credential.is_empty()
                 {
                     return Err(Error::bad("intel_invalid_local_path"));
                 }
@@ -185,6 +190,10 @@ pub(super) struct Settings {
     pub ai_endpoint: String,
     pub ai_model: String,
     pub ai_key_env: String,
+    #[serde(default, skip_serializing)]
+    pub credential: String,
+    #[serde(default, skip_serializing)]
+    pub clear_credential: bool,
 }
 impl Settings {
     pub fn validate(&self) -> Result<()> {
@@ -195,7 +204,6 @@ impl Settings {
             &[url.host_str().unwrap_or("").to_owned()],
         )?;
         if !valid_key_ref(&self.ai_key_env)
-            || self.ai_key_env.is_empty()
             || self.ai_model.len() > 100
             || (self.ai_enabled && self.ai_model.trim().is_empty())
         {

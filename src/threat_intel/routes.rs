@@ -13,6 +13,7 @@ async fn list_sources(pool: web::Data<Pool>, user: UserBaseI) -> HttpResponse {
 async fn add_source(
     req: HttpRequest,
     pool: web::Data<Pool>,
+    config: web::Data<crate::config::ServerConfig>,
     user: UserBaseI,
     input: web::Json<SourceInput>,
 ) -> HttpResponse {
@@ -23,6 +24,7 @@ async fn add_source(
             input.into_inner(),
             &user,
             &AuditContext::from_request(&req),
+            &config.encrypt_key,
         )
         .await,
     )
@@ -30,6 +32,7 @@ async fn add_source(
 async fn update_source(
     req: HttpRequest,
     pool: web::Data<Pool>,
+    config: web::Data<crate::config::ServerConfig>,
     user: UserBaseI,
     id: web::Path<Uuid>,
     input: web::Json<SourceInput>,
@@ -41,6 +44,7 @@ async fn update_source(
             input.into_inner(),
             &user,
             &AuditContext::from_request(&req),
+            &config.encrypt_key,
         )
         .await,
     )
@@ -79,6 +83,7 @@ struct SettingsInput {
 async fn put_settings(
     req: HttpRequest,
     pool: web::Data<Pool>,
+    config: web::Data<crate::config::ServerConfig>,
     user: UserBaseI,
     input: web::Json<SettingsInput>,
 ) -> HttpResponse {
@@ -90,6 +95,7 @@ async fn put_settings(
             input.expected_revision,
             &user,
             &AuditContext::from_request(&req),
+            &config.encrypt_key,
         )
         .await,
     )

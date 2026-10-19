@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS intel_settings (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO intel_settings(singleton) VALUES(TRUE) ON CONFLICT DO NOTHING;
+ALTER TABLE intel_settings ADD COLUMN IF NOT EXISTS credential_ciphertext BYTEA;
 
 CREATE TABLE IF NOT EXISTS intel_source (
     id UUID PRIMARY KEY,
@@ -22,6 +23,7 @@ CREATE TABLE IF NOT EXISTS intel_source (
     next_check_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS credential_ciphertext BYTEA;
 INSERT INTO intel_source(id,name,kind,transport,location,allowed_hosts,auth_env,interval_seconds) VALUES
  ('01800000-0000-7000-8000-000000000001','MITRE Enterprise ATT&CK','mitre_stix','https','https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json',ARRAY['raw.githubusercontent.com'],'',86400),
  ('01800000-0000-7000-8000-000000000002','ESET malware-ioc','eset_github','https','https://api.github.com/repos/eset/malware-ioc/git/trees/master?recursive=1',ARRAY['api.github.com','raw.githubusercontent.com'],'',3600),

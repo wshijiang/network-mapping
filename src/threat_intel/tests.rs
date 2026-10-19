@@ -217,6 +217,66 @@ fn official_misp_exports_keep_iocs_separate_from_victims_and_event_attribution()
     assert_eq!(items[1].value, "192.0.2.20");
 }
 
+fn encryption_key() -> String {
+    openssl::base64::encode_block(&[7_u8; 32])
+}
+
+#[test]
+fn credential_envelopes_reuse_authenticated_encryption_and_never_serialize_plaintext() {
+    let key = encryption_key();
+    let first = credentials::encrypt_update("fixture-private-key", false, &key)
+        .unwrap()
+        .unwrap();
+    let second = credentials::encrypt_update("fixture-private-key", false, &key)
+        .unwrap()
+        .unwrap();
+    assert_ne!(first, second);
+    assert_eq!(
+        credentials::resolve(Some(&first), "", &key)
+            .unwrap()
+            .as_deref(),
+        Some("fixture-private-key")
+    );
+    assert!(
+        credentials::resolve(
+            Some(&first),
+            "",
+            &openssl::base64::encode_block(&[8_u8; 32])
+        )
+        .is_err()
+    );
+    for size in [0, 1, 12, 27] {
+        assert!(credentials::resolve(Some(&first[..size]), "", &key).is_err());
+    }
+    let mut corrupted = first;
+    *corrupted.last_mut().unwrap() ^= 1;
+    assert!(credentials::resolve(Some(&corrupted), "", &key).is_err());
+    for value in [" ", "bad\nkey"] {
+        assert!(credentials::encrypt_update(value, false, &key).is_err());
+    }
+    assert!(credentials::encrypt_update("key", true, &key).is_err());
+    assert!(credentials::encrypt_update("key", false, "bad-master-key").is_err());
+    let source:SourceInput=serde_json::from_value(json!({"name":"source","kind":"json","transport":"https","location":"https://research.example/feed","allowed_hosts":["research.example"],"credential":"fixture-private-key"})).unwrap();
+    let settings:Settings=serde_json::from_value(json!({"ai_enabled":false,"ai_endpoint":"https://api.example/chat","ai_model":"","ai_key_env":"","credential":"fixture-private-key"})).unwrap();
+    assert!(
+        !serde_json::to_string(&source)
+            .unwrap()
+            .contains("fixture-private-key")
+    );
+    assert!(
+        !serde_json::to_string(&settings)
+            .unwrap()
+            .contains("fixture-private-key")
+    );
+}
+fn server_config() -> crate::config::ServerConfig {
+    crate::config::ServerConfig {
+        host: "127.0.0.1".into(),
+        port: 0,
+        encrypt_key: encryption_key(),
+        max_body_size: 128 * 1024,
+    }
+}
 fn user(role: i32) -> UserBaseI {
     UserBaseI {
         id: 1,
@@ -273,6 +333,7 @@ async fn local_source(pool: &Pool, review: bool) -> storage::Source {
         input,
         &user(1),
         &AuditContext::cli("intel-test"),
+        &encryption_key(),
     )
     .await
     .unwrap();
@@ -299,10 +360,13 @@ async fn ai_enabled(pool: &Pool, enabled: bool) {
             ai_endpoint: "https://api.example/v1/chat/completions".into(),
             ai_model: "test".into(),
             ai_key_env: "NM_INTEL_TEST_AI_KEY".into(),
+            credential: String::new(),
+            clear_credential: false,
         },
         storage::settings(pool).await.unwrap().1,
         &user(1),
         &AuditContext::cli("intel-test"),
+        &encryption_key(),
     )
     .await
     .unwrap();
@@ -354,7 +418,7 @@ async fn trusted_iocs_bypass_review_and_confidence_while_ai_is_disabled() {
             .get::<_, i64>(0),
         1
     );
-    assert!(!worker::ai_tick(&pool).await.unwrap());
+    assert!(!worker::ai_tick(&pool, &encryption_key()).await.unwrap());
     // A feed may revert to a previously superseded version. It must replace
     // the newer fact again rather than silently keep the wrong verdict.
     let mut changed = i.clone();
@@ -510,6 +574,7 @@ async fn source_review_policy_can_change_without_affecting_ai_gate() {
         input,
         &user(1),
         &AuditContext::cli("test"),
+        &encryption_key(),
     )
     .await
     .unwrap();
@@ -550,7 +615,7 @@ async fn local_sync_updates_automatically_and_does_not_follow_escaping_symlinks(
     )
     .await
     .unwrap();
-    assert!(worker::source_tick(&pool).await.unwrap());
+    assert!(worker::source_tick(&pool, &encryption_key()).await.unwrap());
     assert_eq!(
         annotate(&pool, &[vec![("domain".into(), "first.example".into())]]).await[0]
             .risk
@@ -566,7 +631,7 @@ async fn local_sync_updates_automatically_and_does_not_follow_escaping_symlinks(
     )
     .await
     .unwrap();
-    assert!(worker::source_tick(&pool).await.unwrap());
+    assert!(worker::source_tick(&pool, &encryption_key()).await.unwrap());
     assert_eq!(
         annotate(&pool, &[vec![("domain".into(), "second.example".into())]]).await[0]
             .risk
@@ -636,6 +701,7 @@ async fn mitre_names_software_and_http_permissions_preserve_attribution_boundari
     let app = http_test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(server_config()))
             .wrap_fn(|req, srv| {
                 req.extensions_mut().insert(user(1));
                 srv.call(req)
@@ -679,6 +745,7 @@ async fn mitre_names_software_and_http_permissions_preserve_attribution_boundari
     let app = http_test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(server_config()))
             .wrap_fn(|req, srv| {
                 req.extensions_mut().insert(user(2));
                 srv.call(req)
@@ -771,7 +838,7 @@ async fn stale_article_cannot_be_claimed_retried_or_relabelled_with_new_source_r
     )
     .await
     .unwrap();
-    assert!(!worker::ai_tick(&pool).await.unwrap());
+    assert!(!worker::ai_tick(&pool, &encryption_key()).await.unwrap());
     let row = c
         .query_one(
             "SELECT status,attempts,body FROM intel_article WHERE id=$1",
@@ -788,6 +855,7 @@ async fn stale_article_cannot_be_claimed_retried_or_relabelled_with_new_source_r
     let app = http_test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(server_config()))
             .wrap_fn(|req, srv| {
                 req.extensions_mut().insert(user(1));
                 srv.call(req)
@@ -822,7 +890,7 @@ async fn stale_article_cannot_be_claimed_retried_or_relabelled_with_new_source_r
         0
     );
     ai_enabled(&pool, false).await;
-    assert!(!worker::ai_tick(&pool).await.unwrap());
+    assert!(!worker::ai_tick(&pool, &encryption_key()).await.unwrap());
     let row = c
         .query_one(
             "SELECT status,claim_token,lease_until FROM intel_article WHERE id=$1",
@@ -859,10 +927,11 @@ async fn current_article_provider_failure_preserves_snapshot_and_allows_retry() 
         revision,
         &user(1),
         &AuditContext::cli("intel-test"),
+        &encryption_key(),
     )
     .await
     .unwrap();
-    assert!(worker::ai_tick(&pool).await.unwrap());
+    assert!(worker::ai_tick(&pool, &encryption_key()).await.unwrap());
     let row=c.query_one("SELECT status,error_code,source_revision,body,body_hash,extraction_metadata FROM intel_article WHERE id=$1",&[&article]).await.unwrap();
     assert_eq!(row.get::<_, String>("status"), "failed");
     assert_eq!(
@@ -877,6 +946,7 @@ async fn current_article_provider_failure_preserves_snapshot_and_allows_retry() 
     let app = http_test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(server_config()))
             .wrap_fn(|req, srv| {
                 req.extensions_mut().insert(user(1));
                 srv.call(req)
@@ -895,7 +965,7 @@ async fn current_article_provider_failure_preserves_snapshot_and_allows_retry() 
         .status()
         .is_success()
     );
-    assert!(worker::ai_tick(&pool).await.unwrap());
+    assert!(worker::ai_tick(&pool, &encryption_key()).await.unwrap());
     assert_eq!(
         c.query_one(
             "SELECT attempts FROM intel_article WHERE id=$1",
@@ -957,13 +1027,19 @@ async fn rss_rediscovery_preserves_old_snapshots_and_queues_a_new_source_version
         input,
         &user(1),
         &AuditContext::cli("intel-test"),
+        &encryption_key(),
     )
     .await
     .unwrap();
-    let result = worker::sync(&pool, source.id, 2, None).await.unwrap();
+    let result = worker::sync(&pool, source.id, 2, None, &encryption_key())
+        .await
+        .unwrap();
     assert_eq!(result.0["articles_added"], 1);
     assert_eq!(
-        worker::sync(&pool, source.id, 2, None).await.unwrap().0["articles_added"],
+        worker::sync(&pool, source.id, 2, None, &encryption_key())
+            .await
+            .unwrap()
+            .0["articles_added"],
         0
     );
     let rows=c.query("SELECT source_revision,body FROM intel_article WHERE source_id=$1 ORDER BY source_revision", &[&source.id]).await.unwrap();
@@ -973,6 +1049,271 @@ async fn rss_rediscovery_preserves_old_snapshots_and_queues_a_new_source_version
     assert_eq!(rows[1].get::<_, i64>(0), 2);
     assert!(rows[1].get::<_, Option<String>>(1).is_none());
     tokio::fs::remove_file(root.join(name)).await.unwrap();
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn encrypted_database_credentials_are_write_only_versioned_and_consumed_by_workers() {
+    use actix_web::{App, HttpMessage, dev::Service, test as http_test, web};
+    let (pool, c, schema) = database().await;
+    let app = http_test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(server_config()))
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(user(1));
+                srv.call(req)
+            })
+            .configure(configure),
+    )
+    .await;
+    let first = "Bearer fixture-source-key-one";
+    let replacement = "Bearer fixture-source-key-two";
+    let ai_secret = "fixture-ai-key";
+    let mut input = json!({"name":"encrypted source","kind":"json","transport":"https","location":"https://research.example/feed","allowed_hosts":["research.example"],"auth_env":"NM_INTEL_TEST_MISSING_DATABASE_CREDENTIAL","credential":first});
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::post()
+            .uri("/api/intel/sources")
+            .set_json(&input)
+            .to_request(),
+    )
+    .await;
+    assert!(response.status().is_success());
+    let created: Value = http_test::read_body_json(response).await;
+    let id: Uuid = serde_json::from_value(created["data"]["id"].clone()).unwrap();
+    let source = storage::get_source(&pool, id).await.unwrap();
+    let ciphertext = source.credential_ciphertext.as_ref().unwrap();
+    assert!(
+        !ciphertext
+            .windows(first.len())
+            .any(|bytes| bytes == first.as_bytes())
+    );
+    assert_eq!(
+        credentials::resolve(Some(ciphertext), &source.input.auth_env, &encryption_key())
+            .unwrap()
+            .as_deref(),
+        Some(first)
+    );
+    // Decryption is attempted before any network I/O and cannot fall back to env.
+    assert_eq!(
+        client::source_bytes(&source, &openssl::base64::encode_block(&[8_u8; 32]))
+            .await
+            .unwrap_err()
+            .code,
+        "intel_credential_crypto_failed"
+    );
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::get()
+            .uri("/api/intel/sources")
+            .to_request(),
+    )
+    .await;
+    let public: Value = http_test::read_body_json(response).await;
+    assert!(!public.to_string().contains(first));
+    let public_source = public["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == created["data"]["id"])
+        .unwrap();
+    assert_eq!(public_source["credential_source"], "database");
+    assert_eq!(public_source["database_credential_configured"], true);
+    assert!(public_source.get("credential_ciphertext").is_none());
+    assert!(public_source.get("credential").is_none());
+    input["expected_revision"] = json!(1);
+    input["credential"] = json!("");
+    input["name"] = json!("ordinary edit");
+    assert!(
+        http_test::call_service(
+            &app,
+            http_test::TestRequest::put()
+                .uri(&format!("/api/intel/sources/{id}"))
+                .set_json(&input)
+                .to_request()
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    let source = storage::get_source(&pool, id).await.unwrap();
+    assert_eq!(
+        credentials::resolve(
+            source.credential_ciphertext.as_deref(),
+            &source.input.auth_env,
+            &encryption_key()
+        )
+        .unwrap()
+        .as_deref(),
+        Some(first)
+    );
+    input["credential"] = json!(replacement); // Stale edit must leave the old secret intact.
+    assert_eq!(
+        http_test::call_service(
+            &app,
+            http_test::TestRequest::put()
+                .uri(&format!("/api/intel/sources/{id}"))
+                .set_json(&input)
+                .to_request()
+        )
+        .await
+        .status(),
+        actix_web::http::StatusCode::CONFLICT
+    );
+    input["expected_revision"] = json!(2);
+    assert!(
+        http_test::call_service(
+            &app,
+            http_test::TestRequest::put()
+                .uri(&format!("/api/intel/sources/{id}"))
+                .set_json(&input)
+                .to_request()
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    let source = storage::get_source(&pool, id).await.unwrap();
+    assert_eq!(
+        credentials::resolve(
+            source.credential_ciphertext.as_deref(),
+            &source.input.auth_env,
+            &encryption_key()
+        )
+        .unwrap()
+        .as_deref(),
+        Some(replacement)
+    );
+    input["expected_revision"] = json!(3);
+    input["credential"] = json!("");
+    input["clear_credential"] = json!(true);
+    assert!(
+        http_test::call_service(
+            &app,
+            http_test::TestRequest::put()
+                .uri(&format!("/api/intel/sources/{id}"))
+                .set_json(&input)
+                .to_request()
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    assert!(
+        storage::get_source(&pool, id)
+            .await
+            .unwrap()
+            .credential_ciphertext
+            .is_none()
+    );
+    let mut settings = json!({"ai_enabled":false,"ai_endpoint":"https://api.example/chat","ai_model":"","ai_key_env":"","credential":ai_secret});
+    assert!(
+        http_test::call_service(
+            &app,
+            http_test::TestRequest::put()
+                .uri("/api/intel/settings")
+                .set_json(json!({"expected_revision":1,"settings":settings}))
+                .to_request()
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    let (configured, revision) = storage::settings(&pool).await.unwrap();
+    assert_eq!(
+        storage::ai_credential(&pool, &configured, revision, &encryption_key())
+            .await
+            .unwrap(),
+        ai_secret
+    );
+    let row = c
+        .query_one(
+            "SELECT document,credential_ciphertext FROM intel_settings WHERE singleton",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(
+        !row.get::<_, Value>("document")
+            .to_string()
+            .contains(ai_secret)
+    );
+    assert!(
+        row.get::<_, Option<Vec<u8>>>("credential_ciphertext")
+            .is_some()
+    );
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::get()
+            .uri("/api/intel/settings")
+            .to_request(),
+    )
+    .await;
+    let public: Value = http_test::read_body_json(response).await;
+    assert!(!public.to_string().contains(ai_secret));
+    assert_eq!(public["data"]["credential_source"], "database");
+    settings["credential"] = json!("");
+    assert!(
+        http_test::call_service(
+            &app,
+            http_test::TestRequest::put()
+                .uri("/api/intel/settings")
+                .set_json(json!({"expected_revision":2,"settings":settings}))
+                .to_request()
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    assert!(
+        storage::ai_credential(&pool, &configured, 2, &encryption_key())
+            .await
+            .is_err()
+    );
+    let (configured, revision) = storage::settings(&pool).await.unwrap();
+    assert_eq!(
+        storage::ai_credential(&pool, &configured, revision, &encryption_key())
+            .await
+            .unwrap(),
+        ai_secret
+    );
+    settings["clear_credential"] = json!(true);
+    assert!(
+        http_test::call_service(
+            &app,
+            http_test::TestRequest::put()
+                .uri("/api/intel/settings")
+                .set_json(json!({"expected_revision":3,"settings":settings}))
+                .to_request()
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    let (configured, revision) = storage::settings(&pool).await.unwrap();
+    assert_eq!(
+        storage::ai_credential(&pool, &configured, revision, &encryption_key())
+            .await
+            .unwrap_err()
+            .code,
+        "intel_credential_missing"
+    );
+    for row in c
+        .query("SELECT metadata FROM audit_event", &[])
+        .await
+        .unwrap()
+    {
+        let audit = row.get::<_, Value>(0).to_string();
+        assert!(
+            [first, replacement, ai_secret]
+                .iter()
+                .all(|secret| !audit.contains(secret))
+        );
+    }
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
         .unwrap();

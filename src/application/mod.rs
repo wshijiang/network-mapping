@@ -597,7 +597,11 @@ pub async fn run(args: Clis) -> io::Result<()> {
     let scanner_diagnostics_data = web::Data::new(scanner_diagnostics);
     background.spawn(
         "threat-intelligence",
-        crate::threat_intel::run(pool.clone(), system_maintenance_state.clone()),
+        crate::threat_intel::run(
+            pool.clone(),
+            system_maintenance_state.clone(),
+            ser_con.encrypt_key.clone(),
+        ),
     );
 
     let renderer_shutdown = report_renderer.clone();
