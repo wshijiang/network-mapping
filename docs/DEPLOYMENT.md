@@ -88,7 +88,7 @@ pnpm build
 ```sh
 sudo useradd --system --user-group --home-dir /var/lib/network-mapping --no-create-home --shell /usr/sbin/nologin network-mapping
 sudo install -d -o root -g network-mapping -m 0750 /etc/network-mapping /etc/network-mapping/ssl
-sudo install -d -o network-mapping -g network-mapping -m 0750 /var/log/network-mapping /var/lib/network-mapping/scanner-diagnostics
+sudo install -d -o network-mapping -g network-mapping -m 0750 /var/log/network-mapping /var/lib/network-mapping/scanner-diagnostics /var/lib/network-mapping/intel-cache
 sudo install -d -o root -g root -m 0755 /opt/network-mapping/network-mapping /opt/network-mapping/network-mapping-vue
 ```
 
@@ -235,6 +235,22 @@ enabled = false
 ```nginx
 location / {
     client_max_body_size 64m;
+    proxy_pass http://127.0.0.1:9999;
+    proxy_set_header Host $host;
+    proxy_set_header Forwarded "";
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $remote_addr;
+}
+
+# 离线 IOC 大文件上传；与上面的普通路由放在同一 server 块。
+location ~ ^/api/intel/sources/[^/]+/import$ {
+    client_max_body_size 512m;
+    client_body_timeout 60s;
+    proxy_request_buffering off;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_read_timeout 120s;
+    proxy_send_timeout 60s;
     proxy_pass http://127.0.0.1:9999;
     proxy_set_header Host $host;
     proxy_set_header Forwarded "";

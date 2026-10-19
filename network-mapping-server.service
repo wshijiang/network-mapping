@@ -12,6 +12,8 @@ ExecStart=/opt/network-mapping/network-mapping/network_mapping_server --config /
 Restart=on-failure
 RestartSec=5
 UMask=0027
+StateDirectory=network-mapping
+StateDirectoryMode=0750
 
 [Install]
 WantedBy=multi-user.target

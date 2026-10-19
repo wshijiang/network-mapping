@@ -163,12 +163,17 @@ async fn github(pool: &Pool, s: &Source, data: &[u8]) -> Result<(Value, bool)> {
     let c = pool.get().await?;
     let known = c
         .query(
-            "SELECT path,content_hash FROM intel_source_file WHERE source_id=$1",
+            "SELECT path,content_hash,parser_version FROM intel_source_file WHERE source_id=$1",
             &[&s.id],
         )
         .await?
         .into_iter()
-        .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1)))
+        .map(|r| {
+            (
+                r.get::<_, String>(0),
+                (r.get::<_, String>(1), r.get::<_, i32>(2)),
+            )
+        })
         .collect::<std::collections::BTreeMap<_, _>>();
     drop(c);
     let mut pending = vec![];
@@ -187,7 +192,7 @@ async fn github(pool: &Pool, s: &Source, data: &[u8]) -> Result<(Value, bool)> {
             .get("sha")
             .and_then(Value::as_str)
             .ok_or_else(|| Error::bad("intel_invalid_github_tree"))?;
-        if known.get(path).is_none_or(|v| v != sha) {
+        if !github_file_current(path, sha, known.get(path)) {
             pending.push((path, sha));
         }
     }
@@ -209,58 +214,92 @@ async fn github(pool: &Pool, s: &Source, data: &[u8]) -> Result<(Value, bool)> {
             }
         }
         let data = client::request(raw.as_str(), &s.input.allowed_hosts, None, None).await?;
-        // The manifest carries a tree OID, not a commit OID. Pin file content
-        // by verifying the Git blob identity after reading the configured ref.
-        let mut blob = format!("blob {}\0", data.len()).into_bytes();
-        blob.extend_from_slice(&data);
-        let actual = openssl::hash::hash(openssl::hash::MessageDigest::sha1(), &blob)
-            .map_err(|_| Error::bad("intel_blob_hash_failed"))?
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
-        if actual != sha {
-            return Err(Error::bad("intel_github_snapshot_changed"));
-        }
-        let format = if path.ends_with(".json") {
-            "json"
-        } else if path.ends_with(".md") {
-            "markdown"
+        let (count, supported) = github_file(pool, s, path, sha, &data).await?;
+        added += count;
+        if supported {
+            parsed += 1;
         } else {
-            "lines"
-        };
-        let entries = parse::indicators(&data, format);
-        match entries {
-            Ok(entries) => {
-                for i in entries {
-                    if storage::ingest(pool, s, i, Origin::Structured, &format!("{path}#")).await? {
-                        added += 1;
-                    }
-                }
-                parsed += 1;
-            }
-            Err(e)
-                if matches!(
-                    e.code,
-                    "intel_no_supported_indicators"
-                        | "intel_invalid_ioc_document"
-                        | "intel_invalid_indicator"
-                        | "intel_invalid_csv"
-                ) =>
-            {
-                unsupported += 1;
-            }
-            Err(e) => return Err(e),
+            unsupported += 1;
         }
-        let mut c = pool.get().await?;
-        let tx = c.transaction().await?;
-        storage::validate_source(&tx, s).await?;
-        tx.execute("INSERT INTO intel_source_file(source_id,path,content_hash) VALUES($1,$2,$3) ON CONFLICT(source_id,path) DO UPDATE SET content_hash=EXCLUDED.content_hash",&[&s.id,&path,&sha]).await?;
-        tx.commit().await?;
     }
     Ok((
         json!({"added":added,"files_parsed":parsed,"unsupported_files":unsupported,"more_files":partial,"tree_sha":tree_sha}),
         partial,
     ))
+}
+pub(super) fn github_format(path: &str) -> &'static str {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".json") {
+        "json"
+    } else if lower.ends_with(".md") {
+        "markdown"
+    } else {
+        "lines"
+    }
+}
+pub(super) fn github_file_current(path: &str, sha: &str, known: Option<&(String, i32)>) -> bool {
+    let Some((hash, version)) = known else {
+        return false;
+    };
+    // Revisit files previously marked processed by the case-sensitive parser.
+    let legacy_format = if path.ends_with(".json") {
+        "json"
+    } else if path.ends_with(".md") {
+        "markdown"
+    } else {
+        "lines"
+    };
+    hash == sha && (*version >= 2 || github_format(path) == legacy_format)
+}
+pub(super) async fn github_file(
+    pool: &Pool,
+    s: &Source,
+    path: &str,
+    sha: &str,
+    data: &[u8],
+) -> Result<(usize, bool)> {
+    // The manifest carries a tree OID, not a commit OID. Verify the blob
+    // before applying the case-insensitive format or marking its cursor.
+    let mut blob = format!("blob {}\0", data.len()).into_bytes();
+    blob.extend_from_slice(data);
+    let actual = openssl::hash::hash(openssl::hash::MessageDigest::sha1(), &blob)
+        .map_err(|_| Error::bad("intel_blob_hash_failed"))?
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    if actual != sha {
+        return Err(Error::bad("intel_github_snapshot_changed"));
+    }
+    let mut added = 0;
+    let entries = parse::indicators(data, github_format(path));
+    let supported = match entries {
+        Ok(entries) => {
+            for i in entries {
+                if storage::ingest(pool, s, i, Origin::Structured, &format!("{path}#")).await? {
+                    added += 1;
+                }
+            }
+            true
+        }
+        Err(e)
+            if matches!(
+                e.code,
+                "intel_no_supported_indicators"
+                    | "intel_invalid_ioc_document"
+                    | "intel_invalid_indicator"
+                    | "intel_invalid_csv"
+            ) =>
+        {
+            false
+        }
+        Err(e) => return Err(e),
+    };
+    let mut c = pool.get().await?;
+    let tx = c.transaction().await?;
+    storage::validate_source(&tx, s).await?;
+    tx.execute("INSERT INTO intel_source_file(source_id,path,content_hash,parser_version) VALUES($1,$2,$3,2) ON CONFLICT(source_id,path) DO UPDATE SET content_hash=EXCLUDED.content_hash,parser_version=EXCLUDED.parser_version",&[&s.id,&path,&sha]).await?;
+    tx.commit().await?;
+    Ok((added, supported))
 }
 
 pub(super) async fn ai_tick(pool: &Pool, encryption_key: &str) -> Result<bool> {

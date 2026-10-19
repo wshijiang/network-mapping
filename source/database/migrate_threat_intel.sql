@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS intel_source_file (
     content_hash TEXT NOT NULL,
     PRIMARY KEY(source_id,path)
 );
+ALTER TABLE intel_source_file ADD COLUMN IF NOT EXISTS parser_version INTEGER NOT NULL DEFAULT 1;
 
 CREATE TABLE IF NOT EXISTS intel_entity (
     attack_id TEXT PRIMARY KEY,

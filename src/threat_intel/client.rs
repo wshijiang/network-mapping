@@ -1,6 +1,70 @@
 use super::*;
 use std::{path::PathBuf, time::Duration};
 
+#[derive(Debug)]
+struct ResolveError(&'static str);
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for ResolveError {}
+
+// Resolve only when the connector needs it. HTTP CONNECT and socks5h proxies
+// resolve the destination remotely; their own host may be on a private network.
+struct DestinationResolver {
+    host: String,
+}
+impl reqwest::dns::Resolve for DestinationResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let destination = name.as_str().eq_ignore_ascii_case(&self.host);
+        Box::pin(async move {
+            let code = if destination {
+                "intel_dns_failed"
+            } else {
+                "intel_proxy_dns_failed"
+            };
+            let addresses = tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::net::lookup_host((name.as_str(), 0)),
+            )
+            .await
+            .map_err(|_| ResolveError(code))?
+            .map_err(|_| ResolveError(code))?
+            .collect::<Vec<_>>();
+            if addresses.is_empty() {
+                return Err(ResolveError(code).into());
+            }
+            if destination && addresses.iter().any(|v| !public_ip(v.ip())) {
+                return Err(ResolveError("intel_private_address_forbidden").into());
+            }
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+pub(super) fn http_builder(host: &str) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(std::sync::Arc::new(DestinationResolver {
+            host: host.to_owned(),
+        }))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .user_agent("NetworkMapping/1.0 threat-intelligence")
+}
+pub(super) fn transport_error(error: reqwest::Error) -> Error {
+    use std::error::Error as _;
+    let mut current = error.source();
+    while let Some(cause) = current {
+        if let Some(resolver) = cause.downcast_ref::<ResolveError>() {
+            return Error::bad(resolver.0);
+        }
+        current = cause.source();
+    }
+    Error::bad("intel_source_transport")
+}
+
 pub(super) async fn local_bytes(location: &str) -> Result<Vec<u8>> {
     let mut file = local_file(location).await?;
     let mut data = Vec::new();
@@ -72,23 +136,10 @@ pub(super) async fn request_bounded(
 ) -> Result<Vec<u8>> {
     let url = validate_url(location, hosts)?;
     let host = url.host_str().unwrap();
-    let addrs = tokio::time::timeout(Duration::from_secs(5), tokio::net::lookup_host((host, 443)))
-        .await
-        .map_err(|_| Error::bad("intel_dns_failed"))?
-        .map_err(|_| Error::bad("intel_dns_failed"))?
-        .collect::<Vec<_>>();
-    if addrs.is_empty() || addrs.iter().any(|v| !public_ip(v.ip())) {
-        return Err(Error::bad("intel_private_address_forbidden"));
-    }
-    // Preserve deployment proxy and CA configuration. With a proxy, deployments
-    // must enforce its public-egress policy too; direct DNS is pinned below.
-    let client = reqwest::Client::builder()
-        .https_only(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .resolve_to_addrs(host, &addrs)
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(30))
-        .user_agent("NetworkMapping/1.0 threat-intelligence")
+    // Keep reqwest's proxy / NO_PROXY selection and native TLS roots. Direct
+    // destinations are validated by the resolver before returning pinned IPs.
+    // Proxies must enforce the same public-egress boundary on their remote DNS.
+    let client = http_builder(host)
         .build()
         .map_err(|_| Error::bad("intel_http_client_failed"))?;
     let mut request = if let Some(body) = post {
@@ -100,10 +151,7 @@ pub(super) async fn request_bounded(
         request = request.header(header, key);
     }
     // Never include reqwest errors or URLs: an upstream export may put a key in its path.
-    let mut response = request
-        .send()
-        .await
-        .map_err(|_| Error::bad("intel_source_transport"))?;
+    let mut response = request.send().await.map_err(transport_error)?;
     if !response.status().is_success() {
         return Err(Error::bad(if response.status().as_u16() == 429 {
             "intel_source_rate_limited"

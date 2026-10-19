@@ -1,5 +1,89 @@
 use super::*;
 
+#[tokio::test]
+async fn proxy_remote_dns_does_not_require_local_target_dns_and_direct_access_stays_guarded() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let proxy = tokio::spawn(async move {
+        let (mut socket, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(socket.read_u8().await.unwrap());
+            assert!(request.len() < 8192);
+        }
+        socket
+            .write_all(
+                b"HTTP/1.1 502 fixture proxy\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    let client = client::http_builder("remote-only.intel.invalid")
+        .no_proxy()
+        .proxy(reqwest::Proxy::https(format!("http://{address}")).unwrap())
+        .build()
+        .unwrap();
+    let error = client
+        .get("https://remote-only.intel.invalid/feed")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        client::transport_error(error).code,
+        "intel_source_transport"
+    );
+    assert!(
+        proxy
+            .await
+            .unwrap()
+            .starts_with("CONNECT remote-only.intel.invalid:443 HTTP/1.1\r\n")
+    );
+    // NO_PROXY/direct requests resolve and validate at the actual connector.
+    let direct = client::http_builder("localhost")
+        .no_proxy()
+        .build()
+        .unwrap();
+    let error = direct
+        .get("https://localhost/feed")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        client::transport_error(error).code,
+        "intel_private_address_forbidden"
+    );
+    let direct = client::http_builder("missing.intel.invalid")
+        .no_proxy()
+        .build()
+        .unwrap();
+    let error = direct
+        .get("https://missing.intel.invalid/feed")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(client::transport_error(error).code, "intel_dns_failed");
+    // Optional live smoke uses the inherited proxy and CA, never provider keys.
+    if std::env::var_os("NM_INTEL_HTTPS_SMOKE").is_some() {
+        let bytes = client::request_bounded(
+            "https://api.github.com/rate_limit",
+            &["api.github.com".into()],
+            None,
+            None,
+            128 * 1024,
+        )
+        .await
+        .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(value.get("resources").is_some());
+    }
+}
+
 #[test]
 fn typed_scope_and_confidence_are_preserved() {
     let data=br#"{"query_status":"ok","data":[{"id":"1","ioc":"8.8.8.8:443","ioc_type":"ip:port","confidence_level":10,"malware_printable":"Cobalt Strike"}]}"#;
@@ -436,6 +520,82 @@ async fn local_source(pool: &Pool, review: bool) -> storage::Source {
         .await
         .unwrap()
 }
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn mixed_case_github_files_are_parsed_and_legacy_skipped_cursors_are_repaired_once() {
+    let (pool, c, schema) = database().await;
+    let source = local_source(&pool, false).await;
+    for (path, data) in [
+        (
+            "reports/IOC.JSON",
+            br#"[{"type":"domain","value":"mixed-json.example"}]"#.as_slice(),
+        ),
+        (
+            "reports/IOC.mD",
+            b"| Domain |\n| --- |\n| mixed-md.example |\n".as_slice(),
+        ),
+    ] {
+        let mut blob = format!("blob {}\0", data.len()).into_bytes();
+        blob.extend_from_slice(data);
+        let hash = openssl::hash::hash(openssl::hash::MessageDigest::sha1(), &blob)
+            .unwrap()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        c.execute(
+            "INSERT INTO intel_source_file(source_id,path,content_hash) VALUES($1,$2,$3)",
+            &[&source.id, &path, &hash],
+        )
+        .await
+        .unwrap();
+        assert!(!worker::github_file_current(
+            path,
+            &hash,
+            Some(&(hash.clone(), 1))
+        ));
+        assert!(worker::github_file_current(
+            "reports/IOC.json",
+            &hash,
+            Some(&(hash.clone(), 1))
+        ));
+        assert_eq!(
+            worker::github_file(&pool, &source, path, &hash, data)
+                .await
+                .unwrap(),
+            (1, true)
+        );
+        let row=c.query_one("SELECT content_hash,parser_version FROM intel_source_file WHERE source_id=$1 AND path=$2",&[&source.id,&path]).await.unwrap();
+        assert!(worker::github_file_current(
+            path,
+            &hash,
+            Some(&(row.get(0), row.get(1)))
+        ));
+        assert_eq!(
+            worker::github_file(&pool, &source, path, &hash, data)
+                .await
+                .unwrap(),
+            (0, true)
+        );
+        assert_eq!(
+            worker::github_file(&pool, &source, path, "incorrect-blob-hash", data)
+                .await
+                .unwrap_err()
+                .code,
+            "intel_github_snapshot_changed"
+        );
+    }
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_published", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        2
+    );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
 async fn draft(pool: &Pool, value: &str) -> (storage::Source, Uuid, Indicator) {
     let mut source = local_source(pool, false).await;
     pool.get().await.unwrap().execute("UPDATE intel_source SET kind='rss',transport='https',location='https://research.example/feed',allowed_hosts=ARRAY['research.example'] WHERE id=$1",&[&source.id]).await.unwrap();
@@ -819,6 +979,11 @@ async fn offline_upload_validates_before_publication_resumes_batches_and_never_p
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
+    let blocked =
+        http_test::call_service(&app, http_test::TestRequest::post().uri(&uri).to_request()).await;
+    assert_eq!(blocked.status(), StatusCode::CONFLICT);
+    let blocked: Value = http_test::read_body_json(blocked).await;
+    assert_eq!(blocked["code"], "intel_import_busy");
     let count = || async {
         c.query_one("SELECT COUNT(*) FROM intel_ioc", &[])
             .await
@@ -881,6 +1046,86 @@ async fn offline_upload_validates_before_publication_resumes_batches_and_never_p
         .get::<_, String>(0),
         "failed"
     );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[actix_web::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL and NM_INTEL_CACHE_ROOT"]
+async fn chunked_upload_streams_over_http_without_buffering_in_the_json_extractor() {
+    use actix_web::{App, HttpMessage, HttpServer, dev::Service, web};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (pool, c, schema) = database().await;
+    let input:SourceInput=serde_json::from_value(json!({"name":"streaming upload","kind":"threatfox_export","transport":"upload","location":""})).unwrap();
+    let saved = storage::save_source(
+        &pool,
+        None,
+        input,
+        &user(1),
+        &AuditContext::cli("intel-test"),
+        &encryption_key(),
+    )
+    .await
+    .unwrap();
+    let id: Uuid = serde_json::from_value(saved["id"].clone()).unwrap();
+    let server_pool = pool.clone();
+    let server = HttpServer::new(move || {
+        App::new()
+            .app_data(web::Data::new(server_pool.clone()))
+            .app_data(web::JsonConfig::default().limit(1024))
+            .app_data(web::PayloadConfig::new(1024))
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(user(1));
+                srv.call(req)
+            })
+            .configure(configure)
+    })
+    .workers(1)
+    .disable_signals()
+    .bind(("127.0.0.1", 0))
+    .unwrap();
+    let address = server.addrs()[0];
+    let server = server.run();
+    let handle = server.handle();
+    let running = actix_web::rt::spawn(server);
+    let body=serde_json::to_vec(&(0..5000).map(|n|json!({"type":"domain","value":format!("stream-{n}.example"),"evidence":"Official structured export. ".repeat(30)})).collect::<Vec<_>>()).unwrap();
+    assert!(body.len() > 2 * 1024 * 1024);
+    let response=tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let mut stream=tokio::net::TcpStream::connect(address).await.unwrap();
+        stream.write_all(format!("POST /api/intel/sources/{id}/import?expected_revision=1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        for bytes in body.chunks(64*1024) {
+            stream.write_all(format!("{:x}\r\n",bytes.len()).as_bytes()).await.unwrap();
+            stream.write_all(bytes).await.unwrap();stream.write_all(b"\r\n").await.unwrap();
+        }
+        stream.write_all(b"0\r\n\r\n").await.unwrap();
+        let mut response=Vec::new();stream.read_to_end(&mut response).await.unwrap();response
+    }).await.unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_ioc", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    assert!(worker::source_tick(&pool, &encryption_key()).await.unwrap());
+    let row = c
+        .query_one(
+            "SELECT snapshot_id,stage,record_count FROM intel_import_snapshot WHERE source_id=$1",
+            &[&id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>(1), "ready");
+    assert_eq!(row.get::<_, i64>(2), 5000);
+    handle.stop(true).await;
+    running.await.unwrap().unwrap();
+    let snapshot: Uuid = row.get(0);
+    let root = std::path::PathBuf::from(std::env::var_os("NM_INTEL_CACHE_ROOT").unwrap());
+    tokio::fs::remove_file(root.join(format!("{snapshot}.ndjson")))
+        .await
+        .unwrap();
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
         .unwrap();
