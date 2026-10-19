@@ -42,6 +42,7 @@ database.username
 dns_follow_up.authorized_cidrs
 dns_follow_up.enabled
 dns_follow_up.excluded_cidrs
+dns_follow_up.excluded_domains
 dns_follow_up.max_targets_per_task
 elasticsearch.bulk_batch_size
 elasticsearch.bulk_max_concurrency

@@ -983,7 +983,7 @@ impl MaxMindConfig {
 pub const DEFAULT_COMMON_SCAN_PORTS: &str = "21,22,23,25,53,80,110,135,139,143,443,445,465,587,993,995,1433,1521,2049,2375,2376,3000,3306,3389,5432,5900,6379,8080,8443,9200,11211,27017";
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
-#[serde(default)]
+#[serde(default, from = "SearchGenerationDocument")]
 pub struct SearchGenerationConfig {
     pub enabled: bool,
     pub stale_after_days: u32,
@@ -991,8 +991,53 @@ pub struct SearchGenerationConfig {
     pub max_pending_tasks: u32,
     pub per_user_hourly_limit: u32,
     pub domain_enabled: bool,
-    /// Exact domains and their subdomains; never inferred from search input.
-    pub authorized_domains: Vec<String>,
+}
+
+// Old allowlists must never become empty denylists while retaining an enabled
+// domain generator. This conversion also protects TOML/env and history restores.
+#[derive(Deserialize)]
+#[serde(default)]
+struct SearchGenerationDocument {
+    enabled: bool,
+    stale_after_days: u32,
+    cooldown_minutes: u32,
+    max_pending_tasks: u32,
+    per_user_hourly_limit: u32,
+    domain_enabled: bool,
+    #[serde(deserialize_with = "legacy_domain_list_present")]
+    authorized_domains: bool,
+}
+
+fn legacy_domain_list_present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    serde_json::Value::deserialize(d).map(|_| true)
+}
+
+impl Default for SearchGenerationDocument {
+    fn default() -> Self {
+        let v = SearchGenerationConfig::default();
+        Self {
+            enabled: v.enabled,
+            stale_after_days: v.stale_after_days,
+            cooldown_minutes: v.cooldown_minutes,
+            max_pending_tasks: v.max_pending_tasks,
+            per_user_hourly_limit: v.per_user_hourly_limit,
+            domain_enabled: v.domain_enabled,
+            authorized_domains: false,
+        }
+    }
+}
+
+impl From<SearchGenerationDocument> for SearchGenerationConfig {
+    fn from(v: SearchGenerationDocument) -> Self {
+        Self {
+            enabled: v.enabled,
+            stale_after_days: v.stale_after_days,
+            cooldown_minutes: v.cooldown_minutes,
+            max_pending_tasks: v.max_pending_tasks,
+            per_user_hourly_limit: v.per_user_hourly_limit,
+            domain_enabled: v.domain_enabled && !v.authorized_domains,
+        }
+    }
 }
 
 impl Default for SearchGenerationConfig {
@@ -1004,7 +1049,6 @@ impl Default for SearchGenerationConfig {
             max_pending_tasks: 100,
             per_user_hourly_limit: 20,
             domain_enabled: false,
-            authorized_domains: Vec::new(),
         }
     }
 }
@@ -1020,12 +1064,6 @@ impl SearchGenerationConfig {
                 "搜索生成有效期须为 1-3650 天，冷却为 1-525600 分钟，队列和每小时额度为 1-10000"
                     .into(),
             );
-        }
-        if self.enabled && self.domain_enabled && self.authorized_domains.is_empty() {
-            return Err("启用域名搜索生成时必须配置授权域名".into());
-        }
-        for domain in &self.authorized_domains {
-            crate::dns::canonical_scan_domain(domain)?;
         }
         Ok(())
     }

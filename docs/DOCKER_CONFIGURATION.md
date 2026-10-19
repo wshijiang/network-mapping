@@ -444,7 +444,7 @@ file 模式不再用 `NM__…` 覆盖 TOML；Compose 端口映射和探针环境
 | `automatic_target.search_generation.max_pending_tasks` | 整数，`100` | 待执行任务上限，1–10000 |
 | `automatic_target.search_generation.per_user_hourly_limit` | 整数，`20` | 每用户小时额度，1–10000 |
 | `automatic_target.search_generation.domain_enabled` | 布尔值，`false` | 域名搜索生成开关 |
-| `automatic_target.search_generation.authorized_domains` | 字符串数组，`[]` | 精确授权域及其子域；开启域名生成需提供，见[搜索触发更新](SEARCH_TARGET_GENERATION.md) |
+| `dns_follow_up.excluded_domains` | 字符串数组，`[]` | 所有 DNS 任务的排除规则：精确域名或 `*.example.com`，最多 256 条；旧域名白名单升级后关闭域名自动生成，见[搜索触发更新](SEARCH_TARGET_GENERATION.md) |
 | `monitor.service_defaults` | 对象，`{}` | 按服务设置规则；文件种子或 Web「健康监控」 |
 | `monitor.operation_rules` | 对象数组，`[]` | 按操作覆盖规则；结构和校验见[监控策略](monitoring-policies.md) |
 | `email_config.host` | 字符串，整个段默认未设置 | SMTP 主机；文件部署的邮件初始值，也可通过 Web 邮件设置管理 |

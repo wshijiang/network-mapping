@@ -50,16 +50,7 @@ impl GenerationResult {
 
 fn allows(policy: &AutomaticTargetConfig, target: &SearchTarget) -> bool {
     if target.kind == "domain" {
-        return policy.search_generation.domain_enabled
-            && policy
-                .search_generation
-                .authorized_domains
-                .iter()
-                .any(|value| {
-                    crate::dns::canonical_scan_domain(value).is_ok_and(|domain| {
-                        target.key == domain || target.key.ends_with(&format!(".{domain}"))
-                    })
-                });
+        return policy.search_generation.domain_enabled;
     }
     let Ok(ip) = target.key.parse::<IpAddr>() else {
         return false;
@@ -87,7 +78,7 @@ pub(crate) async fn generate(
     policy: &AutomaticTargetConfig,
     revision: i64,
     query: &str,
-    dns_follow_up_enabled: bool,
+    dns_policy: &crate::dns_follow_up::DnsFollowUpConfig,
     audit: &AuditContext,
 ) -> Result<GenerationResult, Error> {
     if !policy.search_generation.enabled {
@@ -99,7 +90,10 @@ pub(crate) async fn generate(
     if !allows(policy, &target) {
         return Ok(GenerationResult::target("out_of_scope", &target));
     }
-    if target.kind == "domain" && !dns_follow_up_enabled {
+    if target.kind == "domain" && !dns_policy.allows_domain(&target.key) {
+        return Ok(GenerationResult::target("out_of_scope", &target));
+    }
+    if target.kind == "domain" && !dns_policy.enabled {
         return Ok(GenerationResult::target("unavailable", &target));
     }
     // Never use the user's endpoint filters to infer that a target is absent.
@@ -406,7 +400,6 @@ mod tests {
             ..Default::default()
         };
         policy.search_generation.domain_enabled = true;
-        policy.search_generation.authorized_domains = vec!["Example.COM.".into()];
         let target = |kind, key: &str| SearchTarget {
             kind,
             key: key.into(),
@@ -416,7 +409,30 @@ mod tests {
         assert!(!allows(&policy, &target("ip", "0.1.2.3")));
         assert!(!allows(&policy, &target("ip", "2001:db8::1")));
         assert!(allows(&policy, &target("domain", "a.example.com")));
-        assert!(!allows(&policy, &target("domain", "notexample.com")));
+        assert!(allows(&policy, &target("domain", "notexample.com")));
+    }
+
+    #[test]
+    fn legacy_allowlist_never_enables_a_denylist_generator_on_restore() {
+        for old in [json!([]), json!(["example.com"]), json!(null)] {
+            let value: crate::config::SearchGenerationConfig = serde_json::from_value(json!({
+                "enabled":true,"domain_enabled":true,"authorized_domains":old
+            }))
+            .unwrap();
+            assert!(value.enabled);
+            assert!(!value.domain_enabled);
+            assert!(
+                serde_json::to_value(&value)
+                    .unwrap()
+                    .get("authorized_domains")
+                    .is_none()
+            );
+        }
+        let value: crate::config::SearchGenerationConfig = serde_json::from_value(json!({
+            "enabled":true,"domain_enabled":true
+        }))
+        .unwrap();
+        assert!(value.domain_enabled);
     }
 
     #[test]

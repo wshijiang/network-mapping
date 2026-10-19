@@ -84,3 +84,7 @@ dns_observation_retention_days = 180
 首次 DNS 上传会创建 Data Stream template、Data Stream 与 current-record index。观测使用确定性 `create`，重传 409 视为幂等成功；当前 RR 使用带 `retry_on_conflict` 的脚本化 upsert。部署账户需拥有管理该 template/Data Stream、向 Data Stream `create` 和向 RR index `update` 的最小权限。
 
 不要把 `dns-records` 嵌入 IP、服务或 HTTP 文档。查询 Domain→IP 或 IP→Domain 时以 `ip` 字段关联，由后端组合查询。`domain-assets` 是可重建详情页投影，尚未创建；大规模 CDN 域名必须设置每种 RR 的数量上限和截断标记后才可启用。
+
+## 域名任务排除
+
+运行策略“DNS 排除与解析后扫描”中的 `excluded_domains` 对所有 DNS 任务生效，支持精确项和左侧 `*.` 各级子域项。该策略独立于 DNS 后续端口扫描开关；OpenAPI 仍需满足应用自己的允许范围。详细语义与旧域名白名单迁移见[搜索触发目标更新](SEARCH_TARGET_GENERATION.md#域名排除与升级)。

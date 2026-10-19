@@ -301,12 +301,19 @@ pub(crate) async fn create(
         plan.profile.as_str()
     };
     let scan_plan = crate::scan_control::build_scan_plan(task_profile).map_err(ApiError::bad)?;
-    if domain_task && plan.profile != "dns_records" {
+    if domain_task {
         let runtime = req
             .app_data::<web::Data<crate::runtime_config::RuntimeSettings>>()
             .ok_or_else(ApiError::unavailable)?;
         let global = runtime.dns_follow_up.get().await;
-        if !global.value.enabled {
+        if plan.domains.iter().any(|d| !global.value.allows_domain(d)) {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "domain_excluded",
+                "目标命中平台 DNS 域名排除规则",
+            ));
+        }
+        if plan.profile != "dns_records" && !global.value.enabled {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
                 "dns_follow_up_disabled",

@@ -1208,7 +1208,7 @@ pub(crate) async fn scanner_heartbeat_handler(
         let renewed = match transaction
             .query_opt(
                 "UPDATE scan_task_execution e SET lease_expires_at = CASE \
-                 WHEN e.maintenance_hold THEN NULL ELSE $1::bigint END FROM scan_task t \
+                 WHEN e.maintenance_hold THEN NULL ELSE $1::bigint END, cancel_requested=e.cancel_requested OR NOT dns_scan_task_enabled(t) FROM scan_task t \
                  WHERE e.task_id = t.id AND t.task_id = $2 AND e.assigned_scanner_id = $3 \
                  AND e.execution_status = 'running' RETURNING e.maintenance_hold, e.lease_expires_at;",
                 &[&lease_expires_at, &task_id.to_string(), &scanner_id],
@@ -2330,6 +2330,12 @@ async fn create_dns_task(
     };
     domains.sort();
     domains.dedup();
+    let domain_policy = dns_follow_up.get().await.value;
+    if domains.iter().any(|d| !domain_policy.allows_domain(d)) {
+        return HttpResponse::Forbidden().json(
+            json!({"success":false,"code":"domain_excluded","message":"目标命中 DNS 域名排除规则"}),
+        );
+    }
     let mut connection = match pool.get().await {
         Ok(connection) => connection,
         Err(error) => {

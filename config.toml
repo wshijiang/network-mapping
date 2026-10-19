@@ -71,6 +71,8 @@ failure_backoff_seconds = 300 # 智能刷新失败退避起始时间
 change_refresh_seconds = 3600 # 检测到资产变化后的复核间隔
 
 [dns_follow_up]
+# 所有 DNS 任务共用排除规则：精确域名，或 *.example.com（仅各级子域）。
+excluded_domains = []
 # 将 DNS 的 A/AAAA 结果创建为独立端口扫描任务。仅允许明确授权的网段，默认关闭。
 enabled = false
 authorized_cidrs = []

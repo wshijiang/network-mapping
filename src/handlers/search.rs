@@ -248,7 +248,7 @@ async fn respond_search_elasticsearch(
         Ok(page) => {
             let auto_generation = if let Some(context) = generation {
                 let policy = context.settings.automatic_target.get().await;
-                let dns_enabled = context.settings.dns_follow_up.get().await.value.enabled;
+                let dns_policy = context.settings.dns_follow_up.get().await.value;
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(4),
                     crate::target_generated::search::generate(
@@ -258,7 +258,7 @@ async fn respond_search_elasticsearch(
                         &policy.value,
                         policy.revision,
                         &query,
-                        dns_enabled,
+                        &dns_policy,
                         &context.audit,
                     ),
                 )

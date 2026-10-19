@@ -15,7 +15,7 @@ CIDR、多个目标条件、IN、OR、NOT、has_endpoint 和模糊目标匹配�
 
 IP 必须在 automatic_target 的对应地址族授权范围内，排除范围优先；搜索开关独立于 IPv4/IPv6 周期生成开关。周期网段配置的现有校验仍适用。
 
-域名须开启 domain_enabled，并命中 authorized_domains（精确域名或按标签边界匹配的子域名）。还须开启 DNS 后续扫描。系统创建现有 dns_records 任务，后续端口任务按 dns_follow_up 的授权范围筛选解析地址。任务使用扫描节点的默认 DNS 解析器。域名刷新只有在 DNS 执行成功且已生成的子任务全部成功后才有效；无可扫描地址的成功解析也算完成。
+域名须开启 domain_enabled，且未命中 dns_follow_up.excluded_domains。域名不再使用白名单。还须开启 DNS 后续扫描。系统创建现有 dns_records 任务，后续端口任务按 dns_follow_up 的授权范围筛选解析地址。任务使用扫描节点的默认 DNS 解析器。域名刷新只有在 DNS 执行成功且已生成的子任务全部成功后才有效；无可扫描地址的成功解析也算完成。
 
 ## 配置
 
@@ -29,7 +29,8 @@ cooldown_minutes = 1440     # 1–525600 分钟
 max_pending_tasks = 100     # 1–10000 个搜索来源的待执行实例
 per_user_hourly_limit = 20  # 1–10000 个根任务，滚动一小时
 domain_enabled = false
-authorized_domains = []   # 例如 ["example.com"]，包含子域名
+# 域名排除在 [dns_follow_up] 的 excluded_domains 管理。
+# 旧 authorized_domains 不再使用；升级或恢复旧配置时 domain_enabled 会关闭。
 ```
 
 ## 判断、去重和故障行为
@@ -63,3 +64,13 @@ STORAGE_TEST_DATABASE_URL=postgresql://USER@HOST/TEST_DB cargo test --locked tar
 ```
 
 数据库测试在指定测试库中创建随机隔离 schema，正常完成后删除，仅应用于可丢弃测试数据库。覆盖 100 个并发搜索、用户隔离、空结果成功、任务删除后的冷却、动态有效期、额度、创建失败回滚、DNS 子任务及网段覆盖。
+
+## 域名排除与升级
+
+`dns_follow_up.excluded_domains` 统一控制搜索、手工和 OpenAPI 的 DNS 任务；与解析后 IP 扫描的 enabled 开关独立。普通域名只精确排除，`*.example.com` 排除所有层级子域但不包含根域；要排除整个域树应同时填写两条。大小写、首尾空白和末尾根点被规范化。最多 256 条；不支持裸 `*`、`?`、任意位置 `*`、协议、路径或端口。
+
+创建混合批次时任一域名被排除会拒绝整批，不静默丢目标。领取/恢复任务时 SQL 策略阻止被排除的任务及其 DNS 派生子任务；运行中任务在下一次心跳收到取消指令，已离开进程的网络请求无法撤回。DNS 结果仍可作为历史证据保存，但不会生成新的后续任务。共享 IP 不会因此成为全局 IP 排除项。
+
+初始化会幂等迁移数据库中含旧 `authorized_domains` 的配置，保存新修订并关闭域名搜索生成；文件/env 和历史版本恢复也做相同的安全转换。旧白名单不会复制成排除列表。管理员配置排除规则后可以重新启用域名搜索生成。独立升级 SQL 为 `source/database/migrate_dns_domain_exclusions.sql`；降级前关闭域名自动生成并恢复配套配置与前端。
+
+排除项在保存时规范化；任务领取端使用相同的 Unicode 空白和尾点规则。直接写入数据库的无效排除列表会阻止 DNS 任务领取，避免忽略损坏策略。

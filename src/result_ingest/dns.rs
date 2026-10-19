@@ -550,6 +550,17 @@ async fn create_dns_follow_up_tasks(
     maxmind: Option<&crate::maxmind::MaxMindState>,
 ) -> Result<(), tokio_postgres::Error> {
     let metadata: Value = parent.get("generation_metadata");
+    let excluded: bool = transaction
+        .query_one(
+            "SELECT NOT dns_scan_task_enabled(t) FROM scan_task t WHERE id=$1",
+            &[&parent_task_id],
+        )
+        .await?
+        .get(0);
+    if excluded {
+        transaction.execute("INSERT INTO dns_follow_up_generation(execution_id,status,eligible_ip_count,created_task_count) VALUES($1,'blocked_policy',0,0) ON CONFLICT(execution_id) DO NOTHING", &[&parent_execution_id]).await?;
+        return Ok(());
+    }
     let Some(follow_up) = metadata.get("dns_follow_up") else {
         return Ok(());
     };
