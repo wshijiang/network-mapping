@@ -65,7 +65,8 @@ RUN printf 'rust=%s\n' "$(rustc --version | cut -d ' ' -f 2)" > /out/rust-build-
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 curl && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 network-mapping && useradd --uid 10001 --gid 10001 --no-create-home network-mapping \
-    && install -d -o 10001 -g 10001 /var/lib/network-mapping /var/lib/network-mapping/maxmind /var/lib/network-mapping/scanner-diagnostics /var/log/network-mapping
+    && install -d -o 10001 -g 10001 /var/lib/network-mapping /var/lib/network-mapping/maxmind /var/lib/network-mapping/scanner-diagnostics /var/log/network-mapping \
+    && install -d -m 0700 -o 10001 -g 10001 /var/lib/network-mapping/intel-cache
 WORKDIR /opt/network-mapping
 COPY --from=rust-builder /out/network_mapping_server ./bin/network_mapping_server
 COPY --chmod=0555 docker/healthcheck.sh ./bin/healthcheck

@@ -200,7 +200,14 @@ YARA、Snort 和不支持的 JSON 结构不导入为 IOC，GitHub 作业摘要�
 多实例必须使用同一持久化缓存目录及同一主密钥。缓存丢失不删除已提交证据，重新上传
 原文件可安全去重。反向代理的请求体限制和上传超时应满足所需文件大小。
 
-上传界面在尚未收到浏览器进度事件时显示连接中的动画；事件缺少总长度时按所选文件
+上传前先发送不含文件的 `POST /api/intel/sources/{id}/import/check?expected_revision=N`，
+检查管理员权限、来源版本、启用状态、活动作业，以及缓存文件实际创建、写入和落盘能力。
+检查请求最多等待 15 秒，失败不会发送文件，弹窗保留所选文件并显示错误。检查只创建
+随后删除的私有探测文件，不创建快照或同步作业，不占用导入名额；真正上传和最终安装
+仍重新校验，避免检查之后的来源变更或并发上传绕过限制。
+
+上传界面在检查阶段显示“正在检查服务端缓存和来源状态”，尚未收到浏览器进度事件时
+显示连接中的动画；事件缺少总长度时按所选文件
 大小计算百分比。100% 表示发送完成，仍需等待服务器保存并入队。错误在上传弹窗内展示，
 保留文件供重试；可取消等待或离开页面中止请求。客户端请求最长 30 分钟；后端连续
 60 秒未收到数据会终止接收。已有排队/运行作业时，在接收文件前返回 `intel_import_busy`，
@@ -210,6 +217,36 @@ YARA、Snort 和不支持的 JSON 结构不导入为 IOC，GitHub 作业摘要�
 是否可写且磁盘充足。部署示例普通路由为 64 MiB，大文件需按[部署说明](DEPLOYMENT.md)
 单独放宽 import 路由至 512 MiB 并关闭代理请求缓冲。原生服务应预先创建缓存目录并归属
 服务账户；Compose 的 server-data 持久卷覆盖该目录，旧卷也需允许 UID 10001 写入。
+
+### 导入缓存权限排查
+
+`intel_import_cache_unavailable` 表示缓存目录创建、解析、私有临时文件创建或探测写入失败。
+后端警告日志包含实际路径、失败操作及系统错误，可区分权限不足、只读挂载和空间耗尽。
+Web 不显示服务器绝对路径和底层错误。不会自动退回临时目录，以免重启后丢失断点缓存。
+
+原生开发服务默认路径位于 `/var/lib`，普通用户通常不能自行创建。可在**后端仓库目录**
+准备一个持久目录，并在**启动后端的同一终端**设置：
+
+```sh
+install -d -m 0700 ./intel-cache
+export NM_INTEL_CACHE_ROOT="$(pwd)/intel-cache"
+# 然后在此终端按原启动命令重新运行后端。
+```
+
+该仓库忽略 `intel-cache/`，不要把历史导出缓存提交到 Git。`NM_INTEL_CACHE_ROOT` 是单
+下划线变量，由后端直接读取，不是 `VITE_…`、`NM__…` 或 TOML 字段；后端不会自动加载
+前端 `.env`。仅在 `pnpm dev` 所在终端设置不会改变已经运行的后端。
+
+systemd 等托管服务须将绝对路径写入服务的 `Environment`/`EnvironmentFile` 并重启后端，
+目录及父目录须让实际服务账户可访问。需要保留默认 `/var/lib` 路径时，由管理员预创建
+并将其归属服务账户，不要用 `chmod 777`。修改自定义缓存目录前先暂停导入并迁移旧缓存，
+保持目录私有；修改路径不会移动已有文件。
+
+官方镜像预创建 UID/GID `10001:10001`、权限 `0700` 的缓存目录，Compose 示例通过
+`server-data:/var/lib/network-mapping` 持久化。旧卷和宿主机 bind mount 会覆盖镜像目录，
+仍须检查其中缓存目录的属主、访问权限、只读标志和可用空间。修改容器环境后使用
+`docker compose … up -d --force-recreate`；仅 `restart` 不更新环境。容器中必须使用已挂载
+的绝对路径，不要选择只读根文件系统或仅 64 MiB 的 `/tmp`。
 
 服务器已有文件也可选择 `threatfox_export` + `local`，填写 `NM_INTEL_LOCAL_ROOT` 内的
 相对路径后手动“立即同步”；导入完成不会因检查周期再次读取。普通本地 JSON/文本来源
@@ -221,7 +258,21 @@ YARA、Snort 和不支持的 JSON 结构不导入为 IOC，GitHub 作业摘要�
 7 天的停机补采使用离线历史导入。离线 JSON 支持 API data 数组、通用 iocs 数组与官方
 按 ID 分组的对象；CSV 保留官方带注释的表头、引号与逗号。完整导出的获取方式以当前
 认证门户为准，Web 只上传本地文件，持续更新不改为拉取导出文件。
+离线 CSV 接受 UTF-8（含 BOM）、CRLF、逗号后的字段空格、双引号转义、带逗号/换行的
+引号字段，以及带 `#` 的表头和说明行；说明文字中的引号不参与 CSV 结构解析。表头须包含
+`type`/`ioc_type` 和 `value`/`ioc`/`ioc_value`，数据行字段数须匹配。ThreatFox 的空参考值
+`None`/`null`/`N/A` 按缺省处理。缺列、多列、未闭合引号或错误编码仍拒绝完整文件。
 官方 `md5_hash`、`sha256_hash` 类型统一规范化为库内的 md5、sha256，API 和离线导入共用解析。
+
+URL IOC 接受 HTTP、HTTPS、FTP、FTPS、SMB、带 userinfo 的 URL，以及无协议的主机/路径，
+支持 `[.]`、`[:]`、`[://]` 和不区分大小写的 hxxp/hxxps 还原。无协议 URL 保留无协议形式，
+不会猜测 HTTP/HTTPS，也不扩大为域名或 IP 标记。URL IOC 只存储和精确匹配，不作为抓取地址；
+远程来源和参考链接继续执行各自的协议、凭据、白名单及地址校验。畸形 JSON 与 IOC 字段
+错误分别返回具体错误码，不再把字段校验失败统一报告为 `intel_invalid_ioc_document`。
+ESET GitHub 仓库按文件校验：个别 JSON 本身语法错误时，不发布该文件的有效前缀，记录
+`unsupported_files`、`unsupported_paths` 并继续其他文件；后端警告日志说明畸形 JSON。
+上游修正文件后 blob 哈希变化会重新解析。没有受支持 IOC 类别的报告也按无可导入内容
+记录，不放宽受害目标/背景属性过滤。此规则只隔离仓库内单个文件，上传文件仍须完整校验。
 
 来源置信度不会过滤 IOC。保存 first_seen、last_seen、reporter、reference 和恶意软件
 名称。官方 recent 文件包含 first_seen 或 last_seen 在最近 48 小时内的 IOC，这只是离线
@@ -326,6 +377,7 @@ TLS SAN、相同证书、ASN、软件家族均不用于扩大标记。
 | `PUT /api/intel/sources/{id}` | 更新来源，携带 expected_revision |
 | `POST /api/intel/sources/{id}/sync` | 幂等入队，复用进行中的同源作业 |
 | `POST /api/intel/sources/{id}/import?expected_revision=N` | 管理员上传原始文件体，Content-Type 为 application/octet-stream；仅 upload 来源 |
+| `POST /api/intel/sources/{id}/import/check?expected_revision=N` | 管理员上传前检查；无文件体，不排队、不预留来源，返回 `data.ready=true` 后再传文件 |
 | `GET/PUT /api/intel/settings` | AI 设置、配置 revision、固定 ai_review_required=true |
 | `GET /api/intel/records` | status、q、source_id、offset；每页 50 条 |
 | `POST /api/intel/records/{id}/review` | content_hash、decision、reason；decision 为 approved/rejected/revoked |
@@ -391,7 +443,11 @@ cargo test --locked threat_intel --lib -- --include-ignored
 离线测试覆盖原生 JSON/CSV/ZIP、超过 50,000 条的流式解析、完整校验后发布、跨批续传、
 租约恢复、无周期导出抓取、观察时间有效期、过期历史、重复导入不续期和带数据迁移。
 另覆盖代理远程 DNS、直连 DNS/私网拒绝、混合大小写 GitHub 游标修复和真实 HTTP 分块
-上传（独立处理器 + PG，设置小 JSON/Payload 限额验证原始流式入口）。可设置
+上传（独立处理器 + PG，20 MiB 以上文件，设置小 JSON/Payload 限额验证原始流式入口），
+以及无文件体的缓存探测、来源版本/权限/活动作业检查。CSV 回归包含注释引号、字段空格、
+BOM/CRLF、多行字段和空参考值；URL 回归包含官方 MISP 的 SMB 与无协议字段，并断言
+来源抓取规则不变。可通过 `NM_INTEL_MISP_FIXTURES` 指向本地官方 MISP JSON 样本目录
+附加逐文件解析验证。可设置
 `NM_INTEL_HTTPS_SMOKE=1` 在代理测试中附加真实 GitHub HTTPS 读取，使用现有代理和 CA，
 无需上游凭据；默认测试仅使用本地代理 fixture。
 真实 LLM 调用需要实际配置的服务和密钥；解析器 fixture 测试不代表已调用真实模型。

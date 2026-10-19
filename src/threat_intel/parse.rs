@@ -591,7 +591,13 @@ pub(super) fn threatfox_row(r: &Value, grouped_id: Option<&str>) -> Result<Indic
     i.reference = r
         .get("reference")
         .and_then(Value::as_str)
-        .filter(|v| !v.is_empty())
+        .filter(|v| {
+            !v.trim().is_empty()
+                && !matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "none" | "null" | "n/a"
+                )
+        })
         .map(str::to_owned);
     i.confidence = r
         .get("confidence_level")

@@ -8,6 +8,43 @@ use tokio::io::AsyncWriteExt;
 struct ImportQuery {
     expected_revision: i64,
 }
+async fn upload_source(
+    pool: &Pool,
+    user: &UserBaseI,
+    id: Uuid,
+    revision: i64,
+) -> Result<storage::Source> {
+    admin(user)?;
+    let s = storage::get_source(pool, id).await?;
+    if s.revision != revision {
+        return Err(Error::conflict());
+    }
+    if s.input.transport != "upload" {
+        return Err(Error::bad("intel_invalid_upload_source"));
+    }
+    if !s.input.enabled {
+        return Err(Error::bad("intel_source_disabled"));
+    }
+    if pool.get().await?.query_one("SELECT EXISTS(SELECT 1 FROM intel_sync_run WHERE source_id=$1 AND status IN ('queued','running'))",&[&s.id]).await?.get::<_,bool>(0) {
+        return Err(Error {status:StatusCode::CONFLICT,code:"intel_import_busy"});
+    }
+    Ok(s)
+}
+async fn check_import(
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    id: web::Path<Uuid>,
+    q: web::Query<ImportQuery>,
+) -> HttpResponse {
+    response(
+        async {
+            upload_source(&pool, &user, id.into_inner(), q.expected_revision).await?;
+            imports::check_writable().await?;
+            Ok(json!({"ready": true}))
+        }
+        .await,
+    )
+}
 async fn offline_import(
     req: HttpRequest,
     pool: web::Data<Pool>,
@@ -18,21 +55,8 @@ async fn offline_import(
 ) -> HttpResponse {
     response(
         async {
-            admin(&user)?;
-            let s = storage::get_source(&pool, id.into_inner()).await?;
-            if s.revision != q.expected_revision {
-                return Err(Error::conflict());
-            }
-            if s.input.transport != "upload" {
-                return Err(Error::bad("intel_invalid_upload_source"));
-            }
-            if !s.input.enabled {
-                return Err(Error::bad("intel_source_disabled"));
-            }
-            // Reject busy sources before receiving a potentially large file.
-            if pool.get().await?.query_one("SELECT EXISTS(SELECT 1 FROM intel_sync_run WHERE source_id=$1 AND status IN ('queued','running'))",&[&s.id]).await?.get::<_,bool>(0) {
-                return Err(Error {status:StatusCode::CONFLICT,code:"intel_import_busy"});
-            }
+            // Repeat preflight checks; readiness is not a reservation or authorization token.
+            let s = upload_source(&pool, &user, id.into_inner(), q.expected_revision).await?;
             let temp = imports::temporary().await?;
             let mut file = tokio::fs::File::from_std(
                 temp.reopen()
@@ -40,7 +64,11 @@ async fn offline_import(
             );
             let mut size = 0_u64;
             let mut hash = openssl::sha::Sha256::new();
-            while let Some(chunk) = tokio::time::timeout(std::time::Duration::from_secs(60), payload.next()).await.map_err(|_| Error::bad("intel_import_read_failed"))? {
+            while let Some(chunk) =
+                tokio::time::timeout(std::time::Duration::from_secs(60), payload.next())
+                    .await
+                    .map_err(|_| Error::bad("intel_import_read_failed"))?
+            {
                 let chunk = chunk.map_err(|_| Error::bad("intel_import_read_failed"))?;
                 size += chunk.len() as u64;
                 if size > import_parse::MAX_ARCHIVE {
@@ -372,6 +400,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/sources", web::post().to(add_source))
             .route("/sources/{id}", web::put().to(update_source))
             .route("/sources/{id}/sync", web::post().to(sync_source))
+            .route("/sources/{id}/import/check", web::post().to(check_import))
             .route("/sources/{id}/import", web::post().to(offline_import))
             .route("/settings", web::get().to(get_settings))
             .route("/settings", web::put().to(put_settings))

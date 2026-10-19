@@ -111,13 +111,20 @@ fn convert_reader<R: Read, W: Write>(reader: R, writer: &mut W) -> Result<(i64, 
         Ok(())
     };
     if json {
+        let mut row_error = None;
         let mut rows = |v: Value, group: Option<&str>| -> Result<()> {
-            let i = if v.get("ioc_type").is_some() {
-                parse::threatfox_row(&v, group)?
-            } else {
-                serde_json::from_value(v).map_err(|_| Error::bad("intel_invalid_indicator"))?
-            };
-            emit(i)
+            let result = (|| {
+                let i = if v.get("ioc_type").is_some() {
+                    parse::threatfox_row(&v, group)?
+                } else {
+                    serde_json::from_value(v).map_err(|_| Error::bad("intel_invalid_indicator"))?
+                };
+                emit(i)
+            })();
+            if let Err(error) = &result {
+                row_error = Some(error.code);
+            }
+            result
         };
         let mut deserializer = serde_json::Deserializer::from_reader(reader);
         Root {
@@ -126,7 +133,7 @@ fn convert_reader<R: Read, W: Write>(reader: R, writer: &mut W) -> Result<(i64, 
             group: None,
         }
         .deserialize(&mut deserializer)
-        .map_err(|_| Error::bad("intel_invalid_ioc_document"))?;
+        .map_err(|_| Error::bad(row_error.unwrap_or("intel_invalid_ioc_document")))?;
         budget.store(MAX_ROW, Ordering::Relaxed);
         deserializer
             .end()
@@ -199,16 +206,117 @@ impl<'de> Visitor<'de> for Root<'_, '_> {
         Ok(())
     }
 }
+#[derive(Clone, Copy)]
+enum CsvState {
+    RecordStart,
+    FieldStart,
+    Unquoted,
+    Quoted,
+    AfterQuote,
+    Comment,
+}
+// Some official exports put spaces before opening quotes. Strip only field
+// padding, preserving commas, doubled quotes, and newlines inside quoted data.
+struct CsvPadding<R> {
+    reader: BufReader<R>,
+    state: CsvState,
+}
+impl<R: Read> CsvPadding<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader: BufReader::new(reader),
+            state: CsvState::RecordStart,
+        }
+    }
+}
+impl<R: Read> Read for CsvPadding<R> {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        let mut n = 0;
+        while n < output.len() {
+            let Some(&byte) = self.reader.fill_buf()?.first() else {
+                if matches!(self.state, CsvState::Quoted) {
+                    return Err(std::io::Error::other("unclosed CSV quote"));
+                }
+                break;
+            };
+            self.reader.consume(1);
+            self.state = match (self.state, byte) {
+                (CsvState::RecordStart | CsvState::FieldStart, b' ' | b'\t') => continue,
+                (CsvState::RecordStart, b'#') => CsvState::Comment,
+                (CsvState::Comment, b'\n' | b'\r') => CsvState::RecordStart,
+                (CsvState::Comment, _) => CsvState::Comment,
+                (CsvState::RecordStart | CsvState::FieldStart, b'"') => CsvState::Quoted,
+                (CsvState::Quoted, b'"') => CsvState::AfterQuote,
+                (CsvState::Quoted, _) => CsvState::Quoted,
+                (CsvState::AfterQuote, b'"') => CsvState::Quoted,
+                (_, b',') => CsvState::FieldStart,
+                (_, b'\n' | b'\r') => CsvState::RecordStart,
+                (CsvState::AfterQuote, b' ' | b'\t') => continue,
+                _ => CsvState::Unquoted,
+            };
+            output[n] = byte;
+            n += 1;
+        }
+        Ok(n)
+    }
+}
 fn csv_rows<R: Read>(
     reader: R,
     budget: &AtomicUsize,
     emit: &mut dyn FnMut(Indicator) -> Result<()>,
 ) -> Result<()> {
+    let mut reader = BufReader::new(reader);
+    // Read comments before parsing CSV, so quotes in prose cannot consume the
+    // real header. ThreatFox's commented header is parsed as CSV on its own.
+    let header = loop {
+        budget.store(MAX_ROW, Ordering::Relaxed);
+        let mut line = Vec::new();
+        if reader
+            .read_until(b'\n', &mut line)
+            .map_err(|_| Error::bad("intel_invalid_csv"))?
+            == 0
+        {
+            return Err(Error::bad("intel_invalid_csv"));
+        }
+        let text = std::str::from_utf8(&line)
+            .map_err(|_| Error::bad("intel_source_not_utf8"))?
+            .trim();
+        if text.is_empty() {
+            continue;
+        }
+        let comment = text.starts_with('#');
+        let candidate = text.strip_prefix('#').unwrap_or(text).trim_start();
+        let mut probe = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .from_reader(CsvPadding::new(candidate.as_bytes()));
+        let mut record = csv::StringRecord::new();
+        if probe.read_record(&mut record).unwrap_or(false) {
+            let fields = record
+                .iter()
+                .map(|s| s.trim().to_ascii_lowercase())
+                .collect::<Vec<_>>();
+            if fields
+                .iter()
+                .any(|s| matches!(s.as_str(), "ioc" | "ioc_value" | "value"))
+                && fields
+                    .iter()
+                    .any(|s| matches!(s.as_str(), "type" | "ioc_type"))
+            {
+                if fields.len() > 128 {
+                    return Err(Error::bad("intel_invalid_csv"));
+                }
+                break fields;
+            }
+        }
+        if !comment {
+            return Err(Error::bad("intel_invalid_csv"));
+        }
+    };
     let mut csv = csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
-        .from_reader(reader);
-    let mut header: Option<Vec<String>> = None;
+        .comment(Some(b'#'))
+        .from_reader(CsvPadding::new(reader));
     let mut row = csv::StringRecord::new();
     loop {
         budget.store(MAX_ROW, Ordering::Relaxed);
@@ -221,32 +329,12 @@ fn csv_rows<R: Read>(
         if row.len() > 128 {
             return Err(Error::bad("intel_invalid_csv"));
         }
-        let fields = row
-            .iter()
-            .map(|s| {
-                s.trim()
-                    .trim_start_matches('#')
-                    .trim()
-                    .trim_matches('"')
-                    .to_ascii_lowercase()
-            })
-            .collect::<Vec<_>>();
-        if header.is_none() {
-            if fields
-                .iter()
-                .any(|s| matches!(s.as_str(), "ioc" | "ioc_value" | "value"))
-            {
-                header = Some(fields);
-            }
-            continue;
-        }
         if row
             .get(0)
             .is_some_and(|v| v.trim().is_empty() || v.trim_start().starts_with('#'))
         {
             continue;
         }
-        let header = header.as_ref().unwrap();
         if row.len() != header.len() {
             return Err(Error::bad("intel_invalid_csv"));
         }
@@ -286,9 +374,6 @@ fn csv_rows<R: Read>(
                 .map_err(|_| Error::bad("intel_invalid_indicator"))?
         };
         emit(indicator)?;
-    }
-    if header.is_none() {
-        return Err(Error::bad("intel_invalid_csv"));
     }
     Ok(())
 }

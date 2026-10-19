@@ -51,6 +51,7 @@ docker compose --env-file docker/.env -f docker/compose.example.yml up -d --forc
 | `SERVER_SQL_DIRECTORY` | 宿主机路径 | 未设置 | 仅使用 SQL 覆盖文件时必填；目录必须已存在且允许 UID 10001 读取 |
 | `NM_DEFAULT_ADMIN_USERNAME` | 字符串 | `admin` | 数据库中没有管理员时创建初始管理员的用户名；密码随机生成，不通过环境变量指定；已有管理员不受影响 |
 | `RUST_LOG` | 日志过滤表达式 | 未设置时为 `info`；使用 `--debug-model` 时为 `debug` | 例如 `info,network_mapping_server=debug`；控制文件日志，完整终端日志还需 `--verbose`；默认终端仍只显示启动摘要、警告和错误 |
+| `NM_INTEL_CACHE_ROOT` | 容器内持久目录 | `/var/lib/network-mapping/intel-cache` | IOC 离线导入缓存；直接从后端进程环境读取，TOML/env 模式均适用。目录须允许服务账户读写，默认位于 `server-data` 卷内；详见[权限排查](THREAT_INTELLIGENCE.md#导入缓存权限排查) |
 
 | `COMPOSE_PROFILES` 值 | 本地启动的依赖 | 需要配置的外部连接 |
 | --- | --- | --- |

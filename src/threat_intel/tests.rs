@@ -290,6 +290,119 @@ fn offline_json_csv_and_zip_keep_native_export_metadata_and_reject_malformed_inp
 }
 
 #[test]
+fn offline_csv_handles_official_padding_comments_quotes_and_null_reference() {
+    let csv = concat!(
+        "\u{feff}# ThreatFox export,\"an unmatched quote in a comment\r\n",
+        "# Fields follow\r\n",
+        "# \"first_seen_utc\", \"ioc_id\", \"ioc_value\", \"ioc_type\", \"confidence_level\", \"reference\", \"tags\", \"reporter\"\r\n",
+        "\"2025-01-01 00:00:00\", \"42\", \"evil.example\", \"domain\", \"90\", \"https://research.example/a,b\", \"c2,ssl\", \"researcher \"\"quoted\"\"\nsecond line\"\r\n",
+        "  # Footer,\"another unmatched quote\r\n",
+        "\"2025-01-02 00:00:00\", \"43\", \"http://user:pass@payload.example/drop\", \"url\", \"0\", \"None\", \"\", \"researcher\"\r\n",
+    );
+    let (_, items) = offline_convert(csv.as_bytes()).unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].external_id, "42");
+    assert_eq!(items[0].confidence, Some(90));
+    assert_eq!(
+        items[0].reference.as_deref(),
+        Some("https://research.example/a,b")
+    );
+    let evidence: Value = serde_json::from_str(&items[0].evidence).unwrap();
+    assert_eq!(evidence["reporter"], "researcher \"quoted\"\nsecond line");
+    assert_eq!(items[1].value, "http://user:pass@payload.example/drop");
+    assert!(items[1].reference.is_none());
+    for invalid in [
+        "type,value\ndomain,ok.example,extra\n",
+        "type,value\ndomain,\"unclosed.example\n",
+        "unexpected,header\na,b\n",
+    ] {
+        assert_eq!(
+            offline_convert(invalid.as_bytes()).unwrap_err().code,
+            "intel_invalid_csv"
+        );
+    }
+}
+
+#[test]
+fn official_url_iocs_are_data_and_do_not_relax_source_fetch_validation() {
+    for value in [
+        "smb://38.9.8.78/driverpack/DPU.exe",
+        "ftp://user:pass@payload.example/drop",
+        "http://user:pass@payload.example/drop",
+        "djcaps.gotdns.ch",
+        "143.92.48.38",
+        "now.asmkpo.com:80",
+        "speed.wlaspsd.com/vip.js",
+    ] {
+        let (kind, normalized) = normalize("url", value).unwrap();
+        assert_eq!(kind, "url");
+        assert_eq!(normalized, value);
+    }
+    assert_eq!(
+        normalize("url", "hXxPs[:]//payload[.]example/a").unwrap().1,
+        "https://payload.example/a"
+    );
+    for value in [
+        "javascript:alert(1)",
+        "javascript://payload.example/a",
+        "file:///etc/passwd",
+        "http://",
+        "http://payload.example:99999/a",
+    ] {
+        assert!(normalize("url", value).is_err(), "{value}");
+    }
+    assert!(
+        validate_url(
+            "https://user:pass@reports.example/a",
+            &["reports.example".into()]
+        )
+        .is_err()
+    );
+    assert!(validate_url("smb://reports.example/a", &["reports.example".into()]).is_err());
+    // Real official MISP reports include SMB and protocol-less URL attributes.
+    let event = json!({"Event":{"Attribute":[
+        {"category":"Payload delivery","type":"url","value":"smb://38.9.8.78/driverpack/DPU.exe"},
+        {"category":"Network activity","type":"url","value":"speed.wlaspsd.com/vip.js"}
+    ]}});
+    assert_eq!(
+        parse::indicators(&serde_json::to_vec(&event).unwrap(), "json")
+            .unwrap()
+            .len(),
+        2
+    );
+    if let Some(root) = std::env::var_os("NM_INTEL_MISP_FIXTURES") {
+        let (mut parsed, mut context_only, mut malformed) = (0, 0, 0);
+        for file in std::fs::read_dir(root).unwrap() {
+            let path = file.unwrap().path();
+            let data = std::fs::read(&path).unwrap();
+            match parse::indicators(&data, "json") {
+                Ok(_) => parsed += 1,
+                Err(error) if error.code == "intel_no_supported_indicators" => context_only += 1,
+                Err(error) if error.code == "intel_invalid_json" => malformed += 1,
+                Err(error) => panic!("{}: {}", path.display(), error.code),
+            }
+        }
+        assert!(parsed > 0);
+        println!(
+            "Official MISP samples: {parsed} parsed, {context_only} without supported IOC categories, {malformed} malformed JSON files isolated by the repository worker"
+        );
+    }
+}
+
+#[test]
+fn offline_json_preserves_row_validation_errors_instead_of_misreporting_document_shape() {
+    let data = br#"[{"type":"url","value":"javascript:alert(1)"}]"#;
+    assert_eq!(
+        offline_convert(data).unwrap_err().code,
+        "intel_invalid_indicator_url"
+    );
+    assert_eq!(
+        offline_convert(br#"{"unexpected":[]}"#).unwrap_err().code,
+        "intel_invalid_ioc_document"
+    );
+}
+
+#[test]
 fn offline_streaming_does_not_truncate_at_the_recent_feed_item_limit() {
     use std::io::Write;
     let mut input = tempfile::NamedTempFile::new().unwrap();
@@ -585,12 +698,52 @@ async fn mixed_case_github_files_are_parsed_and_legacy_skipped_cursors_are_repai
             "intel_github_snapshot_changed"
         );
     }
+    // A real official repository file contains a trailing comma. Its valid
+    // prefix must not publish, and a corrected blob must remain discoverable.
+    let path = "reports/malformed.json";
+    for (data, expected) in [
+        (
+            br#"[{"type":"domain","value":"must-not-publish.example"},]"#.as_slice(),
+            (0, false),
+        ),
+        (
+            br#"[{"type":"domain","value":"corrected.example"}]"#.as_slice(),
+            (1, true),
+        ),
+    ] {
+        let mut blob = format!("blob {}\0", data.len()).into_bytes();
+        blob.extend_from_slice(data);
+        let hash = openssl::hash::hash(openssl::hash::MessageDigest::sha1(), &blob)
+            .unwrap()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let old = c.query_opt("SELECT content_hash,parser_version FROM intel_source_file WHERE source_id=$1 AND path=$2", &[&source.id, &path]).await.unwrap();
+        let known = old.map(|row| (row.get(0), row.get(1)));
+        assert!(!worker::github_file_current(path, &hash, known.as_ref()));
+        assert_eq!(
+            worker::github_file(&pool, &source, path, &hash, data)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        c.query_one(
+            "SELECT COUNT(*) FROM intel_ioc WHERE value='must-not-publish.example'",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
     assert_eq!(
         c.query_one("SELECT COUNT(*) FROM intel_published", &[])
             .await
             .unwrap()
             .get::<_, i64>(0),
-        2
+        3
     );
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
@@ -946,6 +1099,48 @@ async fn offline_upload_validates_before_publication_resumes_batches_and_never_p
     assert_eq!(api.get::<_, String>(0), "threatfox");
     assert_eq!(api.get::<_, i32>(1), 1800);
     let uri = format!("/api/intel/sources/{id}/import?expected_revision=1");
+    let check_uri = format!("/api/intel/sources/{id}/import/check?expected_revision=1");
+    let forbidden = http_test::call_service(
+        &app,
+        http_test::TestRequest::post()
+            .uri(&check_uri)
+            .insert_header(("x-fixture-non-admin", "1"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    let stale = http_test::call_service(
+        &app,
+        http_test::TestRequest::post()
+            .uri(&format!(
+                "/api/intel/sources/{id}/import/check?expected_revision=0"
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let ready = http_test::call_service(
+        &app,
+        http_test::TestRequest::post().uri(&check_uri).to_request(),
+    )
+    .await;
+    assert_eq!(ready.status(), StatusCode::OK);
+    let ready: Value = http_test::read_body_json(ready).await;
+    assert_eq!(ready["data"]["ready"], true);
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_import_snapshot", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_sync_run", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
     let rows = (0..=imports::BATCH).map(|n|json!({"ioc_type":"domain","ioc":format!("history-{n}.example"),"id":n+1,"confidence_level":0})).collect::<Vec<_>>();
     let body = serde_json::to_vec(&rows).unwrap();
     let forbidden = http_test::call_service(
@@ -981,6 +1176,14 @@ async fn offline_upload_validates_before_publication_resumes_batches_and_never_p
     assert_eq!(response.status(), StatusCode::OK);
     let blocked =
         http_test::call_service(&app, http_test::TestRequest::post().uri(&uri).to_request()).await;
+    assert_eq!(blocked.status(), StatusCode::CONFLICT);
+    let blocked: Value = http_test::read_body_json(blocked).await;
+    assert_eq!(blocked["code"], "intel_import_busy");
+    let blocked = http_test::call_service(
+        &app,
+        http_test::TestRequest::post().uri(&check_uri).to_request(),
+    )
+    .await;
     assert_eq!(blocked.status(), StatusCode::CONFLICT);
     let blocked: Value = http_test::read_body_json(blocked).await;
     assert_eq!(blocked["code"], "intel_import_busy");
@@ -1089,8 +1292,8 @@ async fn chunked_upload_streams_over_http_without_buffering_in_the_json_extracto
     let server = server.run();
     let handle = server.handle();
     let running = actix_web::rt::spawn(server);
-    let body=serde_json::to_vec(&(0..5000).map(|n|json!({"type":"domain","value":format!("stream-{n}.example"),"evidence":"Official structured export. ".repeat(30)})).collect::<Vec<_>>()).unwrap();
-    assert!(body.len() > 2 * 1024 * 1024);
+    let body=serde_json::to_vec(&(0..7000).map(|n|json!({"type":"domain","value":format!("stream-{n}.example"),"evidence":"Official structured export. ".repeat(120)})).collect::<Vec<_>>()).unwrap();
+    assert!(body.len() > 20 * 1024 * 1024);
     let response=tokio::time::timeout(std::time::Duration::from_secs(30),async {
         let mut stream=tokio::net::TcpStream::connect(address).await.unwrap();
         stream.write_all(format!("POST /api/intel/sources/{id}/import?expected_revision=1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
@@ -1118,7 +1321,7 @@ async fn chunked_upload_streams_over_http_without_buffering_in_the_json_extracto
         .await
         .unwrap();
     assert_eq!(row.get::<_, String>(1), "ready");
-    assert_eq!(row.get::<_, i64>(2), 5000);
+    assert_eq!(row.get::<_, i64>(2), 7000);
     handle.stop(true).await;
     running.await.unwrap().unwrap();
     let snapshot: Uuid = row.get(0);

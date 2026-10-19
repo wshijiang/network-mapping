@@ -311,11 +311,24 @@ impl Indicator {
     }
 }
 pub(super) fn normalize(kind: &str, raw: &str) -> Result<(String, String)> {
-    let value = raw
+    let mut value = raw
         .trim()
         .replace("[.]", ".")
+        .replace("[://]", "://")
+        .replace("[:]", ":")
         .replace("hxxps://", "https://")
         .replace("hxxp://", "http://");
+    if value
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("hxxps://"))
+    {
+        value.replace_range(..5, "https");
+    } else if value
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("hxxp://"))
+    {
+        value.replace_range(..4, "http");
+    }
     let kind = match kind {
         "ip:port" => "ip_port",
         "ipv4" | "ipv6" => "ip",
@@ -349,17 +362,37 @@ pub(super) fn normalize(kind: &str, raw: &str) -> Result<(String, String)> {
             crate::dns::canonical_domain(&value).map_err(|_| Error::bad("intel_invalid_domain"))?
         }
         "url" => {
-            let mut u = reqwest::Url::parse(&value)
+            // IOC values are data, never fetch destinations. Official reports
+            // also publish SMB/FTP and scheme-less URLs, including userinfo.
+            let has_scheme = value.contains("://");
+            let input = if has_scheme {
+                value.clone()
+            } else {
+                format!("ioc://{}", value.trim_start_matches("//"))
+            };
+            let mut u = reqwest::Url::parse(&input)
                 .map_err(|_| Error::bad("intel_invalid_indicator_url"))?;
-            if !matches!(u.scheme(), "http" | "https")
-                || u.host_str().is_none()
-                || !u.username().is_empty()
-                || u.password().is_some()
+            if (has_scheme && !matches!(u.scheme(), "http" | "https" | "ftp" | "ftps" | "smb"))
+                || u.host_str().is_none_or(|host| host.is_empty())
             {
                 return Err(Error::bad("intel_invalid_indicator_url"));
             }
+            if !has_scheme {
+                let host = u
+                    .host_str()
+                    .unwrap()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']');
+                if host.parse::<IpAddr>().is_err() && crate::dns::canonical_domain(host).is_err() {
+                    return Err(Error::bad("intel_invalid_indicator_url"));
+                }
+            }
             u.set_fragment(None);
-            u.to_string()
+            if has_scheme {
+                u.to_string()
+            } else {
+                u.to_string().strip_prefix("ioc://").unwrap().to_owned()
+            }
         }
         "md5" | "sha1" | "sha256" => {
             let len = match kind {

@@ -2,6 +2,7 @@
 scanner/
 /logs/
 /diagnostics/
+/intel-cache/
 .vscode/
 ssl/
 .codegraph/

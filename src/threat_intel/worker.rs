@@ -200,6 +200,7 @@ async fn github(pool: &Pool, s: &Source, data: &[u8]) -> Result<(Value, bool)> {
     let mut added = 0;
     let mut parsed = 0;
     let mut unsupported = 0;
+    let mut unsupported_paths = Vec::new();
     for (path, sha) in pending.into_iter().take(20) {
         // URL path segments are encoded, not interpolated as a URL/query.
         let mut raw = reqwest::Url::parse("https://raw.githubusercontent.com/").unwrap();
@@ -220,10 +221,11 @@ async fn github(pool: &Pool, s: &Source, data: &[u8]) -> Result<(Value, bool)> {
             parsed += 1;
         } else {
             unsupported += 1;
+            unsupported_paths.push(path.chars().take(512).collect::<String>());
         }
     }
     Ok((
-        json!({"added":added,"files_parsed":parsed,"unsupported_files":unsupported,"more_files":partial,"tree_sha":tree_sha}),
+        json!({"added":added,"files_parsed":parsed,"unsupported_files":unsupported,"unsupported_paths":unsupported_paths,"more_files":partial,"tree_sha":tree_sha}),
         partial,
     ))
 }
@@ -285,11 +287,19 @@ pub(super) async fn github_file(
             if matches!(
                 e.code,
                 "intel_no_supported_indicators"
+                    | "intel_invalid_json"
                     | "intel_invalid_ioc_document"
                     | "intel_invalid_indicator"
                     | "intel_invalid_csv"
             ) =>
         {
+            if e.code == "intel_invalid_json" {
+                tracing::warn!(
+                    path,
+                    code = e.code,
+                    "Skipping malformed JSON in IOC repository; no indicators from this file were published"
+                );
+            }
             false
         }
         Err(e) => return Err(e),

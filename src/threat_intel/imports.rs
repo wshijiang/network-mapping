@@ -5,22 +5,49 @@ use storage::{Origin, Source};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 pub(super) const BATCH: usize = 500;
+fn cache_error(path: &std::path::Path, operation: &str, error: std::io::Error) -> Error {
+    tracing::warn!(path = %path.display(), operation, error = %error, "IOC import cache unavailable; check NM_INTEL_CACHE_ROOT and service account permissions");
+    Error::bad("intel_import_cache_unavailable")
+}
 async fn root() -> Result<PathBuf> {
     let path = PathBuf::from(
         std::env::var_os("NM_INTEL_CACHE_ROOT")
             .unwrap_or_else(|| "/var/lib/network-mapping/intel-cache".into()),
     );
-    tokio::fs::create_dir_all(&path)
+    cache_root(&path).await
+}
+async fn cache_root(path: &std::path::Path) -> Result<PathBuf> {
+    tokio::fs::create_dir_all(path)
         .await
-        .map_err(|_| Error::bad("intel_import_cache_unavailable"))?;
+        .map_err(|error| cache_error(path, "create directory", error))?;
     tokio::fs::canonicalize(path)
         .await
-        .map_err(|_| Error::bad("intel_import_cache_unavailable"))
+        .map_err(|error| cache_error(path, "resolve directory", error))
 }
 pub(super) async fn temporary() -> Result<tempfile::NamedTempFile> {
-    tempfile::NamedTempFile::new_in(root().await?)
-        .map_err(|_| Error::bad("intel_import_cache_unavailable"))
+    let path = root().await?;
+    tempfile::NamedTempFile::new_in(&path)
+        .map_err(|error| cache_error(&path, "create private file", error))
 }
+pub(super) async fn check_writable() -> Result<()> {
+    probe(temporary().await?).await
+}
+async fn probe(temp: tempfile::NamedTempFile) -> Result<()> {
+    let path = temp.path();
+    let mut file = tokio::fs::File::from_std(
+        temp.reopen()
+            .map_err(|error| cache_error(path, "open probe", error))?,
+    );
+    file.write_all(b"IOC import cache probe\n")
+        .await
+        .map_err(|error| cache_error(path, "write probe", error))?;
+    file.sync_all()
+        .await
+        .map_err(|error| cache_error(path, "sync probe", error))?;
+    drop(file);
+    Ok(())
+}
+
 pub(super) async fn install(
     pool: &Pool,
     s: &Source,
@@ -218,4 +245,35 @@ pub(super) async fn sync(pool: &Pool, s: &Source) -> Result<(Value, bool)> {
         json!({"offline_import":true,"stage":if complete{"complete"}else{"importing"},"processed":processed+items,"total":total,"added":added}),
         !complete,
     ))
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cache_probe_writes_and_removes_private_file_without_leaving_imports() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = cache_root(&directory.path().join("persistent-cache"))
+            .await
+            .unwrap();
+        let file = tempfile::NamedTempFile::new_in(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                file.as_file().metadata().unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        probe(file).await.unwrap();
+        assert_eq!(std::fs::read_dir(path).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn invalid_cache_directory_reports_configuration_error_without_fallback() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let error = cache_root(&file.path().join("cache")).await.unwrap_err();
+        assert_eq!(error.code, "intel_import_cache_unavailable");
+    }
 }
