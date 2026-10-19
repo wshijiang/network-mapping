@@ -23,9 +23,12 @@ pub(super) async fn validate_source<C: GenericClient + Sync>(c: &C, s: &Source) 
         // Table names are an internal enum, never request data. Lock order is
         // job -> source -> record across workers and publication transactions.
         let sql = format!(
-            "SELECT id FROM {table} WHERE id=$1 AND claim_token=$2 AND status='running' AND lease_until>clock_timestamp() FOR SHARE"
+            "SELECT id FROM {table} WHERE id=$1 AND claim_token=$2 AND source_id=$3 AND source_revision=$4 AND status='running' AND lease_until>clock_timestamp() FOR SHARE"
         );
-        if c.query_opt(&sql, &[&id, &token]).await?.is_none() {
+        if c.query_opt(&sql, &[&id, &token, &s.id, &s.revision])
+            .await?
+            .is_none()
+        {
             return Err(Error::conflict());
         }
     }
@@ -281,11 +284,12 @@ pub(super) async fn ingest(
     let mut payload = json!(i);
     if let Some(id) = article {
         payload["extraction"] = tx
-            .query_one(
-                "SELECT extraction_metadata FROM intel_article WHERE id=$1",
-                &[&id],
+            .query_opt(
+                "SELECT extraction_metadata FROM intel_article WHERE id=$1 AND source_id=$2 AND source_revision=$3",
+                &[&id, &s.id, &s.revision],
             )
             .await?
+            .ok_or_else(Error::conflict)?
             .get("extraction_metadata");
     }
     let identity = if article.is_some() {

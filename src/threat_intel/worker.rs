@@ -103,7 +103,7 @@ pub(super) async fn sync(
             storage::validate_source(&tx, &s).await?;
             let mut added = 0;
             for link in links {
-                added+=tx.execute("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash) SELECT $1,$2,$3,$4,$5,$6 WHERE EXISTS(SELECT 1 FROM intel_source WHERE id=$2 AND revision=$3 AND enabled) ON CONFLICT(source_id,url,feed_hash) DO NOTHING",&[&Uuid::now_v7(),&s.id,&s.revision,&link.url,&link.title,&link.fingerprint]).await?;
+                added+=tx.execute("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash) SELECT $1,$2,$3,$4,$5,$6 WHERE EXISTS(SELECT 1 FROM intel_source WHERE id=$2 AND revision=$3 AND enabled) ON CONFLICT(source_id,url,feed_hash,source_revision) DO NOTHING",&[&Uuid::now_v7(),&s.id,&s.revision,&link.url,&link.title,&link.fingerprint]).await?;
             }
             tx.commit().await?;
             drop(c);
@@ -258,13 +258,15 @@ async fn github(pool: &Pool, s: &Source, data: &[u8]) -> Result<(Value, bool)> {
 
 pub(super) async fn ai_tick(pool: &Pool) -> Result<bool> {
     let (settings, settings_revision) = storage::settings(pool).await?;
-    if !settings.ai_enabled {
-        return Ok(false);
-    }
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
+    tx.execute("UPDATE intel_article a SET status='cancelled',error_code='intel_source_changed',claim_token=NULL,lease_until=NULL FROM intel_source s WHERE a.source_id=s.id AND a.status IN ('queued','running') AND (a.source_revision<>s.revision OR NOT s.enabled OR s.kind<>'rss')",&[]).await?;
+    if !settings.ai_enabled {
+        tx.commit().await?;
+        return Ok(false);
+    }
     tx.execute("UPDATE intel_article SET status='failed',error_code='intel_attempts_exhausted' WHERE status='running' AND lease_until<NOW() AND attempts>=3",&[]).await?;
-    let row=tx.query_opt("SELECT a.* FROM intel_article a JOIN intel_source s ON s.id=a.source_id WHERE s.enabled AND s.kind='rss' AND ((a.status='queued' AND a.available_at<=NOW()) OR (a.status='running' AND a.lease_until<NOW())) AND a.attempts<3 ORDER BY a.created_at FOR UPDATE OF a SKIP LOCKED LIMIT 1",&[]).await?;
+    let row=tx.query_opt("SELECT a.* FROM intel_article a JOIN intel_source s ON s.id=a.source_id WHERE s.enabled AND s.kind='rss' AND a.source_revision=s.revision AND ((a.status='queued' AND a.available_at<=NOW()) OR (a.status='running' AND a.lease_until<NOW())) AND a.attempts<3 ORDER BY a.created_at FOR UPDATE OF a SKIP LOCKED LIMIT 1",&[]).await?;
     let Some(row) = row else {
         tx.commit().await?;
         return Ok(false);
@@ -295,7 +297,15 @@ pub(super) async fn ai_tick(pool: &Pool) -> Result<bool> {
         Err(e) if e.code == "intel_ai_disabled" => ("queued", Some(e.code)),
         Err(e) => ("failed", Some(e.code)),
     };
-    pool.get().await?.execute("UPDATE intel_article SET status=$3,error_code=$4,attempts=CASE WHEN $3='queued' THEN GREATEST(attempts-1,0) ELSE attempts END,claim_token=NULL,lease_until=NULL WHERE id=$1 AND claim_token=$2 AND lease_until>NOW()",&[&id,&token,&state,&error]).await?;
+    pool.get().await?.execute(r#"
+        UPDATE intel_article a SET
+          status=CASE WHEN a.source_revision<>s.revision OR NOT s.enabled OR s.kind<>'rss' THEN 'cancelled' ELSE $3 END,
+          error_code=CASE WHEN a.source_revision<>s.revision OR NOT s.enabled OR s.kind<>'rss' THEN 'intel_source_changed' ELSE $4 END,
+          attempts=CASE WHEN $3='queued' THEN GREATEST(a.attempts-1,0) ELSE a.attempts END,
+          claim_token=NULL,lease_until=NULL
+        FROM intel_source s WHERE a.source_id=s.id AND a.id=$1 AND a.claim_token=$2
+          AND a.status='running' AND a.lease_until>NOW()
+        "#, &[&id,&token,&state,&error]).await?;
     Ok(true)
 }
 async fn extract(
@@ -315,10 +325,15 @@ async fn extract(
     let saved = pool
         .get()
         .await?
-        .query_one("SELECT body FROM intel_article WHERE id=$1", &[&id])
-        .await?
-        .get::<_, Option<String>>(0);
-    let body = if let Some(body) = saved {
+        .query_one(
+            "SELECT body,source_revision FROM intel_article WHERE id=$1",
+            &[&id],
+        )
+        .await?;
+    if saved.get::<_, i64>("source_revision") != source.revision {
+        return Err(Error::bad("intel_source_changed"));
+    }
+    let body = if let Some(body) = saved.get::<_, Option<String>>("body") {
         body
     } else {
         let data = client::request_bounded(
@@ -332,12 +347,15 @@ async fn extract(
         parse::article_text(&data)?
     };
     let body_hash = digest(body.as_bytes());
-    let c = pool.get().await?;
-    let candidates=c.query("SELECT attack_id,name,aliases FROM intel_entity WHERE kind='actor' AND active ORDER BY attack_id LIMIT 1000",&[]).await?.iter().map(|r|json!({"id":r.get::<_,String>(0),"name":r.get::<_,String>(1),"associated_names":r.get::<_,Vec<String>>(2)})).collect::<Vec<_>>();
-    let changed=c.execute("UPDATE intel_article SET body=$3,body_hash=$4,extraction_metadata=$5 WHERE id=$1 AND claim_token=$2 AND lease_until>NOW()",&[&id,&token,&body,&body_hash,&json!({"model":settings.ai_model,"settings_revision":settings_revision,"prompt_version":PROMPT_VERSION,"candidates_hash":digest(json!(candidates).to_string().as_bytes())})]).await?;
+    let mut c = pool.get().await?;
+    let tx = c.transaction().await?;
+    storage::validate_source(&tx, &source).await?;
+    let candidates=tx.query("SELECT attack_id,name,aliases FROM intel_entity WHERE kind='actor' AND active ORDER BY attack_id LIMIT 1000",&[]).await?.iter().map(|r|json!({"id":r.get::<_,String>(0),"name":r.get::<_,String>(1),"associated_names":r.get::<_,Vec<String>>(2)})).collect::<Vec<_>>();
+    let changed=tx.execute("UPDATE intel_article SET body=$3,body_hash=$4,extraction_metadata=$5 WHERE id=$1 AND claim_token=$2 AND lease_until>NOW()",&[&id,&token,&body,&body_hash,&json!({"model":settings.ai_model,"settings_revision":settings_revision,"prompt_version":PROMPT_VERSION,"candidates_hash":digest(json!(candidates).to_string().as_bytes())})]).await?;
     if changed == 0 {
         return Err(Error::bad("intel_ai_lease_lost"));
     }
+    tx.commit().await?;
     drop(c);
     if !storage::settings(pool).await?.0.ai_enabled {
         return Err(Error::bad("intel_ai_disabled"));

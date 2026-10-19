@@ -121,17 +121,32 @@ fn valid_host(host: &str) -> bool {
 pub(super) fn public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => {
-            let [a, b, _, _] = v.octets();
-            !(v.is_private()
-                || v.is_loopback()
-                || v.is_link_local()
-                || v.is_multicast()
-                || v.is_unspecified()
-                || a == 0
-                || a >= 240
-                || (a == 100 && (64..=127).contains(&b))
-                || (a == 192 && b == 0)
-                || (a == 198 && (b == 18 || b == 19)))
+            // Conservative outbound policy for IANA special-use networks,
+            // matching the existing webhook policy. Prefixes must stay exact:
+            // 192.0.1.0/24 is ordinary public space, unlike 192.0.0.0/24.
+            ![
+                "0.0.0.0/8",
+                "10.0.0.0/8",
+                "100.64.0.0/10",
+                "127.0.0.0/8",
+                "169.254.0.0/16",
+                "172.16.0.0/12",
+                "192.0.0.0/24",
+                "192.0.2.0/24",
+                "192.88.99.0/24",
+                "192.168.0.0/16",
+                "198.18.0.0/15",
+                "198.51.100.0/24",
+                "203.0.113.0/24",
+                "224.0.0.0/3",
+            ]
+            .iter()
+            .any(|prefix| {
+                prefix
+                    .parse::<ipnet::Ipv4Net>()
+                    .expect("constant IPv4 prefix")
+                    .contains(&v)
+            })
         }
         IpAddr::V6(v) => v
             .to_ipv4_mapped()

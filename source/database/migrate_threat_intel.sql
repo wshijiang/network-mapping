@@ -103,9 +103,13 @@ CREATE TABLE IF NOT EXISTS intel_article (
     error_code TEXT,
     extraction_metadata JSONB NOT NULL DEFAULT '{}',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(source_id,url,feed_hash),
+    CONSTRAINT intel_article_source_version UNIQUE(source_id,url,feed_hash,source_revision),
     UNIQUE(source_id,id)
 );
+-- Upgrade existing installations without changing old snapshots/review evidence.
+ALTER TABLE intel_article DROP CONSTRAINT IF EXISTS intel_article_source_id_url_feed_hash_key;
+CREATE UNIQUE INDEX IF NOT EXISTS intel_article_source_version
+ ON intel_article(source_id,url,feed_hash,source_revision);
 
 -- Only accepted indicators enter this table. AI drafts live in intel_record.
 CREATE TABLE IF NOT EXISTS intel_ioc (

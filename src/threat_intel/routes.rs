@@ -189,7 +189,7 @@ async fn retry_article(
     response(async {
     admin(&user)?;if !storage::settings(&pool).await?.0.ai_enabled{return Err(Error::bad("intel_ai_disabled"));}
     let mut c=pool.get().await?;let tx=c.transaction().await?;let id=id.into_inner();
-    let changed=tx.execute("UPDATE intel_article a SET status='queued',attempts=0,error_code=NULL,available_at=NOW() FROM intel_source s WHERE a.id=$1 AND a.source_id=s.id AND s.enabled AND s.kind='rss' AND a.status IN ('failed','cancelled','proposed')",&[&id]).await?;
+    let changed=tx.execute("UPDATE intel_article a SET status='queued',attempts=0,error_code=NULL,available_at=NOW() FROM intel_source s WHERE a.id=$1 AND a.source_id=s.id AND a.source_revision=s.revision AND s.enabled AND s.kind='rss' AND a.status IN ('failed','cancelled','proposed')",&[&id]).await?;
     if changed==0{return Err(Error::conflict());}
     audit(&tx,&user,&AuditContext::from_request(&req),"intel.article.retry",&id.to_string(),json!({})).await?;tx.commit().await?;Ok(json!({"id":id}))
 }.await)

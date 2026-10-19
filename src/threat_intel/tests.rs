@@ -136,6 +136,66 @@ fn source_defaults_and_fetch_boundaries_are_explicit() {
 }
 
 #[test]
+fn ipv4_fetch_policy_rejects_special_use_prefixes_without_blocking_public_neighbors() {
+    for address in [
+        "0.255.255.255",
+        "10.255.255.255",
+        "100.64.0.0",
+        "100.127.255.255",
+        "127.255.255.255",
+        "169.254.169.254",
+        "172.16.0.0",
+        "172.31.255.255",
+        "192.0.0.1",
+        "192.0.2.7",
+        "192.88.99.1",
+        "192.168.1.1",
+        "198.18.0.0",
+        "198.19.255.255",
+        "198.51.100.8",
+        "203.0.113.9",
+        "224.0.0.0",
+        "239.255.255.255",
+        "240.0.0.0",
+        "255.255.255.255",
+    ] {
+        assert!(!public_ip(address.parse().unwrap()), "{address}");
+        assert!(
+            !public_ip(format!("::ffff:{address}").parse().unwrap()),
+            "mapped {address}"
+        );
+        assert!(
+            validate_url(&format!("https://{address}/feed"), &[address.into()]).is_err(),
+            "literal {address}"
+        );
+    }
+    for address in [
+        "8.8.8.8",
+        "100.63.255.255",
+        "100.128.0.0",
+        "172.15.255.255",
+        "172.32.0.0",
+        "192.0.1.1",
+        "192.0.3.1",
+        "192.88.98.255",
+        "192.88.100.0",
+        "198.17.255.255",
+        "198.20.0.0",
+        "198.51.99.255",
+        "198.51.101.0",
+        "203.0.112.255",
+        "203.0.114.0",
+        "223.255.255.255",
+    ] {
+        assert!(public_ip(address.parse().unwrap()), "{address}");
+        assert!(
+            public_ip(format!("::ffff:{address}").parse().unwrap()),
+            "mapped {address}"
+        );
+    }
+}
+
+#[test]
 fn official_misp_exports_keep_iocs_separate_from_victims_and_event_attribution() {
     let report = json!({"response":[{"Event":{"uuid":"report-id","info":"Actor X report","Galaxy":[{"name":"Actor X"}],"Attribute":[
         {"uuid":"hash-id","category":"Artifacts dropped","type":"sha256","value":"1111111111111111111111111111111111111111111111111111111111111111","to_ids":false},
@@ -693,6 +753,226 @@ async fn expired_worker_fences_cannot_publish_trusted_data() {
         .await
         .is_err()
     );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn stale_article_cannot_be_claimed_retried_or_relabelled_with_new_source_revision() {
+    use actix_web::{App, HttpMessage, dev::Service, test as http_test, web};
+    let (pool, c, schema) = database().await;
+    let (source, article, indicator) = draft(&pool, "stale.example").await;
+    ai_enabled(&pool, true).await;
+    c.execute(
+        "UPDATE intel_source SET revision=revision+1 WHERE id=$1",
+        &[&source.id],
+    )
+    .await
+    .unwrap();
+    assert!(!worker::ai_tick(&pool).await.unwrap());
+    let row = c
+        .query_one(
+            "SELECT status,attempts,body FROM intel_article WHERE id=$1",
+            &[&article],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>("status"), "cancelled");
+    assert_eq!(row.get::<_, i32>("attempts"), 0);
+    assert_eq!(
+        row.get::<_, String>("body"),
+        "The report identifies malicious infrastructure."
+    );
+    let app = http_test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(user(1));
+                srv.call(req)
+            })
+            .configure(configure),
+    )
+    .await;
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::post()
+            .uri(&format!("/api/intel/articles/{article}/retry"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), actix_web::http::StatusCode::CONFLICT);
+    // A worker that already held the old article cannot load revision 2 and
+    // attach its old saved body to evidence claiming to use revision 2.
+    let token = Uuid::new_v4();
+    c.execute("UPDATE intel_article SET status='running',claim_token=$2,lease_until=NOW()+INTERVAL '3 minutes' WHERE id=$1", &[&article,&token]).await.unwrap();
+    let mut current = storage::get_source(&pool, source.id).await.unwrap();
+    current.fence = Some(storage::Fence::Article(article, token));
+    assert!(
+        storage::ingest(&pool, &current, indicator, storage::Origin::Ai(article), "")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_record", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    ai_enabled(&pool, false).await;
+    assert!(!worker::ai_tick(&pool).await.unwrap());
+    let row = c
+        .query_one(
+            "SELECT status,claim_token,lease_until FROM intel_article WHERE id=$1",
+            &[&article],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>("status"), "cancelled");
+    assert!(row.get::<_, Option<Uuid>>("claim_token").is_none());
+    assert!(
+        row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("lease_until")
+            .is_none()
+    );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn current_article_provider_failure_preserves_snapshot_and_allows_retry() {
+    use actix_web::{App, HttpMessage, dev::Service, test as http_test, web};
+    let (pool, c, schema) = database().await;
+    let (_, article, _) = draft(&pool, "current.example").await;
+    let (mut settings, revision) = storage::settings(&pool).await.unwrap();
+    settings.ai_enabled = true;
+    settings.ai_model = "test".into();
+    // A unique, absent key reference fails before any provider network request.
+    settings.ai_key_env =
+        format!("NM_INTEL_TEST_MISSING_{}", Uuid::new_v4().simple()).to_ascii_uppercase();
+    storage::save_settings(
+        &pool,
+        settings,
+        revision,
+        &user(1),
+        &AuditContext::cli("intel-test"),
+    )
+    .await
+    .unwrap();
+    assert!(worker::ai_tick(&pool).await.unwrap());
+    let row=c.query_one("SELECT status,error_code,source_revision,body,body_hash,extraction_metadata FROM intel_article WHERE id=$1",&[&article]).await.unwrap();
+    assert_eq!(row.get::<_, String>("status"), "failed");
+    assert_eq!(
+        row.get::<_, String>("error_code"),
+        "intel_credential_missing"
+    );
+    assert_eq!(row.get::<_, i64>("source_revision"), 1);
+    let body: String = row.get("body");
+    assert_eq!(body, "The report identifies malicious infrastructure.");
+    assert_eq!(row.get::<_, String>("body_hash"), digest(body.as_bytes()));
+    assert_eq!(row.get::<_, Value>("extraction_metadata")["model"], "test");
+    let app = http_test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(user(1));
+                srv.call(req)
+            })
+            .configure(configure),
+    )
+    .await;
+    assert!(
+        http_test::call_service(
+            &app,
+            http_test::TestRequest::post()
+                .uri(&format!("/api/intel/articles/{article}/retry"))
+                .to_request()
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    assert!(worker::ai_tick(&pool).await.unwrap());
+    assert_eq!(
+        c.query_one(
+            "SELECT attempts FROM intel_article WHERE id=$1",
+            &[&article]
+        )
+        .await
+        .unwrap()
+        .get::<_, i32>(0),
+        1
+    );
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_record", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL and NM_INTEL_LOCAL_ROOT"]
+async fn rss_rediscovery_preserves_old_snapshots_and_queues_a_new_source_version() {
+    let (pool, c, schema) = database().await;
+    let (source, article, _) = draft(&pool, "old.example").await;
+    // Exercise an upgrade from the original three-column uniqueness constraint.
+    c.batch_execute("ALTER TABLE intel_article DROP CONSTRAINT IF EXISTS intel_article_source_version; DROP INDEX IF EXISTS intel_article_source_version; ALTER TABLE intel_article DROP CONSTRAINT IF EXISTS intel_article_source_id_url_feed_hash_key; ALTER TABLE intel_article ADD CONSTRAINT intel_article_source_id_url_feed_hash_key UNIQUE(source_id,url,feed_hash)").await.unwrap();
+    for _ in 0..2 {
+        c.batch_execute(include_str!(
+            "../../source/database/migrate_threat_intel.sql"
+        ))
+        .await
+        .unwrap();
+    }
+    let feed=br#"<rss><channel><item><title>report</title><link>https://research.example/report</link></item></channel></rss>"#;
+    let link = parse::rss(feed, &["research.example".into()])
+        .unwrap()
+        .remove(0);
+    c.execute(
+        "UPDATE intel_article SET feed_hash=$2 WHERE id=$1",
+        &[&article, &link.fingerprint],
+    )
+    .await
+    .unwrap();
+    let root = std::path::PathBuf::from(
+        std::env::var_os("NM_INTEL_LOCAL_ROOT").expect("isolated fixture root"),
+    );
+    tokio::fs::create_dir_all(&root).await.unwrap();
+    let name = format!("{}.rss", Uuid::now_v7());
+    tokio::fs::write(root.join(&name), feed).await.unwrap();
+    let mut input = source.input.clone();
+    input.transport = "local".into();
+    input.location = name.clone();
+    storage::save_source(
+        &pool,
+        Some(source.id),
+        input,
+        &user(1),
+        &AuditContext::cli("intel-test"),
+    )
+    .await
+    .unwrap();
+    let result = worker::sync(&pool, source.id, 2, None).await.unwrap();
+    assert_eq!(result.0["articles_added"], 1);
+    assert_eq!(
+        worker::sync(&pool, source.id, 2, None).await.unwrap().0["articles_added"],
+        0
+    );
+    let rows=c.query("SELECT source_revision,body FROM intel_article WHERE source_id=$1 ORDER BY source_revision", &[&source.id]).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get::<_, i64>(0), 1);
+    assert!(rows[0].get::<_, Option<String>>(1).is_some());
+    assert_eq!(rows[1].get::<_, i64>(0), 2);
+    assert!(rows[1].get::<_, Option<String>>(1).is_none());
+    tokio::fs::remove_file(root.join(name)).await.unwrap();
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
         .unwrap();
