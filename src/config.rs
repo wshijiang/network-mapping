@@ -1362,6 +1362,8 @@ pub struct PasswordHashConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct EmailConfig {
+    #[serde(default)]
+    pub proxy: crate::outbound_proxy::ProxyConfig,
     pub host: String,
     pub account_username: String,
     pub account_password: String,

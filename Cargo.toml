@@ -27,7 +27,7 @@ deadpool-postgres = { version = "0.14"}
 deadpool = "0.13"
 argon2 = "0.5"
 password-hash = "0.5"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "sync", "time", "net", "io-util"] }
 uuid = { version = "1.18", features = ["v4", "v7", "serde"]}
 sysinfo = "0.39"
 chrono-tz = "0.10"
@@ -38,8 +38,11 @@ futures = "0.3"
 fs2 = "0.4"
 ipnet = "2.12"
 regex = "1.12"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "socks"] }
 openssl = "0.10"
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+percent-encoding = "2"
 lettre = { version = "0.11", features = ["tokio1", "tokio1-native-tls", "pool"]}
 totp-rs = { version = "5.7", features = ["gen_secret", "otpauth"]}
 postgres-from-row = "0.5"

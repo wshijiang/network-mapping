@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use tokio_postgres::{Row, Transaction};
 use uuid::Uuid;
 
+use crate::outbound_proxy::{ProxyConfig, ProxyMode};
 use crate::{
     admin::UserBaseI,
     audit::{AuditContext, AuditEvent},
@@ -100,6 +101,12 @@ pub struct ChannelInput {
     #[serde(default)]
     pub smtp_password: String,
     #[serde(default)]
+    pub proxy_mode: Option<ProxyMode>,
+    #[serde(default)]
+    pub proxy_url: String,
+    #[serde(default)]
+    pub clear_proxy: bool,
+    #[serde(default)]
     pub settings: ChannelSettings,
     pub expected_revision: Option<i64>,
 }
@@ -129,6 +136,13 @@ pub struct ChannelSettings {
 
 impl ChannelInput {
     fn validate(&self, creating: bool) -> Result<()> {
+        if self.clear_proxy && !self.proxy_url.is_empty() {
+            return Err(Error::bad("替换和清除代理不能同时进行"));
+        }
+        if !self.proxy_url.is_empty() {
+            crate::outbound_proxy::validate_url(&self.proxy_url)
+                .map_err(|_| Error::bad("代理地址无效，仅支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H"))?;
+        }
         if self.name.trim().is_empty() || self.name.trim().chars().count() > 80 {
             return Err(Error::bad("渠道名称须为 1 至 80 个字符"));
         }
@@ -210,6 +224,9 @@ pub struct Channel {
     pub webhook_configured: bool,
     pub signing_secret_configured: bool,
     pub credential_configured: bool,
+    pub proxy_mode: ProxyMode,
+    pub proxy_configured: bool,
+    pub proxy_endpoint: String,
     pub settings: ChannelSettings,
     pub revision: i64,
     pub updated_at: DateTime<Utc>,
@@ -226,12 +243,18 @@ fn channel(row: &Row) -> Channel {
         signing_secret_configured: row.get::<_, String>("provider") == "feishu"
             && row.get("secret_configured"),
         credential_configured: row.get("secret_configured"),
+        proxy_mode: row
+            .get::<_, String>("proxy_mode")
+            .parse()
+            .unwrap_or_default(),
+        proxy_configured: row.get("proxy_configured"),
+        proxy_endpoint: row.get("proxy_endpoint"),
         settings: serde_json::from_value(row.get("settings")).unwrap_or_default(),
         revision: row.get("revision"),
         updated_at: row.get("updated_at"),
     }
 }
-const CHANNEL_COLUMNS: &str = "id, provider, settings, name, enabled, event_types, minimum_severity, secret_ciphertext IS NOT NULL AS secret_configured, revision, updated_at";
+const CHANNEL_COLUMNS: &str = "id, provider, settings, proxy_mode, proxy_endpoint, proxy_ciphertext IS NOT NULL AS proxy_configured, name, enabled, event_types, minimum_severity, secret_ciphertext IS NOT NULL AS secret_configured, revision, updated_at";
 
 pub fn encrypt(value: &str, encoded_key: &str) -> Result<Vec<u8>> {
     let key = openssl::base64::decode_block(encoded_key).map_err(|_| Error::internal())?;
@@ -300,7 +323,7 @@ pub async fn save(
         Some(encrypt(credential, key)?)
     };
     if let Some(id) = id {
-        let row = tx.query_opt("SELECT revision,provider,settings,secret_ciphertext IS NOT NULL AS secret_configured FROM notification_channel WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", &[&id]).await?.ok_or_else(Error::missing)?;
+        let row = tx.query_opt("SELECT revision,provider,settings,proxy_mode,proxy_ciphertext,proxy_endpoint,secret_ciphertext IS NOT NULL AS secret_configured FROM notification_channel WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", &[&id]).await?.ok_or_else(Error::missing)?;
         if Some(row.get::<_, i64>("revision")) != input.expected_revision {
             return Err(Error::conflict());
         }
@@ -319,6 +342,17 @@ pub async fn save(
             Some(encrypt(&input.webhook_url, key)?)
         };
         let clear = input.provider == "feishu" && input.clear_signing_secret;
+        let previous_mode: ProxyMode = row
+            .get::<_, String>("proxy_mode")
+            .parse()
+            .map_err(|_| Error::internal())?;
+        let (proxy_mode, proxy_ciphertext, proxy_endpoint) = proxy_update(
+            &input,
+            previous_mode,
+            row.get("proxy_ciphertext"),
+            row.get("proxy_endpoint"),
+            key,
+        )?;
         // Imported settings may omit optional keys that the Web DTO fills with defaults.
         // Compare their meaning so renames/subscription edits retain offline receipts.
         let previous_settings: ChannelSettings =
@@ -326,7 +360,7 @@ pub async fn save(
         let destination_changed = url.is_some()
             || (input.provider != "feishu" && previous_settings != input.settings)
             || (input.provider == "telegram" && secret.is_some());
-        tx.execute("UPDATE notification_channel SET name=$2,enabled=$3,event_types=$4,minimum_severity=$5,webhook_ciphertext=COALESCE($6,webhook_ciphertext),secret_ciphertext=CASE WHEN $8 THEN NULL ELSE COALESCE($7,secret_ciphertext) END,settings=$9,revision=revision+1,destination_revision=destination_revision+CASE WHEN $10 THEN 1 ELSE 0 END,updated_at=NOW() WHERE id=$1", &[&id,&input.name.trim(),&input.enabled,&input.event_types,&input.minimum_severity,&url,&secret,&clear,&settings,&destination_changed]).await?;
+        tx.execute("UPDATE notification_channel SET name=$2,enabled=$3,event_types=$4,minimum_severity=$5,webhook_ciphertext=COALESCE($6,webhook_ciphertext),secret_ciphertext=CASE WHEN $8 THEN NULL ELSE COALESCE($7,secret_ciphertext) END,settings=$9,revision=revision+1,destination_revision=destination_revision+CASE WHEN $10 THEN 1 ELSE 0 END,proxy_mode=$11,proxy_ciphertext=$12,proxy_endpoint=$13,updated_at=NOW() WHERE id=$1", &[&id,&input.name.trim(),&input.enabled,&input.event_types,&input.minimum_severity,&url,&secret,&clear,&settings,&destination_changed,&proxy_mode.as_str(),&proxy_ciphertext,&proxy_endpoint]).await?;
         // An edit cancels queued work. In-flight requests may already have left the process.
         tx.execute("UPDATE notification_delivery SET status='cancelled',last_error='channel_changed',finished_at=NOW(),claim_token=NULL,lease_until=NULL WHERE channel_id=$1 AND status IN ('pending','sending')", &[&id]).await?;
     } else {
@@ -345,7 +379,9 @@ pub async fn save(
         } else {
             Vec::new()
         };
-        tx.execute("INSERT INTO notification_channel(id,provider,name,enabled,event_types,minimum_severity,webhook_ciphertext,secret_ciphertext,settings) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", &[&target,&input.provider,&input.name.trim(),&input.enabled,&input.event_types,&input.minimum_severity,&url,&secret,&settings]).await?;
+        let (proxy_mode, proxy_ciphertext, proxy_endpoint) =
+            proxy_update(&input, ProxyMode::System, None, String::new(), key)?;
+        tx.execute("INSERT INTO notification_channel(id,provider,name,enabled,event_types,minimum_severity,webhook_ciphertext,secret_ciphertext,settings,proxy_mode,proxy_ciphertext,proxy_endpoint) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)", &[&target,&input.provider,&input.name.trim(),&input.enabled,&input.event_types,&input.minimum_severity,&url,&secret,&settings,&proxy_mode.as_str(),&proxy_ciphertext,&proxy_endpoint]).await?;
     }
     if input.provider == "email" {
         // Deferred legacy work is handed off atomically with the first usable Web email setup.
@@ -375,7 +411,7 @@ pub async fn remove(
     let tx = conn.transaction().await?;
     tx.query_one("SELECT pg_advisory_xact_lock(728104, 1)", &[])
         .await?;
-    let changed = tx.execute("UPDATE notification_channel SET enabled=FALSE,deleted_at=NOW(),revision=revision+1,webhook_ciphertext=''::BYTEA,secret_ciphertext=NULL WHERE id=$1 AND revision=$2 AND deleted_at IS NULL", &[&id,&revision]).await?;
+    let changed = tx.execute("UPDATE notification_channel SET enabled=FALSE,deleted_at=NOW(),revision=revision+1,webhook_ciphertext=''::BYTEA,secret_ciphertext=NULL,proxy_mode='system',proxy_ciphertext=NULL,proxy_endpoint='' WHERE id=$1 AND revision=$2 AND deleted_at IS NULL", &[&id,&revision]).await?;
     if changed != 1 {
         return Err(Error::conflict());
     }
@@ -569,4 +605,91 @@ pub async fn delivery_detail(pool: &Pool, id: Uuid) -> Result<Value> {
     Ok(
         json!({"id":row.get::<_,Uuid>("id"),"channel_id":row.get::<_,Uuid>("channel_id"),"status":row.get::<_,String>("status"),"last_error":row.get::<_,Option<String>>("last_error"),"attempts":row.get::<_,i32>("attempts"),"finished_at":row.get::<_,Option<DateTime<Utc>>>("finished_at"),"title":row.get::<_,String>("title")}),
     )
+}
+
+fn proxy_update(
+    input: &ChannelInput,
+    previous: ProxyMode,
+    previous_ciphertext: Option<Vec<u8>>,
+    previous_endpoint: String,
+    key: &str,
+) -> Result<(ProxyMode, Option<Vec<u8>>, String)> {
+    let mode = input.proxy_mode.unwrap_or(if input.clear_proxy {
+        ProxyMode::System
+    } else {
+        previous
+    });
+    if mode != ProxyMode::Custom {
+        if !input.proxy_url.is_empty() {
+            return Err(Error::bad("只有指定代理模式可以填写代理地址"));
+        }
+        return Ok((mode, None, String::new()));
+    }
+    if input.clear_proxy {
+        return Err(Error::bad(
+            "指定代理模式不能清空代理地址，请选择直连或沿用系统",
+        ));
+    }
+    if !input.proxy_url.is_empty() {
+        let endpoint = crate::outbound_proxy::endpoint(&input.proxy_url)
+            .map_err(|_| Error::bad("代理地址无效"))?;
+        return Ok((mode, Some(encrypt(&input.proxy_url, key)?), endpoint));
+    }
+    if previous != ProxyMode::Custom || previous_ciphertext.is_none() {
+        return Err(Error::bad("首次指定代理须填写完整代理地址"));
+    }
+    Ok((mode, previous_ciphertext, previous_endpoint))
+}
+fn decrypted_proxy(mode: ProxyMode, ciphertext: Option<&[u8]>, key: &str) -> Result<ProxyConfig> {
+    let url = if mode == ProxyMode::Custom {
+        decrypt(ciphertext.ok_or_else(Error::internal)?, key)?
+    } else {
+        String::new()
+    };
+    if mode == ProxyMode::Custom {
+        crate::outbound_proxy::validate_url(&url).map_err(|_| Error::internal())?;
+    }
+    Ok(ProxyConfig { mode, url })
+}
+/// The same first-email transport is used by legacy template tests and manual reports.
+pub(crate) async fn email_proxy(pool: &Pool, key: &str) -> Result<ProxyConfig> {
+    let row=pool.get().await?.query_opt("SELECT proxy_mode,proxy_ciphertext FROM notification_channel WHERE provider='email' AND deleted_at IS NULL ORDER BY created_at,id LIMIT 1", &[]).await?;
+    match row {
+        None => Ok(ProxyConfig::default()),
+        Some(row) => decrypted_proxy(
+            row.get::<_, String>("proxy_mode")
+                .parse()
+                .map_err(|_| Error::internal())?,
+            row.get::<_, Option<Vec<u8>>>("proxy_ciphertext").as_deref(),
+            key,
+        ),
+    }
+}
+
+/// Read the entire selected transport in one MVCC snapshot: never mix one
+/// channel's SMTP password with another channel's proxy during an edit.
+pub(crate) async fn email_transport(
+    pool: &Pool,
+    key: &str,
+) -> Result<Option<(crate::config::EmailConfig, u16)>> {
+    let row=pool.get().await?.query_opt("SELECT settings,secret_ciphertext,proxy_mode,proxy_ciphertext FROM notification_channel WHERE provider='email' AND deleted_at IS NULL ORDER BY created_at,id LIMIT 1", &[]).await?;
+    let Some(row) = row else { return Ok(None) };
+    let settings: ChannelSettings =
+        serde_json::from_value(row.get("settings")).map_err(|_| Error::internal())?;
+    let secret: Option<Vec<u8>> = row.get("secret_ciphertext");
+    let password = decrypt(secret.as_deref().ok_or_else(Error::internal)?, key)?;
+    let mode = row
+        .get::<_, String>("proxy_mode")
+        .parse()
+        .map_err(|_| Error::internal())?;
+    let cipher: Option<Vec<u8>> = row.get("proxy_ciphertext");
+    Ok(Some((
+        crate::config::EmailConfig {
+            host: settings.smtp_host,
+            account_username: settings.smtp_sender,
+            account_password: password,
+            proxy: decrypted_proxy(mode, cipher.as_deref(), key)?,
+        },
+        settings.smtp_port,
+    )))
 }

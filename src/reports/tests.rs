@@ -109,6 +109,9 @@ async fn deferred_legacy_reports_wait_for_transfer_while_manual_mail_still_runs(
                 smtp_sender: "sender@example.com".into(),
                 ..Default::default()
             },
+            proxy_mode: None,
+            proxy_url: String::new(),
+            clear_proxy: false,
             expected_revision: None,
         },
         &crate::admin::UserBaseI {

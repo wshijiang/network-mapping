@@ -30,6 +30,9 @@ fn input() -> ChannelInput {
         clear_signing_secret: false,
         bot_token: String::new(),
         smtp_password: String::new(),
+        proxy_mode: None,
+        proxy_url: String::new(),
+        clear_proxy: false,
         settings: ChannelSettings::default(),
         expected_revision: None,
     }
@@ -2043,7 +2046,12 @@ async fn bot_template_tests_queue_unsaved_snapshot_and_validate_targets_and_rate
         let snapshot = stored["template_test"]["payload"].clone();
         let encoded = serde_json::to_string(&snapshot).unwrap();
         assert!(encoded.contains("admin"));
-        assert!(encoded.contains("192.0.2.10"));
+        // Feishu card Markdown escapes punctuation as numeric entities.
+        assert!(encoded.contains(if provider == "feishu" {
+            "192&#46;0&#46;2&#46;10"
+        } else {
+            "192.0.2.10"
+        }));
         assert!(encoded.contains("critical"));
         assert!(!encoded.contains("titleTemplate"));
         assert!(!encoded.contains("abcdefghijklmnopqrstuvwxyz"));
@@ -2188,4 +2196,109 @@ async fn bot_template_test_and_delivery_status_require_administrator_and_csrf() 
     )
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn proxies_are_private_preserved_and_do_not_change_recipient_revision() {
+    let (pool, schema) = database().await;
+    let context = AuditContext::cli("proxy-test");
+    for provider in ["feishu", "telegram", "email"] {
+        let mut v = provider_input(provider);
+        v.proxy_mode = Some(ProxyMode::Custom);
+        v.proxy_url = "socks5h://user:proxy-secret@proxy.example.com:1080".into();
+        let created = save(&pool, &key(), None, v, &user(1), &context)
+            .await
+            .unwrap();
+        let public = serde_json::to_string(&created).unwrap();
+        assert!(!public.contains("proxy-secret"));
+        assert!(!public.contains("user@"));
+        assert!(created.proxy_configured);
+        assert_eq!(created.proxy_endpoint, "socks5h://proxy.example.com:1080");
+        let row=pool.get().await.unwrap().query_one("SELECT proxy_ciphertext,secret_ciphertext,destination_revision FROM notification_channel WHERE id=$1", &[&created.id]).await.unwrap();
+        let ciphertext: Vec<u8> = row.get(0);
+        assert!(!String::from_utf8_lossy(&ciphertext).contains("proxy-secret"));
+        assert_eq!(
+            decrypt(&ciphertext, &key()).unwrap(),
+            "socks5h://user:proxy-secret@proxy.example.com:1080"
+        );
+        let revision: i64 = row.get(2);
+        let mut edit = provider_input(provider);
+        edit.webhook_url.clear();
+        edit.signing_secret.clear();
+        edit.smtp_password.clear();
+        edit.bot_token.clear();
+        edit.expected_revision = Some(created.revision);
+        let preserved = save(&pool, &key(), Some(created.id), edit, &user(1), &context)
+            .await
+            .unwrap();
+        let row=pool.get().await.unwrap().query_one("SELECT proxy_ciphertext,destination_revision FROM notification_channel WHERE id=$1", &[&created.id]).await.unwrap();
+        assert_eq!(row.get::<_, Vec<u8>>(0), ciphertext);
+        assert_eq!(row.get::<_, i64>(1), revision);
+        if provider == "email" {
+            let transport = email_transport(&pool, &key()).await.unwrap().unwrap();
+            assert_eq!(transport.0.host, "smtp.example.com");
+            assert_eq!(
+                transport.0.proxy.url,
+                "socks5h://user:proxy-secret@proxy.example.com:1080"
+            );
+            assert_eq!(transport.1, 465);
+            assert_eq!(
+                email_proxy(&pool, &key()).await.unwrap().url,
+                "socks5h://user:proxy-secret@proxy.example.com:1080"
+            );
+        }
+        let mut edit = provider_input(provider);
+        edit.webhook_url.clear();
+        edit.signing_secret.clear();
+        edit.smtp_password.clear();
+        edit.bot_token.clear();
+        edit.expected_revision = Some(preserved.revision);
+        edit.proxy_mode = Some(ProxyMode::Custom);
+        edit.proxy_url = "https://other:replacement-secret@proxy.example.com:8443".into();
+        let changed = save(&pool, &key(), Some(created.id), edit, &user(1), &context)
+            .await
+            .unwrap();
+        let row = pool
+            .get()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT destination_revision FROM notification_channel WHERE id=$1",
+                &[&created.id],
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, i64>(0), revision);
+        let mut edit = provider_input(provider);
+        edit.webhook_url.clear();
+        edit.signing_secret.clear();
+        edit.smtp_password.clear();
+        edit.bot_token.clear();
+        edit.expected_revision = Some(changed.revision);
+        edit.proxy_mode = Some(ProxyMode::Direct);
+        let direct = save(&pool, &key(), Some(created.id), edit, &user(1), &context)
+            .await
+            .unwrap();
+        assert!(!direct.proxy_configured);
+        assert!(direct.proxy_endpoint.is_empty());
+        assert_eq!(direct.proxy_mode, ProxyMode::Direct);
+        if provider == "email" {
+            assert_eq!(
+                email_proxy(&pool, &key()).await.unwrap().mode,
+                ProxyMode::Direct
+            );
+        }
+    }
+    for _ in 0..2 {
+        pool.get()
+            .await
+            .unwrap()
+            .batch_execute(include_str!(
+                "../../source/database/migrate_notification_proxies.sql"
+            ))
+            .await
+            .unwrap();
+    }
+    cleanup(pool, schema).await;
 }

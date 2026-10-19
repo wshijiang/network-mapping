@@ -102,6 +102,8 @@ pub(super) struct Claimed {
     url: Vec<u8>,
     secret: Option<Vec<u8>>,
     provider: String,
+    proxy_mode: ProxyMode,
+    proxy_ciphertext: Option<Vec<u8>>,
     settings: ChannelSettings,
     title: String,
     event_type: String,
@@ -187,6 +189,11 @@ pub(super) async fn claim(pool: &Pool) -> Result<ClaimOutcome> {
         url: channel.get("webhook_ciphertext"),
         secret: channel.get("secret_ciphertext"),
         provider: channel.get("provider"),
+        proxy_mode: channel
+            .get::<_, String>("proxy_mode")
+            .parse()
+            .map_err(|_| Error::internal())?,
+        proxy_ciphertext: channel.get("proxy_ciphertext"),
         settings: serde_json::from_value(channel.get("settings")).map_err(|_| Error::internal())?,
         title,
         event_type: kind.clone(),
@@ -218,6 +225,21 @@ pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client
         .transpose();
     let outcome = match secret {
         Ok(secret) => tokio::time::timeout(Duration::from_secs(20), async {
+            let proxy =
+                match decrypted_proxy(claimed.proxy_mode, claimed.proxy_ciphertext.as_deref(), key)
+                {
+                    Ok(proxy) => proxy,
+                    Err(_) => return Ok(Outcome::failure("secret_unavailable", false)),
+                };
+            let delivery_client =
+                if claimed.proxy_mode == ProxyMode::System || claimed.provider == "email" {
+                    client.clone()
+                } else {
+                    match proxy.http_client() {
+                        Ok(client) => client,
+                        Err(e) => return Ok(Outcome::failure(e.code, e.retryable)),
+                    }
+                };
             let outcome = match claimed.provider.as_str() {
                 "feishu" | "telegram" => {
                     match templates::delivery_payload(
@@ -235,7 +257,7 @@ pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client
                                 match decrypt(&claimed.url, key) {
                                     Ok(url) => {
                                         feishu::send_payload(
-                                            client,
+                                            &delivery_client,
                                             &url,
                                             secret.as_deref(),
                                             payload,
@@ -246,7 +268,7 @@ pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client
                                 }
                             } else {
                                 telegram::send_payload(
-                                    client,
+                                    &delivery_client,
                                     secret.as_deref().unwrap_or_default(),
                                     &claimed.settings.chat_id,
                                     payload,
@@ -262,6 +284,7 @@ pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client
                     match email::render(pool, &claimed.context).await {
                         Ok(rendered) => {
                             email::send(
+                                &proxy,
                                 &claimed.settings,
                                 secret.as_deref().unwrap_or_default(),
                                 &recipients,

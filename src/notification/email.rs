@@ -1,9 +1,6 @@
 //! SMTP notification transport: one attempt, with retry owned by the durable queue.
 use super::{ChannelSettings, Outcome};
-use lettre::{
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
-    transport::smtp::authentication::Credentials,
-};
+use lettre::Message;
 use std::time::Duration;
 
 pub async fn render(
@@ -98,6 +95,7 @@ fn build_message(
 }
 
 pub async fn send(
+    proxy: &crate::outbound_proxy::ProxyConfig,
     settings: &ChannelSettings,
     password: &str,
     recipients: &[String],
@@ -109,19 +107,18 @@ pub async fn send(
         Ok(message) => message,
         Err(outcome) => return outcome,
     };
-    let Ok(transport) = AsyncSmtpTransport::<Tokio1Executor>::relay(&settings.smtp_host) else {
-        return Outcome::failure("invalid_destination", false);
-    };
-    let transport = transport
-        .port(settings.smtp_port)
-        .credentials(Credentials::new(
-            settings.smtp_sender.clone(),
-            password.to_owned(),
-        ))
-        .timeout(Some(Duration::from_secs(10)))
-        .build();
-    match transport.send(message).await {
-        Ok(_) => Outcome {
+    match crate::outbound_proxy::send_smtp(
+        proxy,
+        &settings.smtp_host,
+        settings.smtp_port,
+        &settings.smtp_sender,
+        password,
+        &message,
+        Duration::from_secs(10),
+    )
+    .await
+    {
+        Ok(()) => Outcome {
             sent: true,
             retryable: false,
             reason: "sent",
@@ -129,10 +126,7 @@ pub async fn send(
             code: None,
             retry_after: 0,
         },
-        Err(error) => Outcome::failure(
-            "smtp_delivery_failed",
-            !(error.is_permanent() || error.is_client() || error.is_tls()),
-        ),
+        Err(error) => Outcome::failure(error.code, error.retryable),
     }
 }
 

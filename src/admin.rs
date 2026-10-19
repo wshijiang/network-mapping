@@ -1,9 +1,8 @@
 use chrono::{DateTime, Utc};
 use cidr::IpInet;
 use deadpool_postgres::Pool;
+use lettre::Message;
 use lettre::transport::smtp::Error as LettreSmtpError;
-use lettre::transport::smtp::authentication::Credentials;
-use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use openssl::rand;
 use postgres_from_row::FromRow;
 use serde::{Deserialize, Serialize};
@@ -502,7 +501,7 @@ impl MailRetryPolicy {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MailFailureKind {
+pub(crate) enum MailFailureKind {
     TransientResponse,
     PermanentResponse,
     Timeout,
@@ -515,7 +514,7 @@ enum MailFailureKind {
 }
 
 impl MailFailureKind {
-    const fn is_retryable(self) -> bool {
+    pub(crate) const fn is_retryable(self) -> bool {
         matches!(
             self,
             Self::TransientResponse
@@ -540,7 +539,7 @@ impl MailFailureKind {
     }
 }
 
-fn classify_smtp_error(error: &LettreSmtpError) -> MailFailureKind {
+pub(crate) fn classify_smtp_error(error: &LettreSmtpError) -> MailFailureKind {
     // 先判定协议级永久错误，避免把响应文本中的 "timeout" 误判成网络超时。
     if error.is_permanent() {
         MailFailureKind::PermanentResponse
@@ -673,25 +672,6 @@ pub async fn try_send_email(
 ) -> Result<(), MailSendError> {
     let settings = retry_policy.settings();
     let delivery_id = Uuid::now_v7();
-    let creds = Credentials::new(
-        emailconf.account_username.to_string(),
-        emailconf.account_password.to_string(),
-    );
-
-    // relay 使用 SMTPS，并允许设置页指定服务器端口。每次重试重新建立 transport，
-    // 避免复用已处于异常状态的 SMTP 连接。
-    let mailer_builder = AsyncSmtpTransport::<Tokio1Executor>::relay(&emailconf.host)
-        .map_err(|error_value| {
-            MailSendError::new(
-                std::io::Error::other(format!("邮件服务器配置无效: {error_value}")),
-                0,
-                MailFailureKind::Internal,
-            )
-        })?
-        .port(port)
-        .credentials(creds)
-        .timeout(Some(settings.timeout));
-
     let _permit = SMTP_SEND_SEMAPHORE
         .acquire()
         .await
@@ -700,11 +680,28 @@ pub async fn try_send_email(
         settings,
         delivery_id,
         || {
-            let mailer = mailer_builder.clone().build();
-            let mail = mail.clone();
-            async move { mailer.send(mail).await.map(|_| ()) }
+            crate::outbound_proxy::send_smtp(
+                &emailconf.proxy,
+                &emailconf.host,
+                port,
+                &emailconf.account_username,
+                &emailconf.account_password,
+                &mail,
+                settings.timeout,
+            )
         },
-        classify_smtp_error,
+        |e| {
+            if let Some(kind) = e.mail_kind {
+                return kind;
+            }
+            if e.retryable {
+                MailFailureKind::ConnectionOrNetwork
+            } else if e.code == "smtp_tls_error" || e.code == "proxy_tls_error" {
+                MailFailureKind::Tls
+            } else {
+                MailFailureKind::PermanentResponse
+            }
+        },
     )
     .await;
 
@@ -749,6 +746,21 @@ pub async fn try_send_email(
 pub fn smtp_send_error_message(error: &dyn std::error::Error) -> String {
     let raw = error.to_string();
     let lower = raw.to_lowercase();
+    match raw.as_str() {
+        "proxy_authentication_failed" => return "代理认证失败：请检查代理用户名和密码".into(),
+        "proxy_tls_error" => return "代理服务器 TLS/证书校验失败".into(),
+        "proxy_invalid" => return "代理配置无效，请重新保存渠道".into(),
+        "proxy_connection_failed" | "proxy_dns_failed" => {
+            return "无法通过代理连接邮件服务器，请检查代理地址与目标解析".into();
+        }
+        "proxy_connect_rejected" => {
+            return "代理拒绝连接邮件服务器，请检查 SMTPS 端口是否允许".into();
+        }
+        "proxy_invalid_response" => return "代理响应格式无效，请检查代理协议".into(),
+        "smtp_client_error" => return "SMTP 认证或请求配置无效，请检查账号和服务器设置".into(),
+        "smtp_permanent_error" => return "SMTP 服务器拒绝邮件，请检查发件人与收件人".into(),
+        _ => {}
+    }
 
     // 模板校验（Tera）错误通常是超长的上下文转储，这里单独识别，避免误当成 SMTP 错误。
     if raw.len() > 500 || lower.contains("tera") {

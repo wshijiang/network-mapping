@@ -491,3 +491,5 @@ python3 -m unittest discover -s docker -p 'test_*.py'
 ```
 
 覆盖检查用于防止新增字段漏写或旧名称残留；参数语义、默认值和兼容限制仍需在代码审查时核对。
+
+通知渠道可以单独配置 HTTP/HTTPS/SOCKS5/SOCKS5H 代理，凭据存储在数据库而非全局环境变量；详见[通知代理](NOTIFICATIONS.md#每渠道投递代理)。

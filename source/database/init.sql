@@ -1766,3 +1766,8 @@ CREATE TABLE IF NOT EXISTS domain_discovery_dns_target (
     task_id VARCHAR(36) NOT NULL REFERENCES scan_task(task_id) ON DELETE CASCADE,
     PRIMARY KEY(job_id,domain)
 );
+
+-- Proxy credentials never enter the public settings JSON.
+ALTER TABLE notification_channel ADD COLUMN IF NOT EXISTS proxy_mode TEXT NOT NULL DEFAULT 'system' CHECK(proxy_mode IN ('system','direct','custom'));
+ALTER TABLE notification_channel ADD COLUMN IF NOT EXISTS proxy_ciphertext BYTEA;
+ALTER TABLE notification_channel ADD COLUMN IF NOT EXISTS proxy_endpoint TEXT NOT NULL DEFAULT '';

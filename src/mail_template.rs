@@ -786,22 +786,34 @@ async fn send_rendered_mail_with_id(
     retry_policy: MailRetryPolicy,
     message_id: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let settings = get_mail_settings_from_database(pool).await?;
-    if settings.smtp_host.trim().is_empty() || settings.sender.trim().is_empty() {
-        return Err("尚未配置 SMTP 邮件服务器".into());
-    }
-    let sender_key = get_mail_sender_key_from_database(pool, encryption_key)
-        .await?
-        .ok_or("尚未配置发件邮箱密钥")?;
-    let email_config = EmailConfig {
-        host: settings.smtp_host,
-        account_username: settings.sender.clone(),
-        account_password: sender_key,
+    let (email_config, port) = if let Some(transport) =
+        crate::notification::email_transport(pool, encryption_key)
+            .await
+            .map_err(|_| "邮件渠道传输配置无法读取")?
+    {
+        transport
+    } else {
+        let settings = get_mail_settings_from_database(pool).await?;
+        if settings.smtp_host.trim().is_empty() || settings.sender.trim().is_empty() {
+            return Err("尚未配置 SMTP 邮件服务器".into());
+        }
+        let sender_key = get_mail_sender_key_from_database(pool, encryption_key)
+            .await?
+            .ok_or("尚未配置发件邮箱密钥")?;
+        (
+            EmailConfig {
+                proxy: Default::default(),
+                host: settings.smtp_host,
+                account_username: settings.sender,
+                account_password: sender_key,
+            },
+            settings.smtp_port,
+        )
     };
     let message = Message::builder()
         .from(Mailbox::new(
             Some("Network Mapping".to_owned()),
-            settings.sender.parse()?,
+            email_config.account_username.parse()?,
         ))
         .to(recipient.parse()?)
         .subject(rendered.subject)
@@ -810,7 +822,7 @@ async fn send_rendered_mail_with_id(
             rendered.text_body,
             rendered.html_body,
         ))?;
-    try_send_email(&email_config, settings.smtp_port, message, retry_policy).await?;
+    try_send_email(&email_config, port, message, retry_policy).await?;
     Ok(())
 }
 

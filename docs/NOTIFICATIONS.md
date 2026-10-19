@@ -138,3 +138,23 @@ REPORT_TEST_DATABASE_URL='host=127.0.0.1 user=network_mapping dbname=network_map
 ```
 
 测试覆盖三类渠道的同级扇出、独立启停和事件选择、凭据保留/不回显、SMTP 导入幂等、旧队列部分成功迁移与去重、历史掉线回执及目标变更、登录隐私、报告归档后入队、并发领取、租约、维护切换与旧有 Scanner 恢复。HTTP 使用本地 fixture；没有真实机器人/SMTP 凭据和允许出口时，不将本地检查表述为外部联调成功。
+
+## 每渠道投递代理
+
+创建/编辑邮件、飞书和 Telegram 渠道时可选择沿用系统、直连或指定代理。system 保持旧行为：HTTP 读取环境代理，SMTP 自身直连；direct 明确不使用 HTTP 环境代理；custom 仅使用指定代理，连接失败不回退直连。不修改进程全局代理变量，各渠道独立建立客户端/连接。
+
+支持 `http://host:port`、`https://host:port`、`socks5://host:port` 和 `socks5h://host:port`。HTTP/HTTPS 可使用默认端口，SOCKS 必须给端口；SOCKS4 不支持。SOCKS5 在服务端解析最终目标，SOCKS5H 把名称交给代理。可在 URL 中填写用户名和密码，特殊字符需 URL 编码；SOCKS 用户名和密码必须同时提供。代理 URL 最多 2048 字节，认证项最多 255 字节，不接受控制字符、路径、query 或 fragment。
+
+HTTPS 代理表示连接到代理本身也使用 TLS；普通 HTTP 代理同样可通过 CONNECT 访问 HTTPS/SMTPS 目标。代理地址及认证信息仅用于后端出站连接，浏览器不会通过这些代理发通知。飞书/Telegram 的固定目标校验和禁重定向仍生效。
+
+邮件通过 SOCKS 或 HTTP(S) CONNECT 建立隧道后，再对真实 SMTP 主机执行 SMTPS TLS/SNI/证书校验及认证，保留单 envelope/Bcc 语义。HTTPS 代理的证书与 SMTP 目标证书分别验证，不能以代理域名代替 SMTP 域名。隧道及发送使用统一超时预算，不支持降级明文或静默改为 STARTTLS。代理可能限制连接非 443 端口，需允许实际 SMTPS 端口。
+
+新请求字段为 proxy_mode（system/direct/custom，可省略保留旧值）、proxy_url（写入专用，编辑留空保留）、clear_proxy（显式清除，可省略；不能同时替换，custom 模式下须先改为 system/direct）。首次选择 custom 必须提供 URL。切换到 system/direct 会清除已存代理 URL。旧客户端不带代理字段时保留已有配置。
+
+代理完整 URL 单独存入加密的 proxy_ciphertext，使用现有 server.encrypt_key；不复用 Bot Token/SMTP 密码/飞书密钥，也不放进可回显的 settings。API 只返回 proxy_mode、proxy_configured 和移除用户名/密码后的 proxy_endpoint；代理认证信息不写入审计、投递记录和错误日志。
+
+保存代理会更新渠道 revision 并按既有规则取消旧排队/在途投递；已经发送的请求不能撤回。仅修改代理不改变 destination_revision，因此原有掉线成功回执仍可关联后续恢复通知。多个渠道不会串用代理。模板测试、手工完整报告邮件及旧 SMTP 测试读取与原传输选择一致的首个未删除邮件渠道代理，避免这些路径静默直连。报告和模板发送以一次查询读取完整 SMTP 目标、密码与代理，避免配置并发变更时混用渠道。
+
+启动时执行 source/database/migrate_notification_proxies.sql（幂等），已有渠道默认 system。先部署后端再部署前端。降级到不支持代理的版本前停用自定义代理渠道，避免旧 worker 直接连接。保留新增列与加密主密钥。
+
+验证包括 HTTP/HTTPS CONNECT、SOCKS5/5H、认证失败、卡住的代理、SMTP 目标 TLS/错误主机名/不可信证书、Bcc、编辑保留与清除、目标版本保持和旧邮件路径代理选择。使用隔离本地 TLS/代理 fixtures，不需要真实通知凭据；本地测试不代表部署网络中的代理可访问。

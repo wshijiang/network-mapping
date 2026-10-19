@@ -1137,7 +1137,16 @@ async fn test_mail_server_h(
     let mail_title = String::from("Test");
     let mail_account_name = Some(String::from("Network Mapping"));
 
+    let proxy =
+        match crate::notification::email_proxy(pool.get_ref(), &server_config.encrypt_key).await {
+            Ok(proxy) => proxy,
+            Err(_) => {
+                return HttpResponse::ServiceUnavailable()
+                    .json(json!({"success":false,"message":"SMTP 代理配置无法读取"}));
+            }
+        };
     let mail_config = EmailConfig {
+        proxy,
         host: test_data.smtp_host.trim().to_owned(),
         account_username: test_data.sender.trim().to_owned(),
         account_password: sender_key,
