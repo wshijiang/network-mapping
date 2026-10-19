@@ -183,9 +183,10 @@ p = 2
 # max_pending_tasks = 100
 # per_user_hourly_limit = 20
 # domain_enabled = false
-# authorized_domains = []
 
 # [dns_follow_up]
+# 全局 DNS 排除，精确域名或 *.example.com（仅各级子域）；不受 enabled 影响。
+# excluded_domains = []
 # enabled = false
 # authorized_cidrs = []
 # excluded_cidrs = []
