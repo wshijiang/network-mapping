@@ -39,7 +39,7 @@ pub(super) async fn source_tick(pool: &Pool, encryption_key: &str) -> Result<boo
     let tx = c.transaction().await?;
     tx.execute("UPDATE intel_sync_run SET status='failed',error_code='intel_attempts_exhausted',finished_at=NOW() WHERE status='running' AND lease_until<NOW() AND attempts>=3",&[]).await?;
     tx.execute("UPDATE intel_sync_run j SET status='cancelled',error_code='intel_source_changed',finished_at=NOW() FROM intel_source s WHERE j.source_id=s.id AND j.status IN ('queued','running') AND (NOT s.enabled OR s.revision<>j.source_revision)",&[]).await?;
-    let due=tx.query("SELECT id,revision,interval_seconds FROM intel_source WHERE enabled AND next_check_at<=NOW() ORDER BY next_check_at FOR UPDATE SKIP LOCKED LIMIT 20",&[]).await?;
+    let due=tx.query("SELECT s.id,s.revision,s.interval_seconds FROM intel_source s WHERE s.enabled AND s.next_check_at<=NOW() AND ((s.transport<>'upload' AND s.kind<>'threatfox_export') OR EXISTS(SELECT 1 FROM intel_import_snapshot i WHERE i.source_id=s.id AND i.source_revision=s.revision AND i.stage<>'complete')) ORDER BY s.next_check_at FOR UPDATE OF s SKIP LOCKED LIMIT 20",&[]).await?;
     for row in due {
         let source: Uuid = row.get("id");
         let revision: i64 = row.get("revision");
@@ -93,6 +93,9 @@ pub(super) async fn sync(
     s.fence = fence;
     if s.revision != revision || !s.input.enabled {
         return Err(Error::conflict());
+    }
+    if s.input.transport == "upload" || s.input.kind == "threatfox_export" {
+        return imports::sync(pool, &s).await;
     }
     let data = client::source_bytes(&s, encryption_key).await?;
     match s.input.kind.as_str() {

@@ -11,10 +11,7 @@ fn typed_scope_and_confidence_are_preserved() {
     let export=br#"{"123":[{"ioc_type":"domain","ioc":"export.example","first_seen_utc":"2026-01-01 00:00:00"}]}"#;
     let rows = parse::indicators(export, "threatfox_export").unwrap();
     assert_eq!(rows[0].external_id, "123");
-    assert_eq!(
-        rows[0].valid_until.unwrap().to_rfc3339(),
-        "2026-07-01T00:00:00+00:00"
-    );
+    assert!(rows[0].valid_until.is_none()); // Expiry is a configurable source policy.
     assert_eq!(
         endpoint_keys("8.8.8.8", Some(80)),
         vec![
@@ -95,6 +92,16 @@ fn source_defaults_and_fetch_boundaries_are_explicit() {
     s.validate().unwrap();
     assert_eq!(s.interval_seconds, Some(1800));
     assert!(!s.require_review);
+    assert_eq!(s.expiry_months, 6);
+    let mut offline:SourceInput=serde_json::from_value(json!({"name":"history","kind":"threatfox_export","transport":"https","location":"https://official.example/full.json.zip","allowed_hosts":["official.example"]})).unwrap();
+    assert_eq!(
+        offline.validate().unwrap_err().code,
+        "intel_offline_export_required"
+    );
+    offline.transport = "upload".into();
+    offline.location.clear();
+    offline.allowed_hosts.clear();
+    offline.validate().unwrap();
     s.location = "../secret".into();
     assert!(s.validate().is_err());
     s.location = "/etc/passwd".into();
@@ -133,6 +140,94 @@ fn source_defaults_and_fetch_boundaries_are_explicit() {
         assert!(!public_ip(ip.parse().unwrap()), "{ip}");
     }
     assert!(public_ip("8.8.8.8".parse().unwrap()));
+}
+
+fn offline_convert(bytes: &[u8]) -> Result<(i64, Vec<Indicator>)> {
+    use std::io::{BufRead, Write};
+    let mut input = tempfile::NamedTempFile::new().unwrap();
+    input.write_all(bytes).unwrap();
+    let output = tempfile::NamedTempFile::new().unwrap();
+    let (count, _) = import_parse::convert(input.reopen().unwrap(), output.reopen().unwrap())?;
+    let items = std::io::BufReader::new(output.reopen().unwrap())
+        .lines()
+        .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+        .collect();
+    Ok((count, items))
+}
+#[test]
+fn offline_json_csv_and_zip_keep_native_export_metadata_and_reject_malformed_inputs() {
+    let csv=b"# ThreatFox export\n# first_seen_utc,ioc_id,ioc_value,ioc_type,threat_type,malware,malware_printable,confidence_level,reference,tags,reporter,last_seen_utc\n\"2025-01-01 00:00:00\",42,evil.example,domain,botnet_cc,win.test,Test,0,\"https://research.example/a,b\",\"c2,ssl\",researcher,\"2026-10-01 00:00:00\"\n";
+    let (_, items) = offline_convert(csv).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].external_id, "42");
+    assert_eq!(items[0].confidence, Some(0));
+    assert_eq!(items[0].last_seen.as_deref(), Some("2026-10-01 00:00:00"));
+    assert!(items[0].reference.as_ref().unwrap().ends_with("a,b"));
+    assert!(items[0].actor_id.is_none());
+    let json=br#"{"42":[{"ioc":"evil.example","ioc_type":"domain","first_seen_utc":"2025-01-01 00:00:00","confidence_level":0}]}"#;
+    let (_, items) = offline_convert(json).unwrap();
+    assert_eq!(items[0].external_id, "42");
+    // Official hash subsets use *_hash rather than the internal IOC names.
+    let native = json!([{"ioc_type":"md5_hash","ioc_value":"1".repeat(32)}, {"ioc_type":"sha256_hash","ioc_value":"2".repeat(64)}, {"ioc_type":"ip:port","ioc":"8.8.8.8:443"}, {"ioc_type":"url","ioc":"https://payload.example/drop"}]);
+    let (_, items) = offline_convert(&serde_json::to_vec(&native).unwrap()).unwrap();
+    assert_eq!(
+        items.iter().map(|i| i.kind.as_str()).collect::<Vec<_>>(),
+        ["md5", "sha256", "ip_port", "url"]
+    );
+    let api = json!({"query_status":"ok","data":native});
+    assert_eq!(
+        parse::indicators(&serde_json::to_vec(&api).unwrap(), "threatfox")
+            .unwrap()
+            .len(),
+        4
+    );
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    use std::io::Write;
+    zip.start_file(
+        "../../offline.csv",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    zip.write_all(csv).unwrap();
+    let bytes = zip.finish().unwrap().into_inner();
+    assert_eq!(offline_convert(&bytes).unwrap().0, 1);
+    assert!(offline_convert(br#"{"query_status":"unauthorized","data":[]}"#).is_err());
+    assert!(
+        offline_convert(
+            br#"[{"type":"domain","value":"ok.example"},{"type":"domain","value":"not a domain"}]"#
+        )
+        .is_err()
+    );
+    let enormous = format!(
+        "[{{\"type\":\"domain\",\"value\":\"{}\"}}]",
+        "x".repeat(1024 * 1024 + 1)
+    );
+    assert!(offline_convert(enormous.as_bytes()).is_err());
+}
+
+#[test]
+fn offline_streaming_does_not_truncate_at_the_recent_feed_item_limit() {
+    use std::io::Write;
+    let mut input = tempfile::NamedTempFile::new().unwrap();
+    input.write_all(b"[").unwrap();
+    for n in 0..=MAX_ITEMS {
+        if n > 0 {
+            input.write_all(b",").unwrap();
+        }
+        write!(
+            input,
+            "{{\"type\":\"domain\",\"value\":\"c2-{n}.example\"}}"
+        )
+        .unwrap();
+    }
+    input.write_all(b"]").unwrap();
+    let output = tempfile::NamedTempFile::new().unwrap();
+    assert_eq!(
+        import_parse::convert(input.reopen().unwrap(), output.reopen().unwrap())
+            .unwrap()
+            .0,
+        MAX_ITEMS as i64 + 1
+    );
 }
 
 #[test]
@@ -647,6 +742,315 @@ async fn local_sync_updates_automatically_and_does_not_follow_escaping_symlinks(
     );
     tokio::fs::remove_file(path).await.unwrap();
     tokio::fs::remove_file(link).await.unwrap();
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL and NM_INTEL_CACHE_ROOT"]
+async fn offline_upload_validates_before_publication_resumes_batches_and_never_polls_exports() {
+    use actix_web::{App, HttpMessage, dev::Service, test as http_test, web};
+    let (pool, c, schema) = database().await;
+    let input: SourceInput = serde_json::from_value(json!({"name":"offline history","kind":"threatfox_export","transport":"upload","location":""})).unwrap();
+    let created = storage::save_source(
+        &pool,
+        None,
+        input,
+        &user(1),
+        &AuditContext::cli("intel-test"),
+        &encryption_key(),
+    )
+    .await
+    .unwrap();
+    let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+    let app = http_test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(user(
+                    if req.headers().contains_key("x-fixture-non-admin") {
+                        0
+                    } else {
+                        1
+                    },
+                ));
+                srv.call(req)
+            })
+            .configure(configure),
+    )
+    .await;
+    assert!(!worker::source_tick(&pool, &encryption_key()).await.unwrap());
+    // The initial installation still uses API polling; the export template is manual.
+    let api = c.query_one("SELECT kind,interval_seconds FROM intel_source WHERE id='01800000-0000-7000-8000-000000000003'",&[]).await.unwrap();
+    assert_eq!(api.get::<_, String>(0), "threatfox");
+    assert_eq!(api.get::<_, i32>(1), 1800);
+    let uri = format!("/api/intel/sources/{id}/import?expected_revision=1");
+    let rows = (0..=imports::BATCH).map(|n|json!({"ioc_type":"domain","ioc":format!("history-{n}.example"),"id":n+1,"confidence_level":0})).collect::<Vec<_>>();
+    let body = serde_json::to_vec(&rows).unwrap();
+    let forbidden = http_test::call_service(
+        &app,
+        http_test::TestRequest::post()
+            .uri(&uri)
+            .insert_header(("x-fixture-non-admin", "1"))
+            .set_payload(body.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    let stale = http_test::call_service(
+        &app,
+        http_test::TestRequest::post()
+            .uri(&format!(
+                "/api/intel/sources/{id}/import?expected_revision=0"
+            ))
+            .set_payload(body.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::post()
+            .uri(&uri)
+            .insert_header(("Content-Type", "application/octet-stream"))
+            .set_payload(body)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let count = || async {
+        c.query_one("SELECT COUNT(*) FROM intel_ioc", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0)
+    };
+    assert_eq!(count().await, 0);
+    assert!(worker::source_tick(&pool, &encryption_key()).await.unwrap()); // validate entire file
+    assert_eq!(count().await, 0);
+    assert_eq!(
+        c.query_one(
+            "SELECT stage FROM intel_import_snapshot WHERE source_id=$1",
+            &[&id]
+        )
+        .await
+        .unwrap()
+        .get::<_, String>(0),
+        "ready"
+    );
+    c.execute(
+        "UPDATE intel_source SET next_check_at=NOW() WHERE id=$1",
+        &[&id],
+    )
+    .await
+    .unwrap();
+    assert!(worker::source_tick(&pool, &encryption_key()).await.unwrap());
+    assert_eq!(count().await, imports::BATCH as i64);
+    // An interrupted continuation is claimed again using its expired lease.
+    c.execute("INSERT INTO intel_sync_run(id,source_id,source_revision,status,attempts,claim_token,lease_until) VALUES($1,$2,1,'running',1,$3,NOW()-INTERVAL '1 second')",&[&Uuid::now_v7(),&id,&Uuid::new_v4()]).await.unwrap();
+    assert!(worker::source_tick(&pool, &encryption_key()).await.unwrap());
+    assert_eq!(count().await, imports::BATCH as i64 + 1);
+    let snapshot = c
+        .query_one(
+            "SELECT stage,processed_count FROM intel_import_snapshot WHERE source_id=$1",
+            &[&id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(snapshot.get::<_, String>(0), "complete");
+    assert_eq!(snapshot.get::<_, i64>(1), imports::BATCH as i64 + 1);
+    c.execute(
+        "UPDATE intel_source SET next_check_at=NOW() WHERE id=$1",
+        &[&id],
+    )
+    .await
+    .unwrap();
+    assert!(!worker::source_tick(&pool, &encryption_key()).await.unwrap());
+    // A malformed trailing row must not publish the valid prefix.
+    let response=http_test::call_service(&app,http_test::TestRequest::post().uri(&uri).set_payload(br#"[{"ioc_type":"domain","ioc":"must-not-publish.example"},{"ioc_type":"domain","ioc":"invalid domain"}]"#.as_slice()).to_request()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(worker::source_tick(&pool, &encryption_key()).await.unwrap());
+    assert_eq!(count().await, imports::BATCH as i64 + 1);
+    assert_eq!(
+        c.query_one(
+            "SELECT status FROM intel_sync_run WHERE source_id=$1 ORDER BY created_at DESC LIMIT 1",
+            &[&id]
+        )
+        .await
+        .unwrap()
+        .get::<_, String>(0),
+        "failed"
+    );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn expiry_uses_observation_time_preserves_history_and_survives_migration_and_reimport() {
+    use chrono::{Months, Utc};
+    let (pool, c, schema) = database().await;
+    let source = local_source(&pool, false).await;
+    let key = vec![vec![("domain".into(), "old.example".into())]];
+    let mut old = Indicator::simple("domain", "old.example");
+    old.first_seen = Some((Utc::now() - Months::new(10)).to_rfc3339());
+    old.last_seen = Some((Utc::now() - Months::new(7)).to_rfc3339());
+    storage::ingest(&pool, &source, old.clone(), storage::Origin::Structured, "")
+        .await
+        .unwrap();
+    let hit = annotate(&pool, &key).await;
+    assert!(hit[0].risk.is_none());
+    assert!(hit[0].matches.is_empty());
+    assert_eq!(hit[0].expired_matches.len(), 1);
+    let before: chrono::DateTime<Utc> = c
+        .query_one(
+            "SELECT observed_at FROM intel_record WHERE value='old.example'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        !storage::ingest(&pool, &source, old, storage::Origin::Structured, "")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        before,
+        c.query_one(
+            "SELECT observed_at FROM intel_record WHERE value='old.example'",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, chrono::DateTime<Utc>>(0)
+    );
+    let list = storage::records(
+        &pool,
+        &user(1),
+        &storage::ListQuery {
+            status: Some("expired".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(list["items"][0]["status"], "expired");
+    c.execute(
+        "UPDATE intel_source SET expiry_months=12 WHERE id=$1",
+        &[&source.id],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        annotate(&pool, &key).await[0].risk.as_deref(),
+        Some("malicious")
+    );
+    c.execute(
+        "UPDATE intel_source SET expiry_months=6 WHERE id=$1",
+        &[&source.id],
+    )
+    .await
+    .unwrap();
+    let mut recent = Indicator::simple("domain", "recent.example");
+    recent.first_seen = Some((Utc::now() - Months::new(20)).to_rfc3339());
+    recent.last_seen = Some((Utc::now() - Months::new(1)).to_rfc3339());
+    storage::ingest(&pool, &source, recent, storage::Origin::Structured, "")
+        .await
+        .unwrap();
+    assert_eq!(
+        annotate(&pool, &[vec![("domain".into(), "recent.example".into())]]).await[0]
+            .risk
+            .as_deref(),
+        Some("malicious")
+    );
+    let mut explicit = Indicator::simple("domain", "explicit.example");
+    explicit.valid_until = Some(Utc::now() - chrono::Duration::days(1));
+    storage::ingest(&pool, &source, explicit, storage::Origin::Structured, "")
+        .await
+        .unwrap();
+    c.execute(
+        "UPDATE intel_source SET expiry_months=0 WHERE id=$1",
+        &[&source.id],
+    )
+    .await
+    .unwrap();
+    assert!(
+        annotate(&pool, &[vec![("domain".into(), "explicit.example".into())]]).await[0]
+            .risk
+            .is_none()
+    );
+    // Migration upgrades a populated legacy publication view and backfills timestamps.
+    c.batch_execute("DROP VIEW intel_published;CREATE VIEW intel_published AS SELECT r.id,r.source_id,r.source_revision,r.external_key,r.content_hash,r.origin,r.status,r.kind,r.value,r.payload,r.article_id,r.actor_id,r.ioc_id,r.review_id,r.valid_until,r.created_at,r.updated_at,s.name AS source_name FROM intel_record r JOIN intel_source s ON s.id=r.source_id WHERE r.status='approved';DROP TRIGGER intel_record_publication_guard ON intel_record;UPDATE intel_record SET observed_at=NULL").await.unwrap();
+    for _ in 0..2 {
+        c.batch_execute(include_str!(
+            "../../source/database/migrate_threat_intel.sql"
+        ))
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        before,
+        c.query_one(
+            "SELECT observed_at FROM intel_record WHERE value='old.example'",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, chrono::DateTime<Utc>>(0)
+    );
+    c.execute(
+        "UPDATE intel_source SET expiry_months=6 WHERE id=$1",
+        &[&source.id],
+    )
+    .await
+    .unwrap();
+    assert!(annotate(&pool, &key).await[0].risk.is_none());
+    let another = local_source(&pool, false).await;
+    storage::ingest(
+        &pool,
+        &another,
+        Indicator::simple("domain", "old.example"),
+        storage::Origin::Structured,
+        "",
+    )
+    .await
+    .unwrap();
+    let hit = annotate(&pool, &key).await;
+    assert_eq!(hit[0].risk.as_deref(), Some("malicious"));
+    assert_eq!(hit[0].expired_matches.len(), 1);
+    assert_eq!(hit[0].matches.len(), 1);
+    // For undated reports, the original insertion time is stable across duplicate imports.
+    let dated: chrono::DateTime<Utc> = c
+        .query_one(
+            "SELECT observed_at FROM intel_record WHERE source_id=$1",
+            &[&another.id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        !storage::ingest(
+            &pool,
+            &another,
+            Indicator::simple("domain", "old.example"),
+            storage::Origin::Structured,
+            ""
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        dated,
+        c.query_one(
+            "SELECT observed_at FROM intel_record WHERE source_id=$1",
+            &[&another.id]
+        )
+        .await
+        .unwrap()
+        .get::<_, chrono::DateTime<Utc>>(0)
+    );
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
         .unwrap();

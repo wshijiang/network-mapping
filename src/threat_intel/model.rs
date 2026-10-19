@@ -27,14 +27,20 @@ pub(super) struct SourceInput {
     pub require_review: bool,
     #[serde(default)]
     pub interval_seconds: Option<i32>,
+    #[serde(default = "default_expiry")]
+    pub expiry_months: i32,
     pub expected_revision: Option<i64>,
 }
 fn yes() -> bool {
     true
 }
+fn default_expiry() -> i32 {
+    6
+}
 pub(super) fn default_interval(kind: &str) -> i32 {
     match kind {
-        "mitre_stix" | "threatfox_export" => 86400,
+        "mitre_stix" => 86400,
+        "threatfox_export" => 3600,
         "eset_github" => 3600,
         _ => 1800,
     }
@@ -61,6 +67,7 @@ impl SourceInput {
             .interval_seconds
             .get_or_insert(default_interval(&self.kind));
         if !(60..=2_592_000).contains(interval)
+            || !(0..=120).contains(&self.expiry_months)
             || self.location.len() > 2048
             || !valid_key_ref(&self.auth_env)
         {
@@ -73,6 +80,15 @@ impl SourceInput {
             return Err(Error::bad("intel_invalid_hosts"));
         }
         match self.transport.as_str() {
+            "upload" => {
+                if !matches!(self.kind.as_str(), "json" | "lines" | "threatfox_export")
+                    || !self.location.is_empty()
+                    || !self.auth_env.is_empty()
+                    || !self.credential.is_empty()
+                {
+                    return Err(Error::bad("intel_invalid_upload_source"));
+                }
+            }
             "local" => {
                 if self.location.is_empty()
                     || std::path::Path::new(&self.location)
@@ -88,6 +104,9 @@ impl SourceInput {
                 }
             }
             "https" => {
+                if self.kind == "threatfox_export" {
+                    return Err(Error::bad("intel_offline_export_required"));
+                }
                 validate_url(&self.location, &self.allowed_hosts)?;
             }
             _ => return Err(Error::bad("intel_invalid_transport")),

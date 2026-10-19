@@ -24,12 +24,30 @@ CREATE TABLE IF NOT EXISTS intel_source (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS credential_ciphertext BYTEA;
+ALTER TABLE intel_source DROP CONSTRAINT IF EXISTS intel_source_transport_check;
+ALTER TABLE intel_source ADD CONSTRAINT intel_source_transport_check CHECK(transport IN ('local','https','upload'));
+ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS expiry_months INTEGER NOT NULL DEFAULT 6 CHECK(expiry_months BETWEEN 0 AND 120);
 INSERT INTO intel_source(id,name,kind,transport,location,allowed_hosts,auth_env,interval_seconds) VALUES
  ('01800000-0000-7000-8000-000000000001','MITRE Enterprise ATT&CK','mitre_stix','https','https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json',ARRAY['raw.githubusercontent.com'],'',86400),
  ('01800000-0000-7000-8000-000000000002','ESET malware-ioc','eset_github','https','https://api.github.com/repos/eset/malware-ioc/git/trees/master?recursive=1',ARRAY['api.github.com','raw.githubusercontent.com'],'',3600),
  ('01800000-0000-7000-8000-000000000003','ThreatFox','threatfox','https','https://threatfox-api.abuse.ch/api/v1/',ARRAY['threatfox-api.abuse.ch'],'NM_INTEL_THREATFOX_AUTH_KEY',1800),
  ('01800000-0000-7000-8000-000000000004','ESET WeLiveSecurity RSS','rss','https','https://www.welivesecurity.com/en/rss/feed/',ARRAY['www.welivesecurity.com','welivesecurity.com'],'',1800)
 ON CONFLICT(id) DO NOTHING;
+
+INSERT INTO intel_source(id,name,kind,transport,location,interval_seconds,enabled)
+ VALUES('01800000-0000-7000-8000-000000000005','ThreatFox 离线历史导入','threatfox_export','upload','',3600,TRUE)
+ ON CONFLICT(id) DO NOTHING;
+CREATE TABLE IF NOT EXISTS intel_import_snapshot (
+    source_id UUID PRIMARY KEY REFERENCES intel_source(id),
+    source_revision BIGINT NOT NULL,
+    snapshot_id UUID NOT NULL,
+    stage TEXT NOT NULL CHECK(stage IN ('downloaded','ready','complete')),
+    byte_offset BIGINT NOT NULL DEFAULT 0,
+    record_count BIGINT NOT NULL DEFAULT 0,
+    processed_count BIGINT NOT NULL DEFAULT 0,
+    content_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS intel_sync_run (
     id UUID PRIMARY KEY,
@@ -150,6 +168,18 @@ CREATE INDEX IF NOT EXISTS intel_record_match_key ON intel_record((kind||':'||va
 CREATE INDEX IF NOT EXISTS intel_record_queue ON intel_record(status,created_at);
 CREATE INDEX IF NOT EXISTS intel_sync_source_history ON intel_sync_run(source_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS intel_article_pending ON intel_article(available_at,created_at) WHERE status IN ('queued','running');
+ALTER TABLE intel_record ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ;
+CREATE OR REPLACE FUNCTION intel_observed_time(value TEXT) RETURNS TIMESTAMPTZ LANGUAGE plpgsql STABLE AS $$
+BEGIN
+ IF value IS NULL OR length(value)>100 THEN RETURN NULL; END IF;
+ IF value ~ '^[0-9]{10}$' THEN RETURN to_timestamp(value::BIGINT); END IF;
+ IF value !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}' THEN RETURN NULL; END IF;
+ IF value ~ '(Z|UTC|[+-][0-9]{2}:?[0-9]{2})$' THEN RETURN value::TIMESTAMPTZ; END IF;
+ RETURN value::TIMESTAMP AT TIME ZONE 'UTC';
+EXCEPTION WHEN invalid_datetime_format OR datetime_field_overflow OR numeric_value_out_of_range THEN RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS intel_record_publication_guard ON intel_record;
+UPDATE intel_record SET observed_at=LEAST(created_at,COALESCE(intel_observed_time(payload->>'last_seen'),intel_observed_time(payload->>'first_seen'),created_at)) WHERE observed_at IS NULL;
 CREATE TABLE IF NOT EXISTS intel_review (
     id UUID PRIMARY KEY,
     record_id UUID NOT NULL REFERENCES intel_record(id),
@@ -170,8 +200,8 @@ BEGIN
  IF TG_OP='INSERT' AND (SELECT kind FROM intel_source WHERE id=NEW.source_id)='rss' AND NEW.origin<>'ai' THEN
   RAISE EXCEPTION 'RSS extraction is always AI evidence';
  END IF;
- IF TG_OP='UPDATE' AND (NEW.origin,NEW.source_id,NEW.source_revision,NEW.external_key,NEW.content_hash,NEW.kind,NEW.value,NEW.payload,NEW.article_id,NEW.actor_id,NEW.valid_until)
-     IS DISTINCT FROM (OLD.origin,OLD.source_id,OLD.source_revision,OLD.external_key,OLD.content_hash,OLD.kind,OLD.value,OLD.payload,OLD.article_id,OLD.actor_id,OLD.valid_until) THEN
+ IF TG_OP='UPDATE' AND (NEW.origin,NEW.source_id,NEW.source_revision,NEW.external_key,NEW.content_hash,NEW.kind,NEW.value,NEW.payload,NEW.article_id,NEW.actor_id,NEW.valid_until,NEW.observed_at)
+     IS DISTINCT FROM (OLD.origin,OLD.source_id,OLD.source_revision,OLD.external_key,OLD.content_hash,OLD.kind,OLD.value,OLD.payload,OLD.article_id,OLD.actor_id,OLD.valid_until,OLD.observed_at) THEN
   RAISE EXCEPTION 'intelligence evidence is immutable';
  END IF;
  IF NEW.status='approved' AND (TG_OP='INSERT' OR OLD.status IS DISTINCT FROM 'approved') THEN
@@ -186,6 +216,14 @@ END $$;
 DROP TRIGGER IF EXISTS intel_record_publication_guard ON intel_record;
 CREATE TRIGGER intel_record_publication_guard BEFORE INSERT OR UPDATE ON intel_record FOR EACH ROW EXECUTE FUNCTION intel_record_guard();
 
+CREATE OR REPLACE VIEW intel_record_state AS
+ SELECT q.*,(q.effective_valid_until IS NOT NULL AND q.effective_valid_until<=NOW()) AS expired
+ FROM (SELECT r.*,s.name AS source_name,
+   LEAST(r.valid_until,CASE WHEN s.expiry_months>0 THEN COALESCE(r.observed_at,r.created_at)+make_interval(months=>s.expiry_months) END) AS effective_valid_until
+   FROM intel_record r JOIN intel_source s ON s.id=r.source_id) q;
+-- Preserve the original public view's column order when upgrading.
 CREATE OR REPLACE VIEW intel_published AS
- SELECT r.*,s.name AS source_name FROM intel_record r JOIN intel_source s ON s.id=r.source_id
- WHERE r.status='approved' AND (r.valid_until IS NULL OR r.valid_until>NOW());
+ SELECT r.id,r.source_id,r.source_revision,r.external_key,r.content_hash,r.origin,r.status,r.kind,r.value,
+ r.payload,r.article_id,r.actor_id,r.ioc_id,r.review_id,r.valid_until,r.created_at,r.updated_at,r.source_name,
+ r.observed_at,r.effective_valid_until,r.expired FROM intel_record_state r
+ WHERE r.status='approved' AND NOT r.expired;

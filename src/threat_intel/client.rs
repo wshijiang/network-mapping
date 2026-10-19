@@ -2,6 +2,20 @@ use super::*;
 use std::{path::PathBuf, time::Duration};
 
 pub(super) async fn local_bytes(location: &str) -> Result<Vec<u8>> {
+    let mut file = local_file(location).await?;
+    let mut data = Vec::new();
+    use tokio::io::AsyncReadExt;
+    (&mut file)
+        .take((MAX_BYTES + 1) as u64)
+        .read_to_end(&mut data)
+        .await
+        .map_err(|_| Error::bad("intel_local_read_failed"))?;
+    if data.len() > MAX_BYTES {
+        return Err(Error::bad("intel_source_too_large"));
+    }
+    Ok(data)
+}
+pub(super) async fn local_file(location: &str) -> Result<tokio::fs::File> {
     let root = PathBuf::from(
         std::env::var_os("NM_INTEL_LOCAL_ROOT")
             .unwrap_or_else(|| "/var/lib/network-mapping/intel".into()),
@@ -15,7 +29,7 @@ pub(super) async fn local_bytes(location: &str) -> Result<Vec<u8>> {
     if !path.starts_with(&root) {
         return Err(Error::bad("intel_local_path_escape"));
     }
-    let mut file = tokio::fs::File::open(path)
+    let file = tokio::fs::File::open(path)
         .await
         .map_err(|_| Error::bad("intel_local_file_unavailable"))?;
     if !file
@@ -26,17 +40,7 @@ pub(super) async fn local_bytes(location: &str) -> Result<Vec<u8>> {
     {
         return Err(Error::bad("intel_local_regular_file_required"));
     }
-    let mut data = Vec::new();
-    use tokio::io::AsyncReadExt;
-    (&mut file)
-        .take((MAX_BYTES + 1) as u64)
-        .read_to_end(&mut data)
-        .await
-        .map_err(|_| Error::bad("intel_local_read_failed"))?;
-    if data.len() > MAX_BYTES {
-        return Err(Error::bad("intel_source_too_large"));
-    }
-    Ok(data)
+    Ok(file)
 }
 pub(super) fn secret(name: &str) -> Result<Option<String>> {
     if !valid_key_ref(name) {
@@ -130,6 +134,9 @@ pub(super) async fn source_bytes(
     source: &storage::Source,
     encryption_key: &str,
 ) -> Result<Vec<u8>> {
+    if source.input.transport == "upload" || source.input.kind == "threatfox_export" {
+        return Err(Error::bad("intel_offline_export_required"));
+    }
     if source.input.transport == "local" {
         return local_bytes(&source.input.location).await;
     }
@@ -149,19 +156,11 @@ pub(super) async fn source_bytes(
             k,
         )
     });
-    let location = if source.input.kind == "threatfox_export"
-        && source.input.location.contains("{AUTH_KEY}")
-    {
-        let key = key
-            .as_ref()
-            .ok_or_else(|| Error::bad("intel_credential_missing"))?;
-        source.input.location.replace(
-            "{AUTH_KEY}",
-            &percent_encoding::utf8_percent_encode(key, percent_encoding::NON_ALPHANUMERIC)
-                .to_string(),
-        )
-    } else {
-        source.input.location.clone()
-    };
-    request(&location, &source.input.allowed_hosts, post.as_ref(), auth).await
+    request(
+        &source.input.location,
+        &source.input.allowed_hosts,
+        post.as_ref(),
+        auth,
+    )
+    .await
 }

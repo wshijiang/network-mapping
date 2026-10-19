@@ -1,0 +1,221 @@
+//! Offline uploads and local exports. Incremental updates remain on the API worker.
+use super::*;
+use std::path::PathBuf;
+use storage::{Origin, Source};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+pub(super) const BATCH: usize = 500;
+async fn root() -> Result<PathBuf> {
+    let path = PathBuf::from(
+        std::env::var_os("NM_INTEL_CACHE_ROOT")
+            .unwrap_or_else(|| "/var/lib/network-mapping/intel-cache".into()),
+    );
+    tokio::fs::create_dir_all(&path)
+        .await
+        .map_err(|_| Error::bad("intel_import_cache_unavailable"))?;
+    tokio::fs::canonicalize(path)
+        .await
+        .map_err(|_| Error::bad("intel_import_cache_unavailable"))
+}
+pub(super) async fn temporary() -> Result<tempfile::NamedTempFile> {
+    tempfile::NamedTempFile::new_in(root().await?)
+        .map_err(|_| Error::bad("intel_import_cache_unavailable"))
+}
+pub(super) async fn install(
+    pool: &Pool,
+    s: &Source,
+    temp: tempfile::NamedTempFile,
+    hash: String,
+    actor: Option<(&UserBaseI, &AuditContext)>,
+) -> Result<Uuid> {
+    let mut c = pool.get().await?;
+    let tx = c.transaction().await?;
+    storage::validate_source(&tx, s).await?;
+    // Serialize file replacement against other uploads to this source.
+    tx.query_one(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1,318))",
+        &[&s.id.to_string()],
+    )
+    .await?;
+    if actor.is_some() && tx.query_one("SELECT EXISTS(SELECT 1 FROM intel_sync_run WHERE source_id=$1 AND status IN ('queued','running'))",&[&s.id]).await?.get::<_,bool>(0) {
+        return Err(Error::conflict());
+    }
+    let old = tx
+        .query_opt(
+            "SELECT snapshot_id FROM intel_import_snapshot WHERE source_id=$1",
+            &[&s.id],
+        )
+        .await?;
+    let id = Uuid::now_v7();
+    let directory = root().await?;
+    let path = directory.join(format!("{id}.raw"));
+    temp.persist(&path)
+        .map_err(|_| Error::bad("intel_import_write_failed"))?;
+    let result=async {
+        tx.execute("INSERT INTO intel_import_snapshot(source_id,source_revision,snapshot_id,stage,content_hash) VALUES($1,$2,$3,'downloaded',$4) ON CONFLICT(source_id) DO UPDATE SET source_revision=EXCLUDED.source_revision,snapshot_id=EXCLUDED.snapshot_id,stage='downloaded',content_hash=EXCLUDED.content_hash,byte_offset=0,record_count=0,processed_count=0,created_at=NOW()",&[&s.id,&s.revision,&id,&hash]).await?;
+        if let Some((user,context))=actor {
+            tx.execute("INSERT INTO intel_sync_run(id,source_id,source_revision) VALUES($1,$2,$3)",&[&Uuid::now_v7(),&s.id,&s.revision]).await?;
+            audit(&tx,user,context,"intel.source.import",&s.id.to_string(),json!({"snapshot_id":id,"source_revision":s.revision})).await?;
+        }
+        tx.commit().await?;Ok::<_,Error>(())
+    }.await;
+    if let Err(error) = result {
+        let _ = tokio::fs::remove_file(path).await;
+        return Err(error);
+    }
+    if let Some(row) = old {
+        let old: Uuid = row.get(0);
+        for suffix in ["raw", "ndjson"] {
+            let _ = tokio::fs::remove_file(directory.join(format!("{old}.{suffix}"))).await;
+        }
+    }
+    Ok(id)
+}
+pub(super) async fn sync(pool: &Pool, s: &Source) -> Result<(Value, bool)> {
+    let snapshot = pool
+        .get()
+        .await?
+        .query_opt(
+            "SELECT * FROM intel_import_snapshot WHERE source_id=$1 AND source_revision=$2",
+            &[&s.id, &s.revision],
+        )
+        .await?;
+    let snapshot = match snapshot {
+        Some(row)
+            if row.get::<_, String>("stage") != "complete" || s.input.transport == "upload" =>
+        {
+            row
+        }
+        _ if s.input.transport == "local" => {
+            let mut source = client::local_file(&s.input.location).await?;
+            if source
+                .metadata()
+                .await
+                .map_err(|_| Error::bad("intel_import_read_failed"))?
+                .len()
+                > import_parse::MAX_ARCHIVE
+            {
+                return Err(Error::bad("intel_import_too_large"));
+            }
+            let temp = temporary().await?;
+            let mut output = tokio::fs::File::from_std(
+                temp.reopen()
+                    .map_err(|_| Error::bad("intel_import_write_failed"))?,
+            );
+            let mut hash = openssl::sha::Sha256::new();
+            let mut buffer = vec![0; 64 * 1024];
+            let mut size = 0;
+            loop {
+                let n = source
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|_| Error::bad("intel_import_read_failed"))?;
+                if n == 0 {
+                    break;
+                }
+                size += n as u64;
+                if size > import_parse::MAX_ARCHIVE {
+                    return Err(Error::bad("intel_import_too_large"));
+                }
+                hash.update(&buffer[..n]);
+                output
+                    .write_all(&buffer[..n])
+                    .await
+                    .map_err(|_| Error::bad("intel_import_write_failed"))?;
+            }
+            output
+                .sync_all()
+                .await
+                .map_err(|_| Error::bad("intel_import_write_failed"))?;
+            drop(output);
+            let hash = hash.finish().iter().map(|b| format!("{b:02x}")).collect();
+            install(pool, s, temp, hash, None).await?;
+            return Ok((json!({"offline_import":true,"stage":"uploaded"}), true));
+        }
+        _ => return Err(Error::bad("intel_import_file_required")),
+    };
+    let id: Uuid = snapshot.get("snapshot_id");
+    let stage: String = snapshot.get("stage");
+    let total: i64 = snapshot.get("record_count");
+    let directory = root().await?;
+    if stage == "complete" {
+        return Ok((
+            json!({"offline_import":true,"stage":"complete","total":total}),
+            false,
+        ));
+    }
+    if stage == "downloaded" {
+        let raw = std::fs::File::open(directory.join(format!("{id}.raw")))
+            .map_err(|_| Error::bad("intel_import_cache_missing"))?;
+        let temp = temporary().await?;
+        let output = temp
+            .reopen()
+            .map_err(|_| Error::bad("intel_import_write_failed"))?;
+        let (count, _) = tokio::task::spawn_blocking(move || import_parse::convert(raw, output))
+            .await
+            .map_err(|_| Error::bad("intel_invalid_ioc_document"))??;
+        let mut c = pool.get().await?;
+        let tx = c.transaction().await?;
+        storage::validate_source(&tx, s).await?;
+        temp.persist(directory.join(format!("{id}.ndjson")))
+            .map_err(|_| Error::bad("intel_import_write_failed"))?;
+        tx.execute("UPDATE intel_import_snapshot SET stage='ready',record_count=$3 WHERE source_id=$1 AND snapshot_id=$2",&[&s.id,&id,&count]).await?;
+        tx.commit().await?;
+        let _ = tokio::fs::remove_file(directory.join(format!("{id}.raw"))).await;
+        return Ok((
+            json!({"offline_import":true,"stage":"validated","total":count}),
+            true,
+        ));
+    }
+    let offset: i64 = snapshot.get("byte_offset");
+    let processed: i64 = snapshot.get("processed_count");
+    let file = tokio::fs::File::open(directory.join(format!("{id}.ndjson")))
+        .await
+        .map_err(|_| Error::bad("intel_import_cache_missing"))?;
+    let length = file
+        .metadata()
+        .await
+        .map_err(|_| Error::bad("intel_import_cache_missing"))?
+        .len();
+    let mut reader = tokio::io::BufReader::new(file);
+    reader
+        .seek(std::io::SeekFrom::Start(offset as u64))
+        .await
+        .map_err(|_| Error::bad("intel_import_read_failed"))?;
+    let mut position = offset;
+    let mut items = 0_i64;
+    let mut added = 0_i64;
+    for _ in 0..BATCH {
+        let mut line = Vec::new();
+        let n = reader
+            .read_until(b'\n', &mut line)
+            .await
+            .map_err(|_| Error::bad("intel_import_read_failed"))?;
+        if n == 0 {
+            break;
+        }
+        if n > 1024 * 1024 {
+            return Err(Error::bad("intel_import_too_large"));
+        }
+        let indicator: Indicator =
+            serde_json::from_slice(&line).map_err(|_| Error::bad("intel_invalid_indicator"))?;
+        if storage::ingest(pool, s, indicator, Origin::Structured, "").await? {
+            added += 1;
+        }
+        position += n as i64;
+        items += 1;
+    }
+    let complete = position as u64 >= length;
+    let mut c = pool.get().await?;
+    let tx = c.transaction().await?;
+    storage::validate_source(&tx, s).await?;
+    tx.execute("UPDATE intel_import_snapshot SET byte_offset=$3,processed_count=processed_count+$4,stage=$5 WHERE source_id=$1 AND snapshot_id=$2",&[&s.id,&id,&position,&items,&if complete{"complete"}else{"ready"}]).await?;
+    tx.commit().await?;
+    if complete {
+        let _ = tokio::fs::remove_file(directory.join(format!("{id}.ndjson"))).await;
+    }
+    Ok((
+        json!({"offline_import":true,"stage":if complete{"complete"}else{"importing"},"processed":processed+items,"total":total,"added":added}),
+        !complete,
+    ))
+}

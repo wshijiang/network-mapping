@@ -56,23 +56,10 @@ pub(super) fn indicators(data: &[u8], format: &str) -> Result<Vec<Indicator>> {
         if rows.len() > MAX_ITEMS {
             return Err(Error::bad("intel_too_many_items"));
         }
-        return rows.into_iter().map(|(r, grouped_id)| {
-            let mut i=Indicator::simple(text(r,"ioc_type"),text(r,"ioc"));
-            i.external_id=r.get("id").map(|v|v.as_str().map(str::to_owned).unwrap_or_else(||v.to_string())).or_else(||grouped_id.map(str::to_owned)).unwrap_or_default();
-            i.malware=text(r,"malware_printable").to_owned();
-            if i.malware.is_empty(){i.malware=text(r,"malware").to_owned();}
-            i.reference=r.get("reference").and_then(Value::as_str).filter(|v|!v.is_empty()).map(str::to_owned);
-            i.confidence=r.get("confidence_level").and_then(Value::as_i64).and_then(|v|i32::try_from(v).ok());
-            i.first_seen=r.get("first_seen").or_else(||r.get("first_seen_utc")).and_then(Value::as_str).map(str::to_owned);
-            i.last_seen=r.get("last_seen").or_else(||r.get("last_seen_utc")).and_then(Value::as_str).map(str::to_owned);
-            i.valid_until=i.first_seen.as_deref().and_then(|s| {
-                chrono::DateTime::parse_from_rfc3339(s).ok().map(|v|v.with_timezone(&chrono::Utc))
-                    .or_else(||chrono::NaiveDateTime::parse_from_str(s,"%Y-%m-%d %H:%M:%S UTC").ok().map(|v|v.and_utc()))
-                    .or_else(||chrono::NaiveDateTime::parse_from_str(s,"%Y-%m-%d %H:%M:%S").ok().map(|v|v.and_utc()))
-            }).and_then(|v|v.checked_add_months(chrono::Months::new(6)));
-            i.evidence=serde_json::to_string(&json!({"threat_type":r.get("threat_type"),"reporter":r.get("reporter"),"malware_id":r.get("malware"),"tags":r.get("tags")})).unwrap_or_default();
-            i.normalize()?;Ok(i)
-        }).collect();
+        return rows
+            .into_iter()
+            .map(|(r, id)| threatfox_row(r, id))
+            .collect();
     }
     if format == "json" {
         let v: Value =
@@ -569,4 +556,68 @@ pub(super) fn ai_result(content: &str, body: &str) -> Result<Vec<Indicator>> {
             Ok(i)
         })
         .collect()
+}
+
+pub(super) fn threatfox_row(r: &Value, grouped_id: Option<&str>) -> Result<Indicator> {
+    let mut i = Indicator::simple(
+        match text(r, "ioc_type") {
+            "md5_hash" => "md5",
+            "sha1_hash" => "sha1",
+            "sha256_hash" => "sha256",
+            other => other,
+        },
+        r.get("ioc")
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+            .or_else(|| r.get("ioc_value").and_then(Value::as_str))
+            .unwrap_or(""),
+    );
+    i.external_id = r
+        .get("id")
+        .map(|v| {
+            v.as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| v.to_string())
+        })
+        .or_else(|| grouped_id.map(str::to_owned))
+        .unwrap_or_default();
+    i.malware = text(r, "malware_printable").to_owned();
+    if i.malware.is_empty() {
+        i.malware = text(r, "malware_alias").to_owned();
+    }
+    if i.malware.is_empty() {
+        i.malware = text(r, "malware").to_owned();
+    }
+    i.reference = r
+        .get("reference")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned);
+    i.confidence = r
+        .get("confidence_level")
+        .and_then(Value::as_i64)
+        .and_then(|v| i32::try_from(v).ok());
+    i.first_seen = r
+        .get("first_seen")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            r.get("first_seen_utc")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+        })
+        .map(str::to_owned);
+    i.last_seen = r
+        .get("last_seen")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            r.get("last_seen_utc")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+        })
+        .map(str::to_owned);
+    i.evidence=serde_json::to_string(&json!({"threat_type":r.get("threat_type"),"reporter":r.get("reporter"),"malware_id":r.get("malware"),"tags":r.get("tags")})).unwrap_or_default();
+    i.normalize()?;
+    Ok(i)
 }

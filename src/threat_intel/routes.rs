@@ -1,5 +1,76 @@
 use super::*;
 use actix_web::{HttpRequest, web};
+use futures_util::StreamExt;
+use tokio::io::AsyncWriteExt;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportQuery {
+    expected_revision: i64,
+}
+async fn offline_import(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    id: web::Path<Uuid>,
+    q: web::Query<ImportQuery>,
+    mut payload: web::Payload,
+) -> HttpResponse {
+    response(
+        async {
+            admin(&user)?;
+            let s = storage::get_source(&pool, id.into_inner()).await?;
+            if s.revision != q.expected_revision {
+                return Err(Error::conflict());
+            }
+            if s.input.transport != "upload" {
+                return Err(Error::bad("intel_invalid_upload_source"));
+            }
+            if !s.input.enabled {
+                return Err(Error::bad("intel_source_disabled"));
+            }
+            let temp = imports::temporary().await?;
+            let mut file = tokio::fs::File::from_std(
+                temp.reopen()
+                    .map_err(|_| Error::bad("intel_import_write_failed"))?,
+            );
+            let mut size = 0_u64;
+            let mut hash = openssl::sha::Sha256::new();
+            while let Some(chunk) = payload.next().await {
+                let chunk = chunk.map_err(|_| Error::bad("intel_import_read_failed"))?;
+                size += chunk.len() as u64;
+                if size > import_parse::MAX_ARCHIVE {
+                    return Err(Error {
+                        status: StatusCode::PAYLOAD_TOO_LARGE,
+                        code: "intel_import_too_large",
+                    });
+                }
+                hash.update(&chunk);
+                file.write_all(&chunk)
+                    .await
+                    .map_err(|_| Error::bad("intel_import_write_failed"))?;
+            }
+            if size == 0 {
+                return Err(Error::bad("intel_no_supported_indicators"));
+            }
+            file.sync_all()
+                .await
+                .map_err(|_| Error::bad("intel_import_write_failed"))?;
+            drop(file);
+            let hash = hash.finish().iter().map(|b| format!("{b:02x}")).collect();
+            let snapshot = imports::install(
+                &pool,
+                &s,
+                temp,
+                hash,
+                Some((&user, &AuditContext::from_request(&req))),
+            )
+            .await?;
+            Ok(json!({"snapshot_id":snapshot,"queued":true}))
+        }
+        .await,
+    )
+}
 
 async fn list_sources(pool: web::Data<Pool>, user: UserBaseI) -> HttpResponse {
     response(
@@ -297,6 +368,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/sources", web::post().to(add_source))
             .route("/sources/{id}", web::put().to(update_source))
             .route("/sources/{id}/sync", web::post().to(sync_source))
+            .route("/sources/{id}/import", web::post().to(offline_import))
             .route("/settings", web::get().to(get_settings))
             .route("/settings", web::put().to(put_settings))
             .route("/records", web::get().to(records))

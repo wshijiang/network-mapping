@@ -22,7 +22,9 @@ RSS 文章由 AI 生成的提议始终需要人工审核。Web、API 均没有�
 flowchart TD
     MITRE[MITRE STIX] --> Entities[组织 / 软件 / 技术 / 历史使用关系]
     ESET[ESET GitHub 结构化 IOC] --> Structured[格式规范化与不可变来源证据]
-    TF[ThreatFox API / 导出] --> Structured
+    TF[ThreatFox API 定时增量] --> Structured
+    Offline[管理员离线上传 JSON / CSV / ZIP 历史文件] --> Validate[完整校验 / 分批断点导入]
+    Validate --> Structured
     Files[自定义本地 / HTTPS JSON 与文本] --> Structured
     Structured --> Policy{来源要求审核?}
     Policy -->|否 默认| Published[已接纳 IOC 与有效证据]
@@ -64,8 +66,10 @@ ESET 分别承担规范化、IOC 提供和报告分析角色，不作为三个�
 | ESET malware-ioc GitHub | 3,600 秒 | 结构化 IOC 直接接纳 |
 | ThreatFox recent API | 1,800 秒 | 结构化 IOC 直接接纳 |
 | ESET WeLiveSecurity RSS | 1,800 秒 | 发现文章；AI 启用后生成待审提议 |
+| ThreatFox 离线历史导入 | 手动上传，不定时拉取文件 | 结构化 IOC 直接接纳 |
 
-自定义 JSON、文本/CSV 来源默认 1,800 秒；ThreatFox JSON 导出默认 86,400 秒。
+自定义 JSON、文本/CSV 的本地或 HTTPS 来源默认 1,800 秒。ThreatFox 导出类型仅支持
+离线上传或本地手动导入，不允许配置 HTTPS 导出地址，不参与周期文件抓取。
 停用停止后续同步，不删除历史证据。修改免审策略后，新/重读的结构化记录按新策略处理；
 已有批准记录不会因打开审核开关而被自动撤销。关闭结构化审核后，再次同步可接纳此前
 等待中的结构化记录；AI 提议不会被这一操作接纳。人工拒绝、撤销的同版本记录不会因
@@ -99,12 +103,13 @@ IPv4 抓取按精确特殊用途前缀拒绝文档示例、基准测试、共享
 
 来源列表与 AI 设置只返回 `credential_configured`、`database_credential_configured` 及
 `credential_source`（database/environment/none）；不返回明文或密文。凭据不会进入设置
-JSON、同步摘要、文章/模型输入或审计元数据。切换本地来源会清除该来源的数据库凭据。
+JSON、同步摘要、文章/模型输入或审计元数据。切换本地或离线上传会清除该来源的数据库凭据。
 
 环境变量名称须以 `NM_INTEL_` 开头。例如：
 
 ```text
 NM_INTEL_LOCAL_ROOT=/var/lib/network-mapping/intel
+NM_INTEL_CACHE_ROOT=/var/lib/network-mapping/intel-cache
 NM_INTEL_THREATFOX_AUTH_KEY=<由部署环境注入>
 NM_INTEL_AI_API_KEY=<由部署环境注入>
 ```
@@ -112,8 +117,8 @@ NM_INTEL_AI_API_KEY=<由部署环境注入>
 ThreatFox API 使用 `Auth-Key`；其他结构化 HTTPS 来源的凭据用作 Authorization 请求头。
 需 Bearer 的来源应提供完整 `Bearer …` 值。AI 填写原始 API Key，由客户端添加 Bearer。
 这些约定对数据库与环境变量两种凭据来源相同。
-ThreatFox 导出地址可使用路径占位符 `{AUTH_KEY}`，运行时以 URL 编码后的密钥替换。
-不要将实际密钥直接写入 URL、文档或 Git。
+离线导入不需要配置上游凭据。文件下载由管理员在平台外完成；不将包含访问凭据的导出
+地址填入来源配置、文档或 Git。持续更新仍由独立 API 来源完成。
 
 ## 数据格式
 
@@ -159,19 +164,59 @@ CSV 使用首行字段名，例如 `type,value,malware,confidence,reference`。
 ESET Markdown 仅解析明确的哈希、域名、IP、URL 表格列，不把 Filename 列当成域名。
 YARA、Snort 和不支持的 JSON 结构不导入为 IOC，GitHub 作业摘要记录不支持的文件数。
 
-JSON/CSV 导出可包在只含一个数据文件的 ZIP 中；只在内存中读取，不向文件系统解压。
-拒绝嵌套 ZIP、多文件 ZIP，以及超出 96 MiB 解压/读取上限的输入。单次结构化输入最多
-50,000 条。超限应在来源侧拆分为多个可独立更新的数据源。
+普通周期来源读取上限 96 MiB、单次最多 50,000 条；单文件 ZIP 只读取数据，不按条目路径
+解压。大规模历史数据应使用下述离线导入入口，其流式处理不受 50,000 条近期馈送限制。
+
+### 离线历史导入
+
+1. 管理员在 ThreatFox 官方平台下载完整或近期导出文件，保存到本地；系统不定时下载导出。
+2. 在 Web“来源”选择预置的“ThreatFox 离线历史导入”，点击“上传离线文件”。支持原生
+   JSON、CSV 和只含一个 JSON/CSV 的 ZIP；按内容识别，不信任上传文件名。也支持官方
+   URL、域名、IP:端口、MD5、SHA256 子集。通用 JSON/CSV 可新建离线上传来源。
+3. 上传后先完整校验并写入私有规范化缓存，全部校验成功后每批最多 500 条入库。错误文件
+   的有效前缀不会提前发布；来源审核策略照常执行，上传不会改变固定 AI 审核规则。
+4. 来源列表显示校验阶段、总量与已处理数量，作业页显示错误或分批继续状态。正常每批
+   5 秒后继续；重启后从数据库中的字节偏移和处理数量恢复。重复执行按来源、记录 ID 和
+   内容哈希去重。失败可“继续导入”；原始文件有误或缓存丢失时重新上传。
+
+上传原文件上限 512 MiB，解压内容和规范化缓存分别上限 2 GiB，每条数据上限 1 MiB，
+最多 1,000 万条。拒绝多文件 ZIP、嵌套 ZIP 和畸形 JSON/CSV，不向文件名指定的位置写入。
+超过上限应在本地拆成多个有效数据文件，再逐个上传。同一来源同一时刻只运行一个导入
+作业；处理期间不能覆盖文件。修改来源版本会取消旧任务，需要以新版本重新上传。
+
+服务端缓存目录由 `NM_INTEL_CACHE_ROOT` 指定，默认 `/var/lib/network-mapping/intel-cache`，
+必须可写并持久化；目录只授予服务账户访问权限。临时文件使用私有权限与随机 ID。
+校验完成清理原文件，导入完成清理规范化文件；失败缓存保留供重试，重新上传会替换旧缓存。
+多实例必须使用同一持久化缓存目录及同一主密钥。缓存丢失不删除已提交证据，重新上传
+原文件可安全去重。反向代理的请求体限制和上传超时应满足所需文件大小。
+
+服务器已有文件也可选择 `threatfox_export` + `local`，填写 `NM_INTEL_LOCAL_ROOT` 内的
+相对路径后手动“立即同步”；导入完成不会因检查周期再次读取。普通本地 JSON/文本来源
+仍可按原有周期读取，因此需要手动历史导入时应选离线类型。
 
 ### ThreatFox
 
 默认 API 调用 `get_iocs`，请求最近 7 天。该接口按 first_seen 筛选，首次导入及超过
-7 天的停机补采应添加 ThreatFox JSON 导出来源，或导入可信本地镜像。导出支持 API
-data 数组及官方按 ID 分组的 JSON/ZIP。完整导出下载地址以当前认证门户为准。
+7 天的停机补采使用离线历史导入。离线 JSON 支持 API data 数组、通用 iocs 数组与官方
+按 ID 分组的对象；CSV 保留官方带注释的表头、引号与逗号。完整导出的获取方式以当前
+认证门户为准，Web 只上传本地文件，持续更新不改为拉取导出文件。
+官方 `md5_hash`、`sha256_hash` 类型统一规范化为库内的 md5、sha256，API 和离线导入共用解析。
 
 来源置信度不会过滤 IOC。保存 first_seen、last_seen、reporter、reference 和恶意软件
-名称；能够解析 first_seen 时记录 ThreatFox 自身的六个月有效期。到期证据保留历史，
-不再贡献当前自动标记。抓取时间不会给旧记录续期。滚动窗口中未出现某条记录不表示撤回。
+名称。官方 recent 文件包含 first_seen 或 last_seen 在最近 48 小时内的 IOC，这只是离线
+文件的内容范围；系统不按它的生成周期抓取文件。滚动窗口缺少记录不表示来源撤回。
+
+### 自动过期
+
+每个来源的 `expiry_months` 默认 6 个日历月，可在 Web 调整为 0～120。到期基准依次为
+可解析的 last_seen、first_seen、首次入库时间；无时区的官方时间按 UTC，未来时间最多
+按入库时刻计算。观察时间不可变，同版本反复拉取或导入不会刷新有效期。后续来源明确
+提供更新的观察时间时形成新版本。历史全量中超过期限的 IOC 仍保存证据，但立即归入过期。
+
+有效期取本地来源期限与显式 `valid_until` 的较早者。0 表示不加本地期限，不能绕过来源
+明确给出的到期时间。调整来源期限在后续读取立即生效；不删除历史或更改审核决定。
+过期证据显示灰色“已过期”，不贡献当前恶意/可疑标记；同一 IOC 仍有其他有效来源证据
+时保留其当前风险。此策略适用于自动情报，人工标签不受影响，也不对 MITRE 名称库计时。
 
 官方说明：[API](https://threatfox.abuse.ch/api/)、[导出](https://threatfox.abuse.ch/export/)。
 
@@ -239,7 +284,8 @@ AI 配置修改和审核均写入现有审计系统。提议保存文章版本�
 IOC 库查询或通过 lookup API 精确查询。端点没有实际 URL/文件观察证据时，不生成命中。
 TLS SAN、相同证书、ASN、软件家族均不用于扩大标记。
 
-响应新增独立 `intel` 对象，包含 available、risk、matches。原有 tags 仍是人工标签，
+响应新增独立 `intel` 对象，包含 available、risk、matches、expired_matches；有效证据与
+过期历史分别返回，单个 IOC 每组最多 10 条。原有 tags 仍是人工标签，
 自动情报不删除、覆盖人工标签，也不占用每 IP 20 条人工标签配额。冲突证据并列解释。
 未命中不表示正常；情报存储失败返回 available=false，界面显示暂不可用。
 
@@ -256,6 +302,7 @@ TLS SAN、相同证书、ASN、软件家族均不用于扩大标记。
 | `GET/POST /api/intel/sources` | 来源列表、创建 |
 | `PUT /api/intel/sources/{id}` | 更新来源，携带 expected_revision |
 | `POST /api/intel/sources/{id}/sync` | 幂等入队，复用进行中的同源作业 |
+| `POST /api/intel/sources/{id}/import?expected_revision=N` | 管理员上传原始文件体，Content-Type 为 application/octet-stream；仅 upload 来源 |
 | `GET/PUT /api/intel/settings` | AI 设置、配置 revision、固定 ai_review_required=true |
 | `GET /api/intel/records` | status、q、source_id、offset；每页 50 条 |
 | `POST /api/intel/records/{id}/review` | content_hash、decision、reason；decision 为 approved/rejected/revoked |
@@ -271,6 +318,11 @@ TLS SAN、相同证书、ASN、软件家族均不用于扩大标记。
 
 AI 设置请求为 `{"expected_revision":1,"settings":{"ai_enabled":false,...}}`。来源和
 设置修改采用乐观版本检查。固定 AI 审核字段不可在请求中修改，未知字段拒绝。
+
+来源 `transport` 支持 local/https/upload，`expiry_months` 默认 6。upload 的 location 和
+凭据字段必须为空。来源响应的 `import_status` 返回 stage、total、processed；无文件时为
+null。records 的 status=approved 只列当前有效证据，status=expired 列已接纳的过期证据
+（管理员）。证据响应 valid_until 为计算后的有效期，expired 表示时间状态。
 
 来源创建/更新请求可附加 `credential` 或 `clear_credential`；AI 更新请求则放在
 `settings` 对象内。它们仅用于写入加密字段，不包含在后续配置响应中。例如：
@@ -305,6 +357,7 @@ cargo test --locked threat_intel --lib
 # 下列数据库必须是可丢弃的专用测试库，各测试使用独立 schema。
 INTEL_TEST_DATABASE_URL=postgres://user@127.0.0.1/intel_test \
 NM_INTEL_LOCAL_ROOT=/tmp/intel-test-fixtures \
+NM_INTEL_CACHE_ROOT=/tmp/intel-test-cache \
 cargo test --locked threat_intel --lib -- --include-ignored
 ```
 
@@ -312,4 +365,6 @@ cargo test --locked threat_intel --lib -- --include-ignored
 重复接纳、并发审核、撤销、精确端点范围、RSS/Atom/Markdown、ZIP 和本地路径边界。
 另覆盖旧文章取消与重新发现、特殊用途 IPv4 边界、凭据随机 nonce/认证失败、数据库密文、
 空值保留/替换/清除、陈旧版本冲突和 API/审计不泄露凭据。
+离线测试覆盖原生 JSON/CSV/ZIP、超过 50,000 条的流式解析、完整校验后发布、跨批续传、
+租约恢复、无周期导出抓取、观察时间有效期、过期历史、重复导入不续期和带数据迁移。
 真实 LLM 调用需要实际配置的服务和密钥；解析器 fixture 测试不代表已调用真实模型。
