@@ -1,0 +1,51 @@
+name: Threat intelligence and mandatory AI review
+
+on:
+  pull_request:
+    paths:
+      - 'src/threat_intel/**'
+      - 'source/database/**'
+      - 'Cargo.*'
+      - '.github/workflows/threat-intelligence.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/threat_intel/**'
+      - 'source/database/**'
+      - 'Cargo.*'
+      - '.github/workflows/threat-intelligence.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: threat-intelligence-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review-and-sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+        env:
+          POSTGRES_USER: network_mapping
+          POSTGRES_DB: network_mapping
+          POSTGRES_PASSWORD: isolated_test_only
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U network_mapping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      CARGO_BUILD_JOBS: 2
+      INTEL_TEST_DATABASE_URL: 'host=127.0.0.1 port=5432 dbname=network_mapping user=network_mapping password=isolated_test_only'
+      NM_INTEL_LOCAL_ROOT: '${{ runner.temp }}/intel-fixtures'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust
+        run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --no-self-update && rustup default 1.99.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo fmt --all --check
+      - name: Verify real PostgreSQL publication, permissions and worker recovery
+        run: cargo test --locked --lib threat_intel -- --include-ignored

@@ -55,6 +55,7 @@ pub mod statistics;
 pub mod system_maintenance;
 pub mod system_resource_cache;
 pub mod system_time;
+pub mod threat_intel;
 
 #[cfg(test)]
 pub mod test; // 测试模块

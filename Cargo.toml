@@ -56,6 +56,7 @@ plotters = { version = "0.3.7", default-features = false, features = ["bitmap_ba
 png = "0.18"
 scraper = { version = "0.27.0", default-features = false }
 quick-xml = { version = "0.41", default-features = false }
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 
 [features]
 default = []

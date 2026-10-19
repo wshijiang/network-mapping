@@ -45,6 +45,7 @@ nav:
       - 用户管理 CLI: USER_MANAGEMENT_CLI.md
   - 功能使用:
       - 功能概览: FEATURES.md
+      - 威胁情报与 AI 审核: THREAT_INTELLIGENCE.md
       - 操作系统识别: OS_DETECTION.md
       - Web 框架与组件识别: WEB_DETECTION.md
       - Web 技术目录: WEB_TECHNOLOGY_CATALOG.md
@@ -59,6 +60,7 @@ nav:
       - 智能目标与扫描器分配: SMART_SCANNING.md
       - 搜索触发目标更新: SEARCH_TARGET_GENERATION.md
       - DNS 测绘: DNS_MAPPING.md
+      - 域名关联发现: DOMAIN_DISCOVERY.md
       - 资产端口状态与历史: ASSET_PORT_HISTORY.md
       - 扫描器任务恢复协议: scanner-recovery.md
   - 存储与性能:
@@ -71,6 +73,7 @@ nav:
       - 慢检测与掉线策略: monitoring-policies.md
       - 健康监控与告警: HEALTH_ALERT.md
       - 统一通知渠道: NOTIFICATIONS.md
+      - 通知模板: NOTIFICATION_TEMPLATES.md
       - 扫描器错误与日志: SCANNER_DIAGNOSTICS.md
       - 请求日志: REQUEST_LOG.md
       - 审计日志: AUDIT_LOG.md

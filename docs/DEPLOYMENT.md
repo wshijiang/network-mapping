@@ -7,6 +7,10 @@
 本文是服务端部署入口，面向 Linux，覆盖部署选型、安装顺序、原生服务托管和升级。容器的具体命令见 [Docker 部署指南](DOCKER.md)；扫描节点见[扫描端部署指南](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/DEPLOYMENT.md)。已有 PG 扫描结果的升级必须先阅读[Elasticsearch 存储与迁移](ELASTICSEARCH.md)，不能按空库流程直接切换。
 Docker 环境变量的全部字段、默认值及 Compose 设置见 [完整配置参考](DOCKER_CONFIGURATION.md)。
 
+可信 IOC 自动标记和 AI 审核通过数据库与 Web 管理，无需修改扫描器。部署时可配置
+`NM_INTEL_LOCAL_ROOT`、只读来源文件挂载和服务端凭据环境变量；默认来源会定时同步，AI
+默认关闭。迁移、网络白名单和配套前端要求见[威胁情报部署说明](THREAT_INTELLIGENCE.md)。
+
 [部署方式与安装顺序](#部署方式与安装顺序) · [准备环境](#准备环境) · [文件布局](#文件布局) · [数据库](#数据库) · [配置](#配置) · [首次启动](#首次启动) · [服务托管](#服务托管) · [升级与恢复](#升级与恢复) · [验收与排障](#验收与排障)
 
 ## 部署方式与安装顺序

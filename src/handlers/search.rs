@@ -89,6 +89,7 @@ struct SearchItem {
     region_name: Option<String>,
     city_name: Option<String>,
     tags: Vec<AssetTag>,
+    intel: crate::threat_intel::Annotation,
 }
 
 fn pagination(limit: Option<i64>, offset: Option<i64>) -> Result<(i64, i64), &'static str> {
@@ -214,7 +215,7 @@ pub async fn search_v2(
     match elasticsearch_compilation {
             ElasticsearchCompilation::Supported(filter)
             | ElasticsearchCompilation::RequiresElasticsearch(filter) => respond_search_elasticsearch(
-                elasticsearch.get_ref(), &user, "advanced", query.to_owned(), filter, (limit, offset), sort,
+                pool.get_ref(), elasticsearch.get_ref(), &user, "advanced", query.to_owned(), filter, (limit, offset), sort,
                 (payload.generate_if_needed && offset == 0).then_some(GenerationContext { pool: pool.get_ref(), settings: settings.get_ref(), audit: crate::audit::AuditContext::from_request(&req) }),
             ).await,
             ElasticsearchCompilation::Unsupported => HttpResponse::UnprocessableEntity().json(
@@ -231,6 +232,7 @@ struct GenerationContext<'a> {
 
 #[allow(clippy::too_many_arguments)]
 async fn respond_search_elasticsearch(
+    pool: &Pool,
     elasticsearch: &ElasticsearchService,
     user: &UserBaseI,
     query_type: &'static str,
@@ -246,6 +248,12 @@ async fn respond_search_elasticsearch(
         .await
     {
         Ok(page) => {
+            let keys = page
+                .items
+                .iter()
+                .map(|item| crate::threat_intel::endpoint_keys(&item.ip_address, Some(item.port)))
+                .collect::<Vec<_>>();
+            let intelligence = crate::threat_intel::annotate(pool, &keys).await;
             let auto_generation = if let Some(context) = generation {
                 let policy = context.settings.automatic_target.get().await;
                 let dns_policy = context.settings.dns_follow_up.get().await.value;
@@ -282,7 +290,9 @@ async fn respond_search_elasticsearch(
                 items: page
                     .items
                     .into_iter()
-                    .map(|item| SearchItem {
+                    .zip(intelligence)
+                    .map(|(item, intel)| SearchItem {
+                        intel,
                         ip_address: item.ip_address,
                         port: Some(item.port),
                         protocol: item.protocol,
@@ -347,6 +357,7 @@ async fn respond_search_elasticsearch(
 
 #[get("/api/search/ip")]
 pub async fn search_ip(
+    pool: web::Data<Pool>,
     elasticsearch: web::Data<ElasticsearchService>,
     query: web::Query<SearchQuery>,
     user: UserBaseI,
@@ -365,6 +376,7 @@ pub async fn search_ip(
     };
 
     return respond_search_elasticsearch(
+        pool.get_ref(),
         elasticsearch.get_ref(),
         &user,
         "ip",
@@ -379,6 +391,7 @@ pub async fn search_ip(
 
 #[get("/api/search/network")]
 pub async fn search_network(
+    pool: web::Data<Pool>,
     elasticsearch: web::Data<ElasticsearchService>,
     query: web::Query<SearchQuery>,
     user: UserBaseI,
@@ -398,6 +411,7 @@ pub async fn search_network(
     };
 
     return respond_search_elasticsearch(
+        pool.get_ref(),
         elasticsearch.get_ref(),
         &user,
         "network",
@@ -449,6 +463,7 @@ mod tests {
 
 #[get("/api/search/port")]
 pub async fn search_port(
+    pool: web::Data<Pool>,
     elasticsearch: web::Data<ElasticsearchService>,
     query: web::Query<PortSearchQuery>,
     user: UserBaseI,
@@ -467,6 +482,7 @@ pub async fn search_port(
     };
 
     return respond_search_elasticsearch(
+        pool.get_ref(),
         elasticsearch.get_ref(),
         &user,
         "port",
@@ -481,6 +497,7 @@ pub async fn search_port(
 
 #[get("/api/search/service")]
 pub async fn search_service(
+    pool: web::Data<Pool>,
     elasticsearch: web::Data<ElasticsearchService>,
     query: web::Query<SearchQuery>,
     user: UserBaseI,
@@ -503,7 +520,7 @@ pub async fn search_service(
         .replace('*', "\\*")
         .replace('?', "\\?");
     return respond_search_elasticsearch(
-            elasticsearch.get_ref(), &user, "service", q.to_owned(),
+            pool.get_ref(), elasticsearch.get_ref(), &user, "service", q.to_owned(),
             serde_json::json!({"wildcard": {"service": {"value": format!("*{escaped}*"), "case_insensitive": true}}}),
             (limit, offset), sort,
             None,
@@ -512,6 +529,7 @@ pub async fn search_service(
 
 #[get("/api/search/banner")]
 pub async fn search_banner(
+    pool: web::Data<Pool>,
     elasticsearch: web::Data<ElasticsearchService>,
     query: web::Query<SearchQuery>,
     user: UserBaseI,
@@ -534,7 +552,7 @@ pub async fn search_banner(
         .replace('*', "\\*")
         .replace('?', "\\?");
     return respond_search_elasticsearch(
-            elasticsearch.get_ref(), &user, "banner", q.to_owned(),
+            pool.get_ref(), elasticsearch.get_ref(), &user, "banner", q.to_owned(),
             serde_json::json!({"wildcard": {"banner": {"value": format!("*{escaped}*"), "case_insensitive": true}}}),
             (limit, offset), sort,
             None,

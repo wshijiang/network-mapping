@@ -21,6 +21,12 @@ port = 443 AND service = "https"
 
 返回结果仍包含资产级信息，包括 ASN、ISP、AS 组织、国家、城市和该 IP 的全部有效标签。
 
+每条已授权结果另含 `intel` 自动情报：`available` 表示情报查询是否成功，`risk` 为
+`malicious`、`suspicious` 或空，`matches` 保存来源与证据。IP:端口只匹配该端点，IP
+证据可匹配同 IP 端点；未命中不表示正常。自动情报与人工 `tags` 独立，现有 `tag`
+语法仍查询人工标签，当前没有 `intel.*` 搜索字段。精确 IOC 查询、有效期及审核规则见
+[威胁情报说明](THREAT_INTELLIGENCE.md)。
+
 ### 1.2 当前状态来源
 
 高级搜索只读取当前用户有权访问且 execution 状态为 `succeeded` 的 observation：

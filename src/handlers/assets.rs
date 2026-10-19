@@ -39,6 +39,7 @@ pub(crate) struct AssetPortHistoryQuery {
 #[derive(Serialize)]
 struct AssetPortCurrent {
     port: i32,
+    intel: crate::threat_intel::Annotation,
     protocol: Option<String>,
     service: Option<String>,
     banner: Option<String>,
@@ -73,6 +74,7 @@ struct AssetSummary {
     observation_count: i64,
     first_seen_at: Option<i64>,
     last_seen_at: Option<i64>,
+    intel: crate::threat_intel::Annotation,
     tags: Vec<AssetTag>,
     can_manage_tags: bool,
 }
@@ -161,6 +163,7 @@ pub(crate) async fn get_asset_summary(
 #[get("/api/assets/ports")]
 pub(crate) async fn get_asset_ports(
     req: HttpRequest,
+    pool: web::Data<Pool>,
     elasticsearch: web::Data<ElasticsearchService>,
     query: web::Query<AssetPortsQuery>,
     user: UserBaseI,
@@ -176,6 +179,7 @@ pub(crate) async fn get_asset_ports(
 
     return get_asset_ports_from_elasticsearch(
         &req,
+        pool.get_ref(),
         elasticsearch.get_ref(),
         &ip,
         limit,
@@ -396,7 +400,10 @@ async fn get_asset_summary_from_elasticsearch(
     if es_total(&current) > os_sources.len() as i64 {
         host_os.distribution = None;
     }
+    let mut intelligence =
+        crate::threat_intel::annotate(pool, &[crate::threat_intel::endpoint_keys(ip, None)]).await;
     let summary = AssetSummary {
+        intel: intelligence.remove(0),
         os: host_os,
         ip: ip.to_owned(),
         asn: text("asn"),
@@ -434,6 +441,7 @@ async fn get_asset_summary_from_elasticsearch(
 
 async fn get_asset_ports_from_elasticsearch(
     req: &HttpRequest,
+    pool: &Pool,
     elasticsearch: &ElasticsearchService,
     ip: &str,
     limit: i64,
@@ -464,7 +472,7 @@ async fn get_asset_ports_from_elasticsearch(
     if total == 0 {
         return HttpResponse::NotFound().json(json!({"message": "没有可访问的资产观察记录"}));
     }
-    let items = result
+    let mut items = result
         .pointer("/hits/hits")
         .and_then(Value::as_array)
         .into_iter()
@@ -478,6 +486,7 @@ async fn get_asset_ports_from_elasticsearch(
                 .unwrap_or(0);
             let service_observed_at = source.get("service_observed_at_ms").and_then(Value::as_i64);
             AssetPortCurrent {
+                intel: Default::default(),
                 port: source.get("port").and_then(Value::as_i64).unwrap_or(0) as i32,
                 protocol: source
                     .get("protocol")
@@ -535,6 +544,16 @@ async fn get_asset_ports_from_elasticsearch(
             }
         })
         .collect::<Vec<_>>();
+    let keys = items
+        .iter()
+        .map(|item| crate::threat_intel::endpoint_keys(ip, Some(item.port)))
+        .collect::<Vec<_>>();
+    for (item, intel) in items
+        .iter_mut()
+        .zip(crate::threat_intel::annotate(pool, &keys).await)
+    {
+        item.intel = intel;
+    }
     HttpResponse::Ok().json(json!({"success": true, "data": {
         "ip": ip, "items": items, "total": total, "limit": limit, "offset": offset
     }}))
