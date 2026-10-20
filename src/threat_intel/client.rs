@@ -55,14 +55,38 @@ pub(super) fn http_builder(host: &str) -> reqwest::ClientBuilder {
 }
 pub(super) fn transport_error(error: reqwest::Error) -> Error {
     use std::error::Error as _;
+    let mut code = if error.is_timeout() {
+        "intel_source_timeout"
+    } else {
+        "intel_source_transport"
+    };
+    let mut diagnostic = json!({
+        "timeout":error.is_timeout(), "connect":error.is_connect(),
+        "body_error":error.is_body(), "decode_error":error.is_decode(),
+    });
     let mut current = error.source();
     while let Some(cause) = current {
+        // Inspect locally, emit only fixed classifications: source strings can contain secrets.
+        let message = cause.to_string().to_ascii_lowercase();
+        if message.contains("certificate") {
+            diagnostic["cause_hint"] = json!("tls_certificate");
+        } else if message.contains("tls") && diagnostic.get("cause_hint").is_none() {
+            diagnostic["cause_hint"] = json!("tls_handshake");
+        } else if (message.contains("tunnel") || message.contains("proxy"))
+            && diagnostic.get("cause_hint").is_none()
+        {
+            diagnostic["cause_hint"] = json!("proxy_tunnel");
+        }
         if let Some(resolver) = cause.downcast_ref::<ResolveError>() {
-            return Error::bad(resolver.0);
+            code = resolver.0;
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            diagnostic["io_kind"] = json!(format!("{:?}", io.kind()));
+            diagnostic["os_error"] = json!(io.raw_os_error());
         }
         current = cause.source();
     }
-    Error::bad("intel_source_transport")
+    Error::bad(code).context(diagnostic)
 }
 
 pub(super) async fn local_bytes(location: &str) -> Result<Vec<u8>> {
@@ -134,49 +158,83 @@ pub(super) async fn request_bounded(
     auth: Option<(&str, &str)>,
     limit: usize,
 ) -> Result<Vec<u8>> {
+    let started = std::time::Instant::now();
     let url = validate_url(location, hosts)?;
     let host = url.host_str().unwrap();
-    // Keep reqwest's proxy / NO_PROXY selection and native TLS roots. Direct
-    // destinations are validated by the resolver before returning pinned IPs.
-    // Proxies must enforce the same public-egress boundary on their remote DNS.
-    let client = http_builder(host)
-        .build()
-        .map_err(|_| Error::bad("intel_http_client_failed"))?;
-    let mut request = if let Some(body) = post {
-        client.post(url).json(body)
-    } else {
-        client.get(url)
-    };
-    if let Some((header, key)) = auth {
-        request = request.header(header, key);
-    }
-    // Never include reqwest errors or URLs: an upstream export may put a key in its path.
-    let mut response = request.send().await.map_err(transport_error)?;
-    if !response.status().is_success() {
-        return Err(Error::bad(if response.status().as_u16() == 429 {
-            "intel_source_rate_limited"
+    let proxy_env_keys = [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ]
+    .into_iter()
+    .filter(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty()))
+    .collect::<Vec<_>>()
+    .join(", ");
+    let context = json!({"host":host,"port":url.port_or_known_default(),
+        "method":if post.is_some() {"POST"} else {"GET"},"limit_bytes":limit,
+        "proxy_env_keys":proxy_env_keys});
+    let result = async {
+        // Keep reqwest's proxy / NO_PROXY selection and native TLS roots. Direct
+        // destinations are validated by the resolver before returning pinned IPs.
+        // Proxies must enforce the same public-egress boundary on their remote DNS.
+        let client = http_builder(host)
+            .build()
+            .map_err(|e| transport_error(e).context(json!({"phase":"client_build"})))?;
+        let mut request = if let Some(body) = post {
+            client.post(url.clone()).json(body)
         } else {
-            "intel_source_http_status"
-        }));
-    }
-    if response
-        .content_length()
-        .is_some_and(|len| len > limit as u64)
-    {
-        return Err(Error::bad("intel_source_too_large"));
-    }
-    let mut bytes = vec![];
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| Error::bad("intel_source_read_failed"))?
-    {
-        if bytes.len() + chunk.len() > limit {
-            return Err(Error::bad("intel_source_too_large"));
+            client.get(url.clone())
+        };
+        if let Some((header, key)) = auth {
+            request = request.header(header, key);
         }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
+        // Never include reqwest errors or URLs: an upstream export may put a key in its path.
+        let mut response = request.send().await.map_err(|e| {
+            transport_error(e).context(json!({"phase":"send"}))
+        })?;
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            return Err(Error::bad(if response.status().as_u16() == 429 {
+                "intel_source_rate_limited"
+            } else {
+                "intel_source_http_status"
+            }).context(json!({"phase":"response_status","http_status":status})));
+        }
+        if response
+            .content_length()
+            .is_some_and(|len| len > limit as u64)
+        {
+            return Err(Error::bad("intel_source_too_large").context(json!({
+                "phase":"response_headers","http_status":status,"content_length":response.content_length()
+            })));
+        }
+        let mut bytes = vec![];
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| transport_error(e).context(json!({
+                "phase":"response_body","http_status":status,"received_bytes":bytes.len()
+            })))?
+        {
+            if bytes.len() + chunk.len() > limit {
+                return Err(Error::bad("intel_source_too_large").context(json!({
+                    "phase":"response_body","http_status":status,"received_bytes":bytes.len() + chunk.len()
+                })));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }.await;
+    result.map_err(|e: Error| {
+        let error = e
+            .context(context)
+            .context(json!({"elapsed_ms":started.elapsed().as_millis() as u64}));
+        tracing::warn!(event="IntelHttpRequestFailed",code=error.code,diagnostic=%error.diagnostic);
+        error
+    })
 }
 pub(super) async fn source_bytes(
     source: &storage::Source,

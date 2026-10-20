@@ -26,7 +26,7 @@ async fn upload_source(
         return Err(Error::bad("intel_source_disabled"));
     }
     if pool.get().await?.query_one("SELECT EXISTS(SELECT 1 FROM intel_sync_run WHERE source_id=$1 AND status IN ('queued','running'))",&[&s.id]).await?.get::<_,bool>(0) {
-        return Err(Error {status:StatusCode::CONFLICT,code:"intel_import_busy"});
+        return Err(Error {status:StatusCode::CONFLICT,code:"intel_import_busy",diagnostic:json!({})});
     }
     Ok(s)
 }
@@ -75,6 +75,7 @@ async fn offline_import(
                     return Err(Error {
                         status: StatusCode::PAYLOAD_TOO_LARGE,
                         code: "intel_import_too_large",
+                        diagnostic: json!({}),
                     });
                 }
                 hash.update(&chunk);

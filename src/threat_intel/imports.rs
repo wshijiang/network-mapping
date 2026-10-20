@@ -77,7 +77,7 @@ pub(super) async fn install_claimed(
     )
     .await?;
     if actor.is_some() && tx.query_one("SELECT EXISTS(SELECT 1 FROM intel_sync_run WHERE source_id=$1 AND status IN ('queued','running'))",&[&s.id]).await?.get::<_,bool>(0) {
-        return Err(Error {status:StatusCode::CONFLICT,code:"intel_import_busy"});
+        return Err(Error {status:StatusCode::CONFLICT,code:"intel_import_busy",diagnostic:json!({})});
     }
     let old = tx
         .query_opt(

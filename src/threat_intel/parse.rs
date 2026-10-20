@@ -545,10 +545,11 @@ pub(super) fn article_text_with_selector(data: &[u8], root: &str) -> Result<Stri
     let input = std::str::from_utf8(data).map_err(|_| Error::bad("intel_article_not_utf8"))?;
     let html = Html::parse_document(input);
     let selector = Selector::parse(root).expect("static selector");
-    let node = html
-        .select(&selector)
-        .next()
-        .ok_or_else(|| Error::bad("intel_article_body_missing"))?;
+    let node = html.select(&selector).next().ok_or_else(|| {
+        Error::bad("intel_article_body_missing").context(json!({
+            "selector":root,"html_bytes":data.len(),"reason":"selector_not_found"
+        }))
+    })?;
     // Exclude scripts, styles, navigation, and hidden elements from evidence.
     let mut text = String::new();
     for child in node.descendants() {
@@ -571,7 +572,9 @@ pub(super) fn article_text_with_selector(data: &[u8], root: &str) -> Result<Stri
     }
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.len() < 40 {
-        return Err(Error::bad("intel_article_body_missing"));
+        return Err(Error::bad("intel_article_body_missing").context(json!({
+            "selector":root,"html_bytes":data.len(),"text_bytes":text.len(),"reason":"text_too_short"
+        })));
     }
     Ok(text)
 }

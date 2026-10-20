@@ -37,5 +37,6 @@ fn crypto_error() -> Error {
     Error {
         status: StatusCode::SERVICE_UNAVAILABLE,
         code: "intel_credential_crypto_failed",
+        diagnostic: json!({}),
     }
 }

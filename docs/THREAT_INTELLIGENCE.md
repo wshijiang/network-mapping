@@ -447,7 +447,8 @@ HTTPS 地址。正文可留空由后台抓取，或粘贴 40～100,000 UTF-8 字
 不能填公众号昵称。抓取后核对页面脚本中的账号标识并读取 `#js_content`，保留正文和
 表格文本，排除脚本、导航及隐藏文本。不执行页面脚本、不绕过验证页；账号不一致、
 正文缺失或网络受限时失败并可重试。`mp.weixin.qq.com` 域名白名单本身不代表账号可信。
-普通文章继续读取 article/main。RSS 发现的微信链接也执行账号核对。
+普通文章继续读取 article/main；WeLiveSecurity 的两个官方域名使用 `.article-body`
+正文容器，避免把页面导航、侧栏与推荐文章作为证据。RSS 发现的微信链接也执行账号核对。
 
 微信链接只保留文章身份参数 __biz、mid、idx、sn；去掉 poc_token 等访问/跟踪参数，
 规范化地址用于保存、抓取、引用和 AI 输入。手动正文标记为
@@ -467,7 +468,10 @@ ai_review_required=true。管理员权限、现有 CSRF 与审计规则保持执
 
 管理页面填写兼容 Chat Completions 的完整 HTTPS 接口地址、模型名称，并保存数据库凭据
 或填写凭据环境变量，
-然后开启 AI。接口需要支持 JSON 对象输出。首版提取只有一个独立 worker，单次正文
+然后开启 AI。当前使用 `messages` 请求及 `choices[0].message.content` 响应，仅适配 Chat
+Completions；不支持使用 `input` / `output` 的 Responses API。接口需要支持 JSON 对象输出。
+响应格式不匹配时错误详情记录预期字段及是否发现 Responses 的 `output` 字段，不保存响应正文。
+首版提取只有一个独立 worker，单次正文
 最多 100,000 字节、输出最多 200 条 IOC，模型回复预算 8,000 tokens；文章和模型回复
 HTTP 读取上限各为 2 MiB，RSS/Atom 解析上限 4 MiB；单次 HTTP
 超时 30 秒。来源同步 worker 独立运行，不等待 AI 成功。
@@ -475,6 +479,38 @@ HTTP 读取上限各为 2 MiB，RSS/Atom 解析上限 4 MiB；单次 HTTP
 RSS/Atom 只发现白名单域名文章；去除脚本、导航及隐藏文本后保存文章快照。重试使用
 已保存快照，避免审批引用变化的正文。候选组织来自有效 MITRE 基准库，模型不能创建
 新组织。提议必须附带在正文中可定位、包含该 IOC 的原文证据。
+
+### 文章失败诊断与日志
+
+在“文章”列表的失败记录下展开“错误详情”，可查看文章 ID、失败阶段、发生时间、任务标识
+和尝试次数。HTTP 失败还记录目标主机/端口、方法、请求阶段、状态码、耗时、读取大小、超时/
+连接标志及可用的系统错误类别/编号。`cause_hint` 是 TLS 证书、TLS 握手或代理隧道的分类提示，
+不包含原始异常文本；`proxy_env_keys` 只列出已设置的代理变量名，不代表该请求实际使用了代理。
+正文解析失败记录选择器、页面大小和 `selector_not_found` / `text_too_short` 原因。
+
+处理阶段包括 `article_fetch`（抓取原文）、`article_parse`（解析正文）、`ai_settings`（读取模型配置/
+凭据）、`ai_request`（请求 AI）、`ai_response`（解析响应）、`ai_validate`（校验证据）和
+`indicator_store`（保存提议）。AI 请求使用独立的 `intel_ai_*` 错误代码；已保存正文的手动文章
+和重试文章直接复用快照，AI 连接失败不再显示为文章来源连接失败。HTTP 401/403 应检查凭据，
+404 应检查完整接口地址，429 表示限流，5xx 应检查提供方服务；实际状态码在详情中查看。
+
+最近一次诊断保存在 `intel_article.extraction_metadata.last_error`，通过现有管理员文章接口返回。
+来源同步的失败诊断保存在作业 `summary.last_error`。更新结果仍校验任务租约和 claim token，
+防止过期 worker 覆盖新任务；每次失败替换最近一次诊断，成功后清除文章的最近失败详情。
+历史失败没有可追溯补写的网络信息，需在修复配置后重试，才能生成新诊断。
+
+服务端沿用 `[log].directory`、`[log].file_name` 和滚动配置写入 JSON 日志，无需开启 DEBUG：
+
+- `IntelArticleExtractionFailed`：文章 ID、来源 ID、claim token、尝试次数、错误代码和诊断。
+- `IntelArticleExtractionSucceeded`：文章任务完成及生成提议数（可能为 0）。
+- `IntelHttpRequestFailed`：网络请求的脱敏诊断；文章请求还带 `intel_article` span 的关联 ID。
+- `IntelSourceSyncFailed`：来源同步作业 ID、来源 ID 及失败诊断。
+- `IntelAiWorkerFailed` / `IntelSourceWorkerFailed`：队列读取或结果持久化等 worker 级故障。
+
+复制页面的文章 ID，在实际日志目录检索该 ID 即可串联失败与重试；路径以启动日志中的
+`log_directory` / `log_file` 为准。原始正文、AI 请求/响应内容、认证头、代理地址和完整请求 URL
+均不进入这些诊断，避免 URL 路径/查询参数携带的密钥泄露。数据库错误仅记录 SQLSTATE 与连接
+关闭标志，不记录 SQL 参数或原始数据库异常文本。
 
 文章绑定发现时的来源 revision。来源编辑、停用或更改格式后，旧版本排队/运行中的
 文章取消，不允许通过重试接口改挂到新版本。重新同步会按新 revision 建立独立文章与
@@ -617,6 +653,8 @@ BOM/CRLF、多行字段和空参考值；URL 回归包含官方 MISP 的 SMB 与
 附加逐文件解析验证。可设置
 `NM_INTEL_HTTPS_SMOKE=1` 在代理测试中附加真实 GitHub HTTPS 读取，使用现有代理和 CA，
 无需上游凭据；默认测试仅使用本地代理 fixture。
+`NM_INTEL_ESET_HTML_FIXTURE=/absolute/path/article.html` 可附加验证本地保存的真实
+WeLiveSecurity 页面正文提取；文件仅用于测试，不提交正文到仓库。
 若已有官方完整导出 ZIP，可使用生产流式解析器验证两个本地文件（不会下载或发布 IOC）：
 
 ```sh

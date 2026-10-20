@@ -37,6 +37,19 @@ pub(super) fn canonical_url(raw: &str, source: &SourceInput) -> Result<String> {
 }
 
 pub(super) fn body_snapshot(data: &[u8], url: &str, publisher: &str) -> Result<(String, Value)> {
+    let parsed = reqwest::Url::parse(url).ok();
+    if parsed
+        .as_ref()
+        .and_then(|url| url.host_str())
+        .is_some_and(|host| matches!(host, "www.welivesecurity.com" | "welivesecurity.com"))
+    {
+        // WeLiveSecurity uses a div, not the semantic article/main elements.
+        // Scope this adapter to the publisher; don't treat arbitrary page divs as evidence.
+        return Ok((
+            parse::article_text_with_selector(data, ".article-body")?,
+            json!({"method":"remote_html","selector":".article-body"}),
+        ));
+    }
     let wechat = reqwest::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned))

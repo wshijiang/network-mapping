@@ -1,5 +1,108 @@
 use super::*;
 
+#[test]
+fn welivesecurity_div_body_is_scoped_to_publisher_and_excludes_page_chrome() {
+    let html = br#"<html><body><nav>outside-nav.example</nav>
+      <main><div class="article-header">outside-header.example</div>
+      <div class="article-body"><p>The report identifies malicious infrastructure at evil.example.</p>
+      <script>script.example</script><style>style.example</style><nav>inner-nav.example</nav>
+      <p hidden>hidden.example</p><p aria-hidden="true">aria-hidden.example</p>
+      <table><tr><td>AS64496</td></tr></table></div>
+      <div class="post-related-articles">related.example</div></main></body></html>"#;
+    for host in ["www.welivesecurity.com", "welivesecurity.com"] {
+        let (body, metadata) =
+            articles::body_snapshot(html, &format!("https://{host}/en/report/"), "").unwrap();
+        assert!(body.contains("evil.example"));
+        assert!(body.contains("AS64496"));
+        for excluded in [
+            "outside-",
+            "script.example",
+            "style.example",
+            "nav.example",
+            "hidden.example",
+            "related.example",
+        ] {
+            assert!(!body.contains(excluded), "{excluded}");
+        }
+        assert_eq!(metadata["selector"], ".article-body");
+    }
+    let div_only = br#"<div class="article-body">The report identifies evil.example as malicious infrastructure.</div>"#;
+    assert!(
+        articles::body_snapshot(div_only, "https://www.welivesecurity.com/en/report/", "").is_ok()
+    );
+    assert!(articles::body_snapshot(div_only, "https://other.example/report/", "").is_err());
+    let challenge = br#"<main>Please verify you are human before reading this report.</main>"#;
+    let error = articles::body_snapshot(challenge, "https://www.welivesecurity.com/en/report/", "")
+        .unwrap_err();
+    assert_eq!(error.code, "intel_article_body_missing");
+    assert_eq!(error.diagnostic["selector"], ".article-body");
+    assert_eq!(error.diagnostic["reason"], "selector_not_found");
+    let short = articles::body_snapshot(
+        br#"<div class="article-body">Verify</div>"#,
+        "https://www.welivesecurity.com/en/report/",
+        "",
+    )
+    .unwrap_err();
+    assert_eq!(short.diagnostic["reason"], "text_too_short");
+}
+
+#[test]
+fn optional_live_welivesecurity_html_fixture_is_extracted() {
+    if let Some(path) = std::env::var_os("NM_INTEL_ESET_HTML_FIXTURE") {
+        let data = std::fs::read(path).unwrap();
+        let (body, metadata) =
+            articles::body_snapshot(&data, "https://www.welivesecurity.com/en/report/", "")
+                .unwrap();
+        assert!(body.len() > 1000);
+        assert_eq!(metadata["selector"], ".article-body");
+    }
+}
+
+#[tokio::test]
+async fn transport_diagnostics_classify_timeout_and_refusal_without_secret_urls() {
+    use std::time::Duration;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (_socket, _) = listener.accept().await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let error = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_millis(100))
+        .build()
+        .unwrap()
+        .get(format!(
+            "https://{address}/private-path-key?token=private-query-key"
+        ))
+        .send()
+        .await
+        .unwrap_err();
+    let diagnostic = client::transport_error(error).stage("ai_request").report();
+    server.abort();
+    assert_eq!(diagnostic["code"], "intel_source_timeout");
+    assert_eq!(diagnostic["timeout"], true);
+    assert_eq!(diagnostic["stage"], "ai_request");
+    assert!(!diagnostic.to_string().contains("private-"));
+    assert!(diagnostic.get("occurred_at").is_some());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let error = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!("https://{address}/secret"))
+        .send()
+        .await
+        .unwrap_err();
+    let diagnostic = client::transport_error(error).report();
+    assert_eq!(diagnostic["connect"], true);
+    assert_eq!(diagnostic["io_kind"], "ConnectionRefused");
+    assert!(!diagnostic.to_string().contains("secret"));
+}
+
 #[tokio::test]
 async fn proxy_remote_dns_does_not_require_local_target_dns_and_direct_access_stays_guarded() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2332,6 +2435,16 @@ async fn current_article_provider_failure_preserves_snapshot_and_allows_retry() 
     assert_eq!(body, "The report identifies malicious infrastructure.");
     assert_eq!(row.get::<_, String>("body_hash"), digest(body.as_bytes()));
     assert_eq!(row.get::<_, Value>("extraction_metadata")["model"], "test");
+    let metadata = row.get::<_, Value>("extraction_metadata");
+    assert_eq!(metadata["last_error"]["stage"], "ai_settings");
+    assert_eq!(metadata["last_error"]["code"], "intel_credential_missing");
+    assert!(metadata["last_error"]["occurred_at"].is_string());
+    assert!(metadata["last_error"]["total_elapsed_ms"].is_number());
+    assert!(
+        !metadata["last_error"]
+            .to_string()
+            .contains("NM_INTEL_TEST_MISSING")
+    );
     let app = http_test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))

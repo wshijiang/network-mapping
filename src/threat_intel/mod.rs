@@ -36,6 +36,8 @@ use model::*;
 struct Error {
     status: StatusCode,
     code: &'static str,
+    // Only explicitly allowlisted diagnostics; never raw upstream errors or bodies.
+    diagnostic: Value,
 }
 type Result<T> = std::result::Result<T, Error>;
 impl Error {
@@ -43,30 +45,53 @@ impl Error {
         Self {
             status: StatusCode::BAD_REQUEST,
             code,
+            diagnostic: json!({}),
         }
     }
     fn conflict() -> Self {
         Self {
             status: StatusCode::CONFLICT,
             code: "intel_revision_conflict",
+            diagnostic: json!({}),
         }
     }
     fn missing() -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             code: "intel_not_found",
+            diagnostic: json!({}),
         }
     }
     fn unavailable() -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "intel_storage_unavailable",
+            diagnostic: json!({}),
         }
+    }
+    fn context(mut self, fields: Value) -> Self {
+        if let Some(fields) = fields.as_object() {
+            for (key, value) in fields {
+                self.diagnostic[key] = value.clone();
+            }
+        }
+        self
+    }
+    fn stage(self, stage: &'static str) -> Self {
+        self.context(json!({"stage": stage}))
+    }
+    fn report(&self) -> Value {
+        let mut report = self.diagnostic.clone();
+        report["code"] = json!(self.code);
+        report["occurred_at"] = json!(chrono::Utc::now());
+        report
     }
 }
 impl From<tokio_postgres::Error> for Error {
-    fn from(_: tokio_postgres::Error) -> Self {
-        Self::unavailable()
+    fn from(error: tokio_postgres::Error) -> Self {
+        Self::unavailable().context(json!({
+            "sqlstate":error.code().map(|code| code.code()), "connection_closed":error.is_closed()
+        }))
     }
 }
 impl From<deadpool_postgres::PoolError> for Error {
@@ -81,6 +106,7 @@ fn admin(user: &UserBaseI) -> Result<()> {
         Err(Error {
             status: StatusCode::FORBIDDEN,
             code: "intel_admin_required",
+            diagnostic: json!({}),
         })
     }
 }
