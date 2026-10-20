@@ -276,8 +276,8 @@ async fn jobs(pool: web::Data<Pool>, user: UserBaseI) -> HttpResponse {
 async fn articles(pool: web::Data<Pool>, user: UserBaseI) -> HttpResponse {
     response(async {
     admin(&user)?;
-    let rows=pool.get().await?.query("SELECT a.*,s.name AS source_name FROM intel_article a JOIN intel_source s ON s.id=a.source_id ORDER BY created_at DESC LIMIT 100",&[]).await?;
-    Ok(json!({"items":rows.iter().map(|r|json!({"id":r.get::<_,Uuid>("id"),"source_name":r.get::<_,String>("source_name"),"url":r.get::<_,String>("url"),"title":r.get::<_,String>("title"),"status":r.get::<_,String>("status"),"body_hash":r.get::<_,Option<String>>("body_hash"),"error_code":r.get::<_,Option<String>>("error_code"),"extraction_metadata":r.get::<_,Value>("extraction_metadata"),"created_at":r.get::<_,chrono::DateTime<chrono::Utc>>("created_at")})).collect::<Vec<_>>()}))
+    let rows=pool.get().await?.query("SELECT a.*,s.name AS source_name,counts.record_count,counts.pending_count FROM (SELECT * FROM intel_article ORDER BY created_at DESC LIMIT 100) a JOIN intel_source s ON s.id=a.source_id CROSS JOIN LATERAL (SELECT COUNT(*) AS record_count,COUNT(*) FILTER (WHERE r.status='pending') AS pending_count FROM intel_record r WHERE r.article_id=a.id AND r.source_id=a.source_id AND r.origin='ai') counts ORDER BY a.created_at DESC",&[]).await?;
+    Ok(json!({"items":rows.iter().map(|r|json!({"id":r.get::<_,Uuid>("id"),"source_name":r.get::<_,String>("source_name"),"url":r.get::<_,String>("url"),"title":r.get::<_,String>("title"),"status":r.get::<_,String>("status"),"record_count":r.get::<_,i64>("record_count"),"pending_count":r.get::<_,i64>("pending_count"),"body_hash":r.get::<_,Option<String>>("body_hash"),"error_code":r.get::<_,Option<String>>("error_code"),"extraction_metadata":r.get::<_,Value>("extraction_metadata"),"created_at":r.get::<_,chrono::DateTime<chrono::Utc>>("created_at")})).collect::<Vec<_>>()}))
 }.await)
 }
 async fn article_detail(
@@ -315,7 +315,7 @@ async fn retry_article(
     response(async {
     admin(&user)?;if !storage::settings(&pool).await?.0.ai_enabled{return Err(Error::bad("intel_ai_disabled"));}
     let mut c=pool.get().await?;let tx=c.transaction().await?;let id=id.into_inner();
-    let changed=tx.execute("UPDATE intel_article a SET status='queued',attempts=0,error_code=NULL,available_at=NOW() FROM intel_source s WHERE a.id=$1 AND a.source_id=s.id AND a.source_revision=s.revision AND s.enabled AND s.kind IN ('rss','article') AND a.status IN ('failed','cancelled','proposed')",&[&id]).await?;
+    let changed=tx.execute("UPDATE intel_article a SET status='queued',attempts=0,error_code=NULL,available_at=NOW() FROM intel_source s WHERE a.id=$1 AND a.source_id=s.id AND a.source_revision=s.revision AND s.enabled AND s.kind IN ('rss','article') AND a.status IN ('failed','cancelled','proposed','succeeded')",&[&id]).await?;
     if changed==0{return Err(Error::conflict());}
     audit(&tx,&user,&AuditContext::from_request(&req),"intel.article.retry",&id.to_string(),json!({})).await?;tx.commit().await?;Ok(json!({"id":id}))
 }.await)

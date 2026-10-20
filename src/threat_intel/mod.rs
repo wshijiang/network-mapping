@@ -1,6 +1,7 @@
 //! Source-trusted IOC ingestion and mandatory, version-bound AI review.
 //! Published facts are matched at read time after asset authorization. Scanner
 //! observations and upload checksums never contain these mutable annotations.
+mod article_body;
 mod articles;
 mod batch;
 pub mod cli;

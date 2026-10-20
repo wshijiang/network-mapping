@@ -447,8 +447,17 @@ HTTPS 地址。正文可留空由后台抓取，或粘贴 40～100,000 UTF-8 字
 不能填公众号昵称。抓取后核对页面脚本中的账号标识并读取 `#js_content`，保留正文和
 表格文本，排除脚本、导航及隐藏文本。不执行页面脚本、不绕过验证页；账号不一致、
 正文缺失或网络受限时失败并可重试。`mp.weixin.qq.com` 域名白名单本身不代表账号可信。
-普通文章继续读取 article/main；WeLiveSecurity 的两个官方域名使用 `.article-body`
-正文容器，避免把页面导航、侧栏与推荐文章作为证据。RSS 发现的微信链接也执行账号核对。
+普通文章使用通用静态正文提取：优先识别 `articleBody`、WordPress/Ghost 等常见正文
+容器与 `<article>`，再读取明确标为 Article/NewsArticle/BlogPosting 等类型的 JSON-LD
+`articleBody`；随后尝试 `<main>` 与主体角色，最后按段落数量、正文占比和链接占比选择
+无标准标记的内容块。排除导航、页头页尾、侧栏、推荐文章、脚本和隐藏文本；内联标签
+不拆散 IOC，保留表格内容。WeLiveSecurity 的 `.article-body` 仅为优先适配，失败后同样
+走通用流程；RSS 来源和 AI 分析不限定厂商。RSS 发现的微信链接仍执行账号核对。
+
+RSS 2.0 与 Atom 使用同一发现队列，Atom 链接支持自闭合/成对标签和 XML 实体解码。
+来源需要显式允许 RSS 主机和文章主机；不会自动访问白名单外的文章域名。通用提取
+不保证所有页面成功：不执行 JavaScript、不绕过验证/登录页、不读取整页导航或把摘要
+当作正文；取不到正文时保留可重试失败，可由管理员提交正文快照。
 
 微信链接只保留文章身份参数 __biz、mid、idx、sn；去掉 poc_token 等访问/跟踪参数，
 规范化地址用于保存、抓取、引用和 AI 输入。手动正文标记为
@@ -473,12 +482,23 @@ Completions；不支持使用 `input` / `output` 的 Responses API。接口需�
 响应格式不匹配时错误详情记录预期字段及是否发现 Responses 的 `output` 字段，不保存响应正文。
 首版提取只有一个独立 worker，单次正文
 最多 100,000 字节、输出最多 200 条 IOC，模型回复预算 8,000 tokens；文章和模型回复
-HTTP 读取上限各为 2 MiB，RSS/Atom 解析上限 4 MiB；单次 HTTP
-超时 30 秒。来源同步 worker 独立运行，不等待 AI 成功。
+HTTP 读取上限各为 2 MiB，RSS/Atom 解析上限 4 MiB。管理页的“AI 请求超时（秒）”
+默认 180 秒，可设为 1～1800 的整数，对应设置 API 的 `ai_timeout_seconds`；旧配置缺省时
+自动使用 180 秒。该时限覆盖 AI 请求到响应体读取完成；连接阶段仍限制为 10 秒。
+文章总处理时限为 AI 请求超时加 120 秒，任务租约再多 30 秒，避免长请求提前失去租约。
+普通原文请求为 30 秒，ThreatFox 增量下载为 120 秒。来源同步 worker 独立运行，不等待 AI 成功。
 
 RSS/Atom 只发现白名单域名文章；去除脚本、导航及隐藏文本后保存文章快照。重试使用
 已保存快照，避免审批引用变化的正文。候选组织来自有效 MITRE 基准库，模型不能创建
 新组织。提议必须附带在正文中可定位、包含该 IOC 的原文证据。
+仅证据不符的条目会被单独剔除，其余有效条目生成待审提议；全部证据不符时仍标为失败。
+未知字段、非法指标、响应格式和数量超限等错误仍拒绝整批结果。
+
+AI 返回空 IOC 数组属于正常完成，文章保存为 `succeeded`，显示“提取已完成，未生成提议”。
+文章列表接口返回 `record_count` 与 `pending_count`，页面按真实待审数显示状态；历史
+`proposed` 记录也使用这两个计数，不再把空结果显示成已生成提议。审核完毕的文章显示
+无待审提议。`extraction_metadata.result` 保存本次有效解析数 `parsed`、实际新增数
+`inserted` 及证据拒绝摘要 `validation`；重复写入不会计入新增数。已完成文章仍可重新提取。
 
 ### 文章失败诊断与日志
 
@@ -486,7 +506,10 @@ RSS/Atom 只发现白名单域名文章；去除脚本、导航及隐藏文本�
 和尝试次数。HTTP 失败还记录目标主机/端口、方法、请求阶段、状态码、耗时、读取大小、超时/
 连接标志及可用的系统错误类别/编号。`cause_hint` 是 TLS 证书、TLS 握手或代理隧道的分类提示，
 不包含原始异常文本；`proxy_env_keys` 只列出已设置的代理变量名，不代表该请求实际使用了代理。
-正文解析失败记录选择器、页面大小和 `selector_not_found` / `text_too_short` 原因。
+正文解析失败记录选择器、页面大小，以及 `selector_not_found`、`text_too_short`、
+`no_valid_article_candidate` 或 `challenge_page` 原因。
+AI 证据失败记录条目序号 `record`、拒绝数 `rejected` 和固定原因分类；不记录模型返回文本。
+HTTP 诊断记录 `timeout_seconds`，文章失败还记录 `processing_timeout_seconds`。
 
 处理阶段包括 `article_fetch`（抓取原文）、`article_parse`（解析正文）、`ai_settings`（读取模型配置/
 凭据）、`ai_request`（请求 AI）、`ai_response`（解析响应）、`ai_validate`（校验证据）和
@@ -502,7 +525,7 @@ RSS/Atom 只发现白名单域名文章；去除脚本、导航及隐藏文本�
 服务端沿用 `[log].directory`、`[log].file_name` 和滚动配置写入 JSON 日志，无需开启 DEBUG：
 
 - `IntelArticleExtractionFailed`：文章 ID、来源 ID、claim token、尝试次数、错误代码和诊断。
-- `IntelArticleExtractionSucceeded`：文章任务完成及生成提议数（可能为 0）。
+- `IntelArticleExtractionSucceeded`：文章任务完成、有效解析数 `indicators`、实际新增数 `inserted` 和证据拒绝数 `rejected`（均可能为 0）。
 - `IntelHttpRequestFailed`：网络请求的脱敏诊断；文章请求还带 `intel_article` span 的关联 ID。
 - `IntelSourceSyncFailed`：来源同步作业 ID、来源 ID 及失败诊断。
 - `IntelAiWorkerFailed` / `IntelSourceWorkerFailed`：队列读取或结果持久化等 worker 级故障。
@@ -654,7 +677,8 @@ BOM/CRLF、多行字段和空参考值；URL 回归包含官方 MISP 的 SMB 与
 `NM_INTEL_HTTPS_SMOKE=1` 在代理测试中附加真实 GitHub HTTPS 读取，使用现有代理和 CA，
 无需上游凭据；默认测试仅使用本地代理 fixture。
 `NM_INTEL_ESET_HTML_FIXTURE=/absolute/path/article.html` 可附加验证本地保存的真实
-WeLiveSecurity 页面正文提取；文件仅用于测试，不提交正文到仓库。
+WeLiveSecurity 页面正文提取；`NM_INTEL_GENERIC_HTML_FIXTURE=/absolute/path/article.html`
+可验证任意发布站点的通用提取，不启用站点专用适配。文件仅用于测试，不提交正文到仓库。
 若已有官方完整导出 ZIP，可使用生产流式解析器验证两个本地文件（不会下载或发布 IOC）：
 
 ```sh

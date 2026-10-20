@@ -333,10 +333,15 @@ pub(super) struct Settings {
     pub ai_endpoint: String,
     pub ai_model: String,
     pub ai_key_env: String,
+    #[serde(default = "default_ai_timeout_seconds")]
+    pub ai_timeout_seconds: u64,
     #[serde(default, skip_serializing)]
     pub credential: String,
     #[serde(default, skip_serializing)]
     pub clear_credential: bool,
+}
+fn default_ai_timeout_seconds() -> u64 {
+    180
 }
 impl Settings {
     pub fn validate(&self) -> Result<()> {
@@ -352,7 +357,20 @@ impl Settings {
         {
             return Err(Error::bad("intel_invalid_ai_settings"));
         }
+        if !(1..=1800).contains(&self.ai_timeout_seconds) {
+            return Err(Error::bad("intel_invalid_ai_timeout"));
+        }
         Ok(())
+    }
+
+    pub fn ai_processing_timeout(&self) -> std::time::Duration {
+        // Allow fetching the article and validating/storing the response in addition
+        // to the full configured AI request timeout.
+        std::time::Duration::from_secs(self.ai_timeout_seconds.clamp(1, 1800) + 120)
+    }
+
+    pub fn ai_lease_seconds(&self) -> i32 {
+        self.ai_processing_timeout().as_secs() as i32 + 30
     }
 }
 

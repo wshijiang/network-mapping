@@ -158,6 +158,16 @@ pub(super) async fn request_bounded(
     auth: Option<(&str, &str)>,
     limit: usize,
 ) -> Result<Vec<u8>> {
+    request_bounded_with_timeout(location, hosts, post, auth, limit, Duration::from_secs(30)).await
+}
+pub(super) async fn request_bounded_with_timeout(
+    location: &str,
+    hosts: &[String],
+    post: Option<&Value>,
+    auth: Option<(&str, &str)>,
+    limit: usize,
+    timeout: Duration,
+) -> Result<Vec<u8>> {
     let started = std::time::Instant::now();
     let url = validate_url(location, hosts)?;
     let host = url.host_str().unwrap();
@@ -175,7 +185,7 @@ pub(super) async fn request_bounded(
     .join(", ");
     let context = json!({"host":host,"port":url.port_or_known_default(),
         "method":if post.is_some() {"POST"} else {"GET"},"limit_bytes":limit,
-        "proxy_env_keys":proxy_env_keys});
+        "proxy_env_keys":proxy_env_keys,"timeout_seconds":timeout.as_secs()});
     let result = async {
         // Keep reqwest's proxy / NO_PROXY selection and native TLS roots. Direct
         // destinations are validated by the resolver before returning pinned IPs.
@@ -192,7 +202,7 @@ pub(super) async fn request_bounded(
             request = request.header(header, key);
         }
         // Never include reqwest errors or URLs: an upstream export may put a key in its path.
-        let mut response = request.send().await.map_err(|e| {
+        let mut response = request.timeout(timeout).send().await.map_err(|e| {
             transport_error(e).context(json!({"phase":"send"}))
         })?;
         let status = response.status().as_u16();
@@ -262,11 +272,19 @@ pub(super) async fn source_bytes(
             k,
         )
     });
-    request(
+    request_bounded_with_timeout(
         &source.input.location,
         &source.input.allowed_hosts,
         post.as_ref(),
         auth,
+        MAX_BYTES,
+        // A seven-day ThreatFox response can take longer than the small-article
+        // budget to download. Keep it within the 150-second source job deadline.
+        Duration::from_secs(if source.input.kind == "threatfox" {
+            120
+        } else {
+            30
+        }),
     )
     .await
 }

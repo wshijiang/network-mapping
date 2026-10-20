@@ -346,7 +346,7 @@ pub(super) async fn ai_tick(pool: &Pool, encryption_key: &str) -> Result<bool> {
     let source_id: Uuid = row.get("source_id");
     let url: String = row.get("url");
     let token = Uuid::new_v4();
-    tx.execute("UPDATE intel_article SET status='running',attempts=attempts+1,claim_token=$2,lease_until=NOW()+INTERVAL '3 minutes' WHERE id=$1",&[&id,&token]).await?;
+    tx.execute("UPDATE intel_article SET status='running',attempts=attempts+1,claim_token=$2,lease_until=NOW()+$3::INTEGER*INTERVAL '1 second' WHERE id=$1",&[&id,&token,&settings.ai_lease_seconds()]).await?;
     tx.commit().await?;
     drop(c);
     let result = extract(
@@ -365,11 +365,12 @@ pub(super) async fn ai_tick(pool: &Pool, encryption_key: &str) -> Result<bool> {
         tracing::info_span!("intel_article",article_id=%id,source_id=%source_id,claim_token=%token),
     )
     .await;
-    let (state, error, diagnostic) = match result {
-        Ok(count) => {
+    let (state, error, diagnostic, summary) = match result {
+        Ok(summary) => {
             tracing::info!(event="IntelArticleExtractionSucceeded",article_id=%id,source_id=%source_id,
-                claim_token=%token,indicators=count);
-            ("proposed", None, Value::Null)
+                claim_token=%token,indicators=summary.parsed,inserted=summary.inserted,
+                rejected=summary.validation.rejected);
+            (summary.state(), None, Value::Null, json!(summary))
         }
         Err(e) => {
             let code = e.code;
@@ -387,6 +388,7 @@ pub(super) async fn ai_tick(pool: &Pool, encryption_key: &str) -> Result<bool> {
                 },
                 Some(code),
                 diagnostic,
+                Value::Null,
             )
         }
     };
@@ -395,17 +397,32 @@ pub(super) async fn ai_tick(pool: &Pool, encryption_key: &str) -> Result<bool> {
           status=CASE WHEN a.source_revision<>s.revision OR NOT s.enabled OR s.kind NOT IN ('rss','article') THEN 'cancelled' ELSE $3 END,
           error_code=CASE WHEN a.source_revision<>s.revision OR NOT s.enabled OR s.kind NOT IN ('rss','article') THEN 'intel_source_changed' ELSE $4 END,
           attempts=CASE WHEN $3='queued' THEN GREATEST(a.attempts-1,0) ELSE a.attempts END,
-          extraction_metadata=(a.extraction_metadata-'last_error') || CASE WHEN $5::JSONB='null'::JSONB THEN '{}'::JSONB ELSE jsonb_build_object('last_error',$5::JSONB) END,
+          extraction_metadata=(a.extraction_metadata-'last_error'-'result') || CASE WHEN $5::JSONB='null'::JSONB THEN jsonb_build_object('result',$6::JSONB) ELSE jsonb_build_object('last_error',$5::JSONB) END,
           claim_token=NULL,lease_until=NULL
         FROM intel_source s WHERE a.source_id=s.id AND a.id=$1 AND a.claim_token=$2
           AND a.status='running' AND a.lease_until>NOW()
-        "#, &[&id,&token,&state,&error,&diagnostic]).await?;
+        "#, &[&id,&token,&state,&error,&diagnostic,&summary]).await?;
     Ok(true)
 }
 struct AiConfig<'a> {
     settings: &'a Settings,
     revision: i64,
     encryption_key: &'a str,
+}
+#[derive(Serialize)]
+struct ExtractionSummary {
+    parsed: usize,
+    inserted: usize,
+    validation: ValidationReport,
+}
+impl ExtractionSummary {
+    fn state(&self) -> &'static str {
+        if self.parsed == 0 {
+            "succeeded"
+        } else {
+            "proposed"
+        }
+    }
 }
 async fn extract(
     pool: &Pool,
@@ -414,10 +431,11 @@ async fn extract(
     url: &str,
     config: AiConfig<'_>,
     token: Uuid,
-) -> Result<usize> {
+) -> Result<ExtractionSummary> {
     let started = std::time::Instant::now();
     let mut stage = "source_load";
-    let result = tokio::time::timeout(Duration::from_secs(150), async {
+    let processing_timeout = config.settings.ai_processing_timeout();
+    let result = tokio::time::timeout(processing_timeout, async {
         let AiConfig {
             settings,
             revision: settings_revision,
@@ -441,6 +459,11 @@ async fn extract(
             return Err(Error::bad("intel_source_changed"));
         }
         let mut metadata: Value = saved.get("extraction_metadata");
+        if let Some(fields) = metadata.as_object_mut() {
+            // Previous run results are not part of a new proposal's identity.
+            fields.remove("last_error");
+            fields.remove("result");
+        }
         let body = if let Some(body) = saved.get::<_, Option<String>>("body") {
             body
         } else {
@@ -485,18 +508,19 @@ async fn extract(
         let request = json!({"model":settings.ai_model,"messages":[{"role":"system","content":prompt},{"role":"user","content":json!({"actor_candidates":candidates,"report_url":url,"untrusted_report_text":body}).to_string()}],"response_format":{"type":"json_object"},"max_tokens":8000});
         let authorization = format!("Bearer {key}");
         stage = "ai_request";
-        let data = client::request_bounded(
+        let data = client::request_bounded_with_timeout(
             endpoint.as_str(),
             &[endpoint.host_str().unwrap().to_owned()],
             Some(&request),
             Some(("Authorization", &authorization)),
             2 * 1024 * 1024,
+            Duration::from_secs(settings.ai_timeout_seconds.clamp(1, 1800)),
         )
         .await.map_err(ai_request_error)?;
         stage = "ai_response";
         let content = ai_response_content(&data)?;
         stage = "ai_validate";
-        let entries = parse::ai_result(&content, &body)?;
+        let (entries, validation) = parse::ai_result_isolated(&content, &body)?;
         let count = entries.len();
         let (current, revision) = storage::settings(pool).await?;
         if !current.ai_enabled {
@@ -512,9 +536,10 @@ async fn extract(
             return Err(Error::bad("intel_ai_lease_lost"));
         }
         stage = "indicator_store";
+        let mut inserted = 0;
         for mut i in entries {
             i.reference = Some(url.into());
-            storage::ingest(
+            if storage::ingest(
                 pool,
                 &source,
                 i,
@@ -524,15 +549,18 @@ async fn extract(
                 },
                 &format!("{url}#"),
             )
-            .await?;
+            .await? {
+                inserted += 1;
+            }
         }
-        Ok(count)
+        Ok(ExtractionSummary { parsed: count, inserted, validation })
     })
     .await
     .unwrap_or_else(|_| Err(Error::bad("intel_ai_timeout")));
     result.map_err(|e: Error| {
         e.stage(stage).context(json!({
-            "total_elapsed_ms":started.elapsed().as_millis() as u64
+            "total_elapsed_ms":started.elapsed().as_millis() as u64,
+            "processing_timeout_seconds":processing_timeout.as_secs()
         }))
     })
 }
@@ -574,6 +602,19 @@ fn ai_request_error(mut error: Error) -> Error {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn empty_extractions_are_completed_without_claiming_to_create_proposals() {
+        let mut summary = ExtractionSummary {
+            parsed: 0,
+            inserted: 0,
+            validation: ValidationReport::default(),
+        };
+        assert_eq!(summary.state(), "succeeded");
+        summary.parsed = 2;
+        assert_eq!(summary.state(), "proposed");
+        assert_eq!(json!(summary)["inserted"], 0);
+    }
 
     #[test]
     fn incompatible_ai_responses_have_safe_format_diagnostics() {

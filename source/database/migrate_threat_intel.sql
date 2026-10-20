@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS intel_article (
     feed_hash TEXT NOT NULL,
     body_hash TEXT,
     body TEXT,
-    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','proposed','failed','cancelled')),
+    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','proposed','succeeded','failed','cancelled')),
     attempts INTEGER NOT NULL DEFAULT 0,
     claim_token UUID,
     lease_until TIMESTAMPTZ,
@@ -133,6 +133,9 @@ CREATE TABLE IF NOT EXISTS intel_article (
     UNIQUE(source_id,id)
 );
 -- Upgrade existing installations without changing old snapshots/review evidence.
+ALTER TABLE intel_article DROP CONSTRAINT IF EXISTS intel_article_status_check;
+ALTER TABLE intel_article ADD CONSTRAINT intel_article_status_check
+ CHECK(status IN ('queued','running','proposed','succeeded','failed','cancelled'));
 ALTER TABLE intel_article DROP CONSTRAINT IF EXISTS intel_article_source_id_url_feed_hash_key;
 CREATE UNIQUE INDEX IF NOT EXISTS intel_article_source_version
  ON intel_article(source_id,url,feed_hash,source_revision);
@@ -172,6 +175,7 @@ CREATE TABLE IF NOT EXISTS intel_record (
     CHECK(origin <> 'ai' OR status <> 'approved' OR review_id IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS intel_record_published ON intel_record(kind,value) WHERE status='approved';
+CREATE INDEX IF NOT EXISTS intel_record_article ON intel_record(article_id) WHERE origin='ai';
 CREATE INDEX IF NOT EXISTS intel_record_match_key ON intel_record((kind||':'||value)) WHERE status='approved';
 CREATE INDEX IF NOT EXISTS intel_record_attack_types ON intel_record USING GIN ((payload->'attack_types'));
 CREATE INDEX IF NOT EXISTS intel_record_queue ON intel_record(status,created_at);

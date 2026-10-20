@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn welivesecurity_div_body_is_scoped_to_publisher_and_excludes_page_chrome() {
+fn welivesecurity_preferred_body_and_generic_fallback_exclude_page_chrome() {
     let html = br#"<html><body><nav>outside-nav.example</nav>
       <main><div class="article-header">outside-header.example</div>
       <div class="article-body"><p>The report identifies malicious infrastructure at evil.example.</p>
@@ -30,20 +30,20 @@ fn welivesecurity_div_body_is_scoped_to_publisher_and_excludes_page_chrome() {
     assert!(
         articles::body_snapshot(div_only, "https://www.welivesecurity.com/en/report/", "").is_ok()
     );
-    assert!(articles::body_snapshot(div_only, "https://other.example/report/", "").is_err());
+    assert!(articles::body_snapshot(div_only, "https://other.example/report/", "").is_ok());
     let challenge = br#"<main>Please verify you are human before reading this report.</main>"#;
     let error = articles::body_snapshot(challenge, "https://www.welivesecurity.com/en/report/", "")
         .unwrap_err();
     assert_eq!(error.code, "intel_article_body_missing");
     assert_eq!(error.diagnostic["selector"], ".article-body");
-    assert_eq!(error.diagnostic["reason"], "selector_not_found");
+    assert_eq!(error.diagnostic["reason"], "no_valid_article_candidate");
     let short = articles::body_snapshot(
         br#"<div class="article-body">Verify</div>"#,
         "https://www.welivesecurity.com/en/report/",
         "",
     )
     .unwrap_err();
-    assert_eq!(short.diagnostic["reason"], "text_too_short");
+    assert_eq!(short.diagnostic["reason"], "no_valid_article_candidate");
 }
 
 #[test]
@@ -226,6 +226,77 @@ fn ai_schema_requires_grounded_ioc_evidence_and_rejects_trust_flags() {
 }
 
 #[test]
+fn ai_timeout_defaults_survive_old_settings_and_validate_bounds() {
+    let legacy = json!({"ai_enabled":true,"ai_endpoint":"https://api.example/chat","ai_model":"test","ai_key_env":""});
+    let mut settings: Settings = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(settings.ai_timeout_seconds, 180);
+    assert_eq!(settings.ai_processing_timeout().as_secs(), 300);
+    assert_eq!(settings.ai_lease_seconds(), 330);
+    assert_eq!(json!(settings)["ai_timeout_seconds"], 180);
+    for seconds in [1, 180, 600, 1800] {
+        settings.ai_timeout_seconds = seconds;
+        settings.validate().unwrap();
+        assert!(settings.ai_processing_timeout().as_secs() > seconds);
+        assert!(settings.ai_lease_seconds() as u64 > settings.ai_processing_timeout().as_secs());
+    }
+    for seconds in [0, 1801, u64::MAX] {
+        settings.ai_timeout_seconds = seconds;
+        assert_eq!(
+            settings.validate().unwrap_err().code,
+            "intel_invalid_ai_timeout"
+        );
+    }
+    for value in [json!(-1), json!(1.5), json!("180"), Value::Null] {
+        let mut invalid = legacy.clone();
+        invalid["ai_timeout_seconds"] = value;
+        assert!(serde_json::from_value::<Settings>(invalid).is_err());
+    }
+}
+
+#[test]
+fn ai_isolates_only_ungrounded_evidence_and_distinguishes_empty_results() {
+    let body = "The researchers identified evil.example as a malicious C2 domain in this campaign.";
+    let valid = json!({"type":"domain","value":"evil.example","evidence":body});
+    let invalid = json!({"type":"domain","value":"invented.example","evidence":"This private AI paraphrase is not in the original report."});
+    let output = json!({"iocs":[invalid.clone(),valid.clone()]});
+    let (entries, report) = parse::ai_result_isolated(&output.to_string(), body).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].value, "evil.example");
+    assert_eq!(report.rejected, 1);
+    assert_eq!(report.rejection_samples[0]["record"], 1);
+    assert_eq!(
+        report.rejection_samples[0]["reason"],
+        "evidence_not_in_body"
+    );
+    let diagnostic = json!(report).to_string();
+    assert!(!diagnostic.contains("invented.example"));
+    assert!(!diagnostic.contains("private AI"));
+
+    let error =
+        parse::ai_result_isolated(&json!({"iocs":[invalid]}).to_string(), body).unwrap_err();
+    assert_eq!(error.code, "intel_ai_evidence_not_found");
+    assert_eq!(error.diagnostic["rejected"], 1);
+    let (empty, report) = parse::ai_result_isolated(r#"{"iocs":[]}"#, body).unwrap();
+    assert!(empty.is_empty());
+    assert_eq!(report.rejected, 0);
+
+    let mut forged = valid.clone();
+    forged["approved"] = json!(true);
+    assert_eq!(
+        parse::ai_result_isolated(&json!({"iocs":[valid,forged]}).to_string(), body)
+            .unwrap_err()
+            .code,
+        "intel_ai_invalid_schema"
+    );
+    assert_eq!(
+        parse::ai_result_isolated(r#"{"iocs":[],"status":"approved"}"#, body)
+            .unwrap_err()
+            .code,
+        "intel_ai_invalid_schema"
+    );
+}
+
+#[test]
 fn rss_atom_and_markdown_preserve_structure_without_inventing_indicators() {
     let rss=br#"<rss><channel><item><title>Report &amp; evidence</title><link>https://research.example/report?x=1&amp;y=2</link><description><![CDATA[Research]]></description></item></channel></rss>"#;
     let rows = parse::rss(rss, &["research.example".into()]).unwrap();
@@ -249,6 +320,30 @@ fn rss_atom_and_markdown_preserve_structure_without_inventing_indicators() {
     assert!(!body.contains("ignore"));
     assert!(!body.contains("hidden.example"));
     assert!(body.contains("evil.example"));
+}
+
+#[test]
+fn atom_links_accept_both_tag_forms_and_decode_entities_without_selecting_self_links() {
+    for close in ["/>", "></link>"] {
+        let feed = format!(
+            r#"<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Generic report</title><link rel="self" href="https://publisher.example/feed-item"/><link rel="alternate" href="https://publisher.example/report?a=1&amp;b=2"{close}<summary>Report summary</summary></entry></feed>"#
+        );
+        let links = parse::rss(feed.as_bytes(), &["publisher.example".into()]).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, "https://publisher.example/report?a=1&b=2");
+    }
+}
+
+#[test]
+fn optional_generic_publisher_html_fixture_is_extracted_without_host_adapters() {
+    if let Some(path) = std::env::var_os("NM_INTEL_GENERIC_HTML_FIXTURE") {
+        let data = std::fs::read(path).unwrap();
+        let (body, metadata) =
+            articles::body_snapshot(&data, "https://generic-publisher.example/report/", "")
+                .unwrap();
+        assert!(body.len() > 1000);
+        assert_eq!(metadata["extractor"], "generic-v1");
+    }
 }
 
 #[test]
@@ -1117,6 +1212,7 @@ async fn ai_enabled(pool: &Pool, enabled: bool) {
             ai_endpoint: "https://api.example/v1/chat/completions".into(),
             ai_model: "test".into(),
             ai_key_env: "NM_INTEL_TEST_AI_KEY".into(),
+            ai_timeout_seconds: 180,
             credential: String::new(),
             clear_credential: false,
         },
@@ -2395,6 +2491,145 @@ async fn stale_article_cannot_be_claimed_retried_or_relabelled_with_new_source_r
     assert!(
         row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("lease_until")
             .is_none()
+    );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn article_counts_and_timeout_settings_round_trip_without_phantom_proposals() {
+    use actix_web::{App, HttpMessage, dev::Service, test as http_test, web};
+    let (pool, c, schema) = database().await;
+    let (source, article, indicator) = draft(&pool, "counted.example").await;
+    ai_enabled(&pool, true).await;
+    let (_, revision) = storage::settings(&pool).await.unwrap();
+    let origin = storage::Origin::Ai {
+        article_id: article,
+        settings_revision: revision,
+    };
+    assert!(
+        storage::ingest(&pool, &source, indicator.clone(), origin, "report#")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !storage::ingest(&pool, &source, indicator, origin, "report#")
+            .await
+            .unwrap()
+    );
+    c.execute(
+        "UPDATE intel_article SET status='proposed' WHERE id=$1",
+        &[&article],
+    )
+    .await
+    .unwrap();
+    let empty = Uuid::now_v7();
+    c.execute("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash,status) VALUES($1,$2,1,'https://research.example/empty','empty','empty','succeeded')", &[&empty,&source.id]).await.unwrap();
+    let app = http_test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(server_config()))
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(user(1));
+                srv.call(req)
+            })
+            .configure(configure),
+    )
+    .await;
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::get()
+            .uri("/api/intel/articles")
+            .to_request(),
+    )
+    .await;
+    assert!(response.status().is_success());
+    let value: Value = http_test::read_body_json(response).await;
+    let rows = value["data"]["items"].as_array().unwrap();
+    let counted = rows.iter().find(|row| row["id"] == json!(article)).unwrap();
+    assert_eq!(counted["record_count"], 1);
+    assert_eq!(counted["pending_count"], 1);
+    let zero = rows.iter().find(|row| row["id"] == json!(empty)).unwrap();
+    assert_eq!(zero["record_count"], 0);
+    assert_eq!(zero["pending_count"], 0);
+    c.execute(
+        "UPDATE intel_record SET status='rejected' WHERE article_id=$1",
+        &[&article],
+    )
+    .await
+    .unwrap();
+    let value: Value = http_test::read_body_json(
+        http_test::call_service(
+            &app,
+            http_test::TestRequest::get()
+                .uri("/api/intel/articles")
+                .to_request(),
+        )
+        .await,
+    )
+    .await;
+    let counted = value["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == json!(article))
+        .unwrap();
+    assert_eq!(counted["record_count"], 1);
+    assert_eq!(counted["pending_count"], 0);
+
+    let (mut settings, revision) = storage::settings(&pool).await.unwrap();
+    assert_eq!(settings.ai_timeout_seconds, 180);
+    settings.ai_timeout_seconds = 600;
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::put()
+            .uri("/api/intel/settings")
+            .set_json(json!({"expected_revision":revision,"settings":settings}))
+            .to_request(),
+    )
+    .await;
+    assert!(response.status().is_success());
+    let value: Value = http_test::read_body_json(
+        http_test::call_service(
+            &app,
+            http_test::TestRequest::get()
+                .uri("/api/intel/settings")
+                .to_request(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(value["data"]["settings"]["ai_timeout_seconds"], 600);
+    settings.ai_timeout_seconds = 0;
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::put()
+            .uri("/api/intel/settings")
+            .set_json(json!({"expected_revision":revision+1,"settings":settings}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        storage::settings(&pool).await.unwrap().0.ai_timeout_seconds,
+        600
+    );
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::post()
+            .uri(&format!("/api/intel/articles/{empty}/retry"))
+            .to_request(),
+    )
+    .await;
+    assert!(response.status().is_success());
+    assert_eq!(
+        c.query_one("SELECT status FROM intel_article WHERE id=$1", &[&empty])
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+        "queued"
     );
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await

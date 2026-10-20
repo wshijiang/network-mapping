@@ -434,6 +434,22 @@ pub(super) struct ArticleLink {
     pub title: String,
     pub fingerprint: String,
 }
+fn atom_link(element: &quick_xml::events::BytesStart<'_>) -> Result<Option<String>> {
+    let mut href = None;
+    let mut alternate = true;
+    for attr in element.attributes() {
+        let attr = attr.map_err(|_| Error::bad("intel_invalid_rss"))?;
+        let raw = std::str::from_utf8(&attr.value).map_err(|_| Error::bad("intel_invalid_rss"))?;
+        let value =
+            quick_xml::escape::unescape(raw).map_err(|_| Error::bad("intel_invalid_rss"))?;
+        match attr.key.as_ref() {
+            b"href" => href = Some(value.into_owned()),
+            b"rel" => alternate = value == "alternate",
+            _ => {}
+        }
+    }
+    Ok(if alternate { href } else { None })
+}
 pub(super) fn rss(data: &[u8], hosts: &[String]) -> Result<Vec<ArticleLink>> {
     if data.len() > 4 * 1024 * 1024 {
         return Err(Error::bad("intel_rss_too_large"));
@@ -464,22 +480,16 @@ pub(super) fn rss(data: &[u8], hosts: &[String]) -> Result<Vec<ArticleLink>> {
                     link.clear();
                     content.clear();
                 }
+                if active
+                    && name == "link"
+                    && let Some(href) = atom_link(&e)?
+                {
+                    link = href;
+                }
                 field = name;
             }
             Event::Empty(e) if active && e.local_name().as_ref() == b"link" => {
-                let mut href = None;
-                let mut alternate = true;
-                for a in e.attributes() {
-                    let a = a.map_err(|_| Error::bad("intel_invalid_rss"))?;
-                    let v = String::from_utf8_lossy(&a.value).into_owned();
-                    if a.key.as_ref() == b"href" {
-                        href = Some(v.clone());
-                    }
-                    if a.key.as_ref() == b"rel" {
-                        alternate = v == "alternate";
-                    }
-                }
-                if alternate && let Some(href) = href {
+                if let Some(href) = atom_link(&e)? {
                     link = href;
                 }
             }
@@ -538,8 +548,9 @@ pub(super) fn rss(data: &[u8], hosts: &[String]) -> Result<Vec<ArticleLink>> {
     }
     Ok(out)
 }
+#[cfg(test)]
 pub(super) fn article_text(data: &[u8]) -> Result<String> {
-    article_text_with_selector(data, "article, main")
+    article_body::extract(data, None).map(|(body, _)| body)
 }
 pub(super) fn article_text_with_selector(data: &[u8], root: &str) -> Result<String> {
     let input = std::str::from_utf8(data).map_err(|_| Error::bad("intel_article_not_utf8"))?;
@@ -550,27 +561,7 @@ pub(super) fn article_text_with_selector(data: &[u8], root: &str) -> Result<Stri
             "selector":root,"html_bytes":data.len(),"reason":"selector_not_found"
         }))
     })?;
-    // Exclude scripts, styles, navigation, and hidden elements from evidence.
-    let mut text = String::new();
-    for child in node.descendants() {
-        if let scraper::node::Node::Text(t) = child.value() {
-            if child.ancestors().any(|p| {
-                p.value().as_element().is_some_and(|e| {
-                    matches!(e.name(), "script" | "style" | "nav" | "noscript")
-                        || e.attr("hidden").is_some()
-                        || e.attr("aria-hidden") == Some("true")
-                })
-            }) {
-                continue;
-            }
-            text.push_str(t);
-            text.push('\n');
-            if text.len() > MAX_ARTICLE {
-                return Err(Error::bad("intel_article_too_large"));
-            }
-        }
-    }
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = article_element_text(node)?;
     if text.len() < 40 {
         return Err(Error::bad("intel_article_body_missing").context(json!({
             "selector":root,"html_bytes":data.len(),"text_bytes":text.len(),"reason":"text_too_short"
@@ -579,7 +570,123 @@ pub(super) fn article_text_with_selector(data: &[u8], root: &str) -> Result<Stri
     Ok(text)
 }
 
+pub(super) fn article_element_text(node: scraper::ElementRef<'_>) -> Result<String> {
+    let mut text = String::new();
+    let mut previous_block = None;
+    for child in node.descendants() {
+        if let scraper::node::Node::Text(t) = child.value() {
+            if child.ancestors().any(|p| {
+                p.value().as_element().is_some_and(|e| {
+                    matches!(
+                        e.name(),
+                        "script"
+                            | "style"
+                            | "nav"
+                            | "noscript"
+                            | "header"
+                            | "footer"
+                            | "aside"
+                            | "form"
+                            | "button"
+                            | "template"
+                    ) || e.attr("hidden").is_some()
+                        || e.attr("aria-hidden")
+                            .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+                        || matches!(
+                            e.attr("role"),
+                            Some("navigation" | "banner" | "contentinfo" | "complementary")
+                        )
+                        || e.classes().any(|class| {
+                            matches!(
+                                class,
+                                "hidden"
+                                    | "sr-only"
+                                    | "visually-hidden"
+                                    | "sidebar"
+                                    | "related-posts"
+                                    | "related-articles"
+                                    | "post-related-articles"
+                                    | "newsletter"
+                                    | "social-share"
+                                    | "share-buttons"
+                                    | "comments"
+                                    | "cookie-banner"
+                            )
+                        })
+                        || e.attr("style").is_some_and(|style| {
+                            let compact = style
+                                .split_whitespace()
+                                .collect::<String>()
+                                .to_ascii_lowercase();
+                            compact.contains("display:none")
+                                || compact.contains("visibility:hidden")
+                        })
+                })
+            }) {
+                continue;
+            }
+            let block = child
+                .ancestors()
+                .find(|parent| {
+                    parent
+                        .value()
+                        .as_element()
+                        .is_some_and(|e| article_block(e.name()))
+                })
+                .map(|parent| parent.id());
+            if block != previous_block {
+                text.push('\n');
+            }
+            text.push_str(t);
+            previous_block = block;
+        } else if child.value().as_element().is_some_and(|e| e.name() == "br") {
+            text.push('\n');
+        }
+    }
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.len() > MAX_ARTICLE {
+        return Err(Error::bad("intel_article_too_large"));
+    }
+    Ok(text)
+}
+
+fn article_block(name: &str) -> bool {
+    matches!(
+        name,
+        "p" | "div"
+            | "section"
+            | "article"
+            | "main"
+            | "li"
+            | "tr"
+            | "td"
+            | "th"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "pre"
+            | "blockquote"
+    )
+}
+
+#[cfg(test)]
 pub(super) fn ai_result(content: &str, body: &str) -> Result<Vec<Indicator>> {
+    ai_result_checked(content, body, false).map(|(entries, _)| entries)
+}
+
+pub(super) fn ai_result_isolated(
+    content: &str,
+    body: &str,
+) -> Result<(Vec<Indicator>, ValidationReport)> {
+    ai_result_checked(content, body, true)
+}
+
+fn ai_result_checked(
+    content: &str,
+    body: &str,
+    isolate_evidence: bool,
+) -> Result<(Vec<Indicator>, ValidationReport)> {
     let normalized_body = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let value: Value =
         serde_json::from_str(content).map_err(|_| Error::bad("intel_ai_invalid_json"))?;
@@ -596,37 +703,78 @@ pub(super) fn ai_result(content: &str, body: &str) -> Result<Vec<Indicator>> {
     if items.len() > 200 {
         return Err(Error::bad("intel_ai_too_many_items"));
     }
-    items
+    let mut validation = ValidationReport::default();
+    let entries = items
         .iter()
-        .map(|v| {
-            let mut i: Indicator = serde_json::from_value(v.clone())
-                .map_err(|_| Error::bad("intel_ai_invalid_schema"))?;
-            let raw = i.value.clone();
-            i.normalize()?;
-            let evidence = i.evidence.split_whitespace().collect::<Vec<_>>().join(" ");
-            let normalized_evidence = evidence
-                .replace("[.]", ".")
-                .replace("[:]", ":")
-                .replace("[://]", "://")
-                .replace("hxxps://", "https://")
-                .replace("hxxp://", "http://");
-            let mentions = if i.kind == "asn" {
-                regex::Regex::new(r"(?i)(?-u:\b)AS\s*[0-9]+(?-u:\b)")
-                    .expect("static regex")
-                    .find_iter(&normalized_evidence)
-                    .any(|m| normalize("asn", m.as_str()).is_ok_and(|(_, value)| value == i.value))
-            } else {
-                normalized_evidence.contains(&raw)
-                    || normalized_evidence.contains(&i.value)
-                    || normalized_evidence.to_ascii_lowercase().contains(&i.value)
-            };
-            if evidence.len() < 12 || !normalized_body.contains(&evidence) || !mentions {
-                return Err(Error::bad("intel_ai_evidence_not_found"));
+        .enumerate()
+        .filter_map(|(index, v)| {
+            let result = (|| {
+                let mut i: Indicator = serde_json::from_value(v.clone())
+                    .map_err(|_| Error::bad("intel_ai_invalid_schema"))?;
+                let raw = i.value.clone();
+                i.normalize()?;
+                let evidence = i.evidence.split_whitespace().collect::<Vec<_>>().join(" ");
+                let normalized_evidence = evidence
+                    .replace("[.]", ".")
+                    .replace("[:]", ":")
+                    .replace("[://]", "://")
+                    .replace("hxxps://", "https://")
+                    .replace("hxxp://", "http://");
+                let mentions = if i.kind == "asn" {
+                    regex::Regex::new(r"(?i)(?-u:\b)AS\s*[0-9]+(?-u:\b)")
+                        .expect("static regex")
+                        .find_iter(&normalized_evidence)
+                        .any(|m| {
+                            normalize("asn", m.as_str()).is_ok_and(|(_, value)| value == i.value)
+                        })
+                } else {
+                    normalized_evidence.contains(&raw)
+                        || normalized_evidence.contains(&i.value)
+                        || normalized_evidence.to_ascii_lowercase().contains(&i.value)
+                };
+                let reason = if evidence.len() < 12 {
+                    Some("evidence_too_short")
+                } else if !normalized_body.contains(&evidence) {
+                    Some("evidence_not_in_body")
+                } else if !mentions {
+                    Some("ioc_not_in_evidence")
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    return Err(Error::bad("intel_ai_evidence_not_found").context(json!({
+                        "record":index+1,"reason":reason
+                    })));
+                }
+                i.evidence = evidence;
+                Ok(i)
+            })();
+            match result {
+                Err(error) if isolate_evidence && error.code == "intel_ai_evidence_not_found" => {
+                    validation.rejected += 1;
+                    if validation.rejection_samples.len() < 100 {
+                        // No AI response, IOC value, or report text in diagnostics.
+                        validation.rejection_samples.push(error.diagnostic);
+                    }
+                    None
+                }
+                result => Some(result),
             }
-            i.evidence = evidence;
-            Ok(i)
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    if entries.is_empty() && validation.rejected > 0 {
+        let first = validation
+            .rejection_samples
+            .first()
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        return Err(Error::bad("intel_ai_evidence_not_found")
+            .context(first)
+            .context(json!({
+                "rejected":validation.rejected
+            })));
+    }
+    Ok((entries, validation))
 }
 
 pub(super) fn threatfox_document(

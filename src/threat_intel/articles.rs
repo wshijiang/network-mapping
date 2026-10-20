@@ -43,12 +43,7 @@ pub(super) fn body_snapshot(data: &[u8], url: &str, publisher: &str) -> Result<(
         .and_then(|url| url.host_str())
         .is_some_and(|host| matches!(host, "www.welivesecurity.com" | "welivesecurity.com"))
     {
-        // WeLiveSecurity uses a div, not the semantic article/main elements.
-        // Scope this adapter to the publisher; don't treat arbitrary page divs as evidence.
-        return Ok((
-            parse::article_text_with_selector(data, ".article-body")?,
-            json!({"method":"remote_html","selector":".article-body"}),
-        ));
+        return article_body::extract(data, Some(".article-body"));
     }
     let wechat = reqwest::Url::parse(url)
         .ok()
@@ -56,7 +51,7 @@ pub(super) fn body_snapshot(data: &[u8], url: &str, publisher: &str) -> Result<(
         .as_deref()
         == Some("mp.weixin.qq.com");
     if !wechat {
-        return Ok((parse::article_text(data)?, json!({"method":"remote_html"})));
+        return article_body::extract(data, None);
     }
     if publisher.is_empty() {
         return Err(Error::bad("intel_article_publisher_required"));
