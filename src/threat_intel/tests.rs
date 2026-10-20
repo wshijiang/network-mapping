@@ -226,6 +226,54 @@ fn source_defaults_and_fetch_boundaries_are_explicit() {
     assert!(public_ip("8.8.8.8".parse().unwrap()));
 }
 
+#[test]
+fn ipv6_fetch_policy_rejects_special_use_ranges_without_widening_prefixes() {
+    for address in [
+        "::1",
+        "::ffff:127.0.0.1",
+        "fc00::1",
+        "fe80::1",
+        "64:ff9b::a00:1",
+        "2001::",
+        "2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff",
+        "2001:db8::",
+        "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff",
+        "2002::",
+        "2002:a00:1::1",
+        "2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+        "3fff::",
+        "3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff",
+    ] {
+        assert!(!public_ip(address.parse().unwrap()), "{address}");
+        let location = format!("https://[{address}]/report");
+        let parsed = reqwest::Url::parse(&location).unwrap();
+        assert!(
+            validate_url(&location, &[parsed.host_str().unwrap().into()]).is_err(),
+            "{location}"
+        );
+    }
+    for address in [
+        "2000:ffff::1",
+        "2001:200::1",
+        "2001:db7::1",
+        "2001:db9::1",
+        "2001:4860:4860::8888",
+        "2003::1",
+        "2606:4700:4700::1111",
+        "3fff:1000::1",
+    ] {
+        assert!(public_ip(address.parse().unwrap()), "{address}");
+        let location = format!("https://[{address}]/report");
+        let parsed = reqwest::Url::parse(&location).unwrap();
+        assert!(
+            validate_url(&location, &[parsed.host_str().unwrap().into()]).is_ok(),
+            "{location}"
+        );
+    }
+    // Destination fetch restrictions do not prohibit representing these as IOC data.
+    assert!(normalize("ip", "2002:a00:1::1").is_ok());
+}
+
 fn offline_convert(bytes: &[u8]) -> Result<(i64, Vec<Indicator>)> {
     use std::io::{BufRead, Write};
     let mut input = tempfile::NamedTempFile::new().unwrap();
@@ -1058,14 +1106,32 @@ async fn ai_publication_requires_exact_human_approval_even_for_trusted_source() 
     let (pool, c, schema) = database().await;
     let (source, article, i) = draft(&pool, "evil.example").await;
     assert!(
-        storage::ingest(&pool, &source, i.clone(), storage::Origin::Ai(article), "")
-            .await
-            .is_err()
+        storage::ingest(
+            &pool,
+            &source,
+            i.clone(),
+            storage::Origin::Ai {
+                article_id: article,
+                settings_revision: storage::settings(&pool).await.unwrap().1
+            },
+            ""
+        )
+        .await
+        .is_err()
     );
     ai_enabled(&pool, true).await;
-    storage::ingest(&pool, &source, i, storage::Origin::Ai(article), "")
-        .await
-        .unwrap();
+    storage::ingest(
+        &pool,
+        &source,
+        i,
+        storage::Origin::Ai {
+            article_id: article,
+            settings_revision: storage::settings(&pool).await.unwrap().1,
+        },
+        "",
+    )
+    .await
+    .unwrap();
     assert_eq!(
         c.query_one("SELECT COUNT(*) FROM intel_ioc", &[])
             .await
@@ -1152,6 +1218,148 @@ async fn ai_publication_requires_exact_human_approval_even_for_trusted_source() 
         annotate(&pool, &[vec![("domain".into(), "evil.example".into())]]).await[0]
             .risk
             .is_none()
+    );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn ai_inserts_reject_stale_settings_and_lock_revision_until_commit() {
+    let (pool, c, schema) = database().await;
+    let (source, article_id, indicator) = draft(&pool, "first-response.example").await;
+    ai_enabled(&pool, true).await;
+    let (mut settings, revision) = storage::settings(&pool).await.unwrap();
+    let origin = storage::Origin::Ai {
+        article_id,
+        settings_revision: revision,
+    };
+    storage::ingest(&pool, &source, indicator.clone(), origin, "")
+        .await
+        .unwrap();
+
+    // The worker's preflight already succeeded; all AI settings stay enabled
+    // while the administrator changes the model, endpoint and credential.
+    settings.ai_model = "replacement-model".into();
+    settings.ai_endpoint = "https://replacement.example/v1/chat/completions".into();
+    settings.credential = "fixture-replacement-key".into();
+    storage::save_settings(
+        &pool,
+        settings,
+        revision,
+        &user(1),
+        &AuditContext::cli("test"),
+        &encryption_key(),
+    )
+    .await
+    .unwrap();
+    let mut late = indicator.clone();
+    late.value = "late-response.example".into();
+    assert_eq!(
+        storage::ingest(&pool, &source, late, origin, "")
+            .await
+            .unwrap_err()
+            .code,
+        "intel_ai_settings_changed"
+    );
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_record", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
+
+    // Hold the record lock so insertion pauses after its settings check.
+    // A settings edit must remain blocked until that insertion commits.
+    let mut locker = pool.get().await.unwrap();
+    let hold = locker.transaction().await.unwrap();
+    let locker_pid: i32 = hold
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    hold.query_one(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1,317))",
+        &[&format!("{}:ai-lock", source.id)],
+    )
+    .await
+    .unwrap();
+    let mut fresh = indicator;
+    fresh.value = "fresh-response.example".into();
+    fresh.external_id = "ai-lock".into();
+    let next_revision = storage::settings(&pool).await.unwrap().1;
+    let task_pool = pool.clone();
+    let task_source = source.clone();
+    let inserting = tokio::spawn(async move {
+        storage::ingest(
+            &task_pool,
+            &task_source,
+            fresh,
+            storage::Origin::Ai {
+                article_id,
+                settings_revision: next_revision,
+            },
+            "",
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if c.query_one(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))",
+                &[&locker_pid],
+            )
+            .await
+            .unwrap()
+            .get::<_, bool>(0)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("insertion must reach the held record lock");
+    let mut editor = pool.get().await.unwrap();
+    let edit = editor.transaction().await.unwrap();
+    edit.batch_execute("SET LOCAL lock_timeout='200ms'")
+        .await
+        .unwrap();
+    let error = edit
+        .execute(
+            "UPDATE intel_settings SET revision=revision+1 WHERE singleton",
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code().unwrap().code(), "55P03");
+    edit.rollback().await.unwrap();
+    hold.commit().await.unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), inserting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    );
+    assert_eq!(
+        c.query_one(
+            "SELECT COUNT(*) FROM intel_record WHERE origin='ai' AND status='pending'",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        2
+    );
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_ioc", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
     );
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
@@ -2050,9 +2258,18 @@ async fn stale_article_cannot_be_claimed_retried_or_relabelled_with_new_source_r
     let mut current = storage::get_source(&pool, source.id).await.unwrap();
     current.fence = Some(storage::Fence::Article(article, token));
     assert!(
-        storage::ingest(&pool, &current, indicator, storage::Origin::Ai(article), "")
-            .await
-            .is_err()
+        storage::ingest(
+            &pool,
+            &current,
+            indicator,
+            storage::Origin::Ai {
+                article_id: article,
+                settings_revision: storage::settings(&pool).await.unwrap().1
+            },
+            ""
+        )
+        .await
+        .is_err()
     );
     assert_eq!(
         c.query_one("SELECT COUNT(*) FROM intel_record", &[])
@@ -2811,9 +3028,18 @@ async fn manual_article_submission_preserves_snapshot_permissions_and_ai_gate() 
             .is_err()
     );
     ai_enabled(&pool, true).await;
-    storage::ingest(&pool, &source, i, storage::Origin::Ai(id), "")
-        .await
-        .unwrap();
+    storage::ingest(
+        &pool,
+        &source,
+        i,
+        storage::Origin::Ai {
+            article_id: id,
+            settings_revision: storage::settings(&pool).await.unwrap().1,
+        },
+        "",
+    )
+    .await
+    .unwrap();
     assert_eq!(
         c.query_one("SELECT COUNT(*) FROM intel_ioc", &[])
             .await

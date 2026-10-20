@@ -462,8 +462,11 @@ async fn extract(
     let entries = parse::ai_result(content, &body)?;
     let count = entries.len();
     let (current, revision) = storage::settings(pool).await?;
-    if !current.ai_enabled || revision != settings_revision {
+    if !current.ai_enabled {
         return Err(Error::bad("intel_ai_disabled"));
+    }
+    if revision != settings_revision {
+        return Err(Error::bad("intel_ai_settings_changed"));
     }
     let c = pool.get().await?;
     let active:bool=c.query_one("SELECT EXISTS(SELECT 1 FROM intel_article WHERE id=$1 AND claim_token=$2 AND lease_until>NOW())",&[&id,&token]).await?.get(0);
@@ -473,7 +476,17 @@ async fn extract(
     }
     for mut i in entries {
         i.reference = Some(url.into());
-        storage::ingest(pool, &source, i, Origin::Ai(id), &format!("{url}#")).await?;
+        storage::ingest(
+            pool,
+            &source,
+            i,
+            Origin::Ai {
+                article_id: id,
+                settings_revision,
+            },
+            &format!("{url}#"),
+        )
+        .await?;
     }
     Ok(count)
 }

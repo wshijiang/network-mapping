@@ -289,9 +289,16 @@ pub(super) fn public_ip(ip: IpAddr) -> bool {
             .map(|v| public_ip(IpAddr::V4(v)))
             .unwrap_or_else(|| {
                 let b = v.octets();
-                // Only global unicast. Excludes local, mapped, NAT64 and multicast.
+                // Only ordinary global unicast, matching webhook egress policy.
                 b[0] & 0xe0 == 0x20
-                    && !(b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8)
+                    && !["2001::/23", "2001:db8::/32", "2002::/16", "3fff::/20"]
+                        .iter()
+                        .any(|prefix| {
+                            prefix
+                                .parse::<ipnet::Ipv6Net>()
+                                .expect("constant IPv6 prefix")
+                                .contains(&v)
+                        })
             }),
     }
 }
@@ -300,6 +307,11 @@ pub(super) fn validate_url(value: &str, hosts: &[String]) -> Result<reqwest::Url
     let host = url
         .host_str()
         .ok_or_else(|| Error::bad("intel_invalid_url"))?;
+    // URL serialization brackets IPv6 literals; IpAddr parsing does not.
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
     if value.len() > 4096
         || url.scheme() != "https"
         || !url.username().is_empty()
@@ -307,7 +319,7 @@ pub(super) fn validate_url(value: &str, hosts: &[String]) -> Result<reqwest::Url
         || url.fragment().is_some()
         || url.port_or_known_default() != Some(443)
         || !hosts.iter().any(|h| h == host)
-        || host.parse::<IpAddr>().is_ok_and(|ip| !public_ip(ip))
+        || literal.parse::<IpAddr>().is_ok_and(|ip| !public_ip(ip))
     {
         return Err(Error::bad("intel_url_not_allowed"));
     }

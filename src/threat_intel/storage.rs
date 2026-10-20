@@ -311,7 +311,10 @@ pub(super) async fn ensure_ioc<C: GenericClient + Sync>(
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Origin {
     Structured,
-    Ai(Uuid),
+    Ai {
+        article_id: Uuid,
+        settings_revision: i64,
+    },
 }
 pub(super) async fn ingest(
     pool: &Pool,
@@ -326,14 +329,22 @@ pub(super) async fn ingest(
     let require_review = validate_source(&tx, s).await?;
     let (origin_str, article) = match origin {
         Origin::Structured => ("structured", None),
-        Origin::Ai(id) => ("ai", Some(id)),
+        Origin::Ai { article_id, .. } => ("ai", Some(article_id)),
     };
     // AI output cannot claim to be structured, and cannot supply approval metadata.
     let accepted = origin == Origin::Structured && !require_review;
-    if matches!(origin, Origin::Ai(_)) {
-        let enabled:bool=tx.query_one("SELECT (document->>'ai_enabled')::BOOLEAN FROM intel_settings WHERE singleton FOR SHARE",&[]).await?.get(0);
-        if !enabled {
+    if let Origin::Ai {
+        settings_revision, ..
+    } = origin
+    {
+        // Keep the checked configuration locked until this insertion commits.
+        // A preflight check in the worker cannot fence a concurrent settings edit.
+        let settings=tx.query_one("SELECT (document->>'ai_enabled')::BOOLEAN AS enabled,revision FROM intel_settings WHERE singleton FOR SHARE",&[]).await?;
+        if !settings.get::<_, bool>("enabled") {
             return Err(Error::bad("intel_ai_disabled"));
+        }
+        if settings.get::<_, i64>("revision") != settings_revision {
+            return Err(Error::bad("intel_ai_settings_changed"));
         }
     }
     let explicit = origin == Origin::Structured && i.reference.is_some() && !i.evidence.is_empty();
