@@ -2414,7 +2414,7 @@ pub struct Clis {
     #[arg(short = 'v', long = "verbose")]
     pub terminal_verbose: bool,
 
-    /// 执行用户管理命令后退出；省略时启动服务
+    /// 执行管理命令后退出；省略时启动服务
     #[command(subcommand)]
     pub command: Option<ServerCommand>,
 
@@ -2443,10 +2443,43 @@ pub enum ConfigSource {
 
 #[derive(Debug, Subcommand)]
 pub enum ServerCommand {
+    /// 本地情报管理（仅需 PostgreSQL，不启动 HTTP/Elasticsearch）
+    Intel {
+        #[command(subcommand)]
+        command: IntelCommand,
+    },
     /// 管理平台用户
     User {
         #[command(subcommand)]
         command: UserCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum IntelCommand {
+    /// 列出可离线导入的来源 ID 与审核策略
+    Sources,
+    /// 导入本地 JSON/CSV/ZIP；完整校验后直接写库并显示进度
+    Import {
+        #[arg(long)]
+        source: uuid::Uuid,
+        /// 用于授权检查和审计的现有有效管理员用户名
+        #[arg(long)]
+        admin: String,
+        #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
+        file: Option<std::path::PathBuf>,
+        /// 从数据库与缓存中的已提交批次继续，不重复上传
+        #[arg(long)]
+        resume: bool,
+        /// 默认每批 5000 条，连续执行；审核、校验和数据库持久性保持启用
+        #[arg(long)]
+        fast: bool,
+        /// 自定义每批记录上限（1～50000），覆盖 --fast 的默认值
+        #[arg(long, value_parser=clap::value_parser!(u32).range(1..=50000))]
+        batch_size: Option<u32>,
+        /// 本次最多提交多少批，达到后暂停；校验阶段不计为数据批次
+        #[arg(long, value_parser=clap::value_parser!(u32).range(1..))]
+        max_batches: Option<u32>,
     },
 }
 

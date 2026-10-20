@@ -2,6 +2,8 @@
 //! Published facts are matched at read time after asset authorization. Scanner
 //! observations and upload checksums never contain these mutable annotations.
 mod articles;
+mod batch;
+pub mod cli;
 mod client;
 mod credentials;
 mod import_parse;

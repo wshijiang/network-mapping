@@ -2875,3 +2875,448 @@ async fn manual_article_submission_preserves_snapshot_permissions_and_ai_gate() 
         .await
         .unwrap();
 }
+
+#[test]
+fn fast_import_cli_requires_explicit_source_operator_and_file_or_resume() {
+    use crate::config::{Clis, IntelCommand, ServerCommand};
+    use clap::Parser;
+    let parsed = Clis::try_parse_from([
+        "networkm",
+        "intel",
+        "import",
+        "--source",
+        "01800000-0000-7000-8000-000000000005",
+        "--admin",
+        "admin",
+        "--file",
+        "full.csv.zip",
+        "--fast",
+    ])
+    .unwrap();
+    assert!(matches!(
+        parsed.command,
+        Some(ServerCommand::Intel {
+            command: IntelCommand::Import {
+                fast: true,
+                resume: false,
+                ..
+            }
+        })
+    ));
+    for suffix in [
+        vec![],
+        vec!["--resume", "--file", "full.csv.zip"],
+        vec!["--resume", "--batch-size", "0"],
+        vec!["--resume", "--batch-size", "50001"],
+        vec!["--resume", "--max-batches", "0"],
+    ] {
+        let mut args = vec![
+            "networkm",
+            "intel",
+            "import",
+            "--source",
+            "01800000-0000-7000-8000-000000000005",
+            "--admin",
+            "admin",
+        ];
+        args.extend(suffix);
+        assert!(Clis::try_parse_from(args).is_err());
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn batch_ingest_matches_sequential_versions_decisions_and_actor_resolution() {
+    let (pool, c, schema) = database().await;
+    let single = local_source(&pool, false).await;
+    let bulk = local_source(&pool, false).await;
+    let bundle = json!({"type":"bundle","objects":[{"type":"intrusion-set","id":"intrusion-set--00000000-0000-4000-8000-000000000011","name":"Exact Group","aliases":["Alias Only"],"external_references":[{"source_name":"mitre-attack","external_id":"G9011"}]}]});
+    storage::import_stix(&pool, &single, &serde_json::to_vec(&bundle).unwrap())
+        .await
+        .unwrap();
+    let mut entries = Vec::new();
+    for (key, value, actor) in [
+        ("versions", "first.example", "Exact Group"),
+        ("versions", "second.example", "Alias Only"),
+        ("versions", "first.example", "Exact Group"),
+        ("keep", "last.example", ""),
+    ] {
+        let mut i = Indicator::simple("domain", value);
+        i.external_id = key.into();
+        i.actor_name = actor.into();
+        i.reference = Some("https://research.example/report".into());
+        i.evidence = "The report identifies the infrastructure explicitly.".into();
+        i.first_seen = Some("2026-01-01 00:00:00".into());
+        entries.push(i);
+    }
+    let mut serial_added = 0;
+    for i in entries.clone() {
+        serial_added += storage::ingest(&pool, &single, i, storage::Origin::Structured, "")
+            .await
+            .unwrap() as i64;
+    }
+    let mut db = pool.get().await.unwrap();
+    let tx = db.transaction().await.unwrap();
+    assert_eq!(
+        batch::ingest(&tx, &bulk, entries.clone(), "")
+            .await
+            .unwrap(),
+        serial_added
+    );
+    tx.commit().await.unwrap();
+    let snapshot = |id| {
+        let c = &c;
+        async move {
+            c.query_one("SELECT jsonb_agg(jsonb_build_array(external_key,content_hash,status,kind,value,payload,actor_id,observed_at) ORDER BY external_key,content_hash) FROM intel_record WHERE source_id=$1",&[&id]).await.unwrap().get::<_,Value>(0)
+        }
+    };
+    assert_eq!(snapshot(single.id).await, snapshot(bulk.id).await);
+    // Revocation of a known content version must survive repeated bulk imports.
+    for id in [single.id, bulk.id] {
+        let row=c.query_one("SELECT id,content_hash FROM intel_record WHERE source_id=$1 AND external_key='keep'",&[&id]).await.unwrap();
+        storage::review(
+            &pool,
+            row.get(0),
+            storage::ReviewInput {
+                content_hash: row.get(1),
+                decision: "revoked".into(),
+                reason: "Fixture revocation".into(),
+            },
+            &user(1),
+            &AuditContext::cli("test"),
+        )
+        .await
+        .unwrap();
+    }
+    for i in entries.clone() {
+        storage::ingest(&pool, &single, i, storage::Origin::Structured, "")
+            .await
+            .unwrap();
+    }
+    let tx = db.transaction().await.unwrap();
+    assert_eq!(batch::ingest(&tx, &bulk, entries, "").await.unwrap(), 0);
+    tx.commit().await.unwrap();
+    assert_eq!(snapshot(single.id).await, snapshot(bulk.id).await);
+    // A source requiring review must not create canonical IOC rows at all.
+    let pending = local_source(&pool, true).await;
+    let tx = db.transaction().await.unwrap();
+    batch::ingest(&tx, &pending, vec![Indicator::simple("asn", "AS64496")], "")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_ioc WHERE kind='asn'", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        c.query_one(
+            "SELECT status FROM intel_record WHERE source_id=$1",
+            &[&pending.id]
+        )
+        .await
+        .unwrap()
+        .get::<_, String>(0),
+        "pending"
+    );
+    // One malformed row rolls the whole database batch back.
+    let tx = db.transaction().await.unwrap();
+    assert!(
+        batch::ingest(
+            &tx,
+            &bulk,
+            vec![
+                Indicator::simple("domain", "rollback.example"),
+                Indicator::simple("ip", "invalid")
+            ],
+            ""
+        )
+        .await
+        .is_err()
+    );
+    drop(tx);
+    assert_eq!(
+        c.query_one(
+            "SELECT COUNT(*) FROM intel_record WHERE value='rollback.example'",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+    drop(db);
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL and NM_INTEL_CACHE_ROOT"]
+async fn cli_fast_import_resumes_atomic_batches_and_keeps_review_policy() {
+    use crate::cli_progress::NoopProgressReporter;
+    use std::io::Write;
+    let (pool, c, schema) = database().await;
+    let old = local_source(&pool, true).await;
+    c.execute(
+        "UPDATE intel_source SET transport='upload',location='' WHERE id=$1",
+        &[&old.id],
+    )
+    .await
+    .unwrap();
+    let mut raw = tempfile::NamedTempFile::new().unwrap();
+    raw.write_all(br#"[{"type":"asn","value":"AS64496"},{"type":"domain","value":"cli.example"}]"#)
+        .unwrap();
+    assert!(
+        cli::import(
+            &pool,
+            old.id,
+            "missing",
+            Some(raw.path()),
+            cli::Options {
+                fast: true,
+                ..Default::default()
+            },
+            &NoopProgressReporter
+        )
+        .await
+        .is_err()
+    );
+    let result = cli::import(
+        &pool,
+        old.id,
+        "intel-admin",
+        Some(raw.path()),
+        cli::Options {
+            fast: true,
+            batch_size: Some(1),
+            max_batches: Some(1),
+        },
+        &NoopProgressReporter,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["processed"], 1);
+    assert_eq!(result["paused"], true);
+    assert_eq!(result["batches_committed"], 1);
+    assert!(!worker::source_tick(&pool, &encryption_key()).await.unwrap());
+    cli::import(
+        &pool,
+        old.id,
+        "intel-admin",
+        None,
+        cli::Options {
+            fast: true,
+            ..Default::default()
+        },
+        &NoopProgressReporter,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["fast"], true);
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_ioc", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        c.query_one(
+            "SELECT COUNT(*) FROM intel_record WHERE status='pending'",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        2
+    );
+    assert_eq!(
+        cli::import(
+            &pool,
+            old.id,
+            "intel-admin",
+            None,
+            cli::Options {
+                fast: true,
+                ..Default::default()
+            },
+            &NoopProgressReporter
+        )
+        .await
+        .unwrap()["processed"],
+        2
+    );
+    let current = storage::get_source(&pool, old.id).await.unwrap();
+    let mut temp = imports::temporary().await.unwrap();
+    temp.write_all(br#"[{"type":"domain","value":"atomic.example"}]"#)
+        .unwrap();
+    imports::install(
+        &pool,
+        &current,
+        temp,
+        "fixture".into(),
+        Some((&user(1), &AuditContext::cli("test"))),
+    )
+    .await
+    .unwrap();
+    assert!(worker::source_tick(&pool, &encryption_key()).await.unwrap()); // Full validation only.
+    c.batch_execute("CREATE FUNCTION reject_import_cursor() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture cursor failure'; END $$;CREATE TRIGGER reject_import_cursor BEFORE UPDATE ON intel_import_snapshot FOR EACH ROW WHEN (NEW.processed_count>OLD.processed_count) EXECUTE FUNCTION reject_import_cursor()").await.unwrap();
+    assert!(
+        cli::import(
+            &pool,
+            old.id,
+            "intel-admin",
+            None,
+            cli::Options {
+                fast: true,
+                ..Default::default()
+            },
+            &NoopProgressReporter
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        c.query_one(
+            "SELECT COUNT(*) FROM intel_record WHERE value='atomic.example'",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        c.query_one(
+            "SELECT processed_count FROM intel_import_snapshot WHERE source_id=$1",
+            &[&old.id]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+    c.batch_execute("DROP TRIGGER reject_import_cursor ON intel_import_snapshot")
+        .await
+        .unwrap();
+    assert_eq!(
+        cli::import(
+            &pool,
+            old.id,
+            "intel-admin",
+            None,
+            cli::Options {
+                fast: true,
+                ..Default::default()
+            },
+            &NoopProgressReporter
+        )
+        .await
+        .unwrap()["processed"],
+        1
+    );
+    let job = Uuid::now_v7();
+    c.execute("INSERT INTO intel_sync_run(id,source_id,source_revision,status,claim_token,lease_until) VALUES($1,$2,$3,'running',$4,NOW()+INTERVAL '1 minute')",&[&job,&old.id,&old.revision,&Uuid::new_v4()]).await.unwrap();
+    assert_eq!(
+        cli::import(
+            &pool,
+            old.id,
+            "intel-admin",
+            None,
+            cli::Options {
+                fast: true,
+                ..Default::default()
+            },
+            &NoopProgressReporter
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "intel_import_busy"
+    );
+    c.execute(
+        "UPDATE intel_sync_run SET lease_until=NOW()-INTERVAL '1 second' WHERE id=$1",
+        &[&job],
+    )
+    .await
+    .unwrap();
+    assert!(
+        cli::import(
+            &pool,
+            old.id,
+            "intel-admin",
+            None,
+            cli::Options {
+                fast: true,
+                ..Default::default()
+            },
+            &NoopProgressReporter
+        )
+        .await
+        .is_ok()
+    );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL; optional throughput measurement"]
+async fn batch_import_throughput_preserves_all_records() {
+    let (pool, c, schema) = database().await;
+    let single = local_source(&pool, false).await;
+    let bulk = local_source(&pool, false).await;
+    let entries = |prefix| {
+        (0..1000)
+            .map(|n| Indicator::simple("domain", &format!("perf-{prefix}-{n}.example")))
+            .collect::<Vec<_>>()
+    };
+    let started = std::time::Instant::now();
+    for i in entries("single") {
+        storage::ingest(&pool, &single, i, storage::Origin::Structured, "")
+            .await
+            .unwrap();
+    }
+    let serial = started.elapsed();
+    let started = std::time::Instant::now();
+    let mut db = pool.get().await.unwrap();
+    let tx = db.transaction().await.unwrap();
+    assert_eq!(
+        batch::ingest(&tx, &bulk, entries("batch"), "")
+            .await
+            .unwrap(),
+        1000
+    );
+    tx.commit().await.unwrap();
+    let parallel = started.elapsed();
+    assert_eq!(
+        c.query_one(
+            "SELECT COUNT(*) FROM intel_record WHERE source_id=$1",
+            &[&bulk.id]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        1000
+    );
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_ioc", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        2000
+    );
+    println!(
+        "1000 IOC benchmark: sequential={:.3}s, batch={:.3}s, speedup={:.1}x",
+        serial.as_secs_f64(),
+        parallel.as_secs_f64(),
+        serial.as_secs_f64() / parallel.as_secs_f64()
+    );
+    drop(db);
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}

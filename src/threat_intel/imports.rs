@@ -1,10 +1,12 @@
 //! Offline uploads and local exports. Incremental updates remain on the API worker.
 use super::*;
 use std::path::PathBuf;
-use storage::{Origin, Source};
+use storage::Source;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-pub(super) const BATCH: usize = 500;
+pub(super) const BATCH: usize = 1000;
+pub(super) const FAST_BATCH: usize = 5000;
+const BATCH_BYTES: usize = 8 * 1024 * 1024;
 fn cache_error(path: &std::path::Path, operation: &str, error: std::io::Error) -> Error {
     tracing::warn!(path = %path.display(), operation, error = %error, "IOC import cache unavailable; check NM_INTEL_CACHE_ROOT and service account permissions");
     Error::bad("intel_import_cache_unavailable")
@@ -55,6 +57,16 @@ pub(super) async fn install(
     hash: String,
     actor: Option<(&UserBaseI, &AuditContext)>,
 ) -> Result<Uuid> {
+    install_claimed(pool, s, temp, hash, actor, None).await
+}
+pub(super) async fn install_claimed(
+    pool: &Pool,
+    s: &Source,
+    temp: tempfile::NamedTempFile,
+    hash: String,
+    actor: Option<(&UserBaseI, &AuditContext)>,
+    claim: Option<(Uuid, Uuid)>,
+) -> Result<Uuid> {
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
     storage::validate_source(&tx, s).await?;
@@ -79,9 +91,13 @@ pub(super) async fn install(
     temp.persist(&path)
         .map_err(|_| Error::bad("intel_import_write_failed"))?;
     let result=async {
-        tx.execute("INSERT INTO intel_import_snapshot(source_id,source_revision,snapshot_id,stage,content_hash) VALUES($1,$2,$3,'downloaded',$4) ON CONFLICT(source_id) DO UPDATE SET source_revision=EXCLUDED.source_revision,snapshot_id=EXCLUDED.snapshot_id,stage='downloaded',content_hash=EXCLUDED.content_hash,byte_offset=0,record_count=0,processed_count=0,validation_summary='{}',created_at=NOW()",&[&s.id,&s.revision,&id,&hash]).await?;
+        tx.execute("INSERT INTO intel_import_snapshot(source_id,source_revision,snapshot_id,stage,content_hash) VALUES($1,$2,$3,'downloaded',$4) ON CONFLICT(source_id) DO UPDATE SET source_revision=EXCLUDED.source_revision,snapshot_id=EXCLUDED.snapshot_id,stage='downloaded',content_hash=EXCLUDED.content_hash,byte_offset=0,record_count=0,processed_count=0,paused=FALSE,validation_summary='{}',created_at=NOW()",&[&s.id,&s.revision,&id,&hash]).await?;
         if let Some((user,context))=actor {
-            tx.execute("INSERT INTO intel_sync_run(id,source_id,source_revision) VALUES($1,$2,$3)",&[&Uuid::now_v7(),&s.id,&s.revision]).await?;
+            if let Some((job,token)) = claim {
+                tx.execute("INSERT INTO intel_sync_run(id,source_id,source_revision,status,attempts,claim_token,lease_until) VALUES($1,$2,$3,'running',1,$4,NOW()+INTERVAL '3 minutes')",&[&job,&s.id,&s.revision,&token]).await?;
+            } else {
+                tx.execute("INSERT INTO intel_sync_run(id,source_id,source_revision) VALUES($1,$2,$3)",&[&Uuid::now_v7(),&s.id,&s.revision]).await?;
+            }
             audit(&tx,user,context,"intel.source.import",&s.id.to_string(),json!({"snapshot_id":id,"source_revision":s.revision})).await?;
         }
         tx.commit().await?;Ok::<_,Error>(())
@@ -99,6 +115,13 @@ pub(super) async fn install(
     Ok(id)
 }
 pub(super) async fn sync(pool: &Pool, s: &Source) -> Result<(Value, bool)> {
+    sync_batch(pool, s, BATCH).await
+}
+pub(super) async fn sync_batch(
+    pool: &Pool,
+    s: &Source,
+    batch_size: usize,
+) -> Result<(Value, bool)> {
     let snapshot = pool
         .get()
         .await?
@@ -161,6 +184,9 @@ pub(super) async fn sync(pool: &Pool, s: &Source) -> Result<(Value, bool)> {
         }
         _ => return Err(Error::bad("intel_import_file_required")),
     };
+    if snapshot.get::<_, bool>("paused") {
+        return Err(Error::bad("intel_import_paused"));
+    }
     let id: Uuid = snapshot.get("snapshot_id");
     let stage: String = snapshot.get("stage");
     let total: i64 = snapshot.get("record_count");
@@ -168,7 +194,7 @@ pub(super) async fn sync(pool: &Pool, s: &Source) -> Result<(Value, bool)> {
     let directory = root().await?;
     if stage == "complete" {
         return Ok((
-            json!({"offline_import":true,"stage":"complete","total":total,"validation":validation}),
+            json!({"offline_import":true,"stage":"complete","processed":total,"total":total,"validation":validation}),
             false,
         ));
     }
@@ -223,8 +249,9 @@ pub(super) async fn sync(pool: &Pool, s: &Source) -> Result<(Value, bool)> {
         .map_err(|_| Error::bad("intel_import_read_failed"))?;
     let mut position = offset;
     let mut items = 0_i64;
-    let mut added = 0_i64;
-    for _ in 0..BATCH {
+    let mut entries = Vec::new();
+    let mut bytes = 0;
+    for _ in 0..batch_size {
         let mut line = Vec::new();
         let n = reader
             .read_until(b'\n', &mut line)
@@ -238,17 +265,24 @@ pub(super) async fn sync(pool: &Pool, s: &Source) -> Result<(Value, bool)> {
         }
         let indicator: Indicator =
             serde_json::from_slice(&line).map_err(|_| Error::bad("intel_invalid_indicator"))?;
-        if storage::ingest(pool, s, indicator, Origin::Structured, "").await? {
-            added += 1;
-        }
+        entries.push(indicator);
+        bytes += n;
         position += n as i64;
         items += 1;
+        if bytes >= BATCH_BYTES {
+            break;
+        }
     }
     let complete = position as u64 >= length;
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
     storage::validate_source(&tx, s).await?;
-    tx.execute("UPDATE intel_import_snapshot SET byte_offset=$3,processed_count=processed_count+$4,stage=$5 WHERE source_id=$1 AND snapshot_id=$2",&[&s.id,&id,&position,&items,&if complete{"complete"}else{"ready"}]).await?;
+    let added = batch::ingest(&tx, s, entries, "").await?;
+    let changed = tx.execute("UPDATE intel_import_snapshot SET byte_offset=$3,processed_count=processed_count+$4,stage=$5 WHERE source_id=$1 AND snapshot_id=$2 AND byte_offset=$6 AND stage='ready'",&[&s.id,&id,&position,&items,&if complete{"complete"}else{"ready"},&offset]).await?;
+    if changed != 1 {
+        return Err(Error::conflict());
+    }
+    storage::validate_source(&tx, s).await?;
     tx.commit().await?;
     if complete {
         let _ = tokio::fs::remove_file(directory.join(format!("{id}.ndjson"))).await;

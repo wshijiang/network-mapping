@@ -356,6 +356,9 @@ sudo -u network-mapping ./network_mapping_server --config /etc/network-mapping/c
 
 密码交互输入。若自动管理员名称不同，替换最后一个用户名。CLI 同样加载并校验配置，详见[用户管理](USER_MANAGEMENT_CLI.md)。
 
+历史情报的大文件可使用 `intel import --fast` 直接从本地快速导入，支持进度、作业租约和
+断点恢复，审核与过期规则保持执行，详见[CLI 快速导入](THREAT_INTELLIGENCE.md#cli-快速导入)。
+
 管理员登录控制台后创建扫描器，保存一次性注册 ID 和 Token。节点配置服务端主机、端口和可信 TLS 后注册，确认心跳在线，再对一个已授权的小范围目标执行首个任务。节点部署与持久化目录见[扫描器项目](https://github.com/wshijiang/Network-Mapping-Scanner)。
 
 ### 健康检查 API

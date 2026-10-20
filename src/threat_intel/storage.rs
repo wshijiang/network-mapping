@@ -79,7 +79,7 @@ pub(super) async fn get_source(pool: &Pool, id: Uuid) -> Result<Source> {
 }
 pub(super) async fn sources(pool: &Pool) -> Result<Value> {
     let rows=pool.get().await?.query("SELECT s.*, (SELECT JSONB_BUILD_OBJECT('status',j.status,'summary',j.summary,'error_code',j.error_code,'created_at',j.created_at) FROM intel_sync_run j WHERE j.source_id=s.id ORDER BY created_at DESC LIMIT 1) AS last_run,
-    (SELECT JSONB_BUILD_OBJECT('stage',CASE WHEN i.source_revision=s.revision THEN i.stage ELSE 'cancelled' END,'total',i.record_count,'processed',i.processed_count,'validation',i.validation_summary) FROM intel_import_snapshot i WHERE i.source_id=s.id) AS import_status
+    (SELECT JSONB_BUILD_OBJECT('stage',CASE WHEN i.source_revision<>s.revision THEN 'cancelled' WHEN i.paused THEN 'paused' ELSE i.stage END,'total',i.record_count,'processed',i.processed_count,'validation',i.validation_summary) FROM intel_import_snapshot i WHERE i.source_id=s.id) AS import_status
     FROM intel_source s ORDER BY name,id",&[]).await?;
     let items = rows
         .iter()
@@ -259,6 +259,11 @@ pub(super) async fn enqueue(
     if row.get::<_,String>("transport")=="upload" && !tx.query_one("SELECT EXISTS(SELECT 1 FROM intel_import_snapshot WHERE source_id=$1 AND source_revision=$2 AND stage<>'complete')",&[&id,&revision]).await?.get::<_,bool>(0) {
         return Err(Error::bad("intel_import_file_required"));
     }
+    tx.execute(
+        "UPDATE intel_import_snapshot SET paused=FALSE WHERE source_id=$1 AND source_revision=$2",
+        &[&id, &revision],
+    )
+    .await?;
     let job = Uuid::now_v7();
     let inserted=tx.query_opt("INSERT INTO intel_sync_run(id,source_id,source_revision) VALUES($1,$2,$3) ON CONFLICT(source_id) WHERE status IN ('queued','running') DO NOTHING RETURNING id",&[&job,&id,&revision]).await?;
     let job = if let Some(r) = inserted {

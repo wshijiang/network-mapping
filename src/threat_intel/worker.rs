@@ -14,10 +14,12 @@ pub async fn run(
     tokio::join!(
         async move {
             loop {
-                if !source_maintenance.snapshot().await.enabled
-                    && let Err(e) = source_tick(&sources, &source_key).await
-                {
-                    tracing::warn!(event = "IntelSourceWorkerFailed", code = e.code);
+                if !source_maintenance.snapshot().await.enabled {
+                    match source_tick(&sources, &source_key).await {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!(event = "IntelSourceWorkerFailed", code = e.code),
+                    }
                 }
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
@@ -39,7 +41,7 @@ pub(super) async fn source_tick(pool: &Pool, encryption_key: &str) -> Result<boo
     let tx = c.transaction().await?;
     tx.execute("UPDATE intel_sync_run SET status='failed',error_code='intel_attempts_exhausted',finished_at=NOW() WHERE status='running' AND lease_until<NOW() AND attempts>=3",&[]).await?;
     tx.execute("UPDATE intel_sync_run j SET status='cancelled',error_code='intel_source_changed',finished_at=NOW() FROM intel_source s WHERE j.source_id=s.id AND j.status IN ('queued','running') AND (NOT s.enabled OR s.revision<>j.source_revision)",&[]).await?;
-    let due=tx.query("SELECT s.id,s.revision,s.interval_seconds FROM intel_source s WHERE s.enabled AND s.next_check_at<=NOW() AND ((s.transport NOT IN ('upload','manual') AND s.kind<>'threatfox_export') OR EXISTS(SELECT 1 FROM intel_import_snapshot i WHERE i.source_id=s.id AND i.source_revision=s.revision AND i.stage<>'complete')) ORDER BY s.next_check_at FOR UPDATE OF s SKIP LOCKED LIMIT 20",&[]).await?;
+    let due=tx.query("SELECT s.id,s.revision,s.interval_seconds FROM intel_source s WHERE s.enabled AND s.next_check_at<=NOW() AND ((s.transport NOT IN ('upload','manual') AND s.kind<>'threatfox_export') OR EXISTS(SELECT 1 FROM intel_import_snapshot i WHERE i.source_id=s.id AND i.source_revision=s.revision AND i.stage<>'complete' AND NOT i.paused)) ORDER BY s.next_check_at FOR UPDATE OF s SKIP LOCKED LIMIT 20",&[]).await?;
     for row in due {
         let source: Uuid = row.get("id");
         let revision: i64 = row.get("revision");
@@ -78,7 +80,12 @@ pub(super) async fn source_tick(pool: &Pool, encryption_key: &str) -> Result<boo
     let c = pool.get().await?;
     c.execute("UPDATE intel_sync_run SET status=$3,summary=$4,error_code=$5,finished_at=NOW(),claim_token=NULL,lease_until=NULL WHERE id=$1 AND claim_token=$2 AND lease_until>NOW()",&[&id,&token,&state,&summary,&error]).await?;
     if state == "partial" {
-        c.execute("UPDATE intel_source SET next_check_at=NOW()+INTERVAL '5 seconds' WHERE id=$1 AND revision=$2",&[&source_id,&revision]).await?;
+        let delay = if summary.get("offline_import") == Some(&json!(true)) {
+            0_i32
+        } else {
+            5
+        };
+        c.execute("UPDATE intel_source SET next_check_at=NOW()+$3::INTEGER*INTERVAL '1 second' WHERE id=$1 AND revision=$2",&[&source_id,&revision,&delay]).await?;
     }
     Ok(true)
 }
@@ -131,12 +138,7 @@ pub(super) async fn sync(
                 (parse::indicators(&data, kind)?, ValidationReport::default())
             };
             let total = entries.len();
-            let mut added = 0;
-            for i in entries {
-                if storage::ingest(pool, &s, i, Origin::Structured, "").await? {
-                    added += 1;
-                }
-            }
+            let added = batch::ingest_all(pool, &s, entries, "").await?;
             Ok((
                 json!({"received":total as i64+validation.rejected,"accepted":total,"added":added,"validation":validation,"require_review":s.input.require_review}),
                 false,
@@ -282,11 +284,7 @@ pub(super) async fn github_file(
     let supported = match entries {
         Ok((entries, report)) => {
             validation = report;
-            for i in entries {
-                if storage::ingest(pool, s, i, Origin::Structured, &format!("{path}#")).await? {
-                    added += 1;
-                }
-            }
+            added = batch::ingest_all(pool, s, entries, &format!("{path}#")).await?;
             true
         }
         Err(e)

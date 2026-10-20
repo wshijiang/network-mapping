@@ -29,6 +29,7 @@ pub async fn execute(
     password_config: PasswordHashConfig,
 ) -> CliResult {
     match command {
+        ServerCommand::Intel { command } => crate::threat_intel::cli::execute(command, pool).await,
         ServerCommand::User { command } => execute_user(command, pool, password_config).await,
     }
 }
