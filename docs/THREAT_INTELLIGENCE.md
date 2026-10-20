@@ -158,10 +158,39 @@ ThreatFox API 使用 `Auth-Key`；其他结构化 HTTPS 来源的凭据用作 Au
 }
 ```
 
-支持 `ip`、`ip_port`（兼容 `ip:port`）、`domain`、`url`、`md5`、`sha1`、`sha256`。
+支持 `ip`、`ip_port`（兼容 `ip:port`）、`domain`、`url`、`md5`、`sha1`、`sha256`、`asn`。
+ASN 接受 `AS64496`、`64496`、`AS 64496` 及大小写变体，统一为 `AS64496`。编号须在
+1～4294967294 内；不接受 AS 路径、ASDOT 或网段。纯数字的无类型文本不猜测成 ASN，
+逐行文本请使用带 AS 前缀的完整值。
 可选字段包括 `actor_name`、`actor_id`、`techniques`、`victim_industries`、
 `victim_countries`、`first_seen`、`last_seen`、`valid_until`。verdict 默认为 malicious，
 也支持 suspicious。未知字段报格式错误，不能用于注入审核状态。
+
+### 攻击行为、指标角色与资源登记方
+
+`attack_types` 与 MITRE `techniques` 分开保存。行为分类包括：
+
+| 分类值 | 含义 |
+| --- | --- |
+| bgp_hijacking / route_leak | BGP 路由劫持 / 路由泄漏 |
+| dns_hijacking / dns_response_tampering | DNS 劫持 / DNS 应答篡改 |
+| malicious_redirection / phishing | 恶意重定向 / 钓鱼 |
+| malware_delivery / command_and_control | 恶意软件投递 / 命令与控制 |
+| credential_theft / data_exfiltration | 凭据窃取 / 数据外传 |
+| denial_of_service / reconnaissance | 拒绝服务 / 侦察 |
+
+可选 `role` 包括 route_hijacker、malicious_dns、redirect_destination、c2、payload_host、
+phishing_host；不明确时留空。`resource_owner` 保存原文明确的资源登记方名称，不作为
+攻击组织、MITRE 映射候选或逐 IOC 归因依据。JSON 的 attack_types 使用数组，CSV 用 `|`
+分隔。未知分类/角色报 `intel_invalid_classification`。Web 可按 IOC 类型和攻击行为筛选。
+
+```json
+{"iocs":[{"type":"asn","value":"AS64496","verdict":"malicious","attack_types":["bgp_hijacking","dns_response_tampering"],"role":"route_hijacker","resource_owner":"Example registered holder","reference":"https://research.example/report","evidence":"报告明确将该自治域列为实施路由劫持及 DNS 应答篡改的基础设施。"}]}
+```
+
+无组织名称或软件家族不妨碍接纳有效情报。AI 必须从原文提取 ASN、行为和角色，并附可
+定位证据，不能从 IP 推断 ASN、把所有 IP 指定为 DNS 服务或把登记方当攻击者。
+MITRE 技术仍只提取原文明示的 ATT&CK 编号，不根据行为分类自动猜测映射。
 
 IOC 保留原始证据中的角色：受害行业和地区是报告上下文，不会被标记成攻击基础设施。
 结构化组织归因需要有效 MITRE 组织和明确引用/证据；单纯 malware 或路径中的组织名不
@@ -352,6 +381,36 @@ Network activity、Artifacts dropped、Payload delivery 类别的目标 IP、域
 
 ## AI 配置与审核
 
+### 手动文章与微信公众号
+
+新建 `kind=article`、`transport=manual` 来源，location 与凭据留空，配置允许的完整
+文章域名。在 Web“文章”页展开“提交文章链接 / 正文快照”，选择来源并填写标题和原文
+HTTPS 地址。正文可留空由后台抓取，或粘贴 40～100,000 UTF-8 字节的纯文本。
+手动来源不执行周期抓取，“立即同步”不适用于此类型。AI 关闭时仍可保存文章，队列
+等待 AI 开启；所有提议固定人工审核，来源 require_review 不能绕过这一门槛。
+
+微信远程抓取需要在来源填写具体账号的 `publisher_id`（文章完整链接中的 `__biz`），
+不能填公众号昵称。抓取后核对页面脚本中的账号标识并读取 `#js_content`，保留正文和
+表格文本，排除脚本、导航及隐藏文本。不执行页面脚本、不绕过验证页；账号不一致、
+正文缺失或网络受限时失败并可重试。`mp.weixin.qq.com` 域名白名单本身不代表账号可信。
+普通文章继续读取 article/main。RSS 发现的微信链接也执行账号核对。
+
+微信链接只保留文章身份参数 __biz、mid、idx、sn；去掉 poc_token 等访问/跟踪参数，
+规范化地址用于保存、抓取、引用和 AI 输入。手动正文标记为
+`intake.publisher_verification=administrator_supplied`，不宣称已从官方网络页面核验；
+微信远程账号匹配记录为 page_account_match。审核页可查看 intake 元数据和正文。
+以上方式均保存快照哈希与来源 revision，重复提交同一内容幂等，新正文保留为独立快照；
+重试复用已保存快照。修改或停用来源会取消旧版本排队/运行任务。
+
+```json
+{"source_id":"<来源 UUID>","expected_revision":1,"title":"路由及 DNS 异常报告","url":"https://research.example/report","body":"<可选的完整纯文本正文>"}
+```
+
+该请求提交到 `POST /api/intel/articles`，响应为文章 id、queued 与固定
+ai_review_required=true。管理员权限、现有 CSRF 与审计规则保持执行。
+
+### 提取与审核
+
 管理页面填写兼容 Chat Completions 的完整 HTTPS 接口地址、模型名称，并保存数据库凭据
 或填写凭据环境变量，
 然后开启 AI。接口需要支持 JSON 对象输出。首版提取只有一个独立 worker，单次正文
@@ -395,10 +454,16 @@ AI 配置修改和审核均写入现有审计系统。提议保存文章版本�
 | Domain | 精确域名查询；不扩大到父域、子域或 DNS 解析 IP |
 | URL | 精确 URL 查询；不扩大到域名或 IP |
 | 文件哈希 | 可保存和精确查询；当前扫描协议未采集通用文件样本，不能宣称样本命中 |
+| ASN | 同一规范化 ASN；资产所属 ASN 的证据作为独立上下文展示 |
 
 域名关联页使用精确 IOC 查询；搜索和资产端点自动匹配 IP、IP:端口。URL 和哈希可在
 IOC 库查询或通过 lookup API 精确查询。端点没有实际 URL/文件观察证据时，不生成命中。
-TLS SAN、相同证书、ASN、软件家族均不用于扩大标记。
+TLS SAN、相同证书、ASN、软件家族均不用于扩大 IP 标记。
+ASN 的 lookup 返回该 ASN 本身的结论。资产概要和搜索结果在授权过滤后批量匹配已有
+ASN 字段，返回独立 `intel.asn_context`（available/risk/matches/expired_matches），不改变
+IP/端点自身的 risk 和 matches，不创建派生 IP IOC。Web 显示“所属 ASN：恶意报告 /
+可疑报告 / 已过期”。缺少有效 ASN 数据时不猜测，不用当前 ASN 元数据证明历史 AS 路径。
+这是报告情报匹配，不代表系统已监测到当前 BGP 路由或 DNS 流量异常。
 
 响应新增独立 `intel` 对象，包含 available、risk、matches、expired_matches；有效证据与
 过期历史分别返回，单个 IOC 每组最多 10 条。原有 tags 仍是人工标签，
@@ -421,13 +486,13 @@ TLS SAN、相同证书、ASN、软件家族均不用于扩大标记。
 | `POST /api/intel/sources/{id}/import?expected_revision=N` | 管理员上传原始文件体，Content-Type 为 application/octet-stream；仅 upload 来源 |
 | `POST /api/intel/sources/{id}/import/check?expected_revision=N` | 管理员上传前检查；无文件体，不排队、不预留来源，返回 `data.ready=true` 后再传文件 |
 | `GET/PUT /api/intel/settings` | AI 设置、配置 revision、固定 ai_review_required=true |
-| `GET /api/intel/records` | status、q、source_id、offset；每页 50 条 |
+| `GET /api/intel/records` | status、q、source_id、offset、type、attack_type；每页 50 条 |
 | `POST /api/intel/records/{id}/review` | content_hash、decision、reason；decision 为 approved/rejected/revoked |
 | `GET /api/intel/entities` | kind=actor/software/technique、q；最多 100 条 |
 | `GET /api/intel/entities/{attack_id}` | MITRE 对象与关系；软件使用关系不代表当前 IOC 归因 |
 | `GET /api/intel/lookup?type=domain&value=example.com` | 精确 IOC 查询 |
 | `GET /api/intel/jobs` | 最近 100 次作业 |
-| `GET /api/intel/articles` | 最近 100 篇文章及提取状态 |
+| `GET/POST /api/intel/articles` | 最近 100 篇文章 / 管理员提交链接或正文快照 |
 | `GET /api/intel/articles/{id}` | 审核所需文章快照 |
 | `POST /api/intel/articles/{id}/retry` | AI 开启时重试失败或重新提取已完成文章，复用保存快照 |
 | `GET/POST /api/intel/mappings` | 未映射名称、已确认映射；写入 source_id/name/attack_id/kind（actor 或 software） |
@@ -436,7 +501,8 @@ TLS SAN、相同证书、ASN、软件家族均不用于扩大标记。
 AI 设置请求为 `{"expected_revision":1,"settings":{"ai_enabled":false,...}}`。来源和
 设置修改采用乐观版本检查。固定 AI 审核字段不可在请求中修改，未知字段拒绝。
 
-来源 `transport` 支持 local/https/upload，`expiry_months` 默认 6。upload 的 location 和
+来源 `transport` 支持 local/https/upload/manual，`expiry_months` 默认 6。manual 仅用于
+article 来源，须配置 allowed_hosts；publisher_id 可绑定微信账号。upload/manual 的 location 和
 凭据字段必须为空。来源响应的 `import_status` 返回 stage、total、processed、validation；
 作业 summary 同样包含 validation。无文件时 import_status 为
 null。records 的 status=approved 只列当前有效证据，status=expired 列已接纳的过期证据
@@ -513,3 +579,8 @@ cargo test --locked --lib threatfox_transport_url_iocs -- --nocapture
 注释/引号/列数和原生字段、JSON/STIX 的 BOM、RSS 的 BOM/DOCTYPE 拒绝及 AI 原文证据
 定位。AI 仅接受能在文章中精确定位的证据，修复去活化 URL 不改变人工审核门槛。
 真实 LLM 调用需要实际配置的服务和密钥；解析器 fixture 测试不代表已调用真实模型。
+ASN 扩展回归覆盖 ASN 规范化、JSON/CSV/文本输入、原有 payload 哈希兼容、行为筛选、
+免审/固定 AI 审核、到期和带历史数据迁移，以及 ASN 上下文不生成 IP 标记。文章回归
+覆盖管理员权限、来源 revision、重复提交、快照保留、AI 关闭等待、账号核对、微信参数
+清理、表格正文与隐藏脚本过滤。微信抓取使用 HTML fixture；真实微信页面可能要求
+验证，需部署环境实测，受限时使用手动正文，不宣称已完成真实 LLM/微信联调。

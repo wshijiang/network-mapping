@@ -253,7 +253,12 @@ async fn respond_search_elasticsearch(
                 .iter()
                 .map(|item| crate::threat_intel::endpoint_keys(&item.ip_address, Some(item.port)))
                 .collect::<Vec<_>>();
-            let intelligence = crate::threat_intel::annotate(pool, &keys).await;
+            let asns = page
+                .items
+                .iter()
+                .map(|item| item.asn.as_deref())
+                .collect::<Vec<_>>();
+            let intelligence = crate::threat_intel::annotate_assets(pool, &keys, &asns).await;
             let auto_generation = if let Some(context) = generation {
                 let policy = context.settings.automatic_target.get().await;
                 let dns_policy = context.settings.dns_follow_up.get().await.value;

@@ -54,6 +54,7 @@ pub(super) fn source(row: &tokio_postgres::Row) -> Source {
             transport: row.get("transport"),
             location: row.get("location"),
             allowed_hosts: row.get("allowed_hosts"),
+            publisher_id: row.get("publisher_id"),
             auth_env: row.get("auth_env"),
             credential: String::new(),
             clear_credential: false,
@@ -104,7 +105,7 @@ pub(super) async fn sources(pool: &Pool) -> Result<Value> {
         })
         .collect::<Vec<_>>();
     Ok(
-        json!({"items":items,"defaults":{"mitre_stix":86400,"eset_github":3600,"rss":1800,"threatfox":1800,"threatfox_export":3600,"json":1800,"lines":1800}}),
+        json!({"items":items,"defaults":{"mitre_stix":86400,"eset_github":3600,"rss":1800,"article":1800,"threatfox":1800,"threatfox_export":3600,"json":1800,"lines":1800}}),
     )
 }
 pub(super) async fn save_source(
@@ -153,6 +154,11 @@ pub(super) async fn save_source(
         1
     };
     tx.execute("UPDATE intel_source SET credential_ciphertext=CASE WHEN $2 THEN NULL ELSE COALESCE($3,credential_ciphertext) END,expiry_months=$4 WHERE id=$1", &[&id,&clear,&encrypted,&input.expiry_months]).await?;
+    tx.execute(
+        "UPDATE intel_source SET publisher_id=$2 WHERE id=$1",
+        &[&id, &input.publisher_id],
+    )
+    .await?;
     audit(&tx,user,context,"intel.source.save",&id.to_string(),json!({"revision":revision,"kind":input.kind,"enabled":input.enabled,"require_review":input.require_review,"interval_seconds":input.interval_seconds,"expiry_months":input.expiry_months,"credential_changed":clear||encrypted.is_some()})).await?;
     tx.commit().await?;
     Ok(json!({"id":id,"revision":revision}))
@@ -247,6 +253,9 @@ pub(super) async fn enqueue(
         return Err(Error::bad("intel_source_disabled"));
     }
     let revision: i64 = row.get("revision");
+    if row.get::<_, String>("transport") == "manual" {
+        return Err(Error::bad("intel_article_submission_required"));
+    }
     if row.get::<_,String>("transport")=="upload" && !tx.query_one("SELECT EXISTS(SELECT 1 FROM intel_import_snapshot WHERE source_id=$1 AND source_revision=$2 AND stage<>'complete')",&[&id,&revision]).await?.get::<_,bool>(0) {
         return Err(Error::bad("intel_import_file_required"));
     }
@@ -486,6 +495,9 @@ pub(super) struct ListQuery {
     pub q: Option<String>,
     pub offset: Option<i64>,
     pub source_id: Option<Uuid>,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub attack_type: Option<String>,
 }
 pub(super) async fn records(pool: &Pool, user: &UserBaseI, q: &ListQuery) -> Result<Value> {
     let status = q.status.as_deref().unwrap_or("approved");
@@ -503,8 +515,17 @@ pub(super) async fn records(pool: &Pool, user: &UserBaseI, q: &ListQuery) -> Res
     if query.len() > 200 || !(0..=1_000_000).contains(&offset) {
         return Err(Error::bad("intel_invalid_query"));
     }
+    let kind = q.kind.as_deref().unwrap_or("");
+    let attack = q.attack_type.as_deref().unwrap_or("");
+    if !matches!(
+        kind,
+        "" | "ip" | "ip_port" | "domain" | "url" | "md5" | "sha1" | "sha256" | "asn"
+    ) || (!attack.is_empty() && !ATTACK_TYPES.contains(&attack))
+    {
+        return Err(Error::bad("intel_invalid_query"));
+    }
     let c = pool.get().await?;
-    let rows=c.query("SELECT r.*,COUNT(*) OVER() AS total FROM intel_record_state r WHERE ((r.status=$1 AND ($1<>'approved' OR NOT r.expired)) OR ($1='expired' AND r.status='approved' AND r.expired)) AND ($2::UUID IS NULL OR r.source_id=$2) AND ($3='' OR r.value ILIKE '%'||$3||'%' OR r.payload->>'actor_name' ILIKE '%'||$3||'%' OR r.payload->>'malware' ILIKE '%'||$3||'%') ORDER BY r.created_at DESC,r.id DESC LIMIT 50 OFFSET $4",&[&status,&q.source_id,&query,&offset]).await?;
+    let rows=c.query("SELECT r.*,COUNT(*) OVER() AS total FROM intel_record_state r WHERE ((r.status=$1 AND ($1<>'approved' OR NOT r.expired)) OR ($1='expired' AND r.status='approved' AND r.expired)) AND ($2::UUID IS NULL OR r.source_id=$2) AND ($3='' OR r.value ILIKE '%'||$3||'%' OR r.payload->>'actor_name' ILIKE '%'||$3||'%' OR r.payload->>'malware' ILIKE '%'||$3||'%') AND ($5='' OR r.kind=$5) AND ($6='' OR (r.payload->'attack_types') ? $6) ORDER BY r.created_at DESC,r.id DESC LIMIT 50 OFFSET $4",&[&status,&q.source_id,&query,&offset,&kind,&attack]).await?;
     Ok(
         json!({"items":rows.iter().map(record_json).collect::<Vec<_>>(),"total":rows.first().map(|r|r.get::<_,i64>("total")).unwrap_or(0),"offset":offset}),
     )
@@ -617,12 +638,40 @@ pub(crate) struct Annotation {
     pub risk: Option<String>,
     pub matches: Vec<Value>,
     pub expired_matches: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asn_context: Option<Box<Annotation>>,
 }
 pub(crate) async fn annotate(pool: &Pool, targets: &[Vec<(String, String)>]) -> Vec<Annotation> {
     match annotations(pool, targets).await {
         Ok(v) => v,
         Err(_) => vec![Annotation::default(); targets.len()],
     }
+}
+// One batched read after asset authorization. ASN evidence is context only and
+// never changes the IP/endpoint risk or materializes derived IP indicators.
+pub(crate) async fn annotate_assets(
+    pool: &Pool,
+    targets: &[Vec<(String, String)>],
+    asns: &[Option<&str>],
+) -> Vec<Annotation> {
+    let mut combined = targets.to_vec();
+    let keys = (0..targets.len())
+        .map(|index| {
+            asns.get(index)
+                .copied()
+                .flatten()
+                .and_then(|v| normalize("asn", v).ok())
+        })
+        .collect::<Vec<_>>();
+    combined.extend(keys.iter().map(|key| key.iter().cloned().collect()));
+    let mut result = annotate(pool, &combined).await;
+    let contexts = result.split_off(targets.len());
+    for ((item, context), key) in result.iter_mut().zip(contexts).zip(keys) {
+        if key.is_some() {
+            item.asn_context = Some(Box::new(context));
+        }
+    }
+    result
 }
 async fn annotations(pool: &Pool, targets: &[Vec<(String, String)>]) -> Result<Vec<Annotation>> {
     let keys = targets

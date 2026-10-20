@@ -425,6 +425,14 @@ pub(super) fn csv_object<'a>(
                     .parse::<i32>()
                     .map_err(|_| Error::bad("intel_invalid_confidence"))?
             )
+        } else if key == "attack_types" {
+            json!(
+                value
+                    .split('|')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .collect::<Vec<_>>()
+            )
         } else if key == "is_compromised" {
             match value.to_ascii_lowercase().as_str() {
                 "true" | "1" => json!(true),

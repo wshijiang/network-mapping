@@ -4,7 +4,29 @@ use std::{net::IpAddr, path::Component};
 pub(super) const MAX_ITEMS: usize = 50_000;
 pub(super) const MAX_BYTES: usize = 96 * 1024 * 1024;
 pub(super) const MAX_ARTICLE: usize = 100_000;
-pub(super) const PROMPT_VERSION: &str = "ioc-evidence-v1";
+pub(super) const PROMPT_VERSION: &str = "ioc-evidence-v2";
+pub(super) const ATTACK_TYPES: &[&str] = &[
+    "bgp_hijacking",
+    "route_leak",
+    "dns_hijacking",
+    "dns_response_tampering",
+    "malicious_redirection",
+    "phishing",
+    "malware_delivery",
+    "command_and_control",
+    "credential_theft",
+    "data_exfiltration",
+    "denial_of_service",
+    "reconnaissance",
+];
+pub(super) const IOC_ROLES: &[&str] = &[
+    "route_hijacker",
+    "malicious_dns",
+    "redirect_destination",
+    "c2",
+    "payload_host",
+    "phishing_host",
+];
 
 #[derive(Default, Debug, Serialize, Deserialize, PartialEq)]
 pub(super) struct ValidationReport {
@@ -81,6 +103,8 @@ pub(super) struct SourceInput {
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
     #[serde(default)]
+    pub publisher_id: String,
+    #[serde(default)]
     pub auth_env: String,
     #[serde(default, skip_serializing)]
     pub credential: String,
@@ -124,6 +148,7 @@ impl SourceInput {
                     | "eset_github"
                     | "rss"
                     | "mitre_stix"
+                    | "article"
             )
         {
             return Err(Error::bad("intel_invalid_source"));
@@ -144,7 +169,29 @@ impl SourceInput {
         {
             return Err(Error::bad("intel_invalid_hosts"));
         }
+        self.publisher_id = self.publisher_id.trim().to_owned();
+        if self.publisher_id.len() > 128
+            || !self
+                .publisher_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+        {
+            return Err(Error::bad("intel_invalid_publisher"));
+        }
+        if self.kind == "article" && self.transport != "manual" {
+            return Err(Error::bad("intel_invalid_article_source"));
+        }
         match self.transport.as_str() {
+            "manual" => {
+                if self.kind != "article"
+                    || !self.location.is_empty()
+                    || self.allowed_hosts.is_empty()
+                    || !self.auth_env.is_empty()
+                    || !self.credential.is_empty()
+                {
+                    return Err(Error::bad("intel_invalid_article_source"));
+                }
+            }
             "upload" => {
                 if !matches!(self.kind.as_str(), "json" | "lines" | "threatfox_export")
                     || !self.location.is_empty()
@@ -316,6 +363,12 @@ pub(super) struct Indicator {
     pub actor_id: Option<String>,
     #[serde(default)]
     pub techniques: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attack_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub resource_owner: String,
     #[serde(default)]
     pub victim_industries: Vec<String>,
     #[serde(default)]
@@ -344,6 +397,19 @@ impl Indicator {
         let (kind, value) = normalize(&self.kind, &self.value)?;
         self.kind = kind;
         self.value = value;
+        if self.attack_types.len() > ATTACK_TYPES.len()
+            || self
+                .attack_types
+                .iter()
+                .any(|v| !ATTACK_TYPES.contains(&v.as_str()))
+            || (!self.role.is_empty() && !IOC_ROLES.contains(&self.role.as_str()))
+            || self.resource_owner.len() > 200
+            || self.resource_owner.chars().any(char::is_control)
+        {
+            return Err(Error::bad("intel_invalid_classification"));
+        }
+        self.attack_types.sort();
+        self.attack_types.dedup();
         if !matches!(self.verdict.as_str(), "malicious" | "suspicious")
             || self.evidence.len() > 4000
             || self.external_id.len() > 2048
@@ -400,6 +466,22 @@ pub(super) fn normalize(kind: &str, raw: &str) -> Result<(String, String)> {
         other => other,
     };
     let normalized = match kind {
+        "asn" => {
+            let number = value
+                .get(..2)
+                .filter(|p| p.eq_ignore_ascii_case("as"))
+                .map(|_| value[2..].trim())
+                .unwrap_or(&value);
+            if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(Error::bad("intel_invalid_asn"));
+            }
+            let number = number
+                .parse::<u32>()
+                .ok()
+                .filter(|n| *n > 0 && *n < u32::MAX)
+                .ok_or_else(|| Error::bad("intel_invalid_asn"))?;
+            format!("AS{number}")
+        }
         "ip" => value
             .parse::<IpAddr>()
             .map(|v| v.to_string())

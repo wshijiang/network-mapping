@@ -24,8 +24,11 @@ CREATE TABLE IF NOT EXISTS intel_source (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS credential_ciphertext BYTEA;
+ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS publisher_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE intel_source DROP CONSTRAINT IF EXISTS intel_source_kind_check;
+ALTER TABLE intel_source ADD CONSTRAINT intel_source_kind_check CHECK(kind IN ('json','lines','threatfox','threatfox_export','eset_github','rss','mitre_stix','article'));
 ALTER TABLE intel_source DROP CONSTRAINT IF EXISTS intel_source_transport_check;
-ALTER TABLE intel_source ADD CONSTRAINT intel_source_transport_check CHECK(transport IN ('local','https','upload'));
+ALTER TABLE intel_source ADD CONSTRAINT intel_source_transport_check CHECK(transport IN ('local','https','upload','manual'));
 ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS expiry_months INTEGER NOT NULL DEFAULT 6 CHECK(expiry_months BETWEEN 0 AND 120);
 INSERT INTO intel_source(id,name,kind,transport,location,allowed_hosts,auth_env,interval_seconds) VALUES
  ('01800000-0000-7000-8000-000000000001','MITRE Enterprise ATT&CK','mitre_stix','https','https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json',ARRAY['raw.githubusercontent.com'],'',86400),
@@ -141,6 +144,8 @@ CREATE TABLE IF NOT EXISTS intel_ioc (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(kind,value)
 );
+ALTER TABLE intel_ioc DROP CONSTRAINT IF EXISTS intel_ioc_kind_check;
+ALTER TABLE intel_ioc ADD CONSTRAINT intel_ioc_kind_check CHECK(kind IN ('ip','ip_port','domain','url','md5','sha1','sha256','asn'));
 CREATE TABLE IF NOT EXISTS intel_record (
     id UUID PRIMARY KEY,
     source_id UUID NOT NULL REFERENCES intel_source(id),
@@ -167,6 +172,7 @@ CREATE TABLE IF NOT EXISTS intel_record (
 );
 CREATE INDEX IF NOT EXISTS intel_record_published ON intel_record(kind,value) WHERE status='approved';
 CREATE INDEX IF NOT EXISTS intel_record_match_key ON intel_record((kind||':'||value)) WHERE status='approved';
+CREATE INDEX IF NOT EXISTS intel_record_attack_types ON intel_record USING GIN ((payload->'attack_types'));
 CREATE INDEX IF NOT EXISTS intel_record_queue ON intel_record(status,created_at);
 CREATE INDEX IF NOT EXISTS intel_sync_source_history ON intel_sync_run(source_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS intel_article_pending ON intel_article(available_at,created_at) WHERE status IN ('queued','running');
@@ -199,8 +205,8 @@ DO $$ BEGIN
 END $$;
 CREATE OR REPLACE FUNCTION intel_record_guard() RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
- IF TG_OP='INSERT' AND (SELECT kind FROM intel_source WHERE id=NEW.source_id)='rss' AND NEW.origin<>'ai' THEN
-  RAISE EXCEPTION 'RSS extraction is always AI evidence';
+ IF TG_OP='INSERT' AND (SELECT kind FROM intel_source WHERE id=NEW.source_id) IN ('rss','article') AND NEW.origin<>'ai' THEN
+  RAISE EXCEPTION 'Article extraction is always AI evidence';
  END IF;
  IF TG_OP='UPDATE' AND (NEW.origin,NEW.source_id,NEW.source_revision,NEW.external_key,NEW.content_hash,NEW.kind,NEW.value,NEW.payload,NEW.article_id,NEW.actor_id,NEW.valid_until,NEW.observed_at)
      IS DISTINCT FROM (OLD.origin,OLD.source_id,OLD.source_revision,OLD.external_key,OLD.content_hash,OLD.kind,OLD.value,OLD.payload,OLD.article_id,OLD.actor_id,OLD.valid_until,OLD.observed_at) THEN

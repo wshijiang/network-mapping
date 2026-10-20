@@ -145,6 +145,13 @@ pub(super) fn indicators(data: &[u8], format: &str) -> Result<Vec<Indicator>> {
             if !verdict.is_empty() {
                 i.verdict = verdict.into();
             }
+            i.attack_types = at(&["attack_types"])
+                .split('|')
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned)
+                .collect();
+            i.role = at(&["role"]).to_owned();
+            i.resource_owner = at(&["resource_owner"]).to_owned();
             i.normalize()?;
             out.push(i);
         } else {
@@ -283,6 +290,12 @@ fn misp_report(
     Ok((out, report))
 }
 fn guess(value: &str) -> Option<Indicator> {
+    if value.get(..2).is_some_and(|v| v.eq_ignore_ascii_case("as")) {
+        let number = value[2..].trim();
+        if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) {
+            return Some(Indicator::simple("asn", value));
+        }
+    }
     if value.contains(char::is_whitespace) {
         return None;
     }
@@ -526,9 +539,12 @@ pub(super) fn rss(data: &[u8], hosts: &[String]) -> Result<Vec<ArticleLink>> {
     Ok(out)
 }
 pub(super) fn article_text(data: &[u8]) -> Result<String> {
+    article_text_with_selector(data, "article, main")
+}
+pub(super) fn article_text_with_selector(data: &[u8], root: &str) -> Result<String> {
     let input = std::str::from_utf8(data).map_err(|_| Error::bad("intel_article_not_utf8"))?;
     let html = Html::parse_document(input);
-    let selector = Selector::parse("article, main").expect("static selector");
+    let selector = Selector::parse(root).expect("static selector");
     let node = html
         .select(&selector)
         .next()
@@ -561,6 +577,7 @@ pub(super) fn article_text(data: &[u8]) -> Result<String> {
 }
 
 pub(super) fn ai_result(content: &str, body: &str) -> Result<Vec<Indicator>> {
+    let normalized_body = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let value: Value =
         serde_json::from_str(content).map_err(|_| Error::bad("intel_ai_invalid_json"))?;
     if value
@@ -590,12 +607,17 @@ pub(super) fn ai_result(content: &str, body: &str) -> Result<Vec<Indicator>> {
                 .replace("[://]", "://")
                 .replace("hxxps://", "https://")
                 .replace("hxxp://", "http://");
-            if evidence.len() < 12
-                || !body.contains(&evidence)
-                || !(normalized_evidence.contains(&raw)
+            let mentions = if i.kind == "asn" {
+                regex::Regex::new(r"(?i)(?-u:\b)AS\s*[0-9]+(?-u:\b)")
+                    .expect("static regex")
+                    .find_iter(&normalized_evidence)
+                    .any(|m| normalize("asn", m.as_str()).is_ok_and(|(_, value)| value == i.value))
+            } else {
+                normalized_evidence.contains(&raw)
                     || normalized_evidence.contains(&i.value)
-                    || normalized_evidence.to_ascii_lowercase().contains(&i.value))
-            {
+                    || normalized_evidence.to_ascii_lowercase().contains(&i.value)
+            };
+            if evidence.len() < 12 || !normalized_body.contains(&evidence) || !mentions {
                 return Err(Error::bad("intel_ai_evidence_not_found"));
             }
             i.evidence = evidence;

@@ -1,6 +1,7 @@
 //! Source-trusted IOC ingestion and mandatory, version-bound AI review.
 //! Published facts are matched at read time after asset authorization. Scanner
 //! observations and upload checksums never contain these mutable annotations.
+mod articles;
 mod client;
 mod credentials;
 mod import_parse;
@@ -14,7 +15,7 @@ mod tests;
 mod worker;
 
 pub use routes::configure;
-pub(crate) use storage::{Annotation, annotate, endpoint_keys};
+pub(crate) use storage::{Annotation, annotate, annotate_assets, endpoint_keys};
 pub use worker::run;
 
 use actix_web::{HttpResponse, http::StatusCode};

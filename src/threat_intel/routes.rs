@@ -289,6 +289,22 @@ async fn article_detail(
     Ok(json!({"url":row.get::<_,String>(0),"title":row.get::<_,String>(1),"body":row.get::<_,Option<String>>(2),"body_hash":row.get::<_,Option<String>>(3),"extraction_metadata":row.get::<_,Value>(4)}))
 }.await)
 }
+async fn submit_article(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    input: web::Json<articles::ArticleInput>,
+) -> HttpResponse {
+    response(
+        articles::submit(
+            &pool,
+            input.into_inner(),
+            &user,
+            &AuditContext::from_request(&req),
+        )
+        .await,
+    )
+}
 async fn retry_article(
     req: HttpRequest,
     pool: web::Data<Pool>,
@@ -298,7 +314,7 @@ async fn retry_article(
     response(async {
     admin(&user)?;if !storage::settings(&pool).await?.0.ai_enabled{return Err(Error::bad("intel_ai_disabled"));}
     let mut c=pool.get().await?;let tx=c.transaction().await?;let id=id.into_inner();
-    let changed=tx.execute("UPDATE intel_article a SET status='queued',attempts=0,error_code=NULL,available_at=NOW() FROM intel_source s WHERE a.id=$1 AND a.source_id=s.id AND a.source_revision=s.revision AND s.enabled AND s.kind='rss' AND a.status IN ('failed','cancelled','proposed')",&[&id]).await?;
+    let changed=tx.execute("UPDATE intel_article a SET status='queued',attempts=0,error_code=NULL,available_at=NOW() FROM intel_source s WHERE a.id=$1 AND a.source_id=s.id AND a.source_revision=s.revision AND s.enabled AND s.kind IN ('rss','article') AND a.status IN ('failed','cancelled','proposed')",&[&id]).await?;
     if changed==0{return Err(Error::conflict());}
     audit(&tx,&user,&AuditContext::from_request(&req),"intel.article.retry",&id.to_string(),json!({})).await?;tx.commit().await?;Ok(json!({"id":id}))
 }.await)
@@ -411,6 +427,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/lookup", web::get().to(lookup))
             .route("/jobs", web::get().to(jobs))
             .route("/articles", web::get().to(articles))
+            .route("/articles", web::post().to(submit_article))
             .route("/articles/{id}", web::get().to(article_detail))
             .route("/articles/{id}/retry", web::post().to(retry_article))
             .route("/mappings", web::get().to(mappings))

@@ -400,8 +400,12 @@ async fn get_asset_summary_from_elasticsearch(
     if es_total(&current) > os_sources.len() as i64 {
         host_os.distribution = None;
     }
-    let mut intelligence =
-        crate::threat_intel::annotate(pool, &[crate::threat_intel::endpoint_keys(ip, None)]).await;
+    let mut intelligence = crate::threat_intel::annotate_assets(
+        pool,
+        &[crate::threat_intel::endpoint_keys(ip, None)],
+        &[text("asn").as_deref()],
+    )
+    .await;
     let summary = AssetSummary {
         intel: intelligence.remove(0),
         os: host_os,
