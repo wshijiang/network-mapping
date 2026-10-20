@@ -518,9 +518,10 @@ async fn extract(
         )
         .await.map_err(ai_request_error)?;
         stage = "ai_response";
-        let content = ai_response_content(&data)?;
+        let (content, response_diagnostic) = ai_response_content(&data)?;
         stage = "ai_validate";
-        let (entries, validation) = parse::ai_result_isolated(&content, &body)?;
+        let (entries, validation) = parse::ai_result_isolated(&content, &body)
+            .map_err(|error| error.context(response_diagnostic))?;
         let count = entries.len();
         let (current, revision) = storage::settings(pool).await?;
         if !current.ai_enabled {
@@ -565,23 +566,87 @@ async fn extract(
     })
 }
 
-fn ai_response_content(data: &[u8]) -> Result<String> {
+fn ai_response_content(data: &[u8]) -> Result<(String, Value)> {
     let value: Value = serde_json::from_slice(data).map_err(|error| {
-        Error::bad("intel_ai_invalid_response").context(json!({
-            "reason":"invalid_json","json_line":error.line(),"json_column":error.column(),
-            "response_bytes":data.len()
-        }))
-    })?;
-    let content = value
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            Error::bad("intel_ai_invalid_response").context(json!({
-                "reason":"missing_chat_content","expected_field":"choices[0].message.content",
-                "response_bytes":data.len(),"responses_output_present":value.get("output").is_some()
+        Error::bad("intel_ai_invalid_response")
+            .context(parse::json_error_diagnostic(&error))
+            .context(json!({
+                "reason":"invalid_json",
+                "response_bytes":data.len()
             }))
-        })?;
-    Ok(content.to_owned())
+    })?;
+    // Only allowlisted classifications leave this function. Provider-controlled
+    // finish reasons, refusal text, reasoning, and response content can hold secrets.
+    let finish_reason = match value
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+    {
+        Some(reason @ ("stop" | "length" | "content_filter" | "tool_calls" | "function_call")) => {
+            reason
+        }
+        None if value
+            .pointer("/choices/0/finish_reason")
+            .is_none_or(Value::is_null) =>
+        {
+            "missing"
+        }
+        _ => "other",
+    };
+    let refusal = ai_field_present(value.pointer("/choices/0/message/refusal"));
+    let reasoning = ai_field_present(value.pointer("/choices/0/message/reasoning_content"))
+        || ai_field_present(value.pointer("/choices/0/message/reasoning"));
+    let content_value = value.pointer("/choices/0/message/content");
+    let content = content_value.and_then(Value::as_str);
+    let diagnostic = json!({"finish_reason":finish_reason,"response_bytes":data.len(),
+        "content_bytes":content.map_or(0, str::len),"refusal_present":refusal,
+        "reasoning_content_present":reasoning,"content_format":content.map(parse::ai_content_format).unwrap_or(if content_value.is_some_and(Value::is_null) {"empty"} else {"missing"})});
+    let failure = match finish_reason {
+        "length" => Some(("intel_ai_output_truncated", "output_limit")),
+        "content_filter" => Some(("intel_ai_content_filtered", "content_filtered")),
+        "tool_calls" | "function_call" => {
+            Some(("intel_ai_invalid_response", "unexpected_tool_call"))
+        }
+        _ if refusal => Some(("intel_ai_refused", "model_refusal")),
+        _ => None,
+    };
+    if let Some((code, reason)) = failure {
+        return Err(Error::bad(code)
+            .context(diagnostic)
+            .context(json!({"reason":reason})));
+    }
+    if content_value.is_some_and(Value::is_null) {
+        return Err(Error::bad("intel_ai_empty_content")
+            .context(diagnostic)
+            .context(json!({
+                "reason":if reasoning {"reasoning_only"} else {"empty_content"}
+            })));
+    }
+    let content = content.ok_or_else(|| {
+        Error::bad("intel_ai_invalid_response")
+            .context(diagnostic.clone())
+            .context(json!({
+                "reason":"missing_chat_content","expected_field":"choices[0].message.content",
+                "responses_output_present":value.get("output").is_some()
+            }))
+    })?;
+    if content.trim().is_empty() {
+        return Err(Error::bad("intel_ai_empty_content")
+            .context(diagnostic)
+            .context(json!({
+                "reason":if reasoning {"reasoning_only"} else {"empty_content"}
+            })));
+    }
+    Ok((content.to_owned(), diagnostic))
+}
+
+fn ai_field_present(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(Value::Object(fields)) => !fields.is_empty(),
+        Some(_) => true,
+    }
 }
 
 fn ai_request_error(mut error: Error) -> Error {
@@ -619,7 +684,7 @@ mod diagnostic_tests {
     #[test]
     fn incompatible_ai_responses_have_safe_format_diagnostics() {
         let chat = br#"{"choices":[{"message":{"content":"{\"iocs\":[]}"}}]}"#;
-        assert_eq!(ai_response_content(chat).unwrap(), r#"{"iocs":[]}"#);
+        assert_eq!(ai_response_content(chat).unwrap().0, r#"{"iocs":[]}"#);
         let responses =
             br#"{"output":[{"content":[{"type":"output_text","text":"private report content"}]}]}"#;
         let error = ai_response_content(responses).unwrap_err();
@@ -636,6 +701,79 @@ mod diagnostic_tests {
         assert_eq!(error.diagnostic["reason"], "invalid_json");
         assert!(error.diagnostic["json_line"].is_number());
         assert!(!error.report().to_string().contains("private proxy error"));
+    }
+
+    #[test]
+    fn ai_completion_failures_are_distinct_and_never_accept_truncated_valid_json() {
+        for (finish, message, code, reason) in [
+            (
+                "length",
+                json!({"content":"{\"iocs\":[]}"}),
+                "intel_ai_output_truncated",
+                "output_limit",
+            ),
+            (
+                "content_filter",
+                json!({"content":null}),
+                "intel_ai_content_filtered",
+                "content_filtered",
+            ),
+            (
+                "stop",
+                json!({"content":"{\"iocs\":[]}","refusal":"private-refusal-text"}),
+                "intel_ai_refused",
+                "model_refusal",
+            ),
+            (
+                "stop",
+                json!({"content":" \n\t"}),
+                "intel_ai_empty_content",
+                "empty_content",
+            ),
+            (
+                "stop",
+                json!({"content":null,"reasoning_content":"private-reasoning-text"}),
+                "intel_ai_empty_content",
+                "reasoning_only",
+            ),
+            (
+                "tool_calls",
+                json!({"content":null,"tool_calls":[{"private":"private-tool-data"}]}),
+                "intel_ai_invalid_response",
+                "unexpected_tool_call",
+            ),
+        ] {
+            let response = json!({"choices":[{"finish_reason":finish,"message":message}]});
+            let error = ai_response_content(&serde_json::to_vec(&response).unwrap()).unwrap_err();
+            assert_eq!(error.code, code);
+            assert_eq!(error.diagnostic["reason"], reason);
+            assert_eq!(error.diagnostic["finish_reason"], finish);
+            assert!(error.diagnostic["content_bytes"].is_number());
+            assert!(error.diagnostic["content_format"].is_string());
+            assert!(!error.report().to_string().contains("private-"));
+        }
+    }
+
+    #[test]
+    fn ai_validation_errors_keep_safe_response_metadata_without_raw_provider_values() {
+        let response = json!({"choices":[{"finish_reason":"private-provider-value","message":{
+            "content":"```json\n{\"iocs\":[]}\n```", "reasoning_content":"private-reasoning-text"
+        }}]});
+        let (content, diagnostic) =
+            ai_response_content(&serde_json::to_vec(&response).unwrap()).unwrap();
+        let error = parse::ai_result_isolated(&content, "private-article-text")
+            .map_err(|error| error.context(diagnostic))
+            .unwrap_err();
+        assert_eq!(error.code, "intel_ai_invalid_json");
+        assert_eq!(error.diagnostic["finish_reason"], "other");
+        assert_eq!(error.diagnostic["content_format"], "markdown_fence");
+        assert_eq!(error.diagnostic["reasoning_content_present"], true);
+        assert_eq!(error.diagnostic["refusal_present"], false);
+        assert_eq!(error.diagnostic["content_bytes"], content.len());
+        assert!(error.diagnostic["response_bytes"].is_number());
+        assert!(error.diagnostic["json_line"].is_number());
+        assert!(!error.report().to_string().contains("private-"));
+        assert!(!error.report().to_string().contains("```"));
     }
 
     #[test]

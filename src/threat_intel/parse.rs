@@ -688,8 +688,26 @@ fn ai_result_checked(
     isolate_evidence: bool,
 ) -> Result<(Vec<Indicator>, ValidationReport)> {
     let normalized_body = body.split_whitespace().collect::<Vec<_>>().join(" ");
-    let value: Value =
-        serde_json::from_str(content).map_err(|_| Error::bad("intel_ai_invalid_json"))?;
+    let value: Value = serde_json::from_str(content).map_err(|error| {
+        let format = ai_content_format(content);
+        let mut values = serde_json::Deserializer::from_str(content).into_iter::<Value>();
+        let trailing = matches!(values.next(), Some(Ok(_)))
+            && !content[values.byte_offset()..].trim().is_empty();
+        let reason = match format {
+            "empty" => "empty_content",
+            "markdown_fence" => "markdown_fence",
+            "reasoning_prefix" => "reasoning_prefix",
+            _ if trailing => "trailing_content",
+            _ if error.is_eof() => "incomplete_json",
+            "other_text" => "non_json_text",
+            _ => "invalid_json_syntax",
+        };
+        Error::bad("intel_ai_invalid_json")
+            .context(json_error_diagnostic(&error))
+            .context(json!({
+                "reason":reason,"content_bytes":content.len(),"content_format":format
+            }))
+    })?;
     if value
         .as_object()
         .is_none_or(|o| o.keys().any(|k| k != "iocs"))
@@ -775,6 +793,33 @@ fn ai_result_checked(
             })));
     }
     Ok((entries, validation))
+}
+
+pub(super) fn ai_content_format(content: &str) -> &'static str {
+    let content = content.trim();
+    if content.is_empty() {
+        "empty"
+    } else if content.starts_with("```") || content.starts_with("~~~") {
+        "markdown_fence"
+    } else if content.starts_with("<think>") || content.starts_with("<analysis>") {
+        "reasoning_prefix"
+    } else if content.starts_with('{') {
+        "json_object"
+    } else if content.starts_with('[') {
+        "json_array"
+    } else {
+        "other_text"
+    }
+}
+
+pub(super) fn json_error_diagnostic(error: &serde_json::Error) -> Value {
+    let category = match error.classify() {
+        serde_json::error::Category::Io => "io",
+        serde_json::error::Category::Syntax => "syntax",
+        serde_json::error::Category::Data => "data",
+        serde_json::error::Category::Eof => "eof",
+    };
+    json!({"json_error_category":category,"json_line":error.line(),"json_column":error.column()})
 }
 
 pub(super) fn threatfox_document(

@@ -511,6 +511,21 @@ AI 返回空 IOC 数组属于正常完成，文章保存为 `succeeded`，显示
 AI 证据失败记录条目序号 `record`、拒绝数 `rejected` 和固定原因分类；不记录模型返回文本。
 HTTP 诊断记录 `timeout_seconds`，文章失败还记录 `processing_timeout_seconds`。
 
+AI 回复无法解析为 JSON 时，`intel_ai_invalid_json` 会附带 `json_error_category`、
+`json_line`、`json_column`、`content_bytes` 和 `content_format`。固定分类区分代码围栏、
+前置思考标签、JSON 尾随内容、输入提前结束和其他语法错误；JSON 行列对应原始回复文本，
+不会自动截取其中的 JSON、去除围栏或修补语法。响应外层 JSON 损坏仍报
+`intel_ai_invalid_response`，与模型回复 JSON 损坏分开。
+
+取得模型回复后的失败还附带 `response_bytes`、`finish_reason`、`refusal_present` 和
+`reasoning_content_present`。结束原因只保存固定白名单值，未知值记为 `other`，未提供记为
+`missing`；不保存提供方自定义字符串、拒答内容、推理文本、回复原文或 JSON 错误原始文本。
+`length` 单独报 `intel_ai_output_truncated`，即使已返回可解析 JSON，也不接收可能不完整的
+结果；`content_filter` 报 `intel_ai_content_filtered`，拒答标记报 `intel_ai_refused`。
+空字符串、空白或 null 回复报 `intel_ai_empty_content`，仅有独立推理内容时记录
+`reasoning_only`。未请求的工具/函数调用报响应格式错误。旧接口未提供结束原因时仍可解析
+完整结果；这些检查不会改变原文证据与人工审核要求。
+
 处理阶段包括 `article_fetch`（抓取原文）、`article_parse`（解析正文）、`ai_settings`（读取模型配置/
 凭据）、`ai_request`（请求 AI）、`ai_response`（解析响应）、`ai_validate`（校验证据）和
 `indicator_store`（保存提议）。AI 请求使用独立的 `intel_ai_*` 错误代码；已保存正文的手动文章

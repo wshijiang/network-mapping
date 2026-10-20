@@ -297,6 +297,50 @@ fn ai_isolates_only_ungrounded_evidence_and_distinguishes_empty_results() {
 }
 
 #[test]
+fn ai_json_diagnostics_classify_invalid_content_without_copying_response_text() {
+    for (content, reason, category) in [
+        (" \n", "empty_content", "eof"),
+        ("```json\n{\"iocs\":[]}\n```", "markdown_fence", "syntax"),
+        (
+            "<think>private-marker</think>{\"iocs\":[]}",
+            "reasoning_prefix",
+            "syntax",
+        ),
+        ("{\"iocs\":[]} private-marker", "trailing_content", "syntax"),
+        (
+            "{\"iocs\":[]}{\"extra\":\"private-marker\"}",
+            "trailing_content",
+            "syntax",
+        ),
+        ("{\n\"iocs\": [", "incomplete_json", "eof"),
+        ("{\"private-marker\": }", "invalid_json_syntax", "syntax"),
+        (
+            "Response: private-marker {\"iocs\":[]}",
+            "non_json_text",
+            "syntax",
+        ),
+    ] {
+        let error = parse::ai_result_isolated(content, "private-body-marker").unwrap_err();
+        assert_eq!(error.code, "intel_ai_invalid_json");
+        assert_eq!(error.diagnostic["reason"], reason);
+        assert_eq!(error.diagnostic["json_error_category"], category);
+        assert_eq!(error.diagnostic["content_bytes"], content.len());
+        assert!(error.diagnostic["json_line"].is_number());
+        assert!(error.diagnostic["json_column"].is_number());
+        assert!(!error.report().to_string().contains("private-"));
+    }
+    let error = parse::ai_result_isolated("{\n  \"iocs\": [", "body").unwrap_err();
+    assert_eq!(error.diagnostic["json_line"], 2);
+    assert_eq!(error.diagnostic["json_column"], 11);
+    assert!(
+        parse::ai_result_isolated(" \n{\"iocs\":[]}\n ", "body")
+            .unwrap()
+            .0
+            .is_empty()
+    );
+}
+
+#[test]
 fn rss_atom_and_markdown_preserve_structure_without_inventing_indicators() {
     let rss=br#"<rss><channel><item><title>Report &amp; evidence</title><link>https://research.example/report?x=1&amp;y=2</link><description><![CDATA[Research]]></description></item></channel></rss>"#;
     let rows = parse::rss(rss, &["research.example".into()]).unwrap();
