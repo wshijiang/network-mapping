@@ -7,6 +7,7 @@ pub(super) fn indicators(data: &[u8], format: &str) -> Result<Vec<Indicator>> {
     if data.len() > MAX_BYTES {
         return Err(Error::bad("intel_source_too_large"));
     }
+    let data = data.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(data);
     if data.starts_with(b"PK\x03\x04") {
         // Read one data file in memory; never extract archive paths to disk.
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(data))
@@ -31,35 +32,7 @@ pub(super) fn indicators(data: &[u8], format: &str) -> Result<Vec<Indicator>> {
         return indicators(&content, format);
     }
     if format == "threatfox" || format == "threatfox_export" {
-        let v: Value =
-            serde_json::from_slice(data).map_err(|_| Error::bad("intel_invalid_json"))?;
-        if v.get("query_status").and_then(Value::as_str) == Some("no_result") {
-            return Ok(vec![]);
-        }
-        if v.get("query_status").is_some_and(|s| s != "ok") {
-            return Err(Error::bad("intel_upstream_query_failed"));
-        }
-        let payload = v.get("data").unwrap_or(&v);
-        let rows: Vec<(&Value, Option<&str>)> = match payload {
-            Value::Array(v) => v.iter().map(|r| (r, None)).collect(),
-            Value::Object(v) if format == "threatfox_export" => v
-                .iter()
-                .flat_map(|(id, rows)| {
-                    rows.as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(move |r| (r, Some(id.as_str())))
-                })
-                .collect(),
-            _ => return Err(Error::bad("intel_invalid_threatfox")),
-        };
-        if rows.len() > MAX_ITEMS {
-            return Err(Error::bad("intel_too_many_items"));
-        }
-        return rows
-            .into_iter()
-            .map(|(r, id)| threatfox_row(r, id))
-            .collect();
+        return threatfox_document(data, format, false).map(|(items, _)| items);
     }
     if format == "json" {
         let v: Value =
@@ -123,6 +96,22 @@ pub(super) fn indicators(data: &[u8], format: &str) -> Result<Vec<Indicator>> {
             continue;
         }
         if let Some(header) = header {
+            if row.len() != header.len() {
+                return Err(Error::bad("intel_invalid_csv"));
+            }
+            if header
+                .iter()
+                .any(|field| field.trim().eq_ignore_ascii_case("ioc_type"))
+            {
+                let object = import_parse::csv_object(
+                    header
+                        .iter()
+                        .map(String::as_str)
+                        .zip(row.iter().map(String::as_str)),
+                )?;
+                out.push(threatfox_row(&Value::Object(object), None)?);
+                continue;
+            }
             let at = |names: &[&str]| {
                 header
                     .iter()
@@ -183,12 +172,36 @@ fn text<'a>(v: &'a Value, key: &str) -> &'a str {
 // ESET publishes native MISP event exports alongside its hash lists. Event
 // titles/galaxies describe a report, not attribution for every attribute.
 fn misp(document: &Value) -> Result<Vec<Indicator>> {
+    misp_report(document, false).map(|(items, _)| items)
+}
+pub(super) fn github_indicators(
+    data: &[u8],
+    format: &str,
+) -> Result<(Vec<Indicator>, ValidationReport)> {
+    if data.len() > MAX_BYTES {
+        return Err(Error::bad("intel_source_too_large"));
+    }
+    if format == "json" {
+        let document: Value =
+            serde_json::from_slice(data.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(data))
+                .map_err(|_| Error::bad("intel_invalid_json"))?;
+        if document.get("Event").is_some() || document.get("response").is_some() {
+            return misp_report(&document, true);
+        }
+    }
+    indicators(data, format).map(|items| (items, ValidationReport::default()))
+}
+fn misp_report(
+    document: &Value,
+    isolate_invalid: bool,
+) -> Result<(Vec<Indicator>, ValidationReport)> {
     let events: Vec<&Value> = match document.get("response") {
         Some(Value::Array(events)) => events.iter().collect(),
         Some(event) => vec![event],
         None => vec![document],
     };
     let mut out = vec![];
+    let mut report = ValidationReport::default();
     for event in events {
         let event = event.get("Event").unwrap_or(event);
         let attributes = event.get("Attribute").and_then(Value::as_array);
@@ -207,7 +220,12 @@ fn misp(document: &Value) -> Result<Vec<Indicator>> {
                     .into_iter()
                     .flatten()
             });
-        for a in attributes.into_iter().flatten().chain(object_attributes) {
+        for (index, a) in attributes
+            .into_iter()
+            .flatten()
+            .chain(object_attributes)
+            .enumerate()
+        {
             if a.get("deleted")
                 .is_some_and(|v| v == true || v == "1" || v == "true")
             {
@@ -246,26 +264,30 @@ fn misp(document: &Value) -> Result<Vec<Indicator>> {
                 .get("last_seen")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            i.normalize()?;
+            if let Err(error) = i.normalize() {
+                let raw = json!({"id":i.external_id,"ioc_type":kind,"ioc":text(a,"value")});
+                if isolate_invalid && report.reject(&raw, None, index as i64 + 1, &error) {
+                    continue;
+                }
+                return Err(error);
+            }
             out.push(i);
             if out.len() > MAX_ITEMS {
                 return Err(Error::bad("intel_too_many_items"));
             }
         }
     }
-    if out.is_empty() {
+    if out.is_empty() && report.rejected == 0 {
         return Err(Error::bad("intel_no_supported_indicators"));
     }
-    Ok(out)
+    Ok((out, report))
 }
 fn guess(value: &str) -> Option<Indicator> {
     if value.contains(char::is_whitespace) {
         return None;
     }
-    let kind = if value.starts_with("http://")
-        || value.starts_with("https://")
-        || value.starts_with("hxxp://")
-        || value.starts_with("hxxps://")
+    let kind = if (value.contains("://") || value.contains("[:]//") || value.contains("[://]"))
+        && normalize("url", value).is_ok()
     {
         "url"
     } else if normalize("ip", value).is_ok() {
@@ -286,39 +308,61 @@ fn guess(value: &str) -> Option<Indicator> {
     Some(Indicator::simple(kind, value))
 }
 fn csv_rows(input: &str) -> Result<Vec<Vec<String>>> {
-    let mut rows = vec![];
-    let mut row = vec![];
-    let mut cell = String::new();
-    let mut quoted = false;
-    let mut chars = input.trim_start_matches('\u{feff}').chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '"' if quoted && chars.peek() == Some(&'"') => {
-                cell.push('"');
-                chars.next();
+    let input = input.trim_start_matches('\u{feff}');
+    let mut offset = 0;
+    let mut unprefixed = None;
+    for line in input.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if let Some(comment) = trimmed.strip_prefix('#') {
+            let mut probe = csv::ReaderBuilder::new()
+                .has_headers(false)
+                .from_reader(import_parse::CsvPadding::new(comment.trim().as_bytes()));
+            if let Some(Ok(record)) = probe.records().next()
+                && record.iter().any(|field| {
+                    matches!(
+                        field.trim().to_ascii_lowercase().as_str(),
+                        "ioc" | "ioc_value" | "value"
+                    )
+                })
+                && record.iter().any(|field| {
+                    matches!(
+                        field.trim().to_ascii_lowercase().as_str(),
+                        "type" | "ioc_type"
+                    )
+                })
+            {
+                unprefixed = Some(format!(
+                    "{}\n{}",
+                    comment.trim(),
+                    &input[offset + line.len()..]
+                ));
+                break;
             }
-            '"' => quoted = !quoted,
-            ',' if !quoted => row.push(std::mem::take(&mut cell)),
-            '\n' if !quoted => {
-                row.push(std::mem::take(&mut cell));
-                rows.push(std::mem::take(&mut row));
-                if rows.len() > MAX_ITEMS + 1 {
-                    return Err(Error::bad("intel_too_many_items"));
-                }
-            }
-            '\r' if !quoted => {}
-            _ => cell.push(c),
+        } else if !trimmed.is_empty() {
+            break;
         }
+        offset += line.len();
     }
-    if quoted {
-        return Err(Error::bad("intel_invalid_csv"));
-    }
-    if !cell.is_empty() || !row.is_empty() {
-        row.push(cell);
-        rows.push(row);
+    let content = unprefixed.as_deref().unwrap_or(&input[offset..]);
+    let mut csv = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .comment(Some(b'#'))
+        .from_reader(import_parse::CsvPadding::new(content.as_bytes()));
+    let mut rows = Vec::new();
+    for row in csv.records() {
+        let row = row.map_err(|_| Error::bad("intel_invalid_csv"))?;
+        if row.len() > 128 {
+            return Err(Error::bad("intel_invalid_csv"));
+        }
+        rows.push(row.iter().map(str::to_owned).collect());
+        if rows.len() > MAX_ITEMS + 1 {
+            return Err(Error::bad("intel_too_many_items"));
+        }
     }
     Ok(rows)
 }
+
 fn markdown(text: &str) -> Result<Vec<Indicator>> {
     let mut columns = Vec::<(usize, &str)>::new();
     let mut result = vec![];
@@ -542,6 +586,8 @@ pub(super) fn ai_result(content: &str, body: &str) -> Result<Vec<Indicator>> {
             let evidence = i.evidence.split_whitespace().collect::<Vec<_>>().join(" ");
             let normalized_evidence = evidence
                 .replace("[.]", ".")
+                .replace("[:]", ":")
+                .replace("[://]", "://")
                 .replace("hxxps://", "https://")
                 .replace("hxxp://", "http://");
             if evidence.len() < 12
@@ -558,6 +604,63 @@ pub(super) fn ai_result(content: &str, body: &str) -> Result<Vec<Indicator>> {
         .collect()
 }
 
+pub(super) fn threatfox_document(
+    data: &[u8],
+    format: &str,
+    isolate_invalid: bool,
+) -> Result<(Vec<Indicator>, ValidationReport)> {
+    if data.len() > MAX_BYTES {
+        return Err(Error::bad("intel_source_too_large"));
+    }
+    let data = data.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(data);
+    let v: Value = serde_json::from_slice(data).map_err(|_| Error::bad("intel_invalid_json"))?;
+    if v.get("query_status").and_then(Value::as_str) == Some("no_result") {
+        return Ok((vec![], ValidationReport::default()));
+    }
+    if v.get("query_status").is_some_and(|status| status != "ok") {
+        return Err(Error::bad("intel_upstream_query_failed"));
+    }
+    let payload = v.get("data").unwrap_or(&v);
+    let rows: Vec<(&Value, Option<&str>)> = match payload {
+        Value::Array(rows) => rows.iter().map(|row| (row, None)).collect(),
+        Value::Object(groups) if format == "threatfox_export" => groups
+            .iter()
+            .flat_map(|(id, rows)| {
+                rows.as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(move |row| (row, Some(id.as_str())))
+            })
+            .collect(),
+        _ => return Err(Error::bad("intel_invalid_threatfox")),
+    };
+    if rows.len() > MAX_ITEMS {
+        return Err(Error::bad("intel_too_many_items"));
+    }
+    let mut report = ValidationReport::default();
+    let mut items = Vec::new();
+    for (index, (row, group)) in rows.into_iter().enumerate() {
+        if let Some(item) =
+            validated_threatfox_row(row, group, index as i64 + 1, &mut report, isolate_invalid)?
+        {
+            items.push(item);
+        }
+    }
+    Ok((items, report))
+}
+pub(super) fn validated_threatfox_row(
+    row: &Value,
+    group: Option<&str>,
+    record: i64,
+    report: &mut ValidationReport,
+    isolate_invalid: bool,
+) -> Result<Option<Indicator>> {
+    match threatfox_row(row, group) {
+        Ok(item) => Ok(Some(item)),
+        Err(error) if isolate_invalid && report.reject(row, group, record, &error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
 pub(super) fn threatfox_row(r: &Value, grouped_id: Option<&str>) -> Result<Indicator> {
     let mut i = Indicator::simple(
         match text(r, "ioc_type") {
@@ -623,7 +726,7 @@ pub(super) fn threatfox_row(r: &Value, grouped_id: Option<&str>) -> Result<Indic
                 .filter(|s| !s.trim().is_empty())
         })
         .map(str::to_owned);
-    i.evidence=serde_json::to_string(&json!({"threat_type":r.get("threat_type"),"reporter":r.get("reporter"),"malware_id":r.get("malware"),"tags":r.get("tags")})).unwrap_or_default();
+    i.evidence=serde_json::to_string(&json!({"threat_type":r.get("threat_type"),"reporter":r.get("reporter"),"malware_id":r.get("malware"),"tags":r.get("tags"),"is_compromised":r.get("is_compromised")})).unwrap_or_default();
     i.normalize()?;
     Ok(i)
 }

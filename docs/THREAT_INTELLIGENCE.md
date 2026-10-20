@@ -183,9 +183,13 @@ YARA、Snort 和不支持的 JSON 结构不导入为 IOC，GitHub 作业摘要�
 2. 在 Web“来源”选择预置的“ThreatFox 离线历史导入”，点击“上传离线文件”。支持原生
    JSON、CSV 和只含一个 JSON/CSV 的 ZIP；按内容识别，不信任上传文件名。也支持官方
    URL、域名、IP:端口、MD5、SHA256 子集。通用 JSON/CSV 可新建离线上传来源。
-3. 上传后先完整校验并写入私有规范化缓存，全部校验成功后每批最多 500 条入库。错误文件
-   的有效前缀不会提前发布；来源审核策略照常执行，上传不会改变固定 AI 审核规则。
-4. 来源列表显示校验阶段、总量与已处理数量，作业页显示错误或分批继续状态。正常每批
+3. 上传后先完整读取、校验并写入私有规范化缓存，然后每批最多 500 条入库。ThreatFox
+   原生记录中无法规范化的 IOC 单独隔离；文档结构损坏、超限或缓存错误仍拒绝整个文件，
+   不提前发布有效前缀。通用 JSON/CSV 保持整文件严格校验。来源审核策略照常执行，
+   上传不会改变固定 AI 审核规则。
+4. 来源列表显示校验阶段、有效总量与已处理数量，作业页显示错误或分批继续状态。
+   “已隔离”可展开前 100 条异常的来源 ID、原值及原因；异常记录不生成标记，也不进入
+   AI 审核队列。正常每批
    5 秒后继续；重启后从数据库中的字节偏移和处理数量恢复。重复执行按来源、记录 ID 和
    内容哈希去重。失败可“继续导入”；原始文件有误或缓存丢失时重新上传。
 
@@ -196,7 +200,8 @@ YARA、Snort 和不支持的 JSON 结构不导入为 IOC，GitHub 作业摘要�
 
 服务端缓存目录由 `NM_INTEL_CACHE_ROOT` 指定，默认 `/var/lib/network-mapping/intel-cache`，
 必须可写并持久化；目录只授予服务账户访问权限。临时文件使用私有权限与随机 ID。
-校验完成清理原文件，导入完成清理规范化文件；失败缓存保留供重试，重新上传会替换旧缓存。
+没有异常记录时校验完成清理原文件；有隔离记录时保留原文件直到重新上传替换，便于离线
+核对全部异常。导入完成清理规范化文件；失败缓存保留供重试，重新上传会替换旧缓存。
 多实例必须使用同一持久化缓存目录及同一主密钥。缓存丢失不删除已提交证据，重新上传
 原文件可安全去重。反向代理的请求体限制和上传超时应满足所需文件大小。
 
@@ -262,21 +267,56 @@ systemd 等托管服务须将绝对路径写入服务的 `Environment`/`Environm
 引号字段，以及带 `#` 的表头和说明行；说明文字中的引号不参与 CSV 结构解析。表头须包含
 `type`/`ioc_type` 和 `value`/`ioc`/`ioc_value`，数据行字段数须匹配。ThreatFox 的空参考值
 `None`/`null`/`N/A` 按缺省处理。缺列、多列、未闭合引号或错误编码仍拒绝完整文件。
-官方 `md5_hash`、`sha256_hash` 类型统一规范化为库内的 md5、sha256，API 和离线导入共用解析。
+官方 `md5_hash`、`sha1_hash`、`sha256_hash` 类型统一规范化为库内的 md5、sha1、sha256，
+API、离线导入及通用文本来源中的原生 CSV 共用字段转换与 IOC 规范化。
 
-URL IOC 接受 HTTP、HTTPS、FTP、FTPS、SMB、带 userinfo 的 URL，以及无协议的主机/路径，
+#### 官方字段与值类型
+
+以下结合 [ThreatFox API 文档](https://threatfox.abuse.ch/api/)与实际导出文件核对。
+`ioc_type` 是指标格式，`threat_type` 是用途分类；不能把两者混用。官方通过
+`{"query":"types"}` 提供当前类型列表，文档示例不代表永久封闭枚举。本次完整导出中
+出现以下六种 IOC 类型：`domain`、`url`、`ip:port`、`md5_hash`、`sha1_hash`、`sha256_hash`。
+
+| 字段 | API / JSON 与 CSV 差异 | 处理方式 |
+| --- | --- | --- |
+| ID | API `id` 为字符串；JSON 导出按 ID 分组；CSV 为 `ioc_id` | 保存来源 ID，不将其当作 IOC 值 |
+| 指标值 | API `ioc`，导出 `ioc_value` | 按 ioc_type 规范化并保留精确范围 |
+| `threat_type` | 字符串；样本含 botnet_cc、payload、payload_delivery、cc_skimming | 原样保存上下文，不用于推断组织 |
+| `malware` | API/JSON 为机器名称；CSV 为 `fk_malware` | 保存机器名称及 malware_printable 展示名称 |
+| `malware_alias` | 字符串或 null | 仅作为软件名称备用值 |
+| `confidence_level` | JSON 整数 0～100；CSV 为数字文本 | 保留数值，0 也不阻止可信来源接纳 |
+| 首次/最后观察 | API first_seen/last_seen；导出带 `_utc`；最后观察可为 null | UTC 时间用于证据与本地到期计算 |
+| `reference` | 字符串或 null；CSV 可能为 None/null/N/A | 空值不生成链接；非空引用仍校验格式 |
+| `tags` | API 示例为字符串数组或 null；本次 JSON 导出为逗号分隔字符串或 null，CSV 为文本 | 保留来源结构，不按数组强制反序列化 |
+| `is_compromised` | JSON 布尔；CSV True/False 或 1/0 | 保留布尔元数据 |
+| `reporter` / `anonymous` | 字符串 / 数字标志 | reporter 保留为来源上下文；anonymous 不作为信任门槛 |
+
+类型与字段形态会随官方接口变化，新增不支持的原生 IOC 类型计入隔离报告，不能猜测成
+其他类型。上述导出观测值不代表官方对未来所有数据的保证。
+
+URL IOC 接受 HTTP、HTTPS、FTP、FTPS、SMB、TFTP、TCP、WS、WSS、带 userinfo 的 URL，
+以及无协议的主机/路径，
 支持 `[.]`、`[:]`、`[://]` 和不区分大小写的 hxxp/hxxps 还原。无协议 URL 保留无协议形式，
 不会猜测 HTTP/HTTPS，也不扩大为域名或 IP 标记。URL IOC 只存储和精确匹配，不作为抓取地址；
-远程来源和参考链接继续执行各自的协议、凭据、白名单及地址校验。畸形 JSON 与 IOC 字段
-错误分别返回具体错误码，不再把字段校验失败统一报告为 `intel_invalid_ioc_document`。
+远程来源和参考链接继续执行各自的协议、凭据、白名单及地址校验。域名 IOC 支持 IDN
+转 ASCII 以及下划线 DNS 名称；IP:端口可保存 0～65535，端口 0 仍是精确 IOC，不扩大成
+整 IP，也不允许据此创建端口 0 扫描。畸形 JSON 与 IOC 字段错误分别记录具体错误码，
+不再把字段校验失败统一报告为 `intel_invalid_ioc_document`。
+ThreatFox API 和原生离线文件单独隔离无法识别的 IOC/引用等字段错误，其余有效记录按
+来源策略接纳。汇总 `validation.rejected` 为异常总数，`rejection_samples` 最多保存 100 条
+记录位置、来源 ID、类型、原值和错误码；不会把异常值变成有效 IOC。语法、资源限额、
+磁盘、凭据和网络错误仍终止处理。
 ESET GitHub 仓库按文件校验：个别 JSON 本身语法错误时，不发布该文件的有效前缀，记录
 `unsupported_files`、`unsupported_paths` 并继续其他文件；后端警告日志说明畸形 JSON。
 上游修正文件后 blob 哈希变化会重新解析。没有受支持 IOC 类别的报告也按无可导入内容
-记录，不放宽受害目标/背景属性过滤。此规则只隔离仓库内单个文件，上传文件仍须完整校验。
+记录，不放宽受害目标/背景属性过滤。原生 MISP 内单个合格类别属性的 IOC 格式错误则计入
+同一 validation 报告，其余合格属性继续处理；通用 JSON/MISP 来源仍保持严格校验。
 
 来源置信度不会过滤 IOC。保存 first_seen、last_seen、reporter、reference 和恶意软件
 名称。官方 recent 文件包含 first_seen 或 last_seen 在最近 48 小时内的 IOC，这只是离线
 文件的内容范围；系统不按它的生成周期抓取文件。滚动窗口缺少记录不表示来源撤回。
+官方自 2025-05-01 起会将超过六个月的 IOC 从 API 与导出中移除，因此 full 不等于永久
+全历史。系统保留已导入历史与原观察时间，本地默认六个月过期独立执行。
 
 ### 自动过期
 
@@ -300,6 +340,8 @@ ESET GitHub 仓库按文件校验：个别 JSON 本身语法错误时，不发�
 仓库目录名不用于自动组织归因，README、YARA、Snort 规则不作为 IOC 文本导入。
 文件后缀按大小写无关分派 JSON/Markdown/文本。文件游标保存解析器版本；旧版误跳过的
 大写或混合大小写 JSON/MD 即使 blob 未变化也会重读一次，成功后恢复正常哈希跳过。
+解析器版本 3 还会重读此前版本的文件一次，修复协议、IDN、BOM 和 CSV 兼容问题；不会
+通过改写观察时间为旧 IOC 续期。
 
 原生 MISP JSON 支持 `Event` 与 `response` 封装，读取事件及对象中的 Attribute，仅导入
 Network activity、Artifacts dropped、Payload delivery 类别的目标 IP、域名、URL 和哈希。
@@ -395,7 +437,8 @@ AI 设置请求为 `{"expected_revision":1,"settings":{"ai_enabled":false,...}}`
 设置修改采用乐观版本检查。固定 AI 审核字段不可在请求中修改，未知字段拒绝。
 
 来源 `transport` 支持 local/https/upload，`expiry_months` 默认 6。upload 的 location 和
-凭据字段必须为空。来源响应的 `import_status` 返回 stage、total、processed；无文件时为
+凭据字段必须为空。来源响应的 `import_status` 返回 stage、total、processed、validation；
+作业 summary 同样包含 validation。无文件时 import_status 为
 null。records 的 status=approved 只列当前有效证据，status=expired 列已接纳的过期证据
 （管理员）。证据响应 valid_until 为计算后的有效期，expired 表示时间状态。
 
@@ -450,4 +493,23 @@ BOM/CRLF、多行字段和空参考值；URL 回归包含官方 MISP 的 SMB 与
 附加逐文件解析验证。可设置
 `NM_INTEL_HTTPS_SMOKE=1` 在代理测试中附加真实 GitHub HTTPS 读取，使用现有代理和 CA，
 无需上游凭据；默认测试仅使用本地代理 fixture。
+若已有官方完整导出 ZIP，可使用生产流式解析器验证两个本地文件（不会下载或发布 IOC）：
+
+```sh
+NM_INTEL_JSON_EXPORT_FIXTURE=/absolute/path/full.json.zip \
+NM_INTEL_CSV_EXPORT_FIXTURE=/absolute/path/full.csv.zip \
+cargo test --locked --lib threatfox_transport_url_iocs -- --nocapture
+```
+
+验证覆盖原生 JSON、CSV 与 API 的 TFTP/TCP/WebSocket URL，保留 URL 精确范围并断言来源
+抓取仍拒绝这些协议。外部文件测试输出有效记录数、隔离报告和规范化大小，测试缓存自动清理；不将导出
+文件、实际 IOC 或带凭据的下载链接提交到仓库。日常运行仍通过 API 更新，导出文件只用于
+离线上传/导入。
+本次对用户提供的两份完整 ZIP 分别逐条验证：各 114,663 条，114,659 条有效、4 条域名
+值异常并隔离。真实 ESET MISP 样本 24 份中 21 份可解析、2 份无合格 IOC 类别、1 份
+上游 JSON 损坏；真实 MITRE Enterprise STIX 原子导入 1,905 个实体。可设置
+`NM_INTEL_STIX_FIXTURE=/absolute/path/enterprise-attack.json` 在数据库测试中复验基准库。
+其他来源回归覆盖文本的 TFTP/TCP/WS(S) 和去活化 URL、Markdown 的 IDN、通用 CSV 的
+注释/引号/列数和原生字段、JSON/STIX 的 BOM、RSS 的 BOM/DOCTYPE 拒绝及 AI 原文证据
+定位。AI 仅接受能在文章中精确定位的证据，修复去活化 URL 不改变人工审核门槛。
 真实 LLM 调用需要实际配置的服务和密钥；解析器 fixture 测试不代表已调用真实模型。

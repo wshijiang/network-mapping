@@ -403,6 +403,204 @@ fn offline_json_preserves_row_validation_errors_instead_of_misreporting_document
 }
 
 #[test]
+fn threatfox_transport_url_iocs_work_in_both_offline_formats_and_api() {
+    let values = [
+        "tftp://203.0.113.7:69/arm",
+        "tcp://203.0.113.8/payload.bin",
+        "wss://socket.example:443/ws",
+        "ws://socket.example:80/ws",
+    ];
+    let rows = values
+        .iter()
+        .enumerate()
+        .map(|(n, value)| json!({"id":n+1,"ioc_type":"url","ioc":value,"confidence_level":100}))
+        .collect::<Vec<_>>();
+    let json = serde_json::to_vec(&json!({"data":rows})).unwrap();
+    let (_, imported) = offline_convert(&json).unwrap();
+    let api = parse::indicators(&json, "threatfox").unwrap();
+    let mut csv = "# ioc_id,ioc_type,ioc_value,confidence_level\n".to_owned();
+    for (n, value) in values.iter().enumerate() {
+        csv.push_str(&format!("{},url,{},100\n", n + 1, value));
+    }
+    let (_, csv_imported) = offline_convert(csv.as_bytes()).unwrap();
+    assert_eq!(imported.len(), values.len());
+    for ((left, right), csv) in imported.iter().zip(api.iter()).zip(csv_imported.iter()) {
+        assert_eq!(left.kind, "url");
+        assert_eq!(left.value, right.value);
+        assert_eq!(left.value, csv.value);
+        assert!(left.actor_id.is_none());
+        assert!(validate_url(&left.value, &["socket.example".into()]).is_err());
+    }
+    // Optional full-file verification uses only caller-supplied local archives.
+    // Files and tokenized download URLs must never be checked into the repository.
+    for env in [
+        "NM_INTEL_JSON_EXPORT_FIXTURE",
+        "NM_INTEL_CSV_EXPORT_FIXTURE",
+    ] {
+        if let Some(path) = std::env::var_os(env) {
+            let output = tempfile::NamedTempFile::new().unwrap();
+            let (count, bytes, report) = import_parse::convert_official(
+                std::fs::File::open(path).unwrap(),
+                output.reopen().unwrap(),
+            )
+            .unwrap();
+            assert!(count > 50_000);
+            println!(
+                "{env}: {count} IOC records validated, {bytes} normalized bytes; validation={}",
+                json!(report)
+            );
+        }
+    }
+}
+
+#[test]
+fn official_ioc_field_variants_preserve_scope_and_invalid_rows_are_reported() {
+    assert!(
+        normalize("domain", "tést.example")
+            .unwrap()
+            .1
+            .starts_with("xn--")
+    );
+    assert_eq!(
+        normalize("domain", "c_2_s.example").unwrap().1,
+        "c_2_s.example"
+    );
+    assert_eq!(
+        normalize("ip:port", "203.0.113.7:0").unwrap(),
+        ("ip_port".into(), "203.0.113.7:0".into())
+    );
+    assert!(crate::dns::canonical_domain("c_2_s.example").is_err());
+    let rows = json!([
+        {"id":"1","ioc_type":"domain","ioc":"valid.example","confidence_level":0},
+        {"id":"2","ioc_type":"domain","ioc":"opaque=value=="},
+        {"id":"3","ioc_type":"url","ioc":"tftp://203.0.113.7:69/arm"}
+    ]);
+    let bytes = serde_json::to_vec(&rows).unwrap();
+    assert!(parse::indicators(&bytes, "threatfox").is_err());
+    let (items, report) = parse::threatfox_document(&bytes, "threatfox", true).unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(report.rejected, 1);
+    assert_eq!(report.rejection_samples[0]["external_id"], "2");
+    assert_eq!(report.rejection_samples[0]["record"], 2);
+    assert_eq!(report.rejection_samples[0]["value"], "opaque=value==");
+    assert!(
+        parse::threatfox_document(br#"{"query_status":"unauthorized"}"#, "threatfox", true)
+            .is_err()
+    );
+    let convert = |bytes: &[u8]| {
+        use std::io::Write;
+        let mut input = tempfile::NamedTempFile::new().unwrap();
+        input.write_all(bytes).unwrap();
+        let output = tempfile::NamedTempFile::new().unwrap();
+        import_parse::convert_official(input.reopen().unwrap(), output.reopen().unwrap())
+    };
+    let (count, _, report) = convert(&bytes).unwrap();
+    assert_eq!(count, 2);
+    assert_eq!(report.rejected, 1);
+    let csv=b"# ioc_id,ioc_type,ioc_value,fk_malware,is_compromised\n1,domain,valid.example,win.test,True\n2,domain,opaque=value==,win.test,False\n3,url,tftp://203.0.113.7:69/arm,win.test,False\n";
+    let (count, _, report) = convert(csv).unwrap();
+    assert_eq!(count, 2);
+    assert_eq!(report.rejected, 1);
+    assert!(offline_convert(&bytes).is_err()); // Generic imports keep strict semantics.
+    assert!(convert(br#"[{"ioc_type":"domain","ioc":"valid.example"},{"ioc_type":"domain","ioc":"bad=value"},"#).is_err());
+    assert!(
+        convert(b"ioc_id,ioc_type,ioc_value\n1,domain,valid.example\n2,domain,\"unclosed").is_err()
+    );
+    let many = serde_json::to_vec(
+        &(0..101)
+            .map(|id| json!({"id":id,"ioc_type":"domain","ioc":"opaque=value=="}))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let (count, _, report) = convert(&many).unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(report.rejected, 101);
+    assert_eq!(report.rejection_samples.len(), 100);
+}
+
+#[test]
+fn other_source_adapters_share_format_fixes_without_relaxing_ai_evidence() {
+    let values = [
+        "tftp://203.0.113.7:69/arm",
+        "tcp://203.0.113.8/payload",
+        "wss://socket.example/ws",
+        "HXXPS[:]//payload[.]example/a",
+    ];
+    let text = values.join("\n");
+    assert_eq!(
+        parse::indicators(text.as_bytes(), "lines").unwrap().len(),
+        values.len()
+    );
+    let csv=b"\xef\xbb\xbf# export,\"unmatched metadata quote\r\n# type, value, reference\r\nurl, \"tftp://203.0.113.7:69/arm\", \"https://research.example/a,b\"\r\n";
+    let parsed = parse::indicators(csv, "lines").unwrap();
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].value, "tftp://203.0.113.7:69/arm");
+    assert_eq!(
+        parsed[0].reference.as_deref(),
+        Some("https://research.example/a,b")
+    );
+    let native_csv=b"# ioc_id,ioc_type,ioc_value,fk_malware,confidence_level,is_compromised,reference,first_seen_utc\n7,sha1_hash,1111111111111111111111111111111111111111,win.test,0,False,None,2026-01-01 00:00:00\n";
+    let native = parse::indicators(native_csv, "lines").unwrap();
+    assert_eq!(native[0].kind, "sha1");
+    assert_eq!(native[0].malware, "win.test");
+    assert_eq!(native[0].confidence, Some(0));
+    assert!(native[0].reference.is_none());
+    assert_eq!(native[0].first_seen.as_deref(), Some("2026-01-01 00:00:00"));
+    assert!(native[0].evidence.contains("\"is_compromised\":false"));
+    for invalid in [
+        "type,value\ndomain,valid.example,extra\n",
+        "type,value\ndomain,\"unclosed",
+    ] {
+        assert_eq!(
+            parse::indicators(invalid.as_bytes(), "lines")
+                .err()
+                .unwrap()
+                .code,
+            "intel_invalid_csv"
+        );
+    }
+    let md = "| URL | Domain |\n| --- | --- |\n| wss://socket.example/ws | tést.example |\n";
+    assert_eq!(
+        parse::indicators(md.as_bytes(), "markdown").unwrap().len(),
+        2
+    );
+    let json = b"\xef\xbb\xbf[{\"type\":\"url\",\"value\":\"tcp://203.0.113.7/payload\"}]";
+    assert_eq!(parse::indicators(json, "json").unwrap().len(), 1);
+    let body = "The report lists hxxps[:]//payload[.]example/a as malicious infrastructure.";
+    let ai = json!({"iocs":[{"type":"url","value":"https://payload.example/a","evidence":body}]});
+    assert_eq!(parse::ai_result(&ai.to_string(), body).unwrap().len(), 1);
+    assert!(
+        parse::ai_result(&ai.to_string(), "Different source article without the IOC.").is_err()
+    );
+    let feed=b"\xef\xbb\xbf<rss><channel><item><title>Report</title><link>https://research.example/report</link></item></channel></rss>";
+    assert_eq!(
+        parse::rss(feed, &["research.example".into()])
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        parse::rss(
+            b"<!DOCTYPE x [<!ENTITY a SYSTEM 'file:///etc/passwd'>]><rss/>",
+            &[]
+        )
+        .is_err()
+    );
+    let misp = json!({"Event":{"Attribute":[
+        {"uuid":"good","category":"Network activity","type":"url","value":"tftp://203.0.113.7:69/arm"},
+        {"uuid":"bad","category":"Network activity","type":"domain","value":"opaque=value=="},
+        {"uuid":"victim","category":"Targeting data","type":"domain","value":"victim.example"}
+    ]}});
+    let data = serde_json::to_vec(&misp).unwrap();
+    assert!(parse::indicators(&data, "json").is_err());
+    let (items, report) = parse::github_indicators(&data, "json").unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(report.rejected, 1);
+    assert_eq!(report.rejection_samples[0]["external_id"], "bad");
+    assert!(items[0].actor_id.is_none());
+}
+
+#[test]
 fn offline_streaming_does_not_truncate_at_the_recent_feed_item_limit() {
     use std::io::Write;
     let mut input = tempfile::NamedTempFile::new().unwrap();
@@ -667,7 +865,7 @@ async fn mixed_case_github_files_are_parsed_and_legacy_skipped_cursors_are_repai
             &hash,
             Some(&(hash.clone(), 1))
         ));
-        assert!(worker::github_file_current(
+        assert!(!worker::github_file_current(
             "reports/IOC.json",
             &hash,
             Some(&(hash.clone(), 1))
@@ -676,7 +874,7 @@ async fn mixed_case_github_files_are_parsed_and_legacy_skipped_cursors_are_repai
             worker::github_file(&pool, &source, path, &hash, data)
                 .await
                 .unwrap(),
-            (1, true)
+            (1, true, ValidationReport::default())
         );
         let row=c.query_one("SELECT content_hash,parser_version FROM intel_source_file WHERE source_id=$1 AND path=$2",&[&source.id,&path]).await.unwrap();
         assert!(worker::github_file_current(
@@ -688,7 +886,7 @@ async fn mixed_case_github_files_are_parsed_and_legacy_skipped_cursors_are_repai
             worker::github_file(&pool, &source, path, &hash, data)
                 .await
                 .unwrap(),
-            (0, true)
+            (0, true, ValidationReport::default())
         );
         assert_eq!(
             worker::github_file(&pool, &source, path, "incorrect-blob-hash", data)
@@ -704,11 +902,11 @@ async fn mixed_case_github_files_are_parsed_and_legacy_skipped_cursors_are_repai
     for (data, expected) in [
         (
             br#"[{"type":"domain","value":"must-not-publish.example"},]"#.as_slice(),
-            (0, false),
+            (0, false, ValidationReport::default()),
         ),
         (
             br#"[{"type":"domain","value":"corrected.example"}]"#.as_slice(),
-            (1, true),
+            (1, true, ValidationReport::default()),
         ),
     ] {
         let mut blob = format!("blob {}\0", data.len()).into_bytes();
@@ -1234,8 +1432,16 @@ async fn offline_upload_validates_before_publication_resumes_batches_and_never_p
     .await
     .unwrap();
     assert!(!worker::source_tick(&pool, &encryption_key()).await.unwrap());
-    // A malformed trailing row must not publish the valid prefix.
-    let response=http_test::call_service(&app,http_test::TestRequest::post().uri(&uri).set_payload(br#"[{"ioc_type":"domain","ioc":"must-not-publish.example"},{"ioc_type":"domain","ioc":"invalid domain"}]"#.as_slice()).to_request()).await;
+    // A truncated document must not publish the valid prefix. Individual native
+    // record errors are covered by the separate official isolation test.
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::post()
+            .uri(&uri)
+            .set_payload(br#"[{"ioc_type":"domain","ioc":"must-not-publish.example"},"#.as_slice())
+            .to_request(),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(worker::source_tick(&pool, &encryption_key()).await.unwrap());
     assert_eq!(count().await, imports::BATCH as i64 + 1);
@@ -1249,6 +1455,114 @@ async fn offline_upload_validates_before_publication_resumes_batches_and_never_p
         .get::<_, String>(0),
         "failed"
     );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL and NM_INTEL_CACHE_ROOT"]
+async fn official_import_keeps_rejections_and_original_archive_without_publishing_invalid_values() {
+    use std::io::Write;
+    let (pool, c, schema) = database().await;
+    let old = local_source(&pool, false).await;
+    c.execute("UPDATE intel_source SET kind='threatfox_export',transport='upload',location='' WHERE id=$1",&[&old.id]).await.unwrap();
+    let source = storage::get_source(&pool, old.id).await.unwrap();
+    let malformed = br#"[{"ioc_type":"domain","ioc":"prefix.example"},"#;
+    let mut temp = imports::temporary().await.unwrap();
+    temp.write_all(malformed).unwrap();
+    imports::install(
+        &pool,
+        &source,
+        temp,
+        digest(malformed),
+        Some((&user(1), &AuditContext::cli("test"))),
+    )
+    .await
+    .unwrap();
+    assert!(worker::source_tick(&pool, &encryption_key()).await.unwrap());
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_ioc", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    let body=br#"[{"id":"good","ioc_type":"domain","ioc":"valid.example","confidence_level":0},{"id":"bad","ioc_type":"domain","ioc":"opaque=value=="}]"#;
+    let mut temp = imports::temporary().await.unwrap();
+    temp.write_all(body).unwrap();
+    let id = imports::install(
+        &pool,
+        &source,
+        temp,
+        digest(body),
+        Some((&user(1), &AuditContext::cli("test"))),
+    )
+    .await
+    .unwrap();
+    assert!(worker::source_tick(&pool, &encryption_key()).await.unwrap());
+    let row=c.query_one("SELECT stage,record_count,validation_summary FROM intel_import_snapshot WHERE source_id=$1",&[&source.id]).await.unwrap();
+    assert_eq!(row.get::<_, String>(0), "ready");
+    assert_eq!(row.get::<_, i64>(1), 1);
+    assert_eq!(row.get::<_, Value>(2)["rejected"], 1);
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_ioc", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    c.execute(
+        "UPDATE intel_source SET next_check_at=NOW() WHERE id=$1",
+        &[&source.id],
+    )
+    .await
+    .unwrap();
+    assert!(worker::source_tick(&pool, &encryption_key()).await.unwrap());
+    let row = c
+        .query_one(
+            "SELECT stage,validation_summary FROM intel_import_snapshot WHERE source_id=$1",
+            &[&source.id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>(0), "complete");
+    assert_eq!(row.get::<_, Value>(1)["rejected"], 1);
+    assert_eq!(
+        c.query_one(
+            "SELECT COUNT(*) FROM intel_published WHERE value='valid.example'",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(
+        c.query_one(
+            "SELECT COUNT(*) FROM intel_ioc WHERE value='opaque=value=='",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+    let root = std::path::PathBuf::from(std::env::var_os("NM_INTEL_CACHE_ROOT").unwrap());
+    assert!(root.join(format!("{id}.raw")).exists());
+    let sources = storage::sources(&pool).await.unwrap();
+    let source_json = sources["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == source.id.to_string())
+        .unwrap();
+    assert_eq!(source_json["import_status"]["validation"]["rejected"], 1);
+    let job=c.query_one("SELECT summary FROM intel_sync_run WHERE source_id=$1 ORDER BY created_at DESC LIMIT 1",&[&source.id]).await.unwrap();
+    assert_eq!(job.get::<_, Value>(0)["validation"]["rejected"], 1);
+    tokio::fs::remove_file(root.join(format!("{id}.raw")))
+        .await
+        .unwrap();
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
         .unwrap();
@@ -1628,6 +1942,12 @@ async fn mitre_names_software_and_http_permissions_preserve_attribution_boundari
     assert!(response.status().is_success());
     let data: Value = http_test::read_body_json(response).await;
     assert_eq!(data["data"]["risk"], "malicious");
+    if let Some(path) = std::env::var_os("NM_INTEL_STIX_FIXTURE") {
+        let data = std::fs::read(path).unwrap();
+        let count = storage::import_stix(&pool, &source, &data).await.unwrap();
+        assert!(count > 1000);
+        println!("Official MITRE STIX: {count} entities imported atomically");
+    }
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
         .unwrap();

@@ -121,7 +121,11 @@ pub(super) async fn sync(
         }
         "eset_github" => github(pool, &s, &data).await,
         kind => {
-            let entries = parse::indicators(&data, kind)?;
+            let (entries, validation) = if kind == "threatfox" {
+                parse::threatfox_document(&data, kind, true)?
+            } else {
+                (parse::indicators(&data, kind)?, ValidationReport::default())
+            };
             let total = entries.len();
             let mut added = 0;
             for i in entries {
@@ -130,7 +134,7 @@ pub(super) async fn sync(
                 }
             }
             Ok((
-                json!({"received":total,"added":added,"require_review":s.input.require_review}),
+                json!({"received":total as i64+validation.rejected,"accepted":total,"added":added,"validation":validation,"require_review":s.input.require_review}),
                 false,
             ))
         }
@@ -201,6 +205,7 @@ async fn github(pool: &Pool, s: &Source, data: &[u8]) -> Result<(Value, bool)> {
     let mut parsed = 0;
     let mut unsupported = 0;
     let mut unsupported_paths = Vec::new();
+    let mut validation = ValidationReport::default();
     for (path, sha) in pending.into_iter().take(20) {
         // URL path segments are encoded, not interpolated as a URL/query.
         let mut raw = reqwest::Url::parse("https://raw.githubusercontent.com/").unwrap();
@@ -215,7 +220,8 @@ async fn github(pool: &Pool, s: &Source, data: &[u8]) -> Result<(Value, bool)> {
             }
         }
         let data = client::request(raw.as_str(), &s.input.allowed_hosts, None, None).await?;
-        let (count, supported) = github_file(pool, s, path, sha, &data).await?;
+        let (count, supported, report) = github_file(pool, s, path, sha, &data).await?;
+        validation.merge(report, path);
         added += count;
         if supported {
             parsed += 1;
@@ -225,7 +231,7 @@ async fn github(pool: &Pool, s: &Source, data: &[u8]) -> Result<(Value, bool)> {
         }
     }
     Ok((
-        json!({"added":added,"files_parsed":parsed,"unsupported_files":unsupported,"unsupported_paths":unsupported_paths,"more_files":partial,"tree_sha":tree_sha}),
+        json!({"added":added,"files_parsed":parsed,"unsupported_files":unsupported,"unsupported_paths":unsupported_paths,"validation":validation,"more_files":partial,"tree_sha":tree_sha}),
         partial,
     ))
 }
@@ -239,19 +245,13 @@ pub(super) fn github_format(path: &str) -> &'static str {
         "lines"
     }
 }
-pub(super) fn github_file_current(path: &str, sha: &str, known: Option<&(String, i32)>) -> bool {
+pub(super) fn github_file_current(_path: &str, sha: &str, known: Option<&(String, i32)>) -> bool {
     let Some((hash, version)) = known else {
         return false;
     };
-    // Revisit files previously marked processed by the case-sensitive parser.
-    let legacy_format = if path.ends_with(".json") {
-        "json"
-    } else if path.ends_with(".md") {
-        "markdown"
-    } else {
-        "lines"
-    };
-    hash == sha && (*version >= 2 || github_format(path) == legacy_format)
+    // Version 3 repairs URL protocol, IDN, BOM and CSV compatibility, including
+    // files older parsers marked processed after skipping their valid records.
+    hash == sha && *version >= 3
 }
 pub(super) async fn github_file(
     pool: &Pool,
@@ -259,7 +259,7 @@ pub(super) async fn github_file(
     path: &str,
     sha: &str,
     data: &[u8],
-) -> Result<(usize, bool)> {
+) -> Result<(usize, bool, ValidationReport)> {
     // The manifest carries a tree OID, not a commit OID. Verify the blob
     // before applying the case-insensitive format or marking its cursor.
     let mut blob = format!("blob {}\0", data.len()).into_bytes();
@@ -273,9 +273,11 @@ pub(super) async fn github_file(
         return Err(Error::bad("intel_github_snapshot_changed"));
     }
     let mut added = 0;
-    let entries = parse::indicators(data, github_format(path));
+    let entries = parse::github_indicators(data, github_format(path));
+    let mut validation = ValidationReport::default();
     let supported = match entries {
-        Ok(entries) => {
+        Ok((entries, report)) => {
+            validation = report;
             for i in entries {
                 if storage::ingest(pool, s, i, Origin::Structured, &format!("{path}#")).await? {
                     added += 1;
@@ -307,9 +309,9 @@ pub(super) async fn github_file(
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
     storage::validate_source(&tx, s).await?;
-    tx.execute("INSERT INTO intel_source_file(source_id,path,content_hash,parser_version) VALUES($1,$2,$3,2) ON CONFLICT(source_id,path) DO UPDATE SET content_hash=EXCLUDED.content_hash,parser_version=EXCLUDED.parser_version",&[&s.id,&path,&sha]).await?;
+    tx.execute("INSERT INTO intel_source_file(source_id,path,content_hash,parser_version) VALUES($1,$2,$3,3) ON CONFLICT(source_id,path) DO UPDATE SET content_hash=EXCLUDED.content_hash,parser_version=EXCLUDED.parser_version",&[&s.id,&path,&sha]).await?;
     tx.commit().await?;
-    Ok((added, supported))
+    Ok((added, supported, validation))
 }
 
 pub(super) async fn ai_tick(pool: &Pool, encryption_key: &str) -> Result<bool> {

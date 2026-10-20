@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS intel_import_snapshot (
     content_hash TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE intel_import_snapshot ADD COLUMN IF NOT EXISTS validation_summary JSONB NOT NULL DEFAULT '{}';
 
 CREATE TABLE IF NOT EXISTS intel_sync_run (
     id UUID PRIMARY KEY,

@@ -78,7 +78,7 @@ pub(super) async fn get_source(pool: &Pool, id: Uuid) -> Result<Source> {
 }
 pub(super) async fn sources(pool: &Pool) -> Result<Value> {
     let rows=pool.get().await?.query("SELECT s.*, (SELECT JSONB_BUILD_OBJECT('status',j.status,'summary',j.summary,'error_code',j.error_code,'created_at',j.created_at) FROM intel_sync_run j WHERE j.source_id=s.id ORDER BY created_at DESC LIMIT 1) AS last_run,
-    (SELECT JSONB_BUILD_OBJECT('stage',CASE WHEN i.source_revision=s.revision THEN i.stage ELSE 'cancelled' END,'total',i.record_count,'processed',i.processed_count) FROM intel_import_snapshot i WHERE i.source_id=s.id) AS import_status
+    (SELECT JSONB_BUILD_OBJECT('stage',CASE WHEN i.source_revision=s.revision THEN i.stage ELSE 'cancelled' END,'total',i.record_count,'processed',i.processed_count,'validation',i.validation_summary) FROM intel_import_snapshot i WHERE i.source_id=s.id) AS import_status
     FROM intel_source s ORDER BY name,id",&[]).await?;
     let items = rows
         .iter()
@@ -520,7 +520,8 @@ pub(super) async fn entity_list(pool: &Pool, q: &str, kind: &str) -> Result<Valu
 }
 pub(super) async fn import_stix(pool: &Pool, s: &Source, data: &[u8]) -> Result<usize> {
     let bundle: Value =
-        serde_json::from_slice(data).map_err(|_| Error::bad("intel_invalid_stix"))?;
+        serde_json::from_slice(data.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(data))
+            .map_err(|_| Error::bad("intel_invalid_stix"))?;
     if bundle.get("type").and_then(Value::as_str) != Some("bundle") {
         return Err(Error::bad("intel_invalid_stix"));
     }

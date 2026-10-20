@@ -6,6 +6,71 @@ pub(super) const MAX_BYTES: usize = 96 * 1024 * 1024;
 pub(super) const MAX_ARTICLE: usize = 100_000;
 pub(super) const PROMPT_VERSION: &str = "ioc-evidence-v1";
 
+#[derive(Default, Debug, Serialize, Deserialize, PartialEq)]
+pub(super) struct ValidationReport {
+    pub rejected: i64,
+    pub rejection_samples: Vec<Value>,
+}
+impl ValidationReport {
+    pub fn merge(&mut self, other: Self, file: &str) {
+        self.rejected += other.rejected;
+        for mut sample in other
+            .rejection_samples
+            .into_iter()
+            .take(100_usize.saturating_sub(self.rejection_samples.len()))
+        {
+            sample["file"] = json!(file.chars().take(512).collect::<String>());
+            self.rejection_samples.push(sample);
+        }
+    }
+    pub fn reject(
+        &mut self,
+        row: &Value,
+        grouped_id: Option<&str>,
+        record: i64,
+        error: &Error,
+    ) -> bool {
+        // Only per-record data errors can be isolated. Syntax, size, disk and
+        // transport errors still fail the entire document before publication.
+        if !matches!(
+            error.code,
+            "intel_invalid_indicator"
+                | "intel_invalid_domain"
+                | "intel_invalid_ip"
+                | "intel_invalid_endpoint"
+                | "intel_invalid_indicator_url"
+                | "intel_invalid_hash"
+                | "intel_invalid_reference"
+                | "intel_unsupported_indicator_type"
+                | "intel_indicator_too_long"
+        ) {
+            return false;
+        }
+        self.rejected += 1;
+        if self.rejection_samples.len() < 100 {
+            let text = |key: &str, limit: usize| {
+                row.get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .chars()
+                    .take(limit)
+                    .collect::<String>()
+            };
+            let id = row
+                .get("id")
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| value.to_string())
+                })
+                .unwrap_or_else(|| grouped_id.unwrap_or("").to_owned());
+            self.rejection_samples.push(json!({"record":record,"external_id":id.chars().take(128).collect::<String>(),"type":text("ioc_type",64),"value":if row.get("ioc").and_then(Value::as_str).is_some(){text("ioc",4096)}else{text("ioc_value",4096)},"code":error.code}));
+        }
+        true
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SourceInput {
@@ -351,16 +416,13 @@ pub(super) fn normalize(kind: &str, raw: &str) -> Result<(String, String)> {
             let port = port
                 .parse::<u16>()
                 .ok()
-                .filter(|p| *p > 0)
                 .ok_or_else(|| Error::bad("intel_invalid_endpoint"))?;
             match ip {
                 IpAddr::V4(_) => format!("{ip}:{port}"),
                 IpAddr::V6(_) => format!("[{ip}]:{port}"),
             }
         }
-        "domain" => {
-            crate::dns::canonical_domain(&value).map_err(|_| Error::bad("intel_invalid_domain"))?
-        }
+        "domain" => normalize_ioc_domain(&value)?,
         "url" => {
             // IOC values are data, never fetch destinations. Official reports
             // also publish SMB/FTP and scheme-less URLs, including userinfo.
@@ -372,7 +434,11 @@ pub(super) fn normalize(kind: &str, raw: &str) -> Result<(String, String)> {
             };
             let mut u = reqwest::Url::parse(&input)
                 .map_err(|_| Error::bad("intel_invalid_indicator_url"))?;
-            if (has_scheme && !matches!(u.scheme(), "http" | "https" | "ftp" | "ftps" | "smb"))
+            if (has_scheme
+                && !matches!(
+                    u.scheme(),
+                    "http" | "https" | "ftp" | "ftps" | "smb" | "tftp" | "tcp" | "ws" | "wss"
+                ))
                 || u.host_str().is_none_or(|host| host.is_empty())
             {
                 return Err(Error::bad("intel_invalid_indicator_url"));
@@ -411,4 +477,40 @@ pub(super) fn normalize(kind: &str, raw: &str) -> Result<(String, String)> {
         return Err(Error::bad("intel_indicator_too_long"));
     }
     Ok((kind.to_owned(), normalized))
+}
+
+fn normalize_ioc_domain(value: &str) -> Result<String> {
+    // IOC DNS names may contain underscores or IDNs. Do not weaken the stricter
+    // hostname checks used by source fetching, scanners, or task creation.
+    if value.chars().any(|c| {
+        c.is_whitespace()
+            || c.is_control()
+            || matches!(c, '/' | '\\' | ':' | '?' | '#' | '@' | '%' | '[' | ']')
+    }) {
+        return Err(Error::bad("intel_invalid_domain"));
+    }
+    let ascii = if value.is_ascii() {
+        value.to_ascii_lowercase()
+    } else {
+        reqwest::Url::parse(&format!("https://{value}/"))
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .ok_or_else(|| Error::bad("intel_invalid_domain"))?
+    };
+    let domain = ascii.strip_suffix('.').unwrap_or(&ascii);
+    if domain.is_empty()
+        || domain.len() > 253
+        || domain.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        })
+    {
+        return Err(Error::bad("intel_invalid_domain"));
+    }
+    Ok(domain.to_owned())
 }

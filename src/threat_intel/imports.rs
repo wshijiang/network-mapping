@@ -79,7 +79,7 @@ pub(super) async fn install(
     temp.persist(&path)
         .map_err(|_| Error::bad("intel_import_write_failed"))?;
     let result=async {
-        tx.execute("INSERT INTO intel_import_snapshot(source_id,source_revision,snapshot_id,stage,content_hash) VALUES($1,$2,$3,'downloaded',$4) ON CONFLICT(source_id) DO UPDATE SET source_revision=EXCLUDED.source_revision,snapshot_id=EXCLUDED.snapshot_id,stage='downloaded',content_hash=EXCLUDED.content_hash,byte_offset=0,record_count=0,processed_count=0,created_at=NOW()",&[&s.id,&s.revision,&id,&hash]).await?;
+        tx.execute("INSERT INTO intel_import_snapshot(source_id,source_revision,snapshot_id,stage,content_hash) VALUES($1,$2,$3,'downloaded',$4) ON CONFLICT(source_id) DO UPDATE SET source_revision=EXCLUDED.source_revision,snapshot_id=EXCLUDED.snapshot_id,stage='downloaded',content_hash=EXCLUDED.content_hash,byte_offset=0,record_count=0,processed_count=0,validation_summary='{}',created_at=NOW()",&[&s.id,&s.revision,&id,&hash]).await?;
         if let Some((user,context))=actor {
             tx.execute("INSERT INTO intel_sync_run(id,source_id,source_revision) VALUES($1,$2,$3)",&[&Uuid::now_v7(),&s.id,&s.revision]).await?;
             audit(&tx,user,context,"intel.source.import",&s.id.to_string(),json!({"snapshot_id":id,"source_revision":s.revision})).await?;
@@ -164,10 +164,11 @@ pub(super) async fn sync(pool: &Pool, s: &Source) -> Result<(Value, bool)> {
     let id: Uuid = snapshot.get("snapshot_id");
     let stage: String = snapshot.get("stage");
     let total: i64 = snapshot.get("record_count");
+    let validation: Value = snapshot.get("validation_summary");
     let directory = root().await?;
     if stage == "complete" {
         return Ok((
-            json!({"offline_import":true,"stage":"complete","total":total}),
+            json!({"offline_import":true,"stage":"complete","total":total,"validation":validation}),
             false,
         ));
     }
@@ -178,19 +179,30 @@ pub(super) async fn sync(pool: &Pool, s: &Source) -> Result<(Value, bool)> {
         let output = temp
             .reopen()
             .map_err(|_| Error::bad("intel_import_write_failed"))?;
-        let (count, _) = tokio::task::spawn_blocking(move || import_parse::convert(raw, output))
-            .await
-            .map_err(|_| Error::bad("intel_invalid_ioc_document"))??;
+        let official = s.input.kind == "threatfox_export";
+        let (count, _, report) = tokio::task::spawn_blocking(move || {
+            if official {
+                import_parse::convert_official(raw, output)
+            } else {
+                import_parse::convert(raw, output)
+                    .map(|(count, bytes)| (count, bytes, ValidationReport::default()))
+            }
+        })
+        .await
+        .map_err(|_| Error::bad("intel_invalid_ioc_document"))??;
         let mut c = pool.get().await?;
         let tx = c.transaction().await?;
         storage::validate_source(&tx, s).await?;
         temp.persist(directory.join(format!("{id}.ndjson")))
             .map_err(|_| Error::bad("intel_import_write_failed"))?;
-        tx.execute("UPDATE intel_import_snapshot SET stage='ready',record_count=$3 WHERE source_id=$1 AND snapshot_id=$2",&[&s.id,&id,&count]).await?;
+        let validation = json!(report);
+        tx.execute("UPDATE intel_import_snapshot SET stage='ready',record_count=$3,validation_summary=$4 WHERE source_id=$1 AND snapshot_id=$2",&[&s.id,&id,&count,&validation]).await?;
         tx.commit().await?;
-        let _ = tokio::fs::remove_file(directory.join(format!("{id}.raw"))).await;
+        if report.rejected == 0 {
+            let _ = tokio::fs::remove_file(directory.join(format!("{id}.raw"))).await;
+        }
         return Ok((
-            json!({"offline_import":true,"stage":"validated","total":count}),
+            json!({"offline_import":true,"stage":"validated","total":count,"validation":validation}),
             true,
         ));
     }
@@ -242,7 +254,7 @@ pub(super) async fn sync(pool: &Pool, s: &Source) -> Result<(Value, bool)> {
         let _ = tokio::fs::remove_file(directory.join(format!("{id}.ndjson"))).await;
     }
     Ok((
-        json!({"offline_import":true,"stage":if complete{"complete"}else{"importing"},"processed":processed+items,"total":total,"added":added}),
+        json!({"offline_import":true,"stage":if complete{"complete"}else{"importing"},"processed":processed+items,"total":total,"added":added,"validation":validation}),
         !complete,
     ))
 }

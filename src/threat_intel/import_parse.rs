@@ -28,7 +28,20 @@ impl<R: Read> Read for RowLimit<R> {
         Ok(n)
     }
 }
-pub(super) fn convert(mut raw: std::fs::File, output: std::fs::File) -> Result<(i64, u64)> {
+pub(super) fn convert(raw: std::fs::File, output: std::fs::File) -> Result<(i64, u64)> {
+    convert_with_policy(raw, output, false).map(|(count, bytes, _)| (count, bytes))
+}
+pub(super) fn convert_official(
+    raw: std::fs::File,
+    output: std::fs::File,
+) -> Result<(i64, u64, ValidationReport)> {
+    convert_with_policy(raw, output, true)
+}
+fn convert_with_policy(
+    mut raw: std::fs::File,
+    output: std::fs::File,
+    isolate_invalid: bool,
+) -> Result<(i64, u64, ValidationReport)> {
     let mut magic = [0; 4];
     let n = raw
         .read(&mut magic)
@@ -47,9 +60,9 @@ pub(super) fn convert(mut raw: std::fs::File, output: std::fs::File) -> Result<(
         if entry.is_dir() || entry.size() > MAX_EXPANDED {
             return Err(Error::bad("intel_import_too_large"));
         }
-        convert_reader(entry, &mut writer)
+        convert_reader(entry, &mut writer, isolate_invalid)
     } else {
-        convert_reader(raw, &mut writer)
+        convert_reader(raw, &mut writer, isolate_invalid)
     }?;
     writer
         .flush()
@@ -60,7 +73,11 @@ pub(super) fn convert(mut raw: std::fs::File, output: std::fs::File) -> Result<(
         .map_err(|_| Error::bad("intel_import_write_failed"))?;
     Ok(result)
 }
-fn convert_reader<R: Read, W: Write>(reader: R, writer: &mut W) -> Result<(i64, u64)> {
+fn convert_reader<R: Read, W: Write>(
+    reader: R,
+    writer: &mut W,
+    isolate_invalid: bool,
+) -> Result<(i64, u64, ValidationReport)> {
     let budget = std::sync::Arc::new(AtomicUsize::new(MAX_ROW));
     let mut reader = BufReader::new(RowLimit {
         inner: BufReader::new(reader),
@@ -96,6 +113,7 @@ fn convert_reader<R: Read, W: Write>(reader: R, writer: &mut W) -> Result<(i64, 
     );
     let mut count = 0_i64;
     let mut bytes = 0_u64;
+    let mut report = ValidationReport::default();
     let mut emit = |mut i: Indicator| -> Result<()> {
         i.normalize()?;
         let encoded = serde_json::to_vec(&i).map_err(|_| Error::bad("intel_invalid_indicator"))?;
@@ -112,10 +130,25 @@ fn convert_reader<R: Read, W: Write>(reader: R, writer: &mut W) -> Result<(i64, 
     };
     if json {
         let mut row_error = None;
+        let mut record = 0_i64;
         let mut rows = |v: Value, group: Option<&str>| -> Result<()> {
+            record += 1;
+            if record > 10_000_000 {
+                return Err(Error::bad("intel_import_too_large"));
+            }
             let result = (|| {
                 let i = if v.get("ioc_type").is_some() {
-                    parse::threatfox_row(&v, group)?
+                    let Some(item) = parse::validated_threatfox_row(
+                        &v,
+                        group,
+                        record,
+                        &mut report,
+                        isolate_invalid,
+                    )?
+                    else {
+                        return Ok(());
+                    };
+                    item
                 } else {
                     serde_json::from_value(v).map_err(|_| Error::bad("intel_invalid_indicator"))?
                 };
@@ -139,9 +172,9 @@ fn convert_reader<R: Read, W: Write>(reader: R, writer: &mut W) -> Result<(i64, 
             .end()
             .map_err(|_| Error::bad("intel_invalid_ioc_document"))?;
     } else {
-        csv_rows(reader, &budget, &mut emit)?;
+        csv_rows(reader, &budget, &mut emit, &mut report, isolate_invalid)?;
     }
-    Ok((count, bytes))
+    Ok((count, bytes, report))
 }
 type Emit<'a> = &'a mut dyn FnMut(Value, Option<&str>) -> Result<()>;
 struct Root<'a, 'b> {
@@ -217,12 +250,12 @@ enum CsvState {
 }
 // Some official exports put spaces before opening quotes. Strip only field
 // padding, preserving commas, doubled quotes, and newlines inside quoted data.
-struct CsvPadding<R> {
+pub(super) struct CsvPadding<R> {
     reader: BufReader<R>,
     state: CsvState,
 }
 impl<R: Read> CsvPadding<R> {
-    fn new(reader: R) -> Self {
+    pub(super) fn new(reader: R) -> Self {
         Self {
             reader: BufReader::new(reader),
             state: CsvState::RecordStart,
@@ -264,6 +297,8 @@ fn csv_rows<R: Read>(
     reader: R,
     budget: &AtomicUsize,
     emit: &mut dyn FnMut(Indicator) -> Result<()>,
+    report: &mut ValidationReport,
+    isolate_invalid: bool,
 ) -> Result<()> {
     let mut reader = BufReader::new(reader);
     // Read comments before parsing CSV, so quotes in prose cannot consume the
@@ -318,6 +353,7 @@ fn csv_rows<R: Read>(
         .comment(Some(b'#'))
         .from_reader(CsvPadding::new(reader));
     let mut row = csv::StringRecord::new();
+    let mut record = 0_i64;
     loop {
         budget.store(MAX_ROW, Ordering::Relaxed);
         if !csv
@@ -338,31 +374,20 @@ fn csv_rows<R: Read>(
         if row.len() != header.len() {
             return Err(Error::bad("intel_invalid_csv"));
         }
-        let mut object = serde_json::Map::new();
-        for (key, value) in header.iter().zip(row.iter()) {
-            let value = value.trim();
-            if value.is_empty() {
-                continue;
-            }
-            let key = match key.as_str() {
-                "ioc_id" => "id",
-                "ioc_value" => "ioc",
-                other => other,
-            };
-            let parsed = if matches!(key, "confidence" | "confidence_level") {
-                json!(
-                    value
-                        .parse::<i32>()
-                        .map_err(|_| Error::bad("intel_invalid_confidence"))?
-                )
-            } else {
-                json!(value)
-            };
-            object.insert(key.into(), parsed);
+        record += 1;
+        if record > 10_000_000 {
+            return Err(Error::bad("intel_import_too_large"));
         }
+        let mut object = csv_object(header.iter().map(String::as_str).zip(row.iter()))?;
         let native = object.contains_key("ioc_type");
         let indicator = if native {
-            parse::threatfox_row(&Value::Object(object), None)?
+            let value = Value::Object(object);
+            let Some(item) =
+                parse::validated_threatfox_row(&value, None, record, report, isolate_invalid)?
+            else {
+                continue;
+            };
+            item
         } else {
             if let Some(v) = object.remove("ioc") {
                 object.insert("value".into(), v);
@@ -376,4 +401,40 @@ fn csv_rows<R: Read>(
         emit(indicator)?;
     }
     Ok(())
+}
+
+pub(super) fn csv_object<'a>(
+    fields: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Result<serde_json::Map<String, Value>> {
+    let mut object = serde_json::Map::new();
+    for (key, value) in fields {
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let key = match key.as_str() {
+            "ioc_id" => "id",
+            "ioc_value" => "ioc",
+            "fk_malware" => "malware",
+            other => other,
+        };
+        let parsed = if matches!(key, "confidence" | "confidence_level") {
+            json!(
+                value
+                    .parse::<i32>()
+                    .map_err(|_| Error::bad("intel_invalid_confidence"))?
+            )
+        } else if key == "is_compromised" {
+            match value.to_ascii_lowercase().as_str() {
+                "true" | "1" => json!(true),
+                "false" | "0" => json!(false),
+                _ => json!(value),
+            }
+        } else {
+            json!(value)
+        };
+        object.insert(key.into(), parsed);
+    }
+    Ok(object)
 }
