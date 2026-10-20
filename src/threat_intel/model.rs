@@ -4,7 +4,11 @@ use std::{net::IpAddr, path::Component};
 pub(super) const MAX_ITEMS: usize = 50_000;
 pub(super) const MAX_BYTES: usize = 96 * 1024 * 1024;
 pub(super) const MAX_ARTICLE: usize = 100_000;
-pub(super) const PROMPT_VERSION: &str = "ioc-evidence-v2";
+pub(super) const MAX_AI_IOCS: usize = 2000;
+pub(super) const MAX_AI_OUTPUT_TOKENS: u32 = 393_216;
+pub(super) const DEFAULT_AI_OUTPUT_TOKENS: u32 = 65_536;
+pub(super) const MAX_AI_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const PROMPT_VERSION: &str = "ioc-evidence-v7";
 pub(super) const ATTACK_TYPES: &[&str] = &[
     "bgp_hijacking",
     "route_leak",
@@ -335,10 +339,25 @@ pub(super) struct Settings {
     pub ai_key_env: String,
     #[serde(default = "default_ai_timeout_seconds")]
     pub ai_timeout_seconds: u64,
+    #[serde(default = "default_ai_protocol")]
+    pub ai_protocol: String,
+    #[serde(default = "default_ai_max_output_tokens")]
+    pub ai_max_output_tokens: u32,
+    #[serde(default = "default_ai_reasoning_effort")]
+    pub ai_reasoning_effort: String,
     #[serde(default, skip_serializing)]
     pub credential: String,
     #[serde(default, skip_serializing)]
     pub clear_credential: bool,
+}
+fn default_ai_protocol() -> String {
+    "chat".into()
+}
+fn default_ai_max_output_tokens() -> u32 {
+    DEFAULT_AI_OUTPUT_TOKENS
+}
+fn default_ai_reasoning_effort() -> String {
+    "none".into()
 }
 fn default_ai_timeout_seconds() -> u64 {
     180
@@ -357,6 +376,16 @@ impl Settings {
         {
             return Err(Error::bad("intel_invalid_ai_settings"));
         }
+        if !matches!(self.ai_protocol.as_str(), "chat" | "responses")
+            || !(512..=MAX_AI_OUTPUT_TOKENS).contains(&self.ai_max_output_tokens)
+            || !matches!(
+                self.ai_reasoning_effort.as_str(),
+                "default" | "none" | "low" | "medium" | "high" | "max"
+            )
+        {
+            return Err(Error::bad("intel_invalid_ai_settings"));
+        }
+        super::ai::endpoint(self)?;
         if !(1..=1800).contains(&self.ai_timeout_seconds) {
             return Err(Error::bad("intel_invalid_ai_timeout"));
         }
@@ -407,6 +436,8 @@ pub(super) struct Indicator {
     pub reference: Option<String>,
     #[serde(default)]
     pub evidence: String,
+    #[serde(default, skip_deserializing, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_spans: Vec<evidence::VerifiedSpan>,
     #[serde(default)]
     pub confidence: Option<i32>,
     #[serde(default)]

@@ -1257,6 +1257,9 @@ async fn ai_enabled(pool: &Pool, enabled: bool) {
             ai_model: "test".into(),
             ai_key_env: "NM_INTEL_TEST_AI_KEY".into(),
             ai_timeout_seconds: 180,
+            ai_protocol: "chat".into(),
+            ai_max_output_tokens: 8000,
+            ai_reasoning_effort: "none".into(),
             credential: String::new(),
             clear_credential: false,
         },
@@ -1267,6 +1270,361 @@ async fn ai_enabled(pool: &Pool, enabled: bool) {
     )
     .await
     .unwrap();
+}
+
+async fn report_review_fixture(pool: &Pool) -> (storage::Source, Uuid, Vec<Indicator>) {
+    let (source, article, _) = draft(pool, "unused.example").await;
+    ai_enabled(pool, true).await;
+    let body = "恶意基础设施\na.evil.test 恶意 DNS\nb.evil.test 恶意 DNS";
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            "UPDATE intel_article SET body=$2,body_hash=$3 WHERE id=$1",
+            &[&article, &body, &digest(body.as_bytes())],
+        )
+        .await
+        .unwrap();
+    let entries = ["a.evil.test", "b.evil.test"]
+        .iter()
+        .map(|value| {
+            let mut item = Indicator::simple("domain", value);
+            item.evidence = format!("{value} 恶意 DNS");
+            item.role = "malicious_dns".into();
+            item
+        })
+        .collect();
+    (source, article, entries)
+}
+
+#[test]
+fn large_ai_reports_accept_more_than_one_record_page_and_the_previous_200_ioc_limit() {
+    let lines = (0..201)
+        .map(|n| format!("malicious domain host{n}.evil.test"))
+        .collect::<Vec<_>>();
+    let body = lines.join("\n");
+    let items = lines.iter().enumerate().map(|(n,line)|json!({"type":"domain","value":format!("host{n}.evil.test"),"evidence":line})).collect::<Vec<_>>();
+    assert_eq!(
+        parse::ai_result(&json!({"iocs":items}).to_string(), &body)
+            .unwrap()
+            .len(),
+        201
+    );
+    let oversized = vec![
+        json!({"type":"domain","value":"host0.evil.test","evidence":lines[0]});
+        MAX_AI_IOCS + 1
+    ];
+    assert_eq!(
+        parse::ai_result(&json!({"iocs":oversized}).to_string(), &body)
+            .unwrap_err()
+            .code,
+        "intel_ai_too_many_items"
+    );
+}
+
+fn report_batch(data: &Value, decision: &str) -> review::BatchInput {
+    serde_json::from_value(json!({"body_hash":data["article"]["body_hash"],"reason":"核对报告与全部 IOC 原文","items":data["records"].as_array().unwrap().iter().filter(|r|r["status"]=="pending").map(|r|json!({"id":r["id"],"content_hash":r["content_hash"],"decision":decision})).collect::<Vec<_>>()})).unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn report_review_reuses_facts_across_metadata_quotes_and_retry_articles() {
+    let (pool, c, schema) = database().await;
+    let (source, article, mut entries) = report_review_fixture(&pool).await;
+    let revision = storage::settings(&pool).await.unwrap().1;
+    assert_eq!(
+        storage::ingest_ai_report(
+            &pool,
+            &source,
+            entries.clone(),
+            article,
+            revision,
+            "https://research.example/report"
+        )
+        .await
+        .unwrap(),
+        2
+    );
+    c.execute("UPDATE intel_article SET extraction_metadata=$2 WHERE id=$1", &[&article,&json!({"model":"another model","ai_usage":{"total_tokens":123456},"settings_revision":123,"prompt_version":"new-prompt"})]).await.unwrap();
+    entries[0].evidence = "恶意基础设施中的 a.evil.test".into();
+    assert_eq!(
+        storage::ingest_ai_report(
+            &pool,
+            &source,
+            entries.clone(),
+            article,
+            revision,
+            "https://research.example/report"
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    let queue = review::queue(&pool, &user(1), &storage::ListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(queue["total"], 1);
+    assert_eq!(queue["items"][0]["pending_count"], 2);
+    let data = review::report(&pool, article, &user(1)).await.unwrap();
+    let mut input = report_batch(&data, "approved");
+    input.items[1].decision = "rejected".into();
+    review::submit(&pool, article, input, &user(1), &AuditContext::cli("test"))
+        .await
+        .unwrap();
+    let retry = Uuid::now_v7();
+    c.execute("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash,body,body_hash) SELECT $2,source_id,source_revision,url,title,'retry-hash',body,body_hash FROM intel_article WHERE id=$1", &[&article,&retry]).await.unwrap();
+    assert_eq!(
+        storage::ingest_ai_report(
+            &pool,
+            &source,
+            entries.clone(),
+            retry,
+            revision,
+            "https://research.example/report"
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        review::report(&pool, retry, &user(1)).await.unwrap()["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        review::queue(&pool, &user(1), &storage::ListQuery::default())
+            .await
+            .unwrap()["total"],
+        0
+    );
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_record", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        2
+    );
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_review", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        2
+    );
+    entries[0].role = "c2".into();
+    assert_eq!(
+        storage::ingest_ai_report(
+            &pool,
+            &source,
+            entries,
+            retry,
+            revision,
+            "https://research.example/report"
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        review::queue(&pool, &user(1), &storage::ListQuery::default())
+            .await
+            .unwrap()["items"][0]["pending_count"],
+        1
+    );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn report_review_batch_checks_membership_snapshot_and_versions_atomically() {
+    let (pool, c, schema) = database().await;
+    let (source, article, entries) = report_review_fixture(&pool).await;
+    storage::ingest_ai_report(
+        &pool,
+        &source,
+        entries,
+        article,
+        storage::settings(&pool).await.unwrap().1,
+        "https://research.example/report",
+    )
+    .await
+    .unwrap();
+    let data = review::report(&pool, article, &user(1)).await.unwrap();
+    let mut input = report_batch(&data, "approved");
+    input.items[1].content_hash = "0".repeat(64);
+    assert_eq!(
+        review::submit(&pool, article, input, &user(1), &AuditContext::cli("test"))
+            .await
+            .unwrap_err()
+            .status,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_review", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_published", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    let mut input = report_batch(&data, "approved");
+    input.items[1].id = Uuid::now_v7();
+    assert!(
+        review::submit(&pool, article, input, &user(1), &AuditContext::cli("test"))
+            .await
+            .is_err()
+    );
+    let mut input = report_batch(&data, "approved");
+    input.body_hash = "0".repeat(64);
+    assert!(
+        review::submit(&pool, article, input, &user(1), &AuditContext::cli("test"))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        review::submit(
+            &pool,
+            article,
+            report_batch(&data, "approved"),
+            &user(0),
+            &AuditContext::cli("test")
+        )
+        .await
+        .unwrap_err()
+        .status,
+        StatusCode::FORBIDDEN
+    );
+    review::submit(
+        &pool,
+        article,
+        report_batch(&data, "approved"),
+        &user(1),
+        &AuditContext::cli("test"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_published", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        2
+    );
+    assert!(
+        review::submit(
+            &pool,
+            article,
+            report_batch(&data, "approved"),
+            &user(1),
+            &AuditContext::cli("test")
+        )
+        .await
+        .is_err()
+    );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn report_reextraction_replaces_obsolete_pending_and_rolls_back_invalid_results() {
+    let (pool, c, schema) = database().await;
+    let (mut source, article, entries) = report_review_fixture(&pool).await;
+    let revision = storage::settings(&pool).await.unwrap().1;
+    let token = Uuid::now_v7();
+    c.execute("UPDATE intel_article SET status='running',claim_token=$2,lease_until=NOW()+INTERVAL '10 minutes' WHERE id=$1", &[&article,&token]).await.unwrap();
+    source.fence = Some(storage::Fence::Article(article, token));
+    storage::ingest_ai_report(
+        &pool,
+        &source,
+        entries.clone(),
+        article,
+        revision,
+        "https://research.example/report",
+    )
+    .await
+    .unwrap();
+    let data = review::report(&pool, article, &user(1)).await.unwrap();
+    let mut input = report_batch(&data, "approved");
+    input.items.truncate(1);
+    review::submit(&pool, article, input, &user(1), &AuditContext::cli("test"))
+        .await
+        .unwrap();
+    let next = Uuid::now_v7();
+    c.execute(
+        "UPDATE intel_article SET claim_token=$2 WHERE id=$1",
+        &[&article, &next],
+    )
+    .await
+    .unwrap();
+    source.fence = Some(storage::Fence::Article(article, next));
+    assert_eq!(
+        storage::ingest_ai_report(
+            &pool,
+            &source,
+            vec![entries[0].clone()],
+            article,
+            revision,
+            "https://research.example/report"
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        c.query_one(
+            "SELECT COUNT(*) FROM intel_record WHERE status='pending'",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_published", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
+    let invalid = vec![
+        Indicator::simple("domain", "c.evil.test"),
+        Indicator::simple("ip", "invalid"),
+    ];
+    assert!(
+        storage::ingest_ai_report(
+            &pool,
+            &source,
+            invalid,
+            article,
+            revision,
+            "https://research.example/report"
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_record", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        2
+    );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1413,6 +1771,7 @@ async fn ai_publication_requires_exact_human_approval_even_for_trusted_source() 
             .is_none()
     );
     let review = || storage::ReviewInput {
+        attribution: None,
         content_hash: hash.clone(),
         decision: "approved".into(),
         reason: "checked original evidence".into(),
@@ -1449,6 +1808,7 @@ async fn ai_publication_requires_exact_human_approval_even_for_trusted_source() 
         &pool,
         id,
         storage::ReviewInput {
+            attribution: None,
             decision: "revoked".into(),
             ..review()
         },
@@ -2450,7 +2810,7 @@ async fn expired_worker_fences_cannot_publish_trusted_data() {
 
 #[tokio::test]
 #[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
-async fn stale_article_cannot_be_claimed_retried_or_relabelled_with_new_source_revision() {
+async fn stale_article_retry_forks_current_revision_without_relabelling_old_evidence() {
     use actix_web::{App, HttpMessage, dev::Service, test as http_test, web};
     let (pool, c, schema) = database().await;
     let (source, article, indicator) = draft(&pool, "stale.example").await;
@@ -2493,7 +2853,27 @@ async fn stale_article_cannot_be_claimed_retried_or_relabelled_with_new_source_r
             .to_request(),
     )
     .await;
-    assert_eq!(response.status(), actix_web::http::StatusCode::CONFLICT);
+    assert!(response.status().is_success());
+    let result: Value = http_test::read_body_json(response).await;
+    let fork: Uuid = result["data"]["id"].as_str().unwrap().parse().unwrap();
+    assert_ne!(fork, article);
+    assert_eq!(result["data"]["status"], "queued");
+    assert_eq!(result["data"]["new_source_revision"], true);
+    let rows=c.query("SELECT id,source_revision,body FROM intel_article WHERE source_id=$1 ORDER BY source_revision",&[&source.id]).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get::<_, i64>(1), 1);
+    assert_eq!(rows[1].get::<_, i64>(1), 2);
+    assert_eq!(rows[0].get::<_, String>(2), rows[1].get::<_, String>(2));
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::post()
+            .uri(&format!("/api/intel/articles/{article}/retry"))
+            .to_request(),
+    )
+    .await;
+    let result: Value = http_test::read_body_json(response).await;
+    assert_eq!(result["data"]["id"], json!(fork));
+    assert_eq!(result["data"]["already_active"], true);
     // A worker that already held the old article cannot load revision 2 and
     // attach its old saved body to evidence claiming to use revision 2.
     let token = Uuid::new_v4();
@@ -3460,6 +3840,7 @@ async fn manual_article_submission_preserves_snapshot_permissions_and_ai_gate() 
         &pool,
         record,
         storage::ReviewInput {
+            attribution: None,
             content_hash: hash,
             decision: "approved".into(),
             reason: "Checked exact ASN evidence against the supplied snapshot".into(),
@@ -3596,6 +3977,7 @@ async fn batch_ingest_matches_sequential_versions_decisions_and_actor_resolution
             &pool,
             row.get(0),
             storage::ReviewInput {
+                attribution: None,
                 content_hash: row.get(1),
                 decision: "revoked".into(),
                 reason: "Fixture revocation".into(),
@@ -3934,6 +4316,347 @@ async fn batch_import_throughput_preserves_all_records() {
         serial.as_secs_f64() / parallel.as_secs_f64()
     );
     drop(db);
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn multipart_evidence_preserves_snapshot_ranges_through_pending_review_and_publication() {
+    let (pool, c, schema) = database().await;
+    let (source, article, _) = draft(&pool, "unused.example").await;
+    ai_enabled(&pool, true).await;
+    let body = "存活恶意DNS服务器\n192[.]0[.]2[.]1\n192[.]0[.]2[.]2";
+    let hash = digest(body.as_bytes());
+    let metadata = json!({"prompt_version":PROMPT_VERSION,"evidence_version":"block-spans-v1","body_hash":hash});
+    c.execute(
+        "UPDATE intel_article SET body=$2,body_hash=$3,extraction_metadata=$4 WHERE id=$1",
+        &[&article, &body, &hash, &metadata],
+    )
+    .await
+    .unwrap();
+    let output =
+        json!({"iocs":[{"type":"ip","value":"192.0.2.2","verdict":"malicious","evidence_parts":[
+            {"block_id":1,"kind":"context","quote":"存活恶意DNS服务器"},
+            {"block_id":3,"kind":"ioc","quote":"192[.]0[.]2[.]2"}
+        ]}]})
+        .to_string();
+    let mut items = parse::ai_result(&output, body).unwrap();
+    assert!(
+        storage::ingest(
+            &pool,
+            &source,
+            items.remove(0),
+            storage::Origin::Ai {
+                article_id: article,
+                settings_revision: storage::settings(&pool).await.unwrap().1
+            },
+            "report#"
+        )
+        .await
+        .unwrap()
+    );
+    let row = c
+        .query_one(
+            "SELECT id,status,content_hash,payload FROM intel_record WHERE article_id=$1",
+            &[&article],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>("status"), "pending");
+    let payload: Value = row.get("payload");
+    assert_eq!(payload["extraction"], metadata);
+    assert_eq!(payload["evidence_spans"].as_array().unwrap().len(), 2);
+    assert!(payload.get("evidence_parts").is_none());
+    for span in payload["evidence_spans"].as_array().unwrap() {
+        let start = span["start"].as_u64().unwrap() as usize;
+        let end = span["end"].as_u64().unwrap() as usize;
+        assert_eq!(&body[start..end], span["quote"].as_str().unwrap());
+    }
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_published", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    storage::review(
+        &pool,
+        row.get("id"),
+        storage::ReviewInput {
+            attribution: None,
+            content_hash: row.get("content_hash"),
+            decision: "approved".into(),
+            reason: "核对共享标题与第二条 IOC 原文".into(),
+        },
+        &user(1),
+        &AuditContext::cli("test"),
+    )
+    .await
+    .unwrap();
+    let published: Value = c
+        .query_one(
+            "SELECT payload FROM intel_published WHERE article_id=$1",
+            &[&article],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(published["evidence_spans"], payload["evidence_spans"]);
+    let saved = c
+        .query_one(
+            "SELECT body,body_hash FROM intel_article WHERE id=$1",
+            &[&article],
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.get::<_, String>(0), body);
+    assert_eq!(saved.get::<_, String>(1), hash);
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn review_can_confirm_source_alias_replace_or_clear_actor_without_mutating_model_evidence() {
+    let (pool, c, schema) = database().await;
+    let (source, article, mut i) = draft(&pool, "alias.example").await;
+    ai_enabled(&pool, true).await;
+    i.actor_name = "Report Alias".into();
+    for (id, name, aliases) in [
+        ("G7001", "First Group", vec!["Report Alias"]),
+        ("G7002", "Second Group", vec![]),
+    ] {
+        c.execute("INSERT INTO intel_entity(attack_id,stix_id,kind,name,aliases,source_id,dataset_version,object) VALUES($1,$1,'actor',$2,$3,$4,'test','{}')",&[&id,&name,&aliases,&source.id]).await.unwrap();
+    }
+    let origin = storage::Origin::Ai {
+        article_id: article,
+        settings_revision: storage::settings(&pool).await.unwrap().1,
+    };
+    storage::ingest(&pool, &source, i.clone(), origin, "")
+        .await
+        .unwrap();
+    let candidates = attribution::candidates(
+        &pool,
+        c.query_one(
+            "SELECT id FROM intel_record WHERE article_id=$1",
+            &[&article],
+        )
+        .await
+        .unwrap()
+        .get(0),
+    )
+    .await
+    .unwrap();
+    assert_eq!(candidates["items"][0]["basis"], "associated_name");
+    let row = c
+        .query_one(
+            "SELECT id,content_hash,payload,actor_id FROM intel_record WHERE article_id=$1",
+            &[&article],
+        )
+        .await
+        .unwrap();
+    assert!(row.get::<_, Option<String>>("actor_id").is_none());
+    let original: Value = row.get("payload");
+    storage::review(
+        &pool,
+        row.get("id"),
+        storage::ReviewInput {
+            content_hash: row.get("content_hash"),
+            decision: "approved".into(),
+            reason: "Verified original attribution and source-scoped alias".into(),
+            attribution: Some(attribution::ActorDecision::Alias {
+                actor_id: "G7001".into(),
+            }),
+        },
+        &user(1),
+        &AuditContext::cli("test"),
+    )
+    .await
+    .unwrap();
+    let approved = c
+        .query_one(
+            "SELECT payload,actor_id FROM intel_published WHERE article_id=$1",
+            &[&article],
+        )
+        .await
+        .unwrap();
+    assert_eq!(approved.get::<_, Value>(0), original);
+    assert_eq!(approved.get::<_, String>(1), "G7001");
+    assert_eq!(
+        annotate(&pool, &[vec![("domain".into(), "alias.example".into())]]).await[0].matches[0]["actor"]
+            ["id"],
+        "G7001"
+    );
+    // A per-record replacement does not rewrite the saved alias for future reports.
+    for (value, choice, expected) in [
+        (
+            "replacement.example",
+            attribution::ActorDecision::Select {
+                actor_id: "G7002".into(),
+            },
+            Some("G7002"),
+        ),
+        (
+            "unassigned.example",
+            attribution::ActorDecision::Unassigned,
+            None,
+        ),
+    ] {
+        let mut item = i.clone();
+        item.value = value.into();
+        storage::ingest(&pool, &source, item, origin, "")
+            .await
+            .unwrap();
+        let row = c
+            .query_one(
+                "SELECT id,content_hash FROM intel_record WHERE value=$1",
+                &[&value],
+            )
+            .await
+            .unwrap();
+        storage::review(
+            &pool,
+            row.get("id"),
+            storage::ReviewInput {
+                content_hash: row.get("content_hash"),
+                decision: "approved".into(),
+                reason: "checked scope".into(),
+                attribution: Some(choice),
+            },
+            &user(1),
+            &AuditContext::cli("test"),
+        )
+        .await
+        .unwrap();
+        let hits = annotate(&pool, &[vec![("domain".into(), value.into())]]).await;
+        assert_eq!(hits[0].matches[0]["actor"]["id"].as_str(), expected);
+    }
+    assert_eq!(
+        c.query_one(
+            "SELECT attack_id FROM intel_name_mapping WHERE source_id=$1",
+            &[&source.id]
+        )
+        .await
+        .unwrap()
+        .get::<_, String>(0),
+        "G7001"
+    );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn local_actor_creation_is_atomic_human_review_and_never_uses_mitre_ids() {
+    let (pool, c, schema) = database().await;
+    let (source, article, mut i) = draft(&pool, "local-actor.example").await;
+    ai_enabled(&pool, true).await;
+    i.actor_name = "原文组织".into();
+    storage::ingest(
+        &pool,
+        &source,
+        i,
+        storage::Origin::Ai {
+            article_id: article,
+            settings_revision: storage::settings(&pool).await.unwrap().1,
+        },
+        "",
+    )
+    .await
+    .unwrap();
+    let row = c
+        .query_one(
+            "SELECT id,content_hash FROM intel_record WHERE article_id=$1",
+            &[&article],
+        )
+        .await
+        .unwrap();
+    let id: Uuid = row.get(0);
+    let hash: String = row.get(1);
+    let input = |hash: String, choice| storage::ReviewInput {
+        content_hash: hash,
+        decision: "approved".into(),
+        reason: "checked original organization attribution".into(),
+        attribution: Some(choice),
+    };
+    let create = || attribution::ActorDecision::Create {
+        name: "本地核验组织".into(),
+    };
+    assert!(
+        storage::review(
+            &pool,
+            id,
+            input("stale".into(), create()),
+            &user(1),
+            &AuditContext::cli("test")
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        c.query_one(
+            "SELECT COUNT(*) FROM intel_entity WHERE dataset_version='local-reviewed'",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+    assert!(
+        storage::review(
+            &pool,
+            id,
+            input(
+                hash.clone(),
+                attribution::ActorDecision::Select {
+                    actor_id: "unknown".into()
+                }
+            ),
+            &user(1),
+            &AuditContext::cli("test")
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        c.query_one("SELECT status FROM intel_record WHERE id=$1", &[&id])
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+        "pending"
+    );
+    storage::review(
+        &pool,
+        id,
+        input(hash, create()),
+        &user(1),
+        &AuditContext::cli("test"),
+    )
+    .await
+    .unwrap();
+    let entity=c.query_one("SELECT attack_id,name,dataset_version FROM intel_entity WHERE dataset_version='local-reviewed'",&[]).await.unwrap();
+    assert!(entity.get::<_, String>(0).starts_with("LOCAL-G-"));
+    assert_eq!(entity.get::<_, String>(1), "本地核验组织");
+    let hits = annotate(
+        &pool,
+        &[vec![("domain".into(), "local-actor.example".into())]],
+    )
+    .await;
+    assert_eq!(hits[0].matches[0]["actor"]["name"], "本地核验组织");
+    let immutable = c
+        .query_one(
+            "SELECT actor_id,payload FROM intel_record WHERE id=$1",
+            &[&id],
+        )
+        .await
+        .unwrap();
+    assert!(immutable.get::<_, Option<String>>(0).is_none());
+    assert_eq!(immutable.get::<_, Value>(1)["actor_name"], "原文组织");
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
         .unwrap();

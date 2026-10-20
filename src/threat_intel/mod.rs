@@ -1,16 +1,20 @@
 //! Source-trusted IOC ingestion and mandatory, version-bound AI review.
 //! Published facts are matched at read time after asset authorization. Scanner
 //! observations and upload checksums never contain these mutable annotations.
+mod ai;
 mod article_body;
 mod articles;
+mod attribution;
 mod batch;
 pub mod cli;
 mod client;
 mod credentials;
+mod evidence;
 mod import_parse;
 mod imports;
 mod model;
 mod parse;
+mod review;
 mod routes;
 mod storage;
 #[cfg(test)]

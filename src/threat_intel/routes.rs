@@ -211,6 +211,38 @@ async fn records(
 ) -> HttpResponse {
     response(storage::records(&pool, &user, &q).await)
 }
+async fn review_queue(
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    q: web::Query<storage::ListQuery>,
+) -> HttpResponse {
+    response(review::queue(&pool, &user, &q).await)
+}
+async fn report_review(
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    id: web::Path<Uuid>,
+) -> HttpResponse {
+    response(review::report(&pool, id.into_inner(), &user).await)
+}
+async fn submit_report_review(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    id: web::Path<Uuid>,
+    input: web::Json<review::BatchInput>,
+) -> HttpResponse {
+    response(
+        review::submit(
+            &pool,
+            id.into_inner(),
+            input.into_inner(),
+            &user,
+            &AuditContext::from_request(&req),
+        )
+        .await,
+    )
+}
 async fn review(
     req: HttpRequest,
     pool: web::Data<Pool>,
@@ -226,6 +258,19 @@ async fn review(
             &user,
             &AuditContext::from_request(&req),
         )
+        .await,
+    )
+}
+async fn attribution_candidates(
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    id: web::Path<Uuid>,
+) -> HttpResponse {
+    response(
+        async {
+            admin(&user)?;
+            attribution::candidates(&pool, id.into_inner()).await
+        }
         .await,
     )
 }
@@ -276,7 +321,7 @@ async fn jobs(pool: web::Data<Pool>, user: UserBaseI) -> HttpResponse {
 async fn articles(pool: web::Data<Pool>, user: UserBaseI) -> HttpResponse {
     response(async {
     admin(&user)?;
-    let rows=pool.get().await?.query("SELECT a.*,s.name AS source_name,counts.record_count,counts.pending_count FROM (SELECT * FROM intel_article ORDER BY created_at DESC LIMIT 100) a JOIN intel_source s ON s.id=a.source_id CROSS JOIN LATERAL (SELECT COUNT(*) AS record_count,COUNT(*) FILTER (WHERE r.status='pending') AS pending_count FROM intel_record r WHERE r.article_id=a.id AND r.source_id=a.source_id AND r.origin='ai') counts ORDER BY a.created_at DESC",&[]).await?;
+    let rows=pool.get().await?.query("SELECT a.*,s.name AS source_name,counts.record_count,counts.pending_count FROM (SELECT * FROM intel_article ORDER BY created_at DESC LIMIT 100) a JOIN intel_source s ON s.id=a.source_id CROSS JOIN LATERAL (SELECT COUNT(DISTINCT (r.kind,r.value)) AS record_count,COUNT(DISTINCT r.id) FILTER (WHERE r.status='pending') AS pending_count FROM intel_article_record l JOIN intel_record r ON r.id=l.record_id WHERE l.article_id=a.id AND r.source_id=a.source_id AND r.origin='ai' AND r.status<>'superseded') counts ORDER BY a.created_at DESC",&[]).await?;
     Ok(json!({"items":rows.iter().map(|r|json!({"id":r.get::<_,Uuid>("id"),"source_name":r.get::<_,String>("source_name"),"url":r.get::<_,String>("url"),"title":r.get::<_,String>("title"),"status":r.get::<_,String>("status"),"record_count":r.get::<_,i64>("record_count"),"pending_count":r.get::<_,i64>("pending_count"),"body_hash":r.get::<_,Option<String>>("body_hash"),"error_code":r.get::<_,Option<String>>("error_code"),"extraction_metadata":r.get::<_,Value>("extraction_metadata"),"created_at":r.get::<_,chrono::DateTime<chrono::Utc>>("created_at")})).collect::<Vec<_>>()}))
 }.await)
 }
@@ -313,11 +358,34 @@ async fn retry_article(
     id: web::Path<Uuid>,
 ) -> HttpResponse {
     response(async {
-    admin(&user)?;if !storage::settings(&pool).await?.0.ai_enabled{return Err(Error::bad("intel_ai_disabled"));}
-    let mut c=pool.get().await?;let tx=c.transaction().await?;let id=id.into_inner();
-    let changed=tx.execute("UPDATE intel_article a SET status='queued',attempts=0,error_code=NULL,available_at=NOW() FROM intel_source s WHERE a.id=$1 AND a.source_id=s.id AND a.source_revision=s.revision AND s.enabled AND s.kind IN ('rss','article') AND a.status IN ('failed','cancelled','proposed','succeeded')",&[&id]).await?;
-    if changed==0{return Err(Error::conflict());}
-    audit(&tx,&user,&AuditContext::from_request(&req),"intel.article.retry",&id.to_string(),json!({})).await?;tx.commit().await?;Ok(json!({"id":id}))
+    admin(&user)?;
+    if !storage::settings(&pool).await?.0.ai_enabled{return Err(Error::bad("intel_ai_disabled"));}
+    let mut c=pool.get().await?;let tx=c.transaction().await?;let requested=id.into_inner();
+    let row=tx.query_opt("SELECT * FROM intel_article WHERE id=$1 FOR UPDATE",&[&requested]).await?.ok_or_else(Error::missing)?;
+    let source_id:Uuid=row.get("source_id");let source=storage::source(&tx.query_one("SELECT * FROM intel_source WHERE id=$1 FOR SHARE",&[&source_id]).await?);
+    if !source.input.enabled{return Err(Error::bad("intel_source_disabled"));}
+    if !matches!(source.input.kind.as_str(),"rss"|"article"){return Err(Error::bad("intel_invalid_article_source"));}
+    let stale=row.get::<_,i64>("source_revision")!=source.revision;
+    let mut target=requested;let mut created=false;
+    if stale {
+        let url:String=row.get("url");validate_url(&url,&source.input.allowed_hosts)?;
+        let body:Option<String>=row.get("body");let body_hash:Option<String>=row.get("body_hash");
+        let metadata:Value=row.get("extraction_metadata");
+        if !source.input.publisher_id.is_empty() && metadata.pointer("/intake/publisher_id").and_then(Value::as_str).is_some_and(|id|id!=source.input.publisher_id){return Err(Error::bad("intel_article_publisher_mismatch"));}
+        target=Uuid::now_v7();
+        let intake=json!({"intake":metadata.get("intake"),"retry_of":requested,"snapshot_source_revision":row.get::<_,i64>("source_revision")});
+        created=tx.execute("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash,body,body_hash,extraction_metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING",&[&target,&source_id,&source.revision,&url,&row.get::<_,String>("title"),&row.get::<_,String>("feed_hash"),&body,&body_hash,&intake]).await?>0;
+        target=tx.query_one("SELECT id FROM intel_article WHERE source_id=$1 AND source_revision=$2 AND url=$3 AND feed_hash=$4 FOR UPDATE",&[&source_id,&source.revision,&url,&row.get::<_,String>("feed_hash")]).await?.get(0);
+    }
+    let row=tx.query_one("SELECT status FROM intel_article WHERE id=$1",&[&target]).await?;
+    let status:String=row.get(0);
+    let active=matches!(status.as_str(),"queued"|"running");
+    if !active {
+        tx.execute("UPDATE intel_article SET status='queued',attempts=0,error_code=NULL,available_at=NOW(),claim_token=NULL,lease_until=NULL,extraction_metadata=extraction_metadata-'last_error'-'result'-'ai_usage' WHERE id=$1",&[&target]).await?;
+    }
+    if created || !active {audit(&tx,&user,&AuditContext::from_request(&req),"intel.article.retry",&target.to_string(),json!({"requested_id":requested,"new_source_revision":stale})).await?;}
+    tx.commit().await?;
+    Ok(json!({"id":target,"status":if active {status.as_str()}else{"queued"},"already_active":active&&!created,"new_source_revision":stale}))
 }.await)
 }
 #[derive(Deserialize)]
@@ -402,7 +470,7 @@ async fn entity_detail(
     id: web::Path<String>,
 ) -> HttpResponse {
     response(async {
-    if id.len()>16{return Err(Error::bad("intel_invalid_query"));}let c=pool.get().await?;
+    if id.len()>100{return Err(Error::bad("intel_invalid_query"));}let c=pool.get().await?;
     let row=c.query_opt("SELECT stix_id,object,dataset_version FROM intel_entity WHERE attack_id=$1",&[&id.as_str()]).await?.ok_or_else(Error::missing)?;
     let stix:String=row.get(0);
     let rows=c.query("SELECT r.relation,r.source_ref,e.attack_id,e.name,e.kind,r.object FROM intel_relationship r JOIN intel_entity e ON e.stix_id=CASE WHEN r.source_ref=$1 THEN r.target_ref ELSE r.source_ref END WHERE r.active AND e.active AND (r.source_ref=$1 OR r.target_ref=$1) ORDER BY e.kind,e.attack_id LIMIT 200",&[&stix]).await?;
@@ -422,7 +490,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/settings", web::get().to(get_settings))
             .route("/settings", web::put().to(put_settings))
             .route("/records", web::get().to(records))
+            .route("/review-queue", web::get().to(review_queue))
             .route("/records/{id}/review", web::post().to(review))
+            .route(
+                "/records/{id}/attribution",
+                web::get().to(attribution_candidates),
+            )
             .route("/entities", web::get().to(entities))
             .route("/entities/{id}", web::get().to(entity_detail))
             .route("/lookup", web::get().to(lookup))
@@ -430,6 +503,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/articles", web::get().to(articles))
             .route("/articles", web::post().to(submit_article))
             .route("/articles/{id}", web::get().to(article_detail))
+            .service(
+                web::resource("/articles/{id}/review")
+                    .app_data(web::JsonConfig::default().limit(2 * 1024 * 1024))
+                    .route(web::get().to(report_review))
+                    .route(web::post().to(submit_report_review)),
+            )
             .route("/articles/{id}/retry", web::post().to(retry_article))
             .route("/mappings", web::get().to(mappings))
             .route("/mappings", web::post().to(save_mapping))

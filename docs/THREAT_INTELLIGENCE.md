@@ -451,7 +451,7 @@ HTTPS 地址。正文可留空由后台抓取，或粘贴 40～100,000 UTF-8 字
 容器与 `<article>`，再读取明确标为 Article/NewsArticle/BlogPosting 等类型的 JSON-LD
 `articleBody`；随后尝试 `<main>` 与主体角色，最后按段落数量、正文占比和链接占比选择
 无标准标记的内容块。排除导航、页头页尾、侧栏、推荐文章、脚本和隐藏文本；内联标签
-不拆散 IOC，保留表格内容。WeLiveSecurity 的 `.article-body` 仅为优先适配，失败后同样
+不拆散 IOC；段落、标题和列表项保留换行，同一表格行的单元格使用 ` | ` 分隔。WeLiveSecurity 的 `.article-body` 仅为优先适配，失败后同样
 走通用流程；RSS 来源和 AI 分析不限定厂商。RSS 发现的微信链接仍执行账号核对。
 
 RSS 2.0 与 Atom 使用同一发现队列，Atom 链接支持自闭合/成对标签和 XML 实体解码。
@@ -475,22 +475,40 @@ ai_review_required=true。管理员权限、现有 CSRF 与审计规则保持执
 
 ### 提取与审核
 
-管理页面填写兼容 Chat Completions 的完整 HTTPS 接口地址、模型名称，并保存数据库凭据
-或填写凭据环境变量，
-然后开启 AI。当前使用 `messages` 请求及 `choices[0].message.content` 响应，仅适配 Chat
-Completions；不支持使用 `input` / `output` 的 Responses API。接口需要支持 JSON 对象输出。
-响应格式不匹配时错误详情记录预期字段及是否发现 Responses 的 `output` 字段，不保存响应正文。
+管理页选择 `ai_protocol=chat`（Chat Completions，默认）或 `responses`，填写匹配协议的完整
+HTTPS 接口地址、模型和凭据，再开启 AI。也接受以 `/v1` 结尾的 SDK 基础地址，按所选
+协议追加一次 `/chat/completions` 或 `/responses`；完整地址不会重复追加，明确与协议
+冲突的地址拒绝保存。其他自定义路径保留原样，不猜测服务商前缀。
+例如 Command Code 使用 `https://api.commandcode.ai/provider/v1`，其完整 Chat 地址为
+`https://api.commandcode.ai/provider/v1/chat/completions`，不能省略 `/provider`。通过 `async-openai 0.42` 的 BYOT 调用保留兼容
+提供方的响应扩展字段。自定义传输复用现有受限 HTTP 客户端，继续限制 DNS/public egress、
+HTTPS、代理、重定向和读取大小；不会启用 SDK 自动重试，以免隐式重复付费。
+Chat 读取 `choices[0].message.content`；Responses 只接收 `status=completed` 的 assistant
+`output_text`，拒绝不完整结果、拒答及未请求的工具调用。接口必须支持 JSON 对象输出。
+系统提示词明确要求输出有效 JSON，并包含 `JSON` 字样，满足 DeepSeek 等提供方的 JSON 模式校验，
+不依赖文章正文偶然包含该关键字。
+两种协议当前均显式使用非流式；流式不减少输入 token，也不解除输出预算，后续接入需要
+独立的 SSE 完整性处理。SDK 支持某协议不代表所选服务商一定支持。
 首版提取只有一个独立 worker，单次正文
-最多 100,000 字节、输出最多 200 条 IOC，模型回复预算 8,000 tokens；文章和模型回复
-HTTP 读取上限各为 2 MiB，RSS/Atom 解析上限 4 MiB。管理页的“AI 请求超时（秒）”
+最多 100,000 字节、输出最多 2,000 条 IOC，模型回复预算默认 65,536 tokens；文章
+HTTP 读取上限为 2 MiB，AI 响应读取上限为 16 MiB，RSS/Atom 解析上限 4 MiB。管理页的“AI 请求超时（秒）”
 默认 180 秒，可设为 1～1800 的整数，对应设置 API 的 `ai_timeout_seconds`；旧配置缺省时
 自动使用 180 秒。该时限覆盖 AI 请求到响应体读取完成；连接阶段仍限制为 10 秒。
 文章总处理时限为 AI 请求超时加 120 秒，任务租约再多 30 秒，避免长请求提前失去租约。
 普通原文请求为 30 秒，ThreatFox 增量下载为 120 秒。来源同步 worker 独立运行，不等待 AI 成功。
 
+`ai_max_output_tokens` 可设为 512～393216（384K），缺省为 65536；已显式保存的预算保持原值。
+Chat 发送 `max_tokens`，Responses 发送 `max_output_tokens`。DeepSeek `deepseek-flash`
+支持最高 393216 tokens；其他提供方按实际模型能力设置，不自动请求所有模型的最大预算。
+`ai_reasoning_effort` 默认 `none`，可选 `none/low/medium/high/max/default`。
+`default` 表示不发送推理参数；其他值分别使用 Chat 的 `reasoning_effort` 或 Responses 的
+`reasoning.effort`。提供方不支持某参数时，应在管理页选择“接口默认”，不会静默降级或重发。
+推理模型可能将推理和最终 JSON 共用输出预算，短文章也可能在开始回答前耗尽预算。
+
 RSS/Atom 只发现白名单域名文章；去除脚本、导航及隐藏文本后保存文章快照。重试使用
-已保存快照，避免审批引用变化的正文。候选组织来自有效 MITRE 基准库，模型不能创建
-新组织。提议必须附带在正文中可定位、包含该 IOC 的原文证据。
+已保存快照，避免审批引用变化的正文。请求不再附带全量 MITRE 组织、名称和关联名称；
+模型只报告原文明确的组织名称，服务端查询匹配候选，交由管理员核对。提议必须附带
+在正文中可定位、包含该 IOC 的原文证据。
 仅证据不符的条目会被单独剔除，其余有效条目生成待审提议；全部证据不符时仍标为失败。
 未知字段、非法指标、响应格式和数量超限等错误仍拒绝整批结果。
 
@@ -499,6 +517,67 @@ AI 返回空 IOC 数组属于正常完成，文章保存为 `succeeded`，显示
 `proposed` 记录也使用这两个计数，不再把空结果显示成已生成提议。审核完毕的文章显示
 无待审提议。`extraction_metadata.result` 保存本次有效解析数 `parsed`、实际新增数
 `inserted` 及证据拒绝摘要 `validation`；重复写入不会计入新增数。已完成文章仍可重新提取。
+
+### 分段原文证据与脱敏 IOC
+
+提示词版本 `ioc-evidence-v7` 将完整快照按非空行编号为正文块，传入
+`untrusted_report_blocks`；超过 2048 块时，最后一块保留全部剩余文字。正文块是原文
+结构提示，不是 IOC 候选集合。服务端不预先枚举或筛选候选 IOC；模型仍需阅读完整正文，
+识别 IP、域名、URL、哈希、ASN 等受支持指标及其角色，包括 `[.]`、`[:]`、`[://]`、
+`hxxp(s)` 等已有规范化支持的脱敏形式。组织候选由服务端从有效 MITRE 条目和已人工创建的本地组织查询，不加入模型输入。
+
+编号资产记录（如“（一）恶意IP地址：…”及其“关联域名：…”）按通用记录结构保留范围。
+`record_heading` 与 `record_field` 通过 `scope_block_id` 告知模型关联关系；该字段只描述结构，
+不生成 IOC 候选，也不判定恶意性。完整上下文与 IOC 引文来自同一原文语句时可重叠；
+跨记录、跨新章节或借用推荐公共 DNS 仍会拒绝。范围错误诊断仅记录块编号和固定类型，
+全部拒绝时保留脱敏的逐条校验摘要，避免把总拒绝数误当作同一种原因的数量。
+纯文本快照把表格列名“序号”“IP地址”等各拆成一行时，仍识别为中性表头并保留上层范围。
+叙述性上下文若独立包含同一个完整 IOC 及其关系，可位于前文或后文；仅包含另一个 ASN
+或没有指明当前 IP 的结论，不能用于扩大关联范围。
+
+模型使用 `evidence_parts` 分别引用 IOC 和支持其角色的上下文。例如：
+
+```json
+{"iocs":[{"type":"ip","value":"192.0.2.2","verdict":"malicious","role":"malicious_dns","evidence_parts":[{"block_id":1,"kind":"context","quote":"存活恶意DNS服务器"},{"block_id":3,"kind":"ioc","quote":"192[.]0[.]2[.]2"}]}]}
+```
+
+示例中的正文块分别是标题、第一条 IP、第二条 IP。每项最多 8 段引用，原文合计最多
+4000 UTF-8 字节；组装后的兼容 `evidence` 字段也受该上限约束。`quote` 必须逐字来自
+指定块，只允许空白差异；不得翻译、改写脱敏符号，或把不相邻的标题和 IP 拼成一段
+“原文”。服务端只在核对 IOC 值时规范化脱敏符号，并检查完整值边界；短 IP 不再因为
+不足 12 字节被拒绝。仅引用裸 IOC 仍不足以支持角色，需要上下文或完整叙述语句。
+
+共享标题只可引用到其后同一连续列表/表格范围；遇到新标题或正文段落停止继承。
+结构识别采用保守的文本规则，复杂表格或长标题可能需要在 IOC 所在引用中保留完整
+角色叙述。旧快照若已压平为单行，可分别引用标题和 IOC，但两者之间只能是连续紧凑
+数据行；不允许跨越解释性文字或其他标题。此兼容处理不会重写旧快照和哈希。
+模型须区分恶意基础设施、受害目标及推荐的正常 DNS，不能将标题作用域扩展到后续章节；
+机器校验确认引用和结构范围，最终角色及归因仍由管理员核对。
+
+验证通过后服务端生成 `payload.evidence_spans`，保存块编号、种类、原文和快照中的
+UTF-8 字节区间 `[start,end)`；模型不能提供这些区间。`payload.evidence` 使用明确的
+分段分隔符供旧界面读取，不宣称多段引用连续出现。提取元数据保存
+`evidence_version=block-spans-v1`、`body_hash` 和提示词版本。分段引用本身无需数据库结构变更；本轮人工组织归因新增
+`intel_review.attribution` JSONB 列，由启动迁移幂等添加。
+旧式连续 `evidence` 输出仍支持；已保存的提议、审核及快照不会自动改写，需在文章页
+选择“重新提取”才能使用新提示词。新旧提议均需人工审核。
+
+审核页分别展示“上下文原文”和“IOC 原文”，可定位到快照中对应片段；定位前核对
+UTF-8 区间与原文完全一致，正文始终作为文本展示。来源命中证据也保留分段展示。
+手动提交自 CNCERT 等官方文章的快照仍显示“管理员提供”，表示网络账号尚未核验，
+与原文证据是否匹配是不同维度；不会为特定发布方跳过校验或审核。
+
+部分条目证据失败时，文章页可展开原因摘要及条目序号；
+`extraction_metadata.result.validation.rejection_samples` 最多保留 100 个无原文样本。
+固定原因包括 `evidence_not_in_body`（引用不在原文）、`evidence_block_not_found`
+（块不存在）、`ioc_not_in_evidence`（未引用完整 IOC）、`evidence_context_missing`
+（裸 IOC 缺少上下文）和 `evidence_context_scope_mismatch`（超出共享范围）。
+摘要不保存被剔除的 IOC 值、引用或模型响应。
+
+回归验证覆盖共享标题下的 51 条脱敏 IP、短 IP、大小写与完整值边界、普通 DNS 与
+跨章节引用隔离、旧压平快照、伪造块/区间拒绝，以及数据库中待审到接纳的区间和快照
+一致性。该 51 条用例验证已给定模型结果的校验能力，不代表每次模型调用必然完整提取；
+配置的输出预算仍可能截断长列表，此时按 `intel_ai_output_truncated` 拒绝结果。
 
 ### 文章失败诊断与日志
 
@@ -510,6 +589,11 @@ AI 返回空 IOC 数组属于正常完成，文章保存为 `succeeded`，显示
 `no_valid_article_candidate` 或 `challenge_page` 原因。
 AI 证据失败记录条目序号 `record`、拒绝数 `rejected` 和固定原因分类；不记录模型返回文本。
 HTTP 诊断记录 `timeout_seconds`，文章失败还记录 `processing_timeout_seconds`。
+JSON POST 收到非成功 HTTP 状态时，在原请求时限内额外最多等待 2 秒、采样至多 32 KiB
+错误正文，仅保留固定白名单的错误 code/type、分类和可解析为 UUID 的跟踪 ID；消息原文、
+未知 code/type、密钥和 URL 不进入诊断。采样失败不覆盖原 HTTP 状态。未读取到成功响应
+时不虚构 `response_bytes=0`，而记录错误响应采样大小及完整性。404 需要结合分类判断，
+不能仅凭状态断定接口路径或模型一定有误。
 
 AI 回复无法解析为 JSON 时，`intel_ai_invalid_json` 会附带 `json_error_category`、
 `json_line`、`json_column`、`content_bytes` 和 `content_format`。固定分类区分代码围栏、
@@ -531,6 +615,8 @@ AI 回复无法解析为 JSON 时，`intel_ai_invalid_json` 会附带 `json_erro
 `indicator_store`（保存提议）。AI 请求使用独立的 `intel_ai_*` 错误代码；已保存正文的手动文章
 和重试文章直接复用快照，AI 连接失败不再显示为文章来源连接失败。HTTP 401/403 应检查凭据，
 404 应检查完整接口地址，429 表示限流，5xx 应检查提供方服务；实际状态码在详情中查看。
+提供方要求 JSON 模式提示词包含 `json` 时，诊断分类为 `json_mode_prompt_missing`，
+页面显示“JSON 模式要求提示词明确包含 JSON 字样”；原始错误消息仍不保存或返回。
 
 最近一次诊断保存在 `intel_article.extraction_metadata.last_error`，通过现有管理员文章接口返回。
 来源同步的失败诊断保存在作业 `summary.last_error`。更新结果仍校验任务租约和 claim token，
@@ -551,28 +637,60 @@ AI 回复无法解析为 JSON 时，`intel_ai_invalid_json` 会附带 `json_erro
 关闭标志，不记录 SQL 参数或原始数据库异常文本。
 
 文章绑定发现时的来源 revision。来源编辑、停用或更改格式后，旧版本排队/运行中的
-文章取消，不允许通过重试接口改挂到新版本。重新同步会按新 revision 建立独立文章与
-快照；相同来源版本的重复发现仍幂等。迁移会调整文章唯一约束，不覆盖旧快照与审核记录。
+文章取消。重试旧文章时核对当前来源启用状态、文章 URL 白名单与已有微信账号信息，
+按当前 revision 创建独立文章任务，复用原保存快照，记录 `retry_of` 与原快照来源版本；
+旧文章、快照和审核记录保持不变。同一当前版本任务按原唯一约束去重。
+重复点击已排队/运行任务返回其实际状态，不报通用版本冲突。重新入队立即清除旧结果与
+错误摘要；Web 显示等待/处理中及入队提示，请求失败后也刷新实际状态。
 保存快照和写入提议时均再次检查任务租约、来源 ID 与 revision。
 每条 AI 提议的入库事务还会锁定并核对本次请求使用的 AI 设置 revision；模型、接口或
 凭据配置发生变化后，旧响应停止继续写入，文章可按新配置重试。已提交提议保留原提取
 元数据，仍须人工审核。
 
-在“审核”页逐条检查 IOC、原文证据、组织、软件、攻击技术和受害目标信息。每条记录
-可单独接纳或拒绝；同一提议的所有所列事实随该条决定处理。说明字段必填，审核请求
-绑定 content_hash。并发重复审核只会有一次成功，陈旧版本返回 409。
+“审核”页按报告聚合 AI 待审提议，分页和总数按报告计算，结构化提议仍可单独审核。
+打开报告后一次加载该报告的全部 IOC，不受 IOC 库每页 50 条的限制；逐条选择接纳、拒绝或
+暂不处理，填写共同审核说明后一次提交。每条决定绑定其 `content_hash`，并绑定文章正文哈希；
+成员归属、权限和状态由后端检查，任一冲突返回 409 且整批回滚。数据库仍保留逐 IOC 的
+不可变证据和审核记录，确保每条发布事实都有对应的人工接纳。
+
+点击 IOC 值直接定位并高亮原文；没有独立的定位按钮。前端自动检查所有选定送审 IOC，
+兼容 `[.]`、`[:]`、`[://]`、`hxxp(s)` 等脱敏形式并检查完整指标边界。全部出现时不显示提示；
+仅对未在正文中找到的值显示警告。该提示不替代服务端证据校验或人工判断。
+
+重新提取在同一事务中保存整份报告。去重按同一来源、报告地址、完整正文及规范化 IOC 事实判断，
+不因模型、提示词、token 用量、引用选段或无序列表顺序改变而重复送审。未改变的提议及其
+接纳、拒绝或撤销决定会复用；角色、归因等事实或正文变化仍生成新版本待审。
+`intel_article_record` 关联提取尝试与复用记录，兼容已有记录回填；不改写原始证据或旧审核。
+已不再出现在本次完整提取结果中的待审项转为 superseded，已接纳证据不会被自动撤销。
 
 Web 接纳 AI 提议前要求成功加载非空文章快照。加载失败或正文缺失时显示错误与重试入口，
 不能提交接纳，也不会显示为结构化来源；加载尚未结束、失败或正文缺失均不阻止拒绝
 或撤销证据。说明和记录版本校验仍须满足，重试保留审核说明。
 
 在 IOC 库可撤销一条已接纳证据。其他来源对同一 IOC 的有效证据不受影响。
-名称映射区分组织与软件，只能指向相应类型的有效 MITRE G/S 编号；补别名不会创建
-实体。删除映射立即取消依赖它的标准名称展示，原始来源名称与审核证据仍保留。MITRE 的 Associated Groups
-仅用于候选检索，不自动视为等价别名。
+名称映射区分组织与软件。软件映射仍指向有效 MITRE S 编号；组织映射可指向有效
+MITRE G 编号或人工创建的本地组织。MITRE 的 Associated Groups 仅作候选提示，
+不自动当作等价别名。审核页提供保留当前匹配、不关联、选择/更换当前记录组织、
+补充本来源别名、新建本地组织等操作；缺少报告组织原名时不能凭空关联或新建。
+本地组织使用 `LOCAL-G-<UUID>` 编号、`dataset_version=local-reviewed`，不会伪造 MITRE
+编号。新建组织只关联当前记录，不自动建立跨来源别名。
+
+组织决定与 IOC 接纳在同一事务保存到 `intel_review.attribution`，并受原 `content_hash`
+与管理员审核约束；拒绝、过期请求、无效目标或事务失败均不创建组织或补别名。原提议
+payload、原组织名与原 actor_id 保持不可变；发布查询与命中信息使用人工确认的组织。
+新审核的明确选择（包括不关联）固定在该条记录，不随后续别名变更自动改挂。
+旧审核记录保留原有匹配行为。名称映射页仍可管理来源对应关系。
 
 AI 配置修改和审核均写入现有审计系统。提议保存文章版本、来源版本、内容哈希、模型、
-提示词版本和候选集合哈希。模型输出、文章快照均以文本展示，不作为 HTML 执行。
+提示词版本。新请求移除候选集合哈希，记录组织候选输入数量为 0。模型输出、文章快照
+均以文本展示，不作为 HTML 执行。
+
+文章页的“AI 请求与用量”展示请求、系统提示词和正文块的字节数、块数、协议、预算、
+推理设置、地址格式分类（不记录路径），以及提供方返回的输入/输出/推理/缓存 token 数。字节数不是 token 估算值，
+缺失的用量字段不猜测。成功或空结果保存在 `extraction_metadata.ai_usage`，失败时并入
+最近诊断；不保存原始推理内容、请求正文或响应内容。零结果也可通过“查看快照”核对
+正文是否完整；不会因文章标题含 IP/ASN 就自动编造提议。尚无完整率证据前不预先对短文
+分块，以免重复上下文成本或割断证据范围。
 
 ## 自动标记与范围
 
@@ -619,14 +737,18 @@ IP/端点自身的 risk 和 matches，不创建派生 IP IOC。Web 显示“所�
 | `POST /api/intel/sources/{id}/import/check?expected_revision=N` | 管理员上传前检查；无文件体，不排队、不预留来源，返回 `data.ready=true` 后再传文件 |
 | `GET/PUT /api/intel/settings` | AI 设置、配置 revision、固定 ai_review_required=true |
 | `GET /api/intel/records` | status、q、source_id、offset、type、attack_type；每页 50 条 |
-| `POST /api/intel/records/{id}/review` | content_hash、decision、reason；decision 为 approved/rejected/revoked |
+| `POST /api/intel/records/{id}/review` | content_hash、decision、reason；可选 attribution，决定与接纳一并保存 |
+| `GET /api/intel/records/{id}/attribution` | 管理员查询报告组织名的服务端候选及匹配依据 |
 | `GET /api/intel/entities` | kind=actor/software/technique、q；最多 100 条 |
 | `GET /api/intel/entities/{attack_id}` | MITRE 对象与关系；软件使用关系不代表当前 IOC 归因 |
 | `GET /api/intel/lookup?type=domain&value=example.com` | 精确 IOC 查询 |
 | `GET /api/intel/jobs` | 最近 100 次作业 |
 | `GET/POST /api/intel/articles` | 最近 100 篇文章 / 管理员提交链接或正文快照 |
 | `GET /api/intel/articles/{id}` | 审核所需文章快照 |
-| `POST /api/intel/articles/{id}/retry` | AI 开启时重试失败或重新提取已完成文章，复用保存快照 |
+| `GET /api/intel/review-queue` | 按报告聚合的待审队列与报告数 |
+| `GET /api/intel/articles/{id}/review` | 报告完整快照及全部关联 IOC |
+| `POST /api/intel/articles/{id}/review` | 原子提交选定 IOC 的审核决定，JSON 上限 2 MiB |
+| `POST /api/intel/articles/{id}/retry` | AI 开启时幂等入队；旧来源版本创建独立任务，保留原保存快照 |
 | `GET/POST /api/intel/mappings` | 未映射名称、已确认映射；写入 source_id/name/attack_id/kind（actor 或 software） |
 | `DELETE /api/intel/mappings/{id}?attack_id=Gxxxx` | 按预期目标撤销映射，陈旧目标返回冲突 |
 
@@ -727,3 +849,13 @@ AI 配置并发回归验证同一响应在配置更新后停止写入，以及�
 完整 ZIP 在专用测试库验证：114,659 条有效记录写入、4 条异常隔离，5,000 条/批，先提交
 两批暂停后恢复完成；本地调试构建处理合计约 57 秒，不含人为暂停时间。这是本地验证
 结果，生产耗时取决于数据库、磁盘及记录大小。
+
+### SDK 与人工组织审核回归
+
+SDK 测试覆盖 Chat/Responses 请求分派、单次调用不隐式重发、推理参数省略/关闭、
+预算边界，以及 `10589` 输入、`8000` 输出且正文为空时保留分类用量、不保存推理原文。
+数据库回归验证来源别名、逐条更换、不关联、本地组织创建、陈旧 content_hash 拒绝、
+原始 payload 不变和发布使用人工决定；迁移在同一测试库重复运行验证幂等性。
+前端覆盖预算/协议/推理设置、重试即时状态与失败刷新、拒绝时不提交归因操作，
+并通过桌面及移动端浏览器检查审核与快照入口。以上使用受控模拟响应和临时数据库，
+不等同于已对外部模型执行真实付费提取。

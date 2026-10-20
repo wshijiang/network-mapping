@@ -316,17 +316,112 @@ pub(super) enum Origin {
         settings_revision: i64,
     },
 }
+#[cfg(test)]
 pub(super) async fn ingest(
     pool: &Pool,
+    s: &Source,
+    i: Indicator,
+    origin: Origin,
+    namespace: &str,
+) -> Result<bool> {
+    let mut c = pool.get().await?;
+    let tx = c.transaction().await?;
+    let inserted = ingest_in(&tx, s, i, origin, namespace).await?;
+    tx.commit().await?;
+    Ok(inserted)
+}
+
+// Quotes and execution statistics can vary without changing the reported facts.
+// The report body is compared separately; evidence snapshots remain immutable.
+pub(super) fn ai_facts(payload: &Value) -> Value {
+    let mut facts = payload.clone();
+    if let Some(fields) = facts.as_object_mut() {
+        for key in ["extraction", "evidence", "evidence_spans"] {
+            fields.remove(key);
+        }
+        for key in [
+            "techniques",
+            "attack_types",
+            "victim_industries",
+            "victim_countries",
+        ] {
+            if let Some(values) = fields.get_mut(key).and_then(Value::as_array_mut) {
+                values.sort_by_key(Value::to_string);
+                values.dedup();
+            }
+        }
+    }
+    facts
+}
+
+async fn link_article<C: GenericClient + Sync>(
+    c: &C,
+    s: &Source,
+    article: Uuid,
+    record: Uuid,
+) -> Result<()> {
+    let token = match s.fence {
+        Some(Fence::Article(_, token)) => Some(token),
+        _ => None,
+    };
+    c.execute("INSERT INTO intel_article_record(article_id,record_id,extraction_token) VALUES($1,$2,$3) ON CONFLICT(article_id,record_id) DO UPDATE SET extraction_token=EXCLUDED.extraction_token", &[&article,&record,&token]).await?;
+    Ok(())
+}
+
+pub(super) async fn ingest_ai_report(
+    pool: &Pool,
+    source: &Source,
+    mut entries: Vec<Indicator>,
+    article: Uuid,
+    settings_revision: i64,
+    url: &str,
+) -> Result<usize> {
+    let mut c = pool.get().await?;
+    let tx = c.transaction().await?;
+    let snapshot = tx
+        .query_one(
+            "SELECT url,body FROM intel_article WHERE id=$1 AND source_id=$2 FOR UPDATE",
+            &[&article, &source.id],
+        )
+        .await?;
+    validate_source(&tx, source).await?;
+    // All report insertions and review submissions acquire record locks in order.
+    entries.sort_by_key(|item| format!("{}:{}", item.kind, item.value));
+    let mut inserted = 0;
+    for mut item in entries {
+        item.reference = Some(url.into());
+        inserted += usize::from(
+            ingest_in(
+                &tx,
+                source,
+                item,
+                Origin::Ai {
+                    article_id: article,
+                    settings_revision,
+                },
+                &format!("{url}#"),
+            )
+            .await?,
+        );
+    }
+    if let Some(Fence::Article(_, token)) = source.fence {
+        // A completed extraction replaces obsolete pending proposals, while
+        // previously reviewed evidence and its publication remain unchanged.
+        tx.execute("UPDATE intel_record r SET status='superseded',updated_at=NOW() WHERE r.source_id=$1 AND r.origin='ai' AND r.status='pending' AND EXISTS(SELECT 1 FROM intel_article_record l JOIN intel_article a ON a.id=l.article_id WHERE l.record_id=r.id AND a.source_id=$1 AND a.url=$3 AND a.body IS NOT DISTINCT FROM $4) AND NOT EXISTS(SELECT 1 FROM intel_article_record l WHERE l.record_id=r.id AND l.article_id=$2 AND l.extraction_token=$5)", &[&source.id,&article,&snapshot.get::<_,String>("url"),&snapshot.get::<_,Option<String>>("body"),&token]).await?;
+    }
+    tx.commit().await?;
+    Ok(inserted)
+}
+
+async fn ingest_in<C: GenericClient + Sync>(
+    tx: &C,
     s: &Source,
     mut i: Indicator,
     origin: Origin,
     namespace: &str,
 ) -> Result<bool> {
     i.normalize()?;
-    let mut c = pool.get().await?;
-    let tx = c.transaction().await?;
-    let require_review = validate_source(&tx, s).await?;
+    let require_review = validate_source(tx, s).await?;
     let (origin_str, article) = match origin {
         Origin::Structured => ("structured", None),
         Origin::Ai { article_id, .. } => ("ai", Some(article_id)),
@@ -348,7 +443,11 @@ pub(super) async fn ingest(
         }
     }
     let explicit = origin == Origin::Structured && i.reference.is_some() && !i.evidence.is_empty();
-    i.actor_id = resolve_actor(&tx, s.id, &i.actor_name, i.actor_id.as_deref(), explicit).await?;
+    i.actor_id = if matches!(origin, Origin::Ai { .. }) {
+        None
+    } else {
+        resolve_actor(tx, s.id, &i.actor_name, i.actor_id.as_deref(), explicit).await?
+    };
     if i.reference.is_none() || i.evidence.is_empty() {
         i.actor_id = None;
     }
@@ -385,20 +484,44 @@ pub(super) async fn ingest(
         &[&format!("{}:{key}", s.id)],
     )
     .await?;
+    if let Some(article) = article {
+        let rows = tx.query("SELECT r.id,r.payload,r.status FROM intel_record r JOIN intel_article old ON old.id=r.article_id JOIN intel_article current ON current.id=$3 WHERE r.source_id=$1 AND r.external_key=$2 AND r.origin='ai' AND r.status<>'superseded' AND old.body IS NOT DISTINCT FROM current.body ORDER BY (r.status<>'pending') DESC,r.created_at DESC,r.id DESC", &[&s.id,&key,&article]).await?;
+        let facts = ai_facts(&payload);
+        let matches = rows
+            .iter()
+            .filter(|row| ai_facts(&row.get::<_, Value>("payload")) == facts)
+            .collect::<Vec<_>>();
+        if let Some(existing) = matches.first() {
+            let existing: Uuid = existing.get("id");
+            for duplicate in matches.iter().skip(1) {
+                if duplicate.get::<_, String>("status") == "pending" {
+                    tx.execute("UPDATE intel_record SET status='superseded',updated_at=NOW() WHERE id=$1 AND status='pending'", &[&duplicate.get::<_,Uuid>("id")]).await?;
+                }
+            }
+            link_article(tx, s, article, existing).await?;
+            return Ok(false);
+        }
+    }
     let ioc = if accepted {
-        Some(ensure_ioc(&tx, &i.kind, &i.value).await?)
+        Some(ensure_ioc(tx, &i.kind, &i.value).await?)
     } else {
         None
     };
     let inserted=tx.execute("INSERT INTO intel_record(id,source_id,source_revision,external_key,content_hash,origin,status,kind,value,payload,article_id,actor_id,ioc_id,valid_until,observed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,LEAST(NOW(),COALESCE(intel_observed_time($10::JSONB->>'last_seen'),intel_observed_time($10::JSONB->>'first_seen'),NOW()))) ON CONFLICT(source_id,external_key,content_hash,origin) DO NOTHING",&[&id,&s.id,&s.revision,&key,&hash,&origin_str,&if accepted{"approved"}else{"pending"},&i.kind,&i.value,&payload,&article,&i.actor_id,&ioc,&i.valid_until]).await?;
+    if let Some(article) = article {
+        let actual = tx.query_one("SELECT id FROM intel_record WHERE source_id=$1 AND external_key=$2 AND content_hash=$3 AND origin='ai'", &[&s.id,&key,&hash]).await?.get(0);
+        link_article(tx, s, article, actual).await?;
+        if inserted > 0 {
+            tx.execute("UPDATE intel_record SET status='superseded',updated_at=NOW() WHERE source_id=$1 AND external_key=$2 AND origin='ai' AND status='pending' AND id<>$3", &[&s.id,&key,&actual]).await?;
+        }
+    }
     if inserted > 0 && accepted {
-        supersede(&tx, s.id, &key, origin_str, id).await?;
+        supersede(tx, s.id, &key, origin_str, id).await?;
     }
     if inserted == 0 && accepted
         && let Some(existing)=tx.query_opt("UPDATE intel_record SET status='approved',ioc_id=$5,updated_at=NOW() WHERE source_id=$1 AND external_key=$2 AND content_hash=$3 AND origin=$4 AND status IN ('pending','superseded') RETURNING id",&[&s.id,&key,&hash,&origin_str,&ioc]).await? {
-            supersede(&tx,s.id,&key,origin_str,existing.get(0)).await?;
+            supersede(tx,s.id,&key,origin_str,existing.get(0)).await?;
     }
-    tx.commit().await?;
     Ok(inserted > 0)
 }
 async fn supersede<C: GenericClient + Sync>(
@@ -417,11 +540,28 @@ pub(super) struct ReviewInput {
     pub content_hash: String,
     pub decision: String,
     pub reason: String,
+    #[serde(default)]
+    pub attribution: Option<attribution::ActorDecision>,
 }
 pub(super) async fn review(
     pool: &Pool,
     id: Uuid,
     input: ReviewInput,
+    user: &UserBaseI,
+    context: &AuditContext,
+) -> Result<Value> {
+    admin(user)?;
+    let mut c = pool.get().await?;
+    let tx = c.transaction().await?;
+    let result = review_in(&tx, id, &input, user, context).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(super) async fn review_in(
+    tx: &deadpool_postgres::Transaction<'_>,
+    id: Uuid,
+    input: &ReviewInput,
     user: &UserBaseI,
     context: &AuditContext,
 ) -> Result<Value> {
@@ -432,8 +572,6 @@ pub(super) async fn review(
     {
         return Err(Error::bad("intel_invalid_review"));
     }
-    let mut c = pool.get().await?;
-    let tx = c.transaction().await?;
     let identity = tx
         .query_opt(
             "SELECT source_id,external_key FROM intel_record WHERE id=$1",
@@ -464,13 +602,21 @@ pub(super) async fn review(
     let source: Uuid = row.get("source_id");
     let key: String = row.get("external_key");
     let origin: String = row.get("origin");
+    if input.decision != "approved" && input.attribution.is_some() {
+        return Err(Error::bad("intel_invalid_attribution"));
+    }
+    let attribution = if input.decision == "approved" {
+        attribution::decide(tx, &row, input.attribution.as_ref(), user).await?
+    } else {
+        json!({})
+    };
     let review = Uuid::now_v7();
-    tx.execute("INSERT INTO intel_review(id,record_id,content_hash,decision,reviewed_by,reason) VALUES($1,$2,$3,$4,$5,$6)",&[&review,&id,&hash,&input.decision,&user.id,&input.reason.trim()]).await?;
+    tx.execute("INSERT INTO intel_review(id,record_id,content_hash,decision,reviewed_by,reason,attribution) VALUES($1,$2,$3,$4,$5,$6,$7)",&[&review,&id,&hash,&input.decision,&user.id,&input.reason.trim(),&attribution]).await?;
     let mut ioc: Option<Uuid> = row.get("ioc_id");
     if input.decision == "approved" {
         ioc = Some(
             ensure_ioc(
-                &tx,
+                tx,
                 &row.get::<_, String>("kind"),
                 &row.get::<_, String>("value"),
             )
@@ -483,27 +629,35 @@ pub(super) async fn review(
     )
     .await?;
     if input.decision == "approved" {
-        supersede(&tx, source, &key, &origin, id).await?;
+        supersede(tx, source, &key, &origin, id).await?;
     }
     audit(
-        &tx,
+        tx,
         user,
         context,
         "intel.record.review",
         &id.to_string(),
-        json!({"decision":input.decision,"content_hash":hash,"review_id":review}),
+        json!({"decision":input.decision,"content_hash":hash,"review_id":review,"attribution":attribution}),
     )
     .await?;
-    tx.commit().await?;
     Ok(json!({"id":id,"status":input.decision}))
 }
 pub(super) fn record_json(r: &tokio_postgres::Row) -> Value {
     let expired = r.try_get::<_, bool>("expired").unwrap_or(false);
     let status: String = r.get("status");
+    let attribution = r
+        .try_get::<_, Value>("reviewed_attribution")
+        .unwrap_or_else(|_| json!({}));
+    let original_actor: Option<String> = r.get("actor_id");
+    let effective_actor = if attribution.get("actor_id").is_some() {
+        attribution["actor_id"].as_str().map(str::to_owned)
+    } else {
+        original_actor.clone()
+    };
     let until = r
         .try_get::<_, Option<chrono::DateTime<chrono::Utc>>>("effective_valid_until")
         .unwrap_or_else(|_| r.get("valid_until"));
-    json!({"id":r.get::<_,Uuid>("id"),"source_id":r.get::<_,Uuid>("source_id"),"source_name":r.get::<_,String>("source_name"),"source_revision":r.get::<_,i64>("source_revision"),"origin":r.get::<_,String>("origin"),"status":if status=="approved"&&expired{"expired".to_owned()}else{status},"expired":expired,"type":r.get::<_,String>("kind"),"value":r.get::<_,String>("value"),"content_hash":r.get::<_,String>("content_hash"),"payload":r.get::<_,Value>("payload"),"actor_id":r.get::<_,Option<String>>("actor_id"),"article_id":r.get::<_,Option<Uuid>>("article_id"),"review_id":r.get::<_,Option<Uuid>>("review_id"),"valid_until":until,"created_at":r.get::<_,chrono::DateTime<chrono::Utc>>("created_at")})
+    json!({"id":r.get::<_,Uuid>("id"),"source_id":r.get::<_,Uuid>("source_id"),"source_name":r.get::<_,String>("source_name"),"source_revision":r.get::<_,i64>("source_revision"),"origin":r.get::<_,String>("origin"),"status":if status=="approved"&&expired{"expired".to_owned()}else{status},"expired":expired,"type":r.get::<_,String>("kind"),"value":r.get::<_,String>("value"),"content_hash":r.get::<_,String>("content_hash"),"payload":r.get::<_,Value>("payload"),"actor_id":effective_actor,"original_actor_id":original_actor,"reviewed_attribution":attribution,"article_id":r.get::<_,Option<Uuid>>("article_id"),"review_id":r.get::<_,Option<Uuid>>("review_id"),"valid_until":until,"created_at":r.get::<_,chrono::DateTime<chrono::Utc>>("created_at")})
 }
 #[derive(Deserialize, Default)]
 pub(super) struct ListQuery {
@@ -541,7 +695,7 @@ pub(super) async fn records(pool: &Pool, user: &UserBaseI, q: &ListQuery) -> Res
         return Err(Error::bad("intel_invalid_query"));
     }
     let c = pool.get().await?;
-    let rows=c.query("SELECT r.*,COUNT(*) OVER() AS total FROM intel_record_state r WHERE ((r.status=$1 AND ($1<>'approved' OR NOT r.expired)) OR ($1='expired' AND r.status='approved' AND r.expired)) AND ($2::UUID IS NULL OR r.source_id=$2) AND ($3='' OR r.value ILIKE '%'||$3||'%' OR r.payload->>'actor_name' ILIKE '%'||$3||'%' OR r.payload->>'malware' ILIKE '%'||$3||'%') AND ($5='' OR r.kind=$5) AND ($6='' OR (r.payload->'attack_types') ? $6) ORDER BY r.created_at DESC,r.id DESC LIMIT 50 OFFSET $4",&[&status,&q.source_id,&query,&offset,&kind,&attack]).await?;
+    let rows=c.query("SELECT r.*,COALESCE(rv.attribution,'{}'::JSONB) AS reviewed_attribution,COUNT(*) OVER() AS total FROM intel_record_state r LEFT JOIN intel_review rv ON rv.id=r.review_id AND rv.record_id=r.id WHERE ((r.status=$1 AND ($1<>'approved' OR NOT r.expired)) OR ($1='expired' AND r.status='approved' AND r.expired)) AND ($2::UUID IS NULL OR r.source_id=$2) AND ($3='' OR r.value ILIKE '%'||$3||'%' OR r.payload->>'actor_name' ILIKE '%'||$3||'%' OR r.payload->>'malware' ILIKE '%'||$3||'%') AND ($5='' OR r.kind=$5) AND ($6='' OR (r.payload->'attack_types') ? $6) ORDER BY r.created_at DESC,r.id DESC LIMIT 50 OFFSET $4",&[&status,&q.source_id,&query,&offset,&kind,&attack]).await?;
     Ok(
         json!({"items":rows.iter().map(record_json).collect::<Vec<_>>(),"total":rows.first().map(|r|r.get::<_,i64>("total")).unwrap_or(0),"offset":offset}),
     )
@@ -710,14 +864,15 @@ WITH matches AS (
  BOOL_OR(r.payload->>'verdict'='malicious') OVER(PARTITION BY r.kind,r.value,r.expired) AS malicious
  FROM intel_record_state r WHERE r.status='approved' AND r.kind||':'||r.value=ANY($1)
 )
-SELECT r.*,e.attack_id AS canonical_actor_id,e.name AS canonical_actor_name,
+SELECT r.*,COALESCE(rv.attribution,'{}'::JSONB) AS reviewed_attribution,e.attack_id AS canonical_actor_id,e.name AS canonical_actor_name,
  sw.attack_id AS canonical_software_id,sw.name AS canonical_software_name
 FROM matches r
-LEFT JOIN intel_entity e ON e.kind='actor' AND e.active AND e.attack_id=COALESCE(r.actor_id,
+LEFT JOIN intel_review rv ON rv.id=r.review_id AND rv.record_id=r.id
+LEFT JOIN intel_entity e ON e.kind='actor' AND e.active AND e.attack_id=CASE WHEN rv.attribution ? 'actor_id' THEN rv.attribution->>'actor_id' ELSE COALESCE(r.actor_id,
  (SELECT m.attack_id FROM intel_name_mapping m WHERE m.source_id=r.source_id AND m.kind='actor'
  AND m.name_normalized=LOWER(BTRIM(r.payload->>'actor_name')) LIMIT 1),
  (SELECT MIN(x.attack_id) FROM intel_entity x WHERE x.kind='actor' AND x.active
- AND LOWER(x.name)=LOWER(BTRIM(r.payload->>'actor_name')) HAVING COUNT(*)=1))
+ AND LOWER(x.name)=LOWER(BTRIM(r.payload->>'actor_name')) HAVING COUNT(*)=1)) END
  AND r.payload->>'evidence'<>'' AND r.payload->>'reference' IS NOT NULL
 LEFT JOIN intel_entity sw ON sw.kind='software' AND sw.active AND sw.attack_id=COALESCE(
  (SELECT m.attack_id FROM intel_name_mapping m WHERE m.source_id=r.source_id AND m.kind='software'

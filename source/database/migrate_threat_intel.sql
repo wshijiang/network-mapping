@@ -176,6 +176,16 @@ CREATE TABLE IF NOT EXISTS intel_record (
 );
 CREATE INDEX IF NOT EXISTS intel_record_published ON intel_record(kind,value) WHERE status='approved';
 CREATE INDEX IF NOT EXISTS intel_record_article ON intel_record(article_id) WHERE origin='ai';
+CREATE TABLE IF NOT EXISTS intel_article_record (
+    article_id UUID NOT NULL REFERENCES intel_article(id),
+    record_id UUID NOT NULL REFERENCES intel_record(id),
+    extraction_token UUID,
+    PRIMARY KEY(article_id,record_id)
+);
+CREATE INDEX IF NOT EXISTS intel_article_record_record ON intel_article_record(record_id);
+INSERT INTO intel_article_record(article_id,record_id)
+ SELECT article_id,id FROM intel_record WHERE origin='ai' AND article_id IS NOT NULL
+ ON CONFLICT DO NOTHING;
 CREATE INDEX IF NOT EXISTS intel_record_match_key ON intel_record((kind||':'||value)) WHERE status='approved';
 CREATE INDEX IF NOT EXISTS intel_record_attack_types ON intel_record USING GIN ((payload->'attack_types'));
 CREATE INDEX IF NOT EXISTS intel_record_queue ON intel_record(status,created_at);
@@ -203,6 +213,7 @@ CREATE TABLE IF NOT EXISTS intel_review (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(record_id,id)
 );
+ALTER TABLE intel_review ADD COLUMN IF NOT EXISTS attribution JSONB NOT NULL DEFAULT '{}';
 DO $$ BEGIN
  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='intel_record_review_fk' AND conrelid='intel_record'::REGCLASS) THEN
   ALTER TABLE intel_record ADD CONSTRAINT intel_record_review_fk FOREIGN KEY(id,review_id) REFERENCES intel_review(record_id,id);
@@ -237,6 +248,7 @@ CREATE OR REPLACE VIEW intel_record_state AS
 -- Preserve the original public view's column order when upgrading.
 CREATE OR REPLACE VIEW intel_published AS
  SELECT r.id,r.source_id,r.source_revision,r.external_key,r.content_hash,r.origin,r.status,r.kind,r.value,
- r.payload,r.article_id,r.actor_id,r.ioc_id,r.review_id,r.valid_until,r.created_at,r.updated_at,r.source_name,
+ r.payload,r.article_id,CASE WHEN rv.attribution ? 'actor_id' THEN rv.attribution->>'actor_id' ELSE r.actor_id END AS actor_id,r.ioc_id,r.review_id,r.valid_until,r.created_at,r.updated_at,r.source_name,
  r.observed_at,r.effective_valid_until,r.expired FROM intel_record_state r
+ LEFT JOIN intel_review rv ON rv.id=r.review_id AND rv.record_id=r.id
  WHERE r.status='approved' AND NOT r.expired;

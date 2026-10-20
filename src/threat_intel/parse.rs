@@ -573,6 +573,7 @@ pub(super) fn article_text_with_selector(data: &[u8], root: &str) -> Result<Stri
 pub(super) fn article_element_text(node: scraper::ElementRef<'_>) -> Result<String> {
     let mut text = String::new();
     let mut previous_block = None;
+    let mut previous_cell = None;
     for child in node.descendants() {
         if let scraper::node::Node::Text(t) = child.value() {
             if child.ancestors().any(|p| {
@@ -625,25 +626,60 @@ pub(super) fn article_element_text(node: scraper::ElementRef<'_>) -> Result<Stri
             }) {
                 continue;
             }
-            let block = child
+            // Source indentation is HTML whitespace, not a document boundary.
+            // Do not let whitespace between cells reset their row association.
+            if t.trim().is_empty() {
+                text.push(' ');
+                continue;
+            }
+            let row = child.ancestors().find(|parent| {
+                parent
+                    .value()
+                    .as_element()
+                    .is_some_and(|e| e.name() == "tr")
+            });
+            let cell = child
                 .ancestors()
                 .find(|parent| {
                     parent
                         .value()
                         .as_element()
-                        .is_some_and(|e| article_block(e.name()))
+                        .is_some_and(|e| matches!(e.name(), "td" | "th"))
+                })
+                .map(|parent| parent.id());
+            let block = row
+                .or_else(|| {
+                    child.ancestors().find(|parent| {
+                        parent
+                            .value()
+                            .as_element()
+                            .is_some_and(|e| article_block(e.name()))
+                    })
                 })
                 .map(|parent| parent.id());
             if block != previous_block {
                 text.push('\n');
+            } else if cell.is_some() && previous_cell.is_some() && cell != previous_cell {
+                text.push_str(" | ");
             }
-            text.push_str(t);
+            text.extend(
+                t.chars()
+                    .map(|ch| if ch.is_whitespace() { ' ' } else { ch }),
+            );
             previous_block = block;
+            previous_cell = cell;
         } else if child.value().as_element().is_some_and(|e| e.name() == "br") {
             text.push('\n');
         }
     }
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Keep block boundaries for list/table evidence. Inline markup remains joined
+    // inside a block, so defanged and ordinary indicators are not split apart.
+    let text = text
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
     if text.len() > MAX_ARTICLE {
         return Err(Error::bad("intel_article_too_large"));
     }
@@ -687,7 +723,7 @@ fn ai_result_checked(
     body: &str,
     isolate_evidence: bool,
 ) -> Result<(Vec<Indicator>, ValidationReport)> {
-    let normalized_body = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let document = evidence::Document::new(body);
     let value: Value = serde_json::from_str(content).map_err(|error| {
         let format = ai_content_format(content);
         let mut values = serde_json::Deserializer::from_str(content).into_iter::<Value>();
@@ -718,7 +754,7 @@ fn ai_result_checked(
         .get("iocs")
         .and_then(Value::as_array)
         .ok_or_else(|| Error::bad("intel_ai_invalid_schema"))?;
-    if items.len() > 200 {
+    if items.len() > MAX_AI_IOCS {
         return Err(Error::bad("intel_ai_too_many_items"));
     }
     let mut validation = ValidationReport::default();
@@ -727,44 +763,22 @@ fn ai_result_checked(
         .enumerate()
         .filter_map(|(index, v)| {
             let result = (|| {
-                let mut i: Indicator = serde_json::from_value(v.clone())
+                let mut fields = v.clone();
+                let object = fields
+                    .as_object_mut()
+                    .ok_or_else(|| Error::bad("intel_ai_invalid_schema"))?;
+                // Ranges are server-owned; the model may only quote numbered blocks.
+                if object.contains_key("evidence_spans") {
+                    return Err(Error::bad("intel_ai_invalid_schema"));
+                }
+                let parts = object.remove("evidence_parts");
+                let mut i: Indicator = serde_json::from_value(fields)
                     .map_err(|_| Error::bad("intel_ai_invalid_schema"))?;
                 let raw = i.value.clone();
                 i.normalize()?;
-                let evidence = i.evidence.split_whitespace().collect::<Vec<_>>().join(" ");
-                let normalized_evidence = evidence
-                    .replace("[.]", ".")
-                    .replace("[:]", ":")
-                    .replace("[://]", "://")
-                    .replace("hxxps://", "https://")
-                    .replace("hxxp://", "http://");
-                let mentions = if i.kind == "asn" {
-                    regex::Regex::new(r"(?i)(?-u:\b)AS\s*[0-9]+(?-u:\b)")
-                        .expect("static regex")
-                        .find_iter(&normalized_evidence)
-                        .any(|m| {
-                            normalize("asn", m.as_str()).is_ok_and(|(_, value)| value == i.value)
-                        })
-                } else {
-                    normalized_evidence.contains(&raw)
-                        || normalized_evidence.contains(&i.value)
-                        || normalized_evidence.to_ascii_lowercase().contains(&i.value)
-                };
-                let reason = if evidence.len() < 12 {
-                    Some("evidence_too_short")
-                } else if !normalized_body.contains(&evidence) {
-                    Some("evidence_not_in_body")
-                } else if !mentions {
-                    Some("ioc_not_in_evidence")
-                } else {
-                    None
-                };
-                if let Some(reason) = reason {
-                    return Err(Error::bad("intel_ai_evidence_not_found").context(json!({
-                        "record":index+1,"reason":reason
-                    })));
-                }
-                i.evidence = evidence;
+                document
+                    .validate(&mut i, &raw, parts.as_ref())
+                    .map_err(|error| error.context(json!({"record":index+1})))?;
                 Ok(i)
             })();
             match result {
@@ -789,7 +803,7 @@ fn ai_result_checked(
         return Err(Error::bad("intel_ai_evidence_not_found")
             .context(first)
             .context(json!({
-                "rejected":validation.rejected
+                "rejected":validation.rejected,"validation":validation
             })));
     }
     Ok((entries, validation))

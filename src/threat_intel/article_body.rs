@@ -230,12 +230,12 @@ mod tests {
     #[test]
     fn selects_full_article_after_teasers_and_preserves_inline_iocs_and_tables() {
         let html = format!(
-            "<article><a href='/story'>A long linked preview that should not be used as the full report content.</a></article><article><p>{REPORT}</p><p>Infrastructure: evil.<span>example</span> is the malicious domain.</p>Outside paragraph.<a>Inline reference.</a><table><tr><td>AS64496</td><td>malicious DNS</td></tr></table></article>"
+            "<article><a href='/story'>A long linked preview that should not be used as the full report content.</a></article><article><p>{REPORT}</p><p>Infrastructure:\n evil.<span>example</span> is the malicious domain.</p>Outside paragraph.<a>Inline reference.</a><table><tr><td>AS64496</td>\n<td>malicious DNS</td></tr></table></article>"
         );
         let (body, _) = extract(html.as_bytes(), None).unwrap();
-        assert!(body.contains("evil.example is the malicious domain"));
-        assert!(body.contains("domain. Outside paragraph.Inline reference."));
-        assert!(body.contains("AS64496 malicious DNS"));
+        assert!(body.contains("Infrastructure: evil.example is the malicious domain"));
+        assert!(body.contains("domain.\nOutside paragraph.Inline reference."));
+        assert!(body.contains("AS64496 | malicious DNS"));
         assert!(!body.contains("linked preview"));
     }
 

@@ -207,11 +207,11 @@ pub(super) async fn request_bounded_with_timeout(
         })?;
         let status = response.status().as_u16();
         if !response.status().is_success() {
-            return Err(Error::bad(if response.status().as_u16() == 429 {
-                "intel_source_rate_limited"
-            } else {
-                "intel_source_http_status"
-            }).context(json!({"phase":"response_status","http_status":status})));
+            let code=if status==429 {"intel_source_rate_limited"}else{"intel_source_http_status"};
+            let error=Error::bad(code).context(json!({"phase":"response_status","http_status":status}));
+            // Only JSON POST errors are inspected; never persist upstream prose.
+            let details=if post.is_some() {response_error_diagnostic(&mut response).await}else{json!({})};
+            return Err(error.context(details));
         }
         if response
             .content_length()
@@ -246,6 +246,137 @@ pub(super) async fn request_bounded_with_timeout(
         error
     })
 }
+async fn response_error_diagnostic(response: &mut reqwest::Response) -> Value {
+    let mut bytes = Vec::new();
+    let mut complete = false;
+    let mut read_failed = false;
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    if bytes.len() + chunk.len() > 32768 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                Ok(None) => {
+                    complete = true;
+                    break;
+                }
+                Err(_) => {
+                    read_failed = true;
+                    break;
+                }
+            }
+        }
+    })
+    .await;
+    let mut details = provider_error_diagnostic(&bytes);
+    details["error_body_sample_bytes"] = json!(bytes.len());
+    details["error_body_complete"] = json!(complete);
+    details["error_body_read_failed"] = json!(read_failed || result.is_err());
+    details
+}
+
+fn provider_error_diagnostic(bytes: &[u8]) -> Value {
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        return json!({"provider_error_category":"unclassified"});
+    };
+    let mut details = json!({"provider_error_category":"unclassified"});
+    for (field, path, allowed) in [
+        (
+            "provider_error_code",
+            "/error/code",
+            &[
+                "unsupported_model",
+                "model_not_found",
+                "not_found",
+                "invalid_api_key",
+                "insufficient_quota",
+                "upgrade_required",
+                "cmd_zdr_no_providers",
+                "unsupported_parameter",
+            ] as &[&str],
+        ),
+        (
+            "provider_error_type",
+            "/error/type",
+            &[
+                "invalid_request_error",
+                "authentication_error",
+                "permission_error",
+                "rate_limit_error",
+                "server_error",
+                "api_error",
+                "not_found_error",
+            ] as &[&str],
+        ),
+    ] {
+        if let Some(code) = value
+            .pointer(path)
+            .and_then(Value::as_str)
+            .filter(|code| allowed.contains(code))
+        {
+            details[field] = json!(code);
+        }
+    }
+    let code = value
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let message = value
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let category = if matches!(code, "unsupported_model" | "model_not_found") {
+        "model_unavailable"
+    } else if matches!(code, "invalid_api_key") {
+        "authentication"
+    } else if code == "insufficient_quota" {
+        "quota"
+    } else if code == "upgrade_required" {
+        "permission"
+    } else if code == "unsupported_parameter" {
+        "unsupported_parameter"
+    } else if (message.contains("model")
+        && (message.contains("not found")
+            || message.contains("does not exist")
+            || message.contains("not available")))
+        || message.contains("no endpoints found")
+    {
+        "model_unavailable"
+    } else if (message.contains("route") || message.contains("endpoint"))
+        && message.contains("not found")
+    {
+        "endpoint_not_found"
+    } else if message.contains("json_object")
+        && message.contains("must contain")
+        && (message.contains("word 'json'") || message.contains("word \"json\""))
+        && (message.contains("prompt") || message.contains("messages"))
+    {
+        "json_mode_prompt_missing"
+    } else if message.contains("unsupported")
+        && (message.contains("reasoning") || message.contains("parameter"))
+    {
+        "unsupported_parameter"
+    } else {
+        "unclassified"
+    };
+    details["provider_error_category"] = json!(category);
+    for path in ["/trace_id", "/request_id", "/error/trace_id"] {
+        if let Some(id) = value
+            .pointer(path)
+            .and_then(Value::as_str)
+            .and_then(|s| Uuid::parse_str(s).ok())
+        {
+            details["provider_trace_id"] = json!(id);
+            break;
+        }
+    }
+    details
+}
+
 pub(super) async fn source_bytes(
     source: &storage::Source,
     encryption_key: &str,
@@ -287,4 +418,53 @@ pub(super) async fn source_bytes(
         }),
     )
     .await
+}
+
+#[cfg(test)]
+mod provider_error_tests {
+    use super::*;
+    #[test]
+    fn classifies_json_mode_prompt_errors_without_retaining_upstream_text() {
+        for message in [
+            "Prompt must contain the word 'json' in some form to use 'response_format' of type 'json_object'.",
+            "'messages' must contain the word 'json' in some form, to use 'response_format' of type 'json_object'.",
+            "Messages must contain the word \"JSON\" to use response_format of type JSON_OBJECT.",
+        ] {
+            let raw = json!({"error":{"code":"invalid_request_error","type":"invalid_request_error","param":"messages","message":format!("{message} Bearer private-key https://private.example")}});
+            let diagnostic = provider_error_diagnostic(raw.to_string().as_bytes());
+            assert_eq!(
+                diagnostic,
+                json!({"provider_error_category":"json_mode_prompt_missing","provider_error_type":"invalid_request_error"})
+            );
+        }
+        for message in [
+            "response_format json_object is unsupported for this model",
+            "Invalid JSON in messages",
+            "Messages must contain an object matching the json_object schema",
+        ] {
+            let raw = json!({"error":{"type":"invalid_request_error","message":message}});
+            assert_eq!(
+                provider_error_diagnostic(raw.to_string().as_bytes())["provider_error_category"],
+                "unclassified"
+            );
+        }
+    }
+    #[test]
+    fn classifies_http_error_bodies_without_copying_upstream_text_or_unknown_codes() {
+        let raw = json!({"error":{"code":"model_not_found","type":"invalid_request_error","message":"Private model and secret URL"}});
+        let diagnostic = provider_error_diagnostic(raw.to_string().as_bytes());
+        assert_eq!(diagnostic["provider_error_category"], "model_unavailable");
+        assert_eq!(diagnostic["provider_error_code"], "model_not_found");
+        assert!(!diagnostic.to_string().contains("Private"));
+        let raw = json!({"error":{"code":"Bearer private-key","type":"private-type","message":"Route not found at private URL"},"trace_id":"private-key"});
+        let diagnostic = provider_error_diagnostic(raw.to_string().as_bytes());
+        assert_eq!(diagnostic["provider_error_category"], "endpoint_not_found");
+        assert!(diagnostic.get("provider_error_code").is_none());
+        assert!(diagnostic.get("provider_trace_id").is_none());
+        assert!(!diagnostic.to_string().contains("private"));
+        assert_eq!(
+            provider_error_diagnostic(b"<html>secret</html>")["provider_error_category"],
+            "unclassified"
+        );
+    }
 }
