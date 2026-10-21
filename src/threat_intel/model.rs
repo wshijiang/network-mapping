@@ -8,7 +8,7 @@ pub(super) const MAX_AI_IOCS: usize = 2000;
 pub(super) const MAX_AI_OUTPUT_TOKENS: u32 = 393_216;
 pub(super) const DEFAULT_AI_OUTPUT_TOKENS: u32 = 65_536;
 pub(super) const MAX_AI_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-pub(super) const PROMPT_VERSION: &str = "ioc-evidence-v7";
+pub(super) const PROMPT_VERSION: &str = "ioc-evidence-v8";
 pub(super) const ATTACK_TYPES: &[&str] = &[
     "bgp_hijacking",
     "route_leak",
@@ -36,10 +36,26 @@ pub(super) const IOC_ROLES: &[&str] = &[
 pub(super) struct ValidationReport {
     pub rejected: i64,
     pub rejection_samples: Vec<Value>,
+    #[serde(default)]
+    pub direct_accepted: i64,
+    #[serde(default)]
+    pub corrected: i64,
+    #[serde(default)]
+    pub correction_samples: Vec<Value>,
 }
 impl ValidationReport {
     pub fn merge(&mut self, other: Self, file: &str) {
         self.rejected += other.rejected;
+        self.direct_accepted += other.direct_accepted;
+        self.corrected += other.corrected;
+        for mut sample in other
+            .correction_samples
+            .into_iter()
+            .take(100_usize.saturating_sub(self.correction_samples.len()))
+        {
+            sample["file"] = json!(file.chars().take(512).collect::<String>());
+            self.correction_samples.push(sample);
+        }
         for mut sample in other
             .rejection_samples
             .into_iter()

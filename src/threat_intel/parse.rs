@@ -776,9 +776,18 @@ fn ai_result_checked(
                     .map_err(|_| Error::bad("intel_ai_invalid_schema"))?;
                 let raw = i.value.clone();
                 i.normalize()?;
-                document
+                let correction = document
                     .validate(&mut i, &raw, parts.as_ref())
                     .map_err(|error| error.context(json!({"record":index+1})))?;
+                if let Some(mut diagnostic) = correction {
+                    validation.corrected += 1;
+                    if validation.correction_samples.len() < 100 {
+                        diagnostic["record"] = json!(index + 1);
+                        validation.correction_samples.push(diagnostic);
+                    }
+                } else {
+                    validation.direct_accepted += 1;
+                }
                 Ok(i)
             })();
             match result {

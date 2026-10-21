@@ -404,7 +404,8 @@ pub(super) async fn ai_tick(pool: &Pool, encryption_key: &str) -> Result<bool> {
         Ok(summary) => {
             tracing::info!(event="IntelArticleExtractionSucceeded",article_id=%id,source_id=%source_id,
                 claim_token=%token,indicators=summary.parsed,inserted=summary.inserted,
-                rejected=summary.validation.rejected);
+                rejected=summary.validation.rejected,corrected=summary.validation.corrected,
+                direct_accepted=summary.validation.direct_accepted);
             (summary.state(), None, Value::Null, json!(summary))
         }
         Err(e) => {
@@ -525,7 +526,7 @@ async fn extract(
         metadata["model"] = json!(settings.ai_model);
         metadata["settings_revision"] = json!(settings_revision);
         metadata["prompt_version"] = json!(PROMPT_VERSION);
-        metadata["evidence_version"] = json!("block-spans-v1");
+        metadata["evidence_version"] = json!("block-spans-v2");
         metadata["body_hash"] = json!(body_hash);
         metadata.as_object_mut().map(|fields| fields.remove("candidates_hash"));
         metadata["ai_protocol"] = json!(settings.ai_protocol);
