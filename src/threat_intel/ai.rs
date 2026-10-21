@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 fn payload(settings: &Settings, blocks: &Value, report_url: &str) -> Value {
     let input = json!({"report_url":report_url,"untrusted_report_blocks":blocks}).to_string();
-    let messages = json!([{"role":"system","content":include_str!("ai_prompt.txt")},{"role":"user","content":input}]);
+    let messages = json!([{"role":"system","content":settings.system_prompt()},{"role":"user","content":input}]);
     let mut request = if settings.ai_protocol == "responses" {
         json!({"model":settings.ai_model,"input":messages,"text":{"format":{"type":"json_object"}},"max_output_tokens":settings.ai_max_output_tokens,"store":false,"stream":false})
     } else {
@@ -73,7 +73,7 @@ pub(super) async fn request(
     settings.validate()?;
     let (_, endpoint_format, _) = endpoint(settings)?;
     let request = payload(settings, blocks, report_url);
-    let mut input = json!({"request_bytes":request.to_string().len(),"system_prompt_bytes":include_str!("ai_prompt.txt").len(),"report_blocks_bytes":blocks.to_string().len(),"report_block_count":blocks.as_array().map_or(0,Vec::len),"actor_candidate_count":0,"ai_protocol":settings.ai_protocol,"max_output_tokens":settings.ai_max_output_tokens,"reasoning_effort":settings.ai_reasoning_effort,"prompt_version":PROMPT_VERSION,"endpoint_format":endpoint_format,"stream":transport.stream,"provider_id":transport.provider_id});
+    let mut input = json!({"request_bytes":request.to_string().len(),"system_prompt_bytes":settings.system_prompt().len(),"report_blocks_bytes":blocks.to_string().len(),"report_block_count":blocks.as_array().map_or(0,Vec::len),"actor_candidate_count":0,"ai_protocol":settings.ai_protocol,"max_output_tokens":settings.ai_max_output_tokens,"reasoning_effort":settings.ai_reasoning_effort,"prompt_version":settings.prompt_version(),"prompt_source":if settings.ai_prompt.is_empty(){"default"}else{"custom"},"prompt_hash":digest(settings.system_prompt().as_bytes()),"endpoint_format":endpoint_format,"stream":transport.stream,"provider_id":transport.provider_id});
     let value = llm::execute(settings, key, transport, request, session, None)
         .await
         .map_err(|error| error.context(input.clone()))?;
@@ -223,6 +223,47 @@ mod tests {
     use super::*;
     fn settings(protocol: &str) -> Settings {
         serde_json::from_value(json!({"ai_enabled":true,"ai_endpoint":format!("https://api.example/v1/{}",if protocol=="responses" {"responses"}else{"chat/completions"}),"ai_model":"deepseek/test","ai_key_env":"NM_INTEL_TEST_KEY","ai_protocol":protocol})).unwrap()
+    }
+    #[test]
+    fn custom_prompts_reach_both_protocols_and_empty_override_tracks_the_default() {
+        for protocol in ["chat", "responses"] {
+            let mut s = settings(protocol);
+            let field = if protocol == "chat" {
+                "messages"
+            } else {
+                "input"
+            };
+            assert_eq!(
+                payload(&s, &json!([]), "https://report.example")[field][0]["content"],
+                DEFAULT_AI_PROMPT
+            );
+            assert_eq!(s.prompt_version(), PROMPT_VERSION);
+            s.ai_prompt = "自定义 IOC 提取规则。\n返回 JSON，并保留原文证据。\t".into();
+            s.validate().unwrap();
+            assert_eq!(
+                payload(&s, &json!([]), "https://report.example")[field][0]["content"],
+                s.ai_prompt
+            );
+            let custom_version = s.prompt_version();
+            assert!(custom_version.starts_with(&format!("{PROMPT_VERSION}-custom-")));
+            s.ai_prompt.push('。');
+            assert_ne!(s.prompt_version(), custom_version);
+            s.ai_prompt.clear();
+            assert_eq!(s.system_prompt(), DEFAULT_AI_PROMPT);
+            assert_eq!(s.prompt_version(), PROMPT_VERSION);
+        }
+        for invalid in [
+            "  \n".into(),
+            "bad\0prompt".into(),
+            "bad\u{85}prompt".into(),
+            "中".repeat(MAX_AI_PROMPT_BYTES / 3 + 1),
+        ] {
+            assert_eq!(
+                validate_ai_prompt(&invalid).unwrap_err().code,
+                "intel_invalid_ai_prompt"
+            );
+        }
+        validate_ai_prompt(&"a".repeat(MAX_AI_PROMPT_BYTES)).unwrap();
     }
     #[test]
     fn both_protocols_preserve_the_full_model_output_budget() {

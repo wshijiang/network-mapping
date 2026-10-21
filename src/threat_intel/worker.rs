@@ -526,7 +526,9 @@ async fn extract(
         storage::validate_source(&tx, &source).await?;
         metadata["model"] = json!(settings.ai_model);
         metadata["settings_revision"] = json!(settings_revision);
-        metadata["prompt_version"] = json!(PROMPT_VERSION);
+        metadata["prompt_version"] = json!(settings.prompt_version());
+        metadata["prompt_hash"] = json!(digest(settings.system_prompt().as_bytes()));
+        metadata["prompt_source"] = json!(if settings.ai_prompt.is_empty() { "default" } else { "custom" });
         metadata["evidence_version"] = json!("block-spans-v2");
         metadata["body_hash"] = json!(body_hash);
         metadata.as_object_mut().map(|fields| fields.remove("candidates_hash"));

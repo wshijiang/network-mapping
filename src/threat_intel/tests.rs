@@ -1459,6 +1459,7 @@ async fn ai_enabled(pool: &Pool, enabled: bool) {
             ai_protocol: "chat".into(),
             ai_max_output_tokens: 8000,
             ai_reasoning_effort: "none".into(),
+            ai_prompt: String::new(),
             credential: String::new(),
             clear_credential: false,
         },

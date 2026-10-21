@@ -36,6 +36,24 @@ async fn settings(
         .await,
     )
 }
+async fn prompt(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    config: web::Data<crate::config::ServerConfig>,
+    user: UserBaseI,
+    input: web::Json<storage::PromptInput>,
+) -> HttpResponse {
+    response(
+        storage::save_prompt(
+            &pool,
+            input.into_inner(),
+            &config.encrypt_key,
+            &user,
+            &AuditContext::from_request(&req),
+        )
+        .await,
+    )
+}
 async fn create(
     req: HttpRequest,
     pool: web::Data<Pool>,
@@ -291,6 +309,7 @@ pub(in crate::threat_intel) fn configure(cfg: &mut web::ServiceConfig) {
             .app_data(web::JsonConfig::default().limit(1024 * 1024))
             .route("/settings", web::get().to(read))
             .route("/settings", web::put().to(settings))
+            .route("/prompt", web::put().to(prompt))
             .route("/providers", web::get().to(read))
             .route("/providers", web::post().to(create))
             .route("/providers/{id}", web::put().to(update))

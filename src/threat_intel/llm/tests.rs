@@ -512,6 +512,15 @@ async fn management_endpoints_require_admin_and_enforce_model_ownership() {
     )
     .await;
     assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let denied_prompt = http_test::call_service(
+        &app,
+        http_test::TestRequest::put()
+            .uri("/api/llm/prompt")
+            .set_json(json!({"expected_revision":1,"prompt":"unauthorized"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(denied_prompt.status(), StatusCode::FORBIDDEN);
     let before = storage::read(&pool, &key).await.unwrap();
     let revision = before["revision"].as_i64().unwrap();
     let err = storage::save_settings(
@@ -534,6 +543,144 @@ async fn management_endpoints_require_admin_and_enforce_model_ownership() {
     assert_eq!(
         storage::read(&pool, &key).await.unwrap()["revision"],
         revision
+    );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn online_prompt_edits_reset_and_provider_updates_share_the_runtime_fence() {
+    let (pool, c, schema) = database().await;
+    let key = encryption_key();
+    let operator = user(1);
+    let context = AuditContext::cli("llm-prompt-test");
+    c.batch_execute(include_str!("../../../source/database/migrate_llm.sql"))
+        .await
+        .unwrap();
+    let before = storage::read(&pool, &key).await.unwrap();
+    assert_eq!(before["default_ioc_prompt"], DEFAULT_AI_PROMPT);
+    assert_eq!(before["ioc_prompt"], "");
+    let revision = before["revision"].as_i64().unwrap();
+    let custom = "自定义提示词\n必须返回 JSON 并附原文证据。";
+    let saved = storage::save_prompt(
+        &pool,
+        storage::PromptInput {
+            expected_revision: revision,
+            prompt: custom.into(),
+        },
+        &key,
+        &operator,
+        &context,
+    )
+    .await
+    .unwrap();
+    let saved_revision = saved["revision"].as_i64().unwrap();
+    let (settings, runtime_revision) = super::super::storage::settings(&pool).await.unwrap();
+    assert_eq!(runtime_revision, saved_revision);
+    assert_eq!(settings.system_prompt(), custom);
+    assert_ne!(settings.prompt_version(), PROMPT_VERSION);
+    let conflict = storage::save_prompt(
+        &pool,
+        storage::PromptInput {
+            expected_revision: revision,
+            prompt: "stale overwrite".into(),
+        },
+        &key,
+        &operator,
+        &context,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(conflict.code, "intel_revision_conflict");
+    let invalid = storage::save_prompt(
+        &pool,
+        storage::PromptInput {
+            expected_revision: saved_revision,
+            prompt: " \n ".into(),
+        },
+        &key,
+        &operator,
+        &context,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(invalid.code, "intel_invalid_ai_prompt");
+    assert_eq!(
+        storage::read(&pool, &key).await.unwrap()["ioc_prompt"],
+        custom
+    );
+    let provider = Provider {
+        name: "prompt fixture".into(),
+        default_model: "fixture-model".into(),
+        models: vec![Model {
+            id: "fixture-model".into(),
+            ..Model::default()
+        }],
+        ..Provider::default()
+    };
+    let created = storage::save_provider(
+        &pool,
+        None,
+        storage::ProviderInput {
+            expected_revision: saved_revision,
+            provider,
+        },
+        &key,
+        &operator,
+        &context,
+    )
+    .await
+    .unwrap();
+    let chosen = storage::save_settings(
+        &pool,
+        storage::SettingsInput {
+            expected_revision: created["revision"].as_i64().unwrap(),
+            enabled: true,
+            provider_id: Some(decode(created["id"].clone()).unwrap()),
+            model_id: Some("fixture-model".into()),
+            global: Transport::global(),
+        },
+        &key,
+        &operator,
+        &context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        super::super::storage::settings(&pool)
+            .await
+            .unwrap()
+            .0
+            .system_prompt(),
+        custom
+    );
+    let chosen_revision = chosen["revision"].as_i64().unwrap();
+    let restored = storage::save_prompt(
+        &pool,
+        storage::PromptInput {
+            expected_revision: chosen_revision,
+            prompt: String::new(),
+        },
+        &key,
+        &operator,
+        &context,
+    )
+    .await
+    .unwrap();
+    let state = storage::read(&pool, &key).await.unwrap();
+    assert_eq!(state["revision"], restored["revision"]);
+    assert_eq!(state["ioc_prompt"], "");
+    assert_eq!(state["model_id"], "fixture-model");
+    assert_eq!(state["enabled"], true);
+    let (runtime, _) = super::super::storage::settings(&pool).await.unwrap();
+    assert_eq!(runtime.system_prompt(), DEFAULT_AI_PROMPT);
+    assert_eq!(runtime.prompt_version(), PROMPT_VERSION);
+    assert!(
+        runtime_transport(&pool, chosen_revision, &key)
+            .await
+            .is_err()
     );
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await

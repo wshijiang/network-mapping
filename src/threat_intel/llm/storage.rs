@@ -7,13 +7,14 @@ pub(super) struct State {
     pub provider_id: Option<Uuid>,
     pub model_id: Option<String>,
     pub global: Transport,
+    pub ioc_prompt: String,
 }
 pub(super) async fn state<C: deadpool_postgres::GenericClient + Sync>(
     c: &C,
     key: &str,
 ) -> Result<State> {
     let r = c
-        .query_one("SELECT * FROM llm_settings WHERE singleton", &[])
+        .query_one("SELECT l.*,COALESCE(i.document->>'ai_prompt','') AS ioc_prompt FROM llm_settings l CROSS JOIN intel_settings i WHERE l.singleton AND i.singleton", &[])
         .await?;
     Ok(State {
         revision: r.get("revision"),
@@ -21,6 +22,7 @@ pub(super) async fn state<C: deadpool_postgres::GenericClient + Sync>(
         provider_id: r.get("provider_id"),
         model_id: r.get("model_id"),
         global: decrypt(r.get("transport_ciphertext"), r.get("global_config"), key)?,
+        ioc_prompt: r.get("ioc_prompt"),
     })
 }
 pub(super) async fn provider<C: deadpool_postgres::GenericClient + Sync>(
@@ -74,7 +76,7 @@ pub(super) async fn read(pool: &Pool, key: &str) -> Result<Value> {
     }
     tx.commit().await?;
     Ok(
-        json!({"revision":s.revision,"enabled":s.enabled,"provider_id":s.provider_id,"model_id":s.model_id,"global":s.global.redact(),"providers":providers,"presets":presets(),"effective":effective}),
+        json!({"revision":s.revision,"enabled":s.enabled,"provider_id":s.provider_id,"model_id":s.model_id,"global":s.global.redact(),"providers":providers,"presets":presets(),"effective":effective,"ioc_prompt":s.ioc_prompt,"default_ioc_prompt":DEFAULT_AI_PROMPT,"prompt_version":ai_prompt_version(&s.ioc_prompt),"prompt_max_bytes":MAX_AI_PROMPT_BYTES}),
     )
 }
 async fn lock(tx: &Transaction<'_>, expected: i64) -> Result<()> {
@@ -96,6 +98,7 @@ async fn lock(tx: &Transaction<'_>, expected: i64) -> Result<()> {
     Ok(())
 }
 async fn publish(tx: &Transaction<'_>, s: &State, key: &str) -> Result<i64> {
+    validate_ai_prompt(&s.ioc_prompt)?;
     let (mut document, ciphertext) = if let (Some(id), Some(model)) =
         (s.provider_id, s.model_id.as_deref())
     {
@@ -126,6 +129,7 @@ async fn publish(tx: &Transaction<'_>, s: &State, key: &str) -> Result<i64> {
         (document, None)
     };
     document["llm_managed"] = json!(true);
+    document["ai_prompt"] = json!(s.ioc_prompt);
     document["llm_provider_id"] = json!(s.provider_id);
     let revision:i64=tx.query_one("UPDATE intel_settings SET document=$1,credential_ciphertext=$2,revision=revision+1,updated_at=NOW() WHERE singleton RETURNING revision",&[&document,&ciphertext]).await?.get(0);
     let public = json!(s.global.redact());
@@ -162,6 +166,7 @@ pub(super) async fn save_settings(
         provider_id: input.provider_id,
         model_id: input.model_id,
         global: input.global,
+        ioc_prompt: old.ioc_prompt,
     };
     let revision = publish(&tx, &s, key).await?;
     audit(
@@ -175,6 +180,43 @@ pub(super) async fn save_settings(
     .await?;
     tx.commit().await?;
     Ok(json!({"revision":revision}))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PromptInput {
+    pub expected_revision: i64,
+    pub prompt: String,
+}
+
+pub(super) async fn save_prompt(
+    pool: &Pool,
+    input: PromptInput,
+    key: &str,
+    user: &UserBaseI,
+    context: &AuditContext,
+) -> Result<Value> {
+    admin(user)?;
+    validate_ai_prompt(&input.prompt)?;
+    let mut c = pool.get().await?;
+    let tx = c.transaction().await?;
+    lock(&tx, input.expected_revision).await?;
+    let mut s = state(&tx, key).await?;
+    s.ioc_prompt = input.prompt;
+    let revision = publish(&tx, &s, key).await?;
+    let default = s.ioc_prompt.is_empty();
+    let effective = if default {
+        DEFAULT_AI_PROMPT
+    } else {
+        &s.ioc_prompt
+    };
+    audit(&tx, user, context, if default { "llm.prompt.reset" } else { "llm.prompt.save" },
+        "settings", json!({"revision":revision,"prompt_version":ai_prompt_version(&s.ioc_prompt),
+            "prompt_hash":digest(effective.as_bytes()),"prompt_source":if default {"default"} else {"custom"}})).await?;
+    tx.commit().await?;
+    Ok(
+        json!({"revision":revision,"ioc_prompt":s.ioc_prompt,"prompt_version":ai_prompt_version(&s.ioc_prompt)}),
+    )
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

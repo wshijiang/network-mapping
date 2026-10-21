@@ -9,6 +9,8 @@ pub(super) const MAX_AI_OUTPUT_TOKENS: u32 = 393_216;
 pub(super) const DEFAULT_AI_OUTPUT_TOKENS: u32 = 65_536;
 pub(super) const MAX_AI_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const PROMPT_VERSION: &str = "ioc-evidence-v8";
+pub(super) const DEFAULT_AI_PROMPT: &str = include_str!("ai_prompt.txt");
+pub(super) const MAX_AI_PROMPT_BYTES: usize = 64 * 1024;
 pub(super) const ATTACK_TYPES: &[&str] = &[
     "bgp_hijacking",
     "route_leak",
@@ -365,6 +367,9 @@ pub(super) struct Settings {
     pub ai_max_output_tokens: u32,
     #[serde(default = "default_ai_reasoning_effort")]
     pub ai_reasoning_effort: String,
+    /// Empty means follow the bundled default, including future default updates.
+    #[serde(default)]
+    pub ai_prompt: String,
     #[serde(default, skip_serializing)]
     pub credential: String,
     #[serde(default, skip_serializing)]
@@ -383,7 +388,20 @@ fn default_ai_timeout_seconds() -> u64 {
     180
 }
 impl Settings {
+    pub fn system_prompt(&self) -> &str {
+        if self.ai_prompt.is_empty() {
+            DEFAULT_AI_PROMPT
+        } else {
+            &self.ai_prompt
+        }
+    }
+
+    pub fn prompt_version(&self) -> String {
+        ai_prompt_version(&self.ai_prompt)
+    }
+
     pub fn validate(&self) -> Result<()> {
+        validate_ai_prompt(&self.ai_prompt)?;
         let url = reqwest::Url::parse(&self.ai_endpoint)
             .map_err(|_| Error::bad("intel_invalid_ai_endpoint"))?;
         validate_url(
@@ -420,6 +438,29 @@ impl Settings {
 
     pub fn ai_lease_seconds(&self) -> i32 {
         self.ai_processing_timeout().as_secs() as i32 + 30
+    }
+}
+
+pub(super) fn validate_ai_prompt(prompt: &str) -> Result<()> {
+    if prompt.len() > MAX_AI_PROMPT_BYTES
+        || (!prompt.is_empty() && prompt.trim().is_empty())
+        || prompt
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    {
+        return Err(Error::bad("intel_invalid_ai_prompt"));
+    }
+    Ok(())
+}
+
+pub(super) fn ai_prompt_version(prompt: &str) -> String {
+    if prompt.is_empty() {
+        PROMPT_VERSION.into()
+    } else {
+        format!(
+            "{PROMPT_VERSION}-custom-{}",
+            &digest(prompt.as_bytes())[..12]
+        )
     }
 }
 
