@@ -4,6 +4,12 @@
 
 服务端负责扫描调度、资产查询、数据分析、开放平台及系统运维。文档按实际任务分类，左侧导航与下方专题索引保持一致。
 
+## 版本更新
+
+| 文档 | 内容 |
+| --- | --- |
+| [更新日志](CHANGELOG.md) | 自上次发布 tag 以来的服务端变动、固定比较范围与升级兼容注意 |
+
 ## 从这里开始
 
 | 当前任务 | 建议阅读顺序 |
@@ -50,6 +56,7 @@
 | [智能目标与扫描器分配](SMART_SCANNING.md) | 地域调度、自动刷新、任务组与执行反馈 |
 | [搜索触发目标更新](SEARCH_TARGET_GENERATION.md) | 更新范围、去重、限制与故障行为 |
 | [DNS 测绘](DNS_MAPPING.md) | DNS 任务、解析结果和数据保留 |
+| [证书透明度域名发现](DOMAIN_DISCOVERY.md) | crt.sh 发现、完整 SAN 关系、后台恢复和 DNS 验证 |
 | [资产端口状态与历史](ASSET_PORT_HISTORY.md) | 端口当前状态、历史记录与回填语义 |
 | [扫描器任务恢复协议](scanner-recovery.md) | 服务端任务恢复、检查点和诊断领取 |
 
@@ -69,8 +76,8 @@
 | [运行时配置](RUNTIME_CONFIGURATION.md) | 配置来源、发布接口、生效方式和实现边界 |
 | [慢检测与掉线策略](monitoring-policies.md) | 在线策略管理、冲突恢复及性能统计 |
 | [健康监控与告警](HEALTH_ALERT.md) | 监控阈值、慢 SQL 和通知联动 |
-| [分渠道通知模板](NOTIFICATION_TEMPLATES.md) | 邮件、飞书、Telegram 的独立模板、样式、在线预览和版本发布 |
 | [统一通知渠道](NOTIFICATIONS.md) | 邮件、飞书、Telegram 的事件订阅、投递与排障 |
+| [分渠道通知模板](NOTIFICATION_TEMPLATES.md) | 邮件、飞书、Telegram 的独立模板、样式、在线预览和版本发布 |
 | [扫描器错误与日志](SCANNER_DIAGNOSTICS.md) | 远程错误事件、日志采集与服务端治理 |
 | [请求日志](REQUEST_LOG.md) | 请求采集、查询、错误分类和保留策略 |
 | [审计日志](AUDIT_LOG.md) | 操作审计、事件范围和查询约定 |
