@@ -5120,3 +5120,98 @@ async fn management_versions_snapshots_deletes_and_shared_evidence() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn article_list_exposes_disabled_source_and_retry_preserves_snapshot() {
+    use actix_web::{App, HttpMessage, dev::Service, test as http_test, web};
+    let (pool, c, schema) = database().await;
+    let (source, article, _) = draft(&pool, "disabled-retry.example").await;
+    ai_enabled(&pool, true).await;
+    c.execute(
+        "UPDATE intel_source SET enabled=FALSE WHERE id=$1",
+        &[&source.id],
+    )
+    .await
+    .unwrap();
+    let app = http_test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(server_config()))
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(user(1));
+                srv.call(req)
+            })
+            .configure(configure),
+    )
+    .await;
+    let list: Value = http_test::call_and_read_body_json(
+        &app,
+        http_test::TestRequest::get()
+            .uri("/api/intel/articles")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(list["data"]["items"][0]["source_enabled"], false);
+    let before = c
+        .query_one(
+            "SELECT status,attempts,body FROM intel_article WHERE id=$1",
+            &[&article],
+        )
+        .await
+        .unwrap();
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::post()
+            .uri(&format!("/api/intel/articles/{article}/retry"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: Value = http_test::read_body_json(response).await;
+    assert_eq!(error["code"], "intel_source_disabled");
+    let after = c
+        .query_one(
+            "SELECT status,attempts,body FROM intel_article WHERE id=$1",
+            &[&article],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        after.get::<_, String>("status"),
+        before.get::<_, String>("status")
+    );
+    assert_eq!(
+        after.get::<_, i32>("attempts"),
+        before.get::<_, i32>("attempts")
+    );
+    assert_eq!(
+        after.get::<_, String>("body"),
+        before.get::<_, String>("body")
+    );
+    c.execute(
+        "UPDATE intel_source SET enabled=TRUE WHERE id=$1",
+        &[&source.id],
+    )
+    .await
+    .unwrap();
+    let list: Value = http_test::call_and_read_body_json(
+        &app,
+        http_test::TestRequest::get()
+            .uri("/api/intel/articles")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(list["data"]["items"][0]["source_enabled"], true);
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::post()
+            .uri(&format!("/api/intel/articles/{article}/retry"))
+            .to_request(),
+    )
+    .await;
+    assert!(response.status().is_success());
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
