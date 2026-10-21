@@ -163,6 +163,13 @@ pub(super) async fn save_source(
     tx.commit().await?;
     Ok(json!({"id":id,"revision":revision}))
 }
+fn runtime_settings(mut document: Value) -> Result<Settings> {
+    if let Some(fields) = document.as_object_mut() {
+        fields.remove("llm_managed");
+        fields.remove("llm_provider_id");
+    }
+    serde_json::from_value(document).map_err(|_| Error::unavailable())
+}
 pub(super) async fn settings(pool: &Pool) -> Result<(Settings, i64)> {
     let row = pool
         .get()
@@ -172,15 +179,11 @@ pub(super) async fn settings(pool: &Pool) -> Result<(Settings, i64)> {
             &[],
         )
         .await?;
-    Ok((
-        serde_json::from_value(row.get("document")).map_err(|_| Error::unavailable())?,
-        row.get("revision"),
-    ))
+    Ok((runtime_settings(row.get("document"))?, row.get("revision")))
 }
 pub(super) async fn settings_json(pool: &Pool) -> Result<Value> {
     let row=pool.get().await?.query_one("SELECT document,revision,credential_ciphertext IS NOT NULL AS stored FROM intel_settings WHERE singleton",&[]).await?;
-    let s: Settings =
-        serde_json::from_value(row.get("document")).map_err(|_| Error::unavailable())?;
+    let s = runtime_settings(row.get("document"))?;
     let stored: bool = row.get("stored");
     let (kind, configured) = credentials::status(stored, &s.ai_key_env);
     Ok(
@@ -203,8 +206,17 @@ pub(super) async fn ai_credential(
         .await?
         .ok_or_else(Error::conflict)?;
     let ciphertext: Option<Vec<u8>> = row.get(0);
-    credentials::resolve(ciphertext.as_deref(), &s.ai_key_env, key)?
-        .ok_or_else(|| Error::bad("intel_credential_missing"))
+    if let Some(value) = credentials::resolve(ciphertext.as_deref(), &s.ai_key_env, key)? {
+        return Ok(value);
+    }
+    if llm::runtime_transport(pool, revision, key)
+        .await?
+        .headers
+        .contains_key("authorization")
+    {
+        return Ok(String::new());
+    }
+    Err(Error::bad("intel_credential_missing"))
 }
 pub(super) async fn save_settings(
     pool: &Pool,
@@ -219,6 +231,10 @@ pub(super) async fn save_settings(
     let encrypted = credentials::encrypt_update(&s.credential, s.clear_credential, encryption_key)?;
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
+    let managed: bool = tx.query_one("SELECT COALESCE((document->>'llm_managed')::BOOLEAN,FALSE) FROM intel_settings WHERE singleton FOR UPDATE", &[]).await?.get(0);
+    if managed {
+        return Err(Error::bad("llm_settings_moved"));
+    }
     let row=tx.query_opt("UPDATE intel_settings SET document=$1,revision=revision+1,updated_at=NOW(),credential_ciphertext=CASE WHEN $3 THEN NULL ELSE COALESCE($4,credential_ciphertext) END WHERE singleton AND revision=$2 RETURNING revision",&[&json!(s),&expected,&s.clear_credential,&encrypted]).await?.ok_or_else(Error::conflict)?;
     let revision: i64 = row.get(0);
     audit(

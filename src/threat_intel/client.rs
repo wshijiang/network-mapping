@@ -246,7 +246,7 @@ pub(super) async fn request_bounded_with_timeout(
         error
     })
 }
-async fn response_error_diagnostic(response: &mut reqwest::Response) -> Value {
+pub(super) async fn response_error_diagnostic(response: &mut reqwest::Response) -> Value {
     let mut bytes = Vec::new();
     let mut complete = false;
     let mut read_failed = false;

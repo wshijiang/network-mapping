@@ -1,13 +1,12 @@
 //! async-openai owns protocol dispatch/JSON decoding. Its custom transport uses
 //! our bounded reqwest 0.12 path to preserve DNS, TLS, proxy and redirect policy.
 use super::*;
+#[cfg(test)]
 use async_openai::{
     Client, config::OpenAIConfig, error::OpenAIError, middleware::HttpRequestFactory,
 };
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+#[cfg(test)]
+use std::sync::Arc;
 
 fn payload(settings: &Settings, blocks: &Value, report_url: &str) -> Value {
     let input = json!({"report_url":report_url,"untrusted_report_blocks":blocks}).to_string();
@@ -68,94 +67,22 @@ pub(super) async fn request(
     key: &str,
     blocks: &Value,
     report_url: &str,
+    transport: &llm::Resolved,
+    session: &str,
 ) -> Result<(Vec<u8>, Value)> {
     settings.validate()?;
-    let (endpoint, endpoint_format, base) = endpoint(settings)?;
+    let (_, endpoint_format, _) = endpoint(settings)?;
     let request = payload(settings, blocks, report_url);
-    let mut input = json!({"request_bytes":request.to_string().len(),"system_prompt_bytes":include_str!("ai_prompt.txt").len(),"report_blocks_bytes":blocks.to_string().len(),"report_block_count":blocks.as_array().map_or(0,Vec::len),"actor_candidate_count":0,"ai_protocol":settings.ai_protocol,"max_output_tokens":settings.ai_max_output_tokens,"reasoning_effort":settings.ai_reasoning_effort,"prompt_version":PROMPT_VERSION});
-    let transport_error = Arc::new(Mutex::new(None));
-    let response_size = Arc::new(Mutex::new(0usize));
-    input["endpoint_format"] = json!(endpoint_format);
-    let timeout = settings.ai_timeout_seconds;
-    let service = {
-        let failure = transport_error.clone();
-        let size = response_size.clone();
-        tower::service_fn(move |factory: HttpRequestFactory| {
-            let endpoint = endpoint.clone();
-            let failure = failure.clone();
-            let size = size.clone();
-            async move {
-                let request = factory.build().await?;
-                let body = request
-                    .body()
-                    .and_then(|body| body.as_bytes())
-                    .ok_or_else(|| OpenAIError::InvalidArgument("expected JSON body".into()))?;
-                let body: Value = serde_json::from_slice(body)
-                    .map_err(|_| OpenAIError::InvalidArgument("expected JSON body".into()))?;
-                let authorization = request
-                    .headers()
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| OpenAIError::InvalidArgument("missing authorization".into()))?;
-                let url = reqwest::Url::parse(&endpoint)
-                    .map_err(|_| OpenAIError::InvalidArgument("invalid endpoint".into()))?;
-                match client::request_bounded_with_timeout(
-                    &endpoint,
-                    &[url.host_str().unwrap_or("").into()],
-                    Some(&body),
-                    Some(("Authorization", authorization)),
-                    MAX_AI_RESPONSE_BYTES,
-                    Duration::from_secs(timeout),
-                )
-                .await
-                {
-                    Ok(bytes) => {
-                        *size.lock().map_err(|_| {
-                            OpenAIError::InvalidArgument("transport state".into())
-                        })? = bytes.len();
-                        let response = http::Response::builder()
-                            .status(200)
-                            .header("content-type", "application/json")
-                            .body(bytes)
-                            .map_err(|_| OpenAIError::InvalidArgument("response headers".into()))?;
-                        Ok(response.into())
-                    }
-                    Err(error) => {
-                        *failure.lock().map_err(|_| {
-                            OpenAIError::InvalidArgument("transport state".into())
-                        })? = Some(worker::ai_request_error(error));
-                        Err(OpenAIError::InvalidArgument(
-                            "bounded transport failed".into(),
-                        ))
-                    }
-                }
-            }
-        })
-    };
-    // A custom service replaces the SDK's retry service. One queue attempt makes
-    // exactly one paid request; never silently replay a costly reasoning call.
-    let sdk = Client::with_config(OpenAIConfig::new().with_api_base(base).with_api_key(key))
-        .with_http_service(service);
-    let result = dispatch(&sdk, request, &settings.ai_protocol).await;
-    if let Some(error) = transport_error
-        .lock()
-        .map_err(|_| Error::unavailable())?
-        .take()
-    {
-        return Err(error.context(input));
-    }
-    input["response_bytes"] = json!(*response_size.lock().map_err(|_| Error::unavailable())?);
-    let value = result.map_err(|error| {
-        let mut classified = Error::bad("intel_ai_invalid_response").context(input.clone());
-        if let OpenAIError::JSONDeserialize(error, _) = error {
-            classified = classified.context(parse::json_error_diagnostic(&error));
-        }
-        classified.context(json!({"response_bytes":response_size.lock().map(|v|*v).unwrap_or(0),"reason":"sdk_response_decode"})).stage("ai_response")
-    })?;
+    let mut input = json!({"request_bytes":request.to_string().len(),"system_prompt_bytes":include_str!("ai_prompt.txt").len(),"report_blocks_bytes":blocks.to_string().len(),"report_block_count":blocks.as_array().map_or(0,Vec::len),"actor_candidate_count":0,"ai_protocol":settings.ai_protocol,"max_output_tokens":settings.ai_max_output_tokens,"reasoning_effort":settings.ai_reasoning_effort,"prompt_version":PROMPT_VERSION,"endpoint_format":endpoint_format,"stream":transport.stream,"provider_id":transport.provider_id});
+    let value = llm::execute(settings, key, transport, request, session, None)
+        .await
+        .map_err(|error| error.context(input.clone()))?;
     let bytes = serde_json::to_vec(&value).map_err(|_| Error::bad("intel_ai_invalid_response"))?;
+    input["response_bytes"] = json!(bytes.len());
     Ok((bytes, input))
 }
 
+#[cfg(test)]
 async fn dispatch(
     sdk: &Client<OpenAIConfig>,
     request: Value,

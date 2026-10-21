@@ -12,6 +12,7 @@ mod credentials;
 mod evidence;
 mod import_parse;
 mod imports;
+mod llm;
 mod model;
 mod parse;
 mod review;

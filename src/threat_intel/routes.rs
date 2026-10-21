@@ -478,6 +478,7 @@ async fn entity_detail(
 }.await)
 }
 pub fn configure(cfg: &mut web::ServiceConfig) {
+    llm::configure(cfg);
     cfg.service(
         web::scope("/api/intel")
             .app_data(web::JsonConfig::default().limit(128 * 1024))

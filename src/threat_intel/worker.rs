@@ -541,10 +541,12 @@ async fn extract(
         if !storage::settings(pool).await?.0.ai_enabled {
             return Err(Error::bad("intel_ai_disabled"));
         }
+        let transport = llm::runtime_transport(pool, settings_revision, encryption_key).await?;
         let key = storage::ai_credential(pool, settings, settings_revision, encryption_key).await?;
         let blocks = evidence::Document::new(&body).prompt_blocks();
         stage = "ai_request";
-        let (data, input_diagnostic) = ai::request(settings, &key, &blocks, url).await?;
+        let session = digest(format!("ioc:{id}:{body_hash}:{settings_revision}").as_bytes());
+        let (data, input_diagnostic) = ai::request(settings, &key, &blocks, url, &transport, &session).await?;
         stage = "ai_response";
         let (content, mut response_diagnostic) = ai::response_content(&data, &settings.ai_protocol)
             .map_err(|error| error.context(input_diagnostic.clone()))?;

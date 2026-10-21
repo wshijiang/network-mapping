@@ -435,6 +435,8 @@ Network activity、Artifacts dropped、Payload delivery 类别的目标 IP、域
 
 ## AI 配置与审核
 
+配置入口已迁至 **LLM → 基础 / 供应商**。供应商、模型、全局覆盖、session、流式与旧设置迁移见 [LLM 配置与调试](LLM.md)。本页的 `ai_*` 字段用于说明 IOC worker 的兼容运行投影，迁移后的管理写入使用 `/api/llm/*`。
+
 ### 手动文章与微信公众号
 
 新建 `kind=article`、`transport=manual` 来源，location 与凭据留空，配置允许的完整
@@ -475,8 +477,8 @@ ai_review_required=true。管理员权限、现有 CSRF 与审计规则保持执
 
 ### 提取与审核
 
-管理页选择 `ai_protocol=chat`（Chat Completions，默认）或 `responses`，填写匹配协议的完整
-HTTPS 接口地址、模型和凭据，再开启 AI。也接受以 `/v1` 结尾的 SDK 基础地址，按所选
+在 LLM 供应商页选择 Chat Completions 或 Responses，填写匹配协议的完整
+HTTPS 接口地址、模型和凭据，再在基础页选择唯一组合并开启提取。也接受以 `/v1` 结尾的 SDK 基础地址，按所选
 协议追加一次 `/chat/completions` 或 `/responses`；完整地址不会重复追加，明确与协议
 冲突的地址拒绝保存。其他自定义路径保留原样，不猜测服务商前缀。
 例如 Command Code 使用 `https://api.commandcode.ai/provider/v1`，其完整 Chat 地址为
@@ -487,11 +489,11 @@ Chat 读取 `choices[0].message.content`；Responses 只接收 `status=completed
 `output_text`，拒绝不完整结果、拒答及未请求的工具调用。接口必须支持 JSON 对象输出。
 系统提示词明确要求输出有效 JSON，并包含 `JSON` 字样，满足 DeepSeek 等提供方的 JSON 模式校验，
 不依赖文章正文偶然包含该关键字。
-两种协议当前均显式使用非流式；流式不减少输入 token，也不解除输出预算，后续接入需要
-独立的 SSE 完整性处理。SDK 支持某协议不代表所选服务商一定支持。
+两种协议均支持全局或供应商局部选择流式传输；默认关闭。SSE 必须正常结束，累积完整输出后才做 JSON 和原文证据校验；断流不入库。
+流式不减少输入 token，也不解除输出预算。SDK 支持某协议不代表所选服务商一定支持。
 首版提取只有一个独立 worker，单次正文
 最多 100,000 字节、输出最多 2,000 条 IOC，模型回复预算默认 65,536 tokens；文章
-HTTP 读取上限为 2 MiB，AI 响应读取上限为 16 MiB，RSS/Atom 解析上限 4 MiB。管理页的“AI 请求超时（秒）”
+HTTP 读取上限为 2 MiB，AI 响应读取上限为 16 MiB，RSS/Atom 解析上限 4 MiB。供应商页的“请求超时（秒）”
 默认 180 秒，可设为 1～1800 的整数，对应设置 API 的 `ai_timeout_seconds`；旧配置缺省时
 自动使用 180 秒。该时限覆盖 AI 请求到响应体读取完成；连接阶段仍限制为 10 秒。
 文章总处理时限为 AI 请求超时加 120 秒，任务租约再多 30 秒，避免长请求提前失去租约。

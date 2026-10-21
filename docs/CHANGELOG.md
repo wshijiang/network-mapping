@@ -2,6 +2,16 @@
 
 [文档中心](README.md) · [部署与升级](DEPLOYMENT.md) · [扫描端更新日志](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/CHANGELOG.md)
 
+## 待发布开发变更
+
+- 新增独立 LLM 管理 API、DeepSeek / OpenCode Go / CommandCode GOAT 预设及供应商、模型管理；IOC 提取使用唯一供应商与模型组合。
+- 支持全局与供应商局部的代理、自定义头、session 头名称及流式传输；敏感配置加密保存，局部关闭与继承具有独立语义。
+- 扩展 async-openai 的自定义有界传输，支持 Chat / Responses 流式输出、正常结束检查和可取消的在线对话调试。IOC 流完整结束后才执行原文证据校验与人工审核。
+- 幂等迁移旧 AI 设置；保留运行配置投影及入库版本锁。迁移后旧 AI 设置写接口返回已迁移错误，发布所用 frontend-ref 已固定配套 LLM 控制台提交，需一同部署。
+- 补充 [LLM 配置与升级文档](LLM.md)、模型发现和配置继承测试、真实 PostgreSQL 迁移与单选约束测试、SDK 流式与取消测试。
+
+本节为当前工作区开发变更，未计入下方主分支历史截止快照。升级前备份数据库并停止旧服务实例，保留加密主密钥；回滚需同步恢复对应备份与前端。
+
 ## 未发布（自 v0.1.29 以来）
 
 截至 **2026-10-21（北京时间）**，以最新已发布 tag [v0.1.29](https://github.com/wshijiang/network-mapping/releases/tag/v0.1.29) 为基线，汇总主分支已合入的服务端变动，不包含尚未合入的开发分支或前端独立变动。

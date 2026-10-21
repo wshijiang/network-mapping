@@ -997,7 +997,7 @@ fn official_misp_exports_keep_iocs_separate_from_victims_and_event_attribution()
     assert_eq!(items[1].value, "192.0.2.20");
 }
 
-fn encryption_key() -> String {
+pub(super) fn encryption_key() -> String {
     openssl::base64::encode_block(&[7_u8; 32])
 }
 
@@ -1049,7 +1049,7 @@ fn credential_envelopes_reuse_authenticated_encryption_and_never_serialize_plain
             .contains("fixture-private-key")
     );
 }
-fn server_config() -> crate::config::ServerConfig {
+pub(super) fn server_config() -> crate::config::ServerConfig {
     crate::config::ServerConfig {
         host: "127.0.0.1".into(),
         port: 0,
@@ -1057,7 +1057,7 @@ fn server_config() -> crate::config::ServerConfig {
         max_body_size: 128 * 1024,
     }
 }
-fn user(role: i32) -> UserBaseI {
+pub(super) fn user(role: i32) -> UserBaseI {
     UserBaseI {
         id: 1,
         username: "intel-admin".into(),
@@ -1067,7 +1067,7 @@ fn user(role: i32) -> UserBaseI {
         enable_2fa: false,
     }
 }
-async fn database() -> (Pool, tokio_postgres::Client, String) {
+pub(super) async fn database() -> (Pool, tokio_postgres::Client, String) {
     let url = std::env::var("INTEL_TEST_DATABASE_URL")
         .expect("INTEL_TEST_DATABASE_URL must point to a disposable PostgreSQL database");
     let (c, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)

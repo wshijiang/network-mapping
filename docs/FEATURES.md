@@ -2,6 +2,7 @@
 
 可信来源 IOC 自动标记、Web 来源管理与必须人工审核的 AI 补充提取见
 [威胁情报、可信 IOC 与 AI 审核](THREAT_INTELLIGENCE.md)。
+独立 LLM 导航提供供应商／模型单选、全局与局部配置及在线对话调试，见 [LLM 配置](LLM.md)。
 
 [返回项目首页](../README.md) · [文档索引](README.md)
 
