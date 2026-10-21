@@ -123,9 +123,79 @@ impl<'a> Document<'a> {
         json!(
             self.blocks
                 .iter()
-                .map(|block| json!({"block_id":block.id,"kind":block.kind,"scope_block_id":block.scope,"text":block.text}))
+                .map(|block| {
+                    let mut value = json!({"block_id":block.id,"kind":block.kind,"scope_block_id":block.scope,"text":block.text});
+                    if let Some(unit) = self.unit_id(block) {
+                        value["evidence_unit_id"] = json!(unit);
+                    }
+                    value
+                })
                 .collect::<Vec<_>>()
         )
+    }
+
+    fn record_title(&self, block: &Block<'_>, kind: &str) -> Option<&Block<'a>> {
+        let title = &self.blocks[block.scope? - 1];
+        let title_kind = malicious_record_kind(title.text)?;
+        normalize(title_kind, field(title.text)?.1).ok()?;
+        (title.kind == "record_heading"
+            && ((block.id == title.id && kind == title_kind)
+                || (block.kind == "record_field"
+                    && kind == "domain"
+                    && self.associated_domain_field(block))))
+        .then_some(title)
+    }
+
+    fn unit_id(&self, block: &Block<'_>) -> Option<String> {
+        let kind = if block.kind == "record_heading" {
+            malicious_record_kind(block.text)?
+        } else {
+            "domain"
+        };
+        let title = self.record_title(block, kind)?;
+        Some(format!("record:{}:block:{}", title.id, block.id))
+    }
+
+    pub fn validate_unit(
+        &self,
+        indicator: &mut Indicator,
+        raw_value: &str,
+        unit: &str,
+    ) -> Result<()> {
+        let missing = || rejected("evidence_unit_not_found");
+        let (scope, id) = unit
+            .strip_prefix("record:")
+            .and_then(|value| value.split_once(":block:"))
+            .ok_or_else(missing)?;
+        let id = id.parse::<usize>().map_err(|_| missing())?;
+        let block = self
+            .blocks
+            .get(id.saturating_sub(1))
+            .filter(|block| block.id == id && self.unit_id(block).as_deref() == Some(unit))
+            .ok_or_else(missing)?;
+        let title = self
+            .record_title(block, &indicator.kind)
+            .ok_or_else(missing)?;
+        if scope.parse::<usize>().ok() != Some(title.id)
+            || !mentions(block.text, &indicator.kind, raw_value, &indicator.value)
+        {
+            return Err(rejected("ioc_not_in_evidence"));
+        }
+        // Only typed, complete source tokens in this selected unit are eligible.
+        // Neither the unit ID nor a model-supplied offset/quote can create an IOC.
+        let data = field(block.text).map_or(block.text, |(_, value)| value);
+        let quote = data
+            .split(|c: char| c.is_whitespace() || ";,、，|".contains(c))
+            .find(|token| {
+                normalize(&indicator.kind, token).is_ok_and(|(_, value)| value == indicator.value)
+            })
+            .ok_or_else(|| rejected("ioc_not_in_evidence"))?;
+        let parts = json!([
+            {"block_id":title.id,"kind":"context","quote":title.text},
+            {"block_id":block.id,"kind":"ioc","quote":quote}
+        ]);
+        self.validate(indicator, raw_value, Some(&parts))
+            .map(|_| ())
     }
 
     pub fn validate(
@@ -282,24 +352,16 @@ impl<'a> Document<'a> {
             .filter(|span| span.kind == PartKind::Ioc)
             .collect::<Vec<_>>();
         let scope = self.blocks[iocs.first()?.block_id - 1].scope?;
-        let title = &self.blocks[scope - 1];
-        let title_kind = malicious_record_kind(title.text)?;
-        let (_, title_value) = field(title.text)?;
+        let title = self.record_title(&self.blocks[iocs[0].block_id - 1], &indicator.kind)?;
         // An exact malicious field label and a complete, typed title value are
         // required. Merely sharing a structural scope is never sufficient.
-        normalize(title_kind, title_value).ok()?;
-        if title.kind != "record_heading"
-            || !iocs.iter().all(|ioc| {
-                let block = &self.blocks[ioc.block_id - 1];
-                block.scope == Some(scope)
-                    && mentions(&ioc.quote, &indicator.kind, raw_value, &indicator.value)
-                    && mentions(block.text, &indicator.kind, raw_value, &indicator.value)
-                    && ((block.id == scope && indicator.kind == title_kind)
-                        || (block.kind == "record_field"
-                            && indicator.kind == "domain"
-                            && self.associated_domain_field(block)))
-            })
-        {
+        if !iocs.iter().all(|ioc| {
+            let block = &self.blocks[ioc.block_id - 1];
+            block.scope == Some(scope)
+                && mentions(&ioc.quote, &indicator.kind, raw_value, &indicator.value)
+                && mentions(block.text, &indicator.kind, raw_value, &indicator.value)
+                && self.record_title(block, &indicator.kind).is_some()
+        }) {
             return None;
         }
         // Only known metadata from THIS record or its contiguous list's exact

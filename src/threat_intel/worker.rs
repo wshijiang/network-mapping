@@ -405,6 +405,7 @@ pub(super) async fn ai_tick(pool: &Pool, encryption_key: &str) -> Result<bool> {
             tracing::info!(event="IntelArticleExtractionSucceeded",article_id=%id,source_id=%source_id,
                 claim_token=%token,indicators=summary.parsed,inserted=summary.inserted,
                 rejected=summary.validation.rejected,corrected=summary.validation.corrected,
+                unit_accepted=summary.validation.unit_accepted,
                 direct_accepted=summary.validation.direct_accepted);
             (summary.state(), None, Value::Null, json!(summary))
         }

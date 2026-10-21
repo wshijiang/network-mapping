@@ -282,3 +282,168 @@ fn legacy_validation_reports_deserialize_and_correction_samples_are_bounded() {
     assert_eq!(report.corrected, 101);
     assert_eq!(report.correction_samples.len(), 100);
 }
+
+#[test]
+fn server_evidence_units_ground_all_46_silverfox_iocs_without_model_quotes() {
+    let body = include_str!("fixtures/silverfox_assets.txt");
+    let document = Document::new(body);
+    let blocks = document.prompt_blocks();
+    let mut seen = HashSet::new();
+    let mut proposals = Vec::new();
+    for block in &document.blocks {
+        let Some(unit) = blocks[block.id - 1]["evidence_unit_id"].as_str() else {
+            continue;
+        };
+        let kind = if block.kind == "record_heading" {
+            "ip"
+        } else {
+            "domain"
+        };
+        for value in field(block.text).unwrap().1.split(';').map(str::trim) {
+            if seen.insert(value) {
+                proposals.push(json!({"type":kind,"value":value,"evidence_unit_id":unit}));
+            }
+        }
+    }
+    let (items, report) = parse(body, proposals).unwrap();
+    assert_eq!(items.len(), 46);
+    assert_eq!(
+        (
+            report.direct_accepted,
+            report.unit_accepted,
+            report.corrected,
+            report.rejected
+        ),
+        (46, 46, 0, 0)
+    );
+    for item in items {
+        assert_eq!(item.evidence_spans.len(), 2);
+        assert_eq!(item.evidence_spans[0].kind, PartKind::Context);
+        assert_eq!(item.evidence_spans[1].kind, PartKind::Ioc);
+        assert_eq!(item.evidence_spans[1].quote, item.value);
+        assert_eq!(
+            document.blocks[item.evidence_spans[1].block_id - 1].scope,
+            Some(item.evidence_spans[0].block_id)
+        );
+        for span in item.evidence_spans {
+            assert_eq!(&body[span.start..span.end], span.quote);
+        }
+    }
+}
+
+#[test]
+fn units_cannot_create_values_cross_records_or_select_benign_fields() {
+    let body = "（一）恶意IP地址：192.0.2.1\n关联域名：evil.example\n推荐公共DNS：8.8.8.8\n（二）恶意IP地址：192.0.2.2\n关联域名：other.example\n归属地：中国 香港";
+    for (kind, value, unit, reason) in [
+        (
+            "domain",
+            "evil.example",
+            "record:4:block:5",
+            "ioc_not_in_evidence",
+        ),
+        (
+            "domain",
+            "invented.example",
+            "record:1:block:2",
+            "ioc_not_in_evidence",
+        ),
+        (
+            "domain",
+            "vil.example",
+            "record:1:block:2",
+            "ioc_not_in_evidence",
+        ),
+        (
+            "ip",
+            "8.8.8.8",
+            "record:1:block:3",
+            "evidence_unit_not_found",
+        ),
+        (
+            "domain",
+            "evil.example",
+            "record:4:block:2",
+            "evidence_unit_not_found",
+        ),
+        (
+            "domain",
+            "evil.example",
+            "record:1:block:0",
+            "evidence_unit_not_found",
+        ),
+        (
+            "domain",
+            "evil.example",
+            "record:1:block:999",
+            "evidence_unit_not_found",
+        ),
+        (
+            "domain",
+            "evil.example",
+            "record:1:block:02",
+            "evidence_unit_not_found",
+        ),
+        (
+            "ip",
+            "192.0.2.1",
+            "record:1:block:2",
+            "evidence_unit_not_found",
+        ),
+        (
+            "domain",
+            "evil.example",
+            "invented-unit",
+            "evidence_unit_not_found",
+        ),
+    ] {
+        let error = parse(
+            body,
+            vec![json!({"type":kind,"value":value,"evidence_unit_id":unit})],
+        )
+        .unwrap_err();
+        assert_eq!(error.diagnostic["reason"], reason, "{unit} {value}");
+    }
+    let blocks = Document::new(body).prompt_blocks();
+    assert!(blocks[2].get("evidence_unit_id").is_none());
+    assert!(blocks[5].get("evidence_unit_id").is_none());
+    let benign = "（一）非恶意IP地址：192.0.2.1\n关联域名：benign.example";
+    assert!(
+        Document::new(benign)
+            .prompt_blocks()
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| b.get("evidence_unit_id").is_none())
+    );
+}
+
+#[test]
+fn units_preserve_defanging_and_coexist_with_legacy_narrative_evidence() {
+    let body = "（一）恶意IP地址：192[.]0[.]2[.]1\n关联域名：\n evil[.]example; other.example\n研究确认 third.example 为恶意域名。";
+    let (items, report) = parse(body, vec![
+        json!({"type":"ip","value":"192.0.2.1","evidence_unit_id":"record:1:block:1"}),
+        json!({"type":"domain","value":"evil.example","evidence_unit_id":"record:1:block:3"}),
+        json!({"type":"domain","value":"third.example","evidence":"研究确认 third.example 为恶意域名。"}),
+    ]).unwrap();
+    assert_eq!(report.direct_accepted, 3);
+    assert_eq!(report.unit_accepted, 2);
+    assert_eq!(items[0].evidence_spans[1].quote, "192[.]0[.]2[.]1");
+    assert_eq!(items[1].evidence_spans[1].quote, "evil[.]example");
+    for item in items {
+        for span in item.evidence_spans {
+            assert_eq!(&body[span.start..span.end], span.quote);
+        }
+    }
+    for extra in [json!({"evidence_parts":[]}), json!({"evidence":""})] {
+        let mut proposal =
+            json!({"type":"ip","value":"192.0.2.1","evidence_unit_id":"record:1:block:1"});
+        proposal
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert_eq!(
+            parse(body, vec![proposal]).unwrap_err().code,
+            "intel_ai_invalid_schema"
+        );
+    }
+}

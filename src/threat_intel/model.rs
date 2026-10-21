@@ -38,6 +38,9 @@ pub(super) struct ValidationReport {
     pub rejection_samples: Vec<Value>,
     #[serde(default)]
     pub direct_accepted: i64,
+    // A subset of direct_accepted: model selected a server-described record unit.
+    #[serde(default)]
+    pub unit_accepted: i64,
     #[serde(default)]
     pub corrected: i64,
     #[serde(default)]
@@ -47,6 +50,7 @@ impl ValidationReport {
     pub fn merge(&mut self, other: Self, file: &str) {
         self.rejected += other.rejected;
         self.direct_accepted += other.direct_accepted;
+        self.unit_accepted += other.unit_accepted;
         self.corrected += other.corrected;
         for mut sample in other
             .correction_samples
