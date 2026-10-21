@@ -2,6 +2,7 @@
 use super::*;
 use std::collections::BTreeMap;
 
+mod debug;
 mod model;
 mod routes;
 mod storage;

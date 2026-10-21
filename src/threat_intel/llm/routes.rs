@@ -141,9 +141,12 @@ pub(super) struct ChatInput {
     pub model_id: String,
     pub session_id: Uuid,
     pub messages: Vec<Message>,
+    #[serde(default)]
+    pub parameters: debug::Parameters,
 }
 impl ChatInput {
     pub fn validate(&self) -> Result<()> {
+        self.parameters.validate()?;
         if self.model_id.len() > 100
             || self.messages.is_empty()
             || self.messages.len() > 64
@@ -200,13 +203,14 @@ async fn chat(
         admin(&user)?;
         input.validate()?;
         let lease = Lease::acquire(user.id)?;
-        let (settings, transport, key) = storage::debug_runtime(
+        let (mut settings, mut transport, key) = storage::debug_runtime(
             &pool,
             input.provider_id,
             &input.model_id,
             &config.encrypt_key,
         )
         .await?;
+        input.parameters.apply(&mut settings, &mut transport)?;
         let c = pool.get().await?;
         audit(
             &c,
@@ -214,7 +218,7 @@ async fn chat(
             &AuditContext::from_request(&req),
             "llm.debug.request",
             &input.provider_id.to_string(),
-            json!({"model":input.model_id,"stream":transport.stream}),
+            json!({"model":input.model_id,"parameters":input.parameters.effective(&settings, &transport)}),
         )
         .await?;
         Ok::<_, Error>((lease, settings, transport, key))
@@ -224,19 +228,8 @@ async fn chat(
         Ok(v) => v,
         Err(error) => return response::<Value>(Err(error)),
     };
-    let messages = json!(input.messages);
-    let mut payload = if settings.ai_protocol == "responses" {
-        json!({"model":settings.ai_model,"input":messages,"max_output_tokens":settings.ai_max_output_tokens,"store":false})
-    } else {
-        json!({"model":settings.ai_model,"messages":messages,"max_tokens":settings.ai_max_output_tokens})
-    };
-    if settings.ai_reasoning_effort != "default" {
-        if settings.ai_protocol == "responses" {
-            payload["reasoning"] = json!({"effort":settings.ai_reasoning_effort});
-        } else {
-            payload["reasoning_effort"] = json!(settings.ai_reasoning_effort);
-        }
-    }
+    let payload = input.parameters.payload(&settings, json!(input.messages));
+    let effective_parameters = input.parameters.effective(&settings, &transport);
     let session = digest(
         format!(
             "debug:{}:{}:{}:{}",
@@ -252,7 +245,7 @@ async fn chat(
         let result = execute(&settings, &key, &transport, payload, &session, Some(events));
         tokio::pin!(result);
         let _ = wire
-            .send(sse(json!({"type":"started","stream":transport.stream})))
+            .send(sse(json!({"type":"started","stream":transport.stream,"parameters":effective_parameters})))
             .await;
         let mut deltas_open = true;
         let mut first_delta_ms = None;
