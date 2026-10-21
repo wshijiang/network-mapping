@@ -20,9 +20,6 @@ pub(super) fn canonical_url(raw: &str, source: &SourceInput) -> Result<String> {
         }
         let mut identity = Vec::new();
         for (key, value) in url.query_pairs() {
-            if key == "__biz" && !source.publisher_id.is_empty() && value != source.publisher_id {
-                return Err(Error::bad("intel_article_publisher_mismatch"));
-            }
             if matches!(key.as_ref(), "__biz" | "mid" | "idx" | "sn") {
                 identity.push((key.into_owned(), value.into_owned()));
             }
@@ -36,7 +33,7 @@ pub(super) fn canonical_url(raw: &str, source: &SourceInput) -> Result<String> {
     Ok(url.to_string())
 }
 
-pub(super) fn body_snapshot(data: &[u8], url: &str, publisher: &str) -> Result<(String, Value)> {
+pub(super) fn body_snapshot(data: &[u8], url: &str) -> Result<(String, Value)> {
     let parsed = reqwest::Url::parse(url).ok();
     if parsed
         .as_ref()
@@ -53,31 +50,10 @@ pub(super) fn body_snapshot(data: &[u8], url: &str, publisher: &str) -> Result<(
     if !wechat {
         return article_body::extract(data, None);
     }
-    if publisher.is_empty() {
-        return Err(Error::bad("intel_article_publisher_required"));
-    }
-    let input = std::str::from_utf8(data).map_err(|_| Error::bad("intel_article_not_utf8"))?;
-    let html = scraper::Html::parse_document(input);
-    let script = scraper::Selector::parse("script").expect("static selector");
-    let pattern =
-        regex::Regex::new(r#"\bbiz\s*=\s*["']([A-Za-z0-9+/=]{1,128})["']"#).expect("static regex");
-    let ids = html
-        .select(&script)
-        .flat_map(|node| {
-            let script = node.text().collect::<String>();
-            pattern
-                .captures_iter(&script)
-                .map(|c| c[1].to_owned())
-                .collect::<Vec<_>>()
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    if ids.len() != 1 || !ids.contains(publisher) {
-        return Err(Error::bad("intel_article_publisher_mismatch"));
-    }
     let body = parse::article_text_with_selector(data, "#js_content")?;
     Ok((
         body,
-        json!({"method":"remote_wechat","publisher_id":publisher,"publisher_verification":"page_account_match"}),
+        json!({"method":"remote_wechat","publisher_verification":"not_bound"}),
     ))
 }
 
@@ -121,14 +97,6 @@ pub(super) async fn save(
         .is_some_and(|body| body.len() < 40 || body.len() > MAX_ARTICLE || body.contains('\0'))
     {
         return Err(Error::bad("intel_invalid_article"));
-    }
-    if body.is_none()
-        && reqwest::Url::parse(&url)
-            .ok()
-            .is_some_and(|u| u.host_str() == Some("mp.weixin.qq.com"))
-        && source.input.publisher_id.is_empty()
-    {
-        return Err(Error::bad("intel_article_publisher_required"));
     }
     // Plain text is explicitly administrator supplied, never claimed to be a
     // network-verified official publication or a structured trusted feed.

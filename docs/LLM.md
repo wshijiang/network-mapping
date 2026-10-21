@@ -12,7 +12,16 @@
 
 在线调试支持临时选择其他供应商和模型、多轮对话、停止生成和新建会话。临时选择不修改 IOC 绑定；切换组合会清空当前对话。对话只保留在当前页面，服务端不建立聊天历史库。未完整、失败或已停止的模型回答不会作为后续对话历史发送。界面以纯文本显示回答。
 
-启用流式后实时显示文本；关闭时等待完整响应。完成后展示耗时及供应商实际返回的 token 用量；用量缺失不等于零。在线调试会调用真实供应商，按该供应商账户规则计费。每个管理员同时最多一个调试请求，每实例最多四个；页面断开或停止会取消上游读取，不自动重放付费请求。
+启用流式后分别接收思考数据与正式回复。思考时显示带 `skeleton skeleton-text` 的
+`Thinking...`，默认收起，可点击箭头展开；首段正式回复到达时自动收起，回复继续显示在下方聊天气泡。
+完成、出错或停止后停止思考动画，仍可展开已有思考数据；思考文本不加入下一轮聊天历史。
+Chat 兼容接口读取 `reasoning_content` / `reasoning`，Responses 读取接口实际返回的思考文本或摘要，
+开启推理时在调试请求中申请 `reasoning.summary=auto`。关闭流式时在完整响应后显示可展开的思考数据。完成后展示耗时及供应商实际返回的 token 用量；用量缺失不等于零。
+在回复信息的“流式开启／关闭”后显示平均输出速率（token/s），按输出 token 数除以请求总耗时计算，
+包含等待和思考时间。生成期间显示“统计中”，缺少用量、失败、停止或耗时无效时显示“—”。
+输出速率后显示缓存命中输入 token 数和命中率（缓存命中 token 数 ÷ 输入 token 总数）。
+已返回的零命中显示 `0 token`、`0.0%`；未提供缓存用量显示“—”，输入为零或数据无效时不计算命中率。
+Chat 流式调试请求使用 `stream_options.include_usage=true` 获取最终用量，不按字符数或分片数估算。在线调试会调用真实供应商，按该供应商账户规则计费。每个管理员同时最多一个调试请求，每实例最多四个；页面断开或停止会取消上游读取，不自动重放付费请求。
 
 ## 供应商与模型
 
@@ -81,7 +90,8 @@ OpenCode 的 `x-opencode-session` 表示路由／缓存亲和性，不是服务�
 | POST `/api/llm/providers/{id}/models/refresh` | 读取远端模型，不自动写入配置 |
 | POST `/api/llm/debug/chat` | 传 provider_id、model_id、session_id、messages，返回 SSE |
 
-新增与修改供应商的请求为 `{expected_revision,provider}`。调试消息只接受 system（仅首条）、user、assistant 文本，最多 64 条且总内容不超过 128 KiB。SSE 事件为 started、delta、done、error；done 为完整成功，EOF 不作为成功。前端使用 POST fetch 传 CSRF 头，并使用 AbortController 停止。
+新增与修改供应商的请求为 `{expected_revision,provider}`。调试消息只接受 system（仅首条）、user、assistant 文本，最多 64 条且总内容不超过 128 KiB。SSE 事件为 started、reasoning（思考文本增量）、delta（正式回复增量）、done、error；
+非流式 done 可包含 reasoning 文本字段，Responses 的 done 可补齐最终摘要；done 为完整成功，EOF 不作为成功。前端使用 POST fetch 传 CSRF 头，并使用 AbortController 停止。
 
 真实出站延续 HTTPS/443、公网目的地址、DNS 校验、TLS 验证及禁止重定向规则。模型列表上限 2 MiB、500 项；推理响应总上限 16 MiB，流式单行上限 1 MiB。请求超时 1～1800 秒，连接阶段最多 10 秒。代理远端解析目的地址时，代理需执行相同的公网出站边界。
 

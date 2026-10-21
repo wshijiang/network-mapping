@@ -129,7 +129,7 @@ pub(super) struct SourceInput {
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
     #[serde(default)]
-    pub publisher_id: String,
+    pub request_config: source_transport::RequestConfig,
     #[serde(default)]
     pub auth_env: String,
     #[serde(default, skip_serializing)]
@@ -191,19 +191,15 @@ impl SourceInput {
         }
         self.allowed_hosts.sort();
         self.allowed_hosts.dedup();
-        if self.allowed_hosts.len() > 20 || self.allowed_hosts.iter().any(|host| !valid_host(host))
+        if self.allowed_hosts.len() > 20
+            || self
+                .allowed_hosts
+                .iter()
+                .any(|host| !valid_host_pattern(host))
         {
             return Err(Error::bad("intel_invalid_hosts"));
         }
-        self.publisher_id = self.publisher_id.trim().to_owned();
-        if self.publisher_id.len() > 128
-            || !self
-                .publisher_id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
-        {
-            return Err(Error::bad("intel_invalid_publisher"));
-        }
+        self.request_config.validate()?;
         if self.kind == "article" && self.transport != "manual" {
             return Err(Error::bad("intel_invalid_article_source"));
         }
@@ -275,9 +271,27 @@ fn valid_host(host: &str) -> bool {
         && host == host.to_ascii_lowercase()
         && host.split('.').all(|p| {
             !p.is_empty()
+                && p.len() <= 63
                 && !p.starts_with('-')
                 && !p.ends_with('-')
                 && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+fn valid_host_pattern(pattern: &str) -> bool {
+    pattern == "*" || valid_host(pattern.strip_prefix("*.").unwrap_or(pattern))
+}
+fn host_matches(pattern: &str, host: &str) -> bool {
+    if pattern == host {
+        return true;
+    }
+    if !valid_host_pattern(pattern) {
+        return false;
+    }
+    pattern == "*"
+        || pattern == host
+        || pattern.strip_prefix("*.").is_some_and(|base| {
+            host.strip_suffix(base)
+                .is_some_and(|prefix| prefix.ends_with('.') && prefix.len() > 1)
         })
 }
 pub(super) fn public_ip(ip: IpAddr) -> bool {
@@ -344,7 +358,7 @@ pub(super) fn validate_url(value: &str, hosts: &[String]) -> Result<reqwest::Url
         || url.password().is_some()
         || url.fragment().is_some()
         || url.port_or_known_default() != Some(443)
-        || !hosts.iter().any(|h| h == host)
+        || !hosts.iter().any(|h| host_matches(h, host))
         || literal.parse::<IpAddr>().is_ok_and(|ip| !public_ip(ip))
     {
         return Err(Error::bad("intel_url_not_allowed"));

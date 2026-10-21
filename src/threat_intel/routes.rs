@@ -105,11 +105,15 @@ async fn offline_import(
     )
 }
 
-async fn list_sources(pool: web::Data<Pool>, user: UserBaseI) -> HttpResponse {
+async fn list_sources(
+    pool: web::Data<Pool>,
+    config: web::Data<crate::config::ServerConfig>,
+    user: UserBaseI,
+) -> HttpResponse {
     response(
         async {
             admin(&user)?;
-            storage::sources(&pool).await
+            storage::sources(&pool, &config.encrypt_key).await
         }
         .await,
     )
@@ -426,7 +430,6 @@ async fn retry_article(
         let url:String=row.get("url");validate_url(&url,&source.input.allowed_hosts)?;
         let body:Option<String>=row.get("body");let body_hash:Option<String>=row.get("body_hash");
         let metadata:Value=row.get("extraction_metadata");
-        if !source.input.publisher_id.is_empty() && metadata.pointer("/intake/publisher_id").and_then(Value::as_str).is_some_and(|id|id!=source.input.publisher_id){return Err(Error::bad("intel_article_publisher_mismatch"));}
         target=Uuid::now_v7();
         let intake=json!({"intake":metadata.get("intake"),"retry_of":requested,"snapshot_source_revision":row.get::<_,i64>("source_revision")});
         created=tx.execute("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash,body,body_hash,extraction_metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING",&[&target,&source_id,&source.revision,&url,&row.get::<_,String>("title"),&row.get::<_,String>("feed_hash"),&body,&body_hash,&intake]).await?>0;

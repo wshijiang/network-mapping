@@ -11,7 +11,7 @@ fn welivesecurity_preferred_body_and_generic_fallback_exclude_page_chrome() {
       <div class="post-related-articles">related.example</div></main></body></html>"#;
     for host in ["www.welivesecurity.com", "welivesecurity.com"] {
         let (body, metadata) =
-            articles::body_snapshot(html, &format!("https://{host}/en/report/"), "").unwrap();
+            articles::body_snapshot(html, &format!("https://{host}/en/report/")).unwrap();
         assert!(body.contains("evil.example"));
         assert!(body.contains("AS64496"));
         for excluded in [
@@ -27,12 +27,10 @@ fn welivesecurity_preferred_body_and_generic_fallback_exclude_page_chrome() {
         assert_eq!(metadata["selector"], ".article-body");
     }
     let div_only = br#"<div class="article-body">The report identifies evil.example as malicious infrastructure.</div>"#;
-    assert!(
-        articles::body_snapshot(div_only, "https://www.welivesecurity.com/en/report/", "").is_ok()
-    );
-    assert!(articles::body_snapshot(div_only, "https://other.example/report/", "").is_ok());
+    assert!(articles::body_snapshot(div_only, "https://www.welivesecurity.com/en/report/").is_ok());
+    assert!(articles::body_snapshot(div_only, "https://other.example/report/").is_ok());
     let challenge = br#"<main>Please verify you are human before reading this report.</main>"#;
-    let error = articles::body_snapshot(challenge, "https://www.welivesecurity.com/en/report/", "")
+    let error = articles::body_snapshot(challenge, "https://www.welivesecurity.com/en/report/")
         .unwrap_err();
     assert_eq!(error.code, "intel_article_body_missing");
     assert_eq!(error.diagnostic["selector"], ".article-body");
@@ -40,7 +38,6 @@ fn welivesecurity_preferred_body_and_generic_fallback_exclude_page_chrome() {
     let short = articles::body_snapshot(
         br#"<div class="article-body">Verify</div>"#,
         "https://www.welivesecurity.com/en/report/",
-        "",
     )
     .unwrap_err();
     assert_eq!(short.diagnostic["reason"], "no_valid_article_candidate");
@@ -51,8 +48,7 @@ fn optional_live_welivesecurity_html_fixture_is_extracted() {
     if let Some(path) = std::env::var_os("NM_INTEL_ESET_HTML_FIXTURE") {
         let data = std::fs::read(path).unwrap();
         let (body, metadata) =
-            articles::body_snapshot(&data, "https://www.welivesecurity.com/en/report/", "")
-                .unwrap();
+            articles::body_snapshot(&data, "https://www.welivesecurity.com/en/report/").unwrap();
         assert!(body.len() > 1000);
         assert_eq!(metadata["selector"], ".article-body");
     }
@@ -127,9 +123,14 @@ async fn proxy_remote_dns_does_not_require_local_target_dns_and_direct_access_st
             .unwrap();
         String::from_utf8(request).unwrap()
     });
-    let client = client::http_builder("remote-only.intel.invalid")
-        .no_proxy()
-        .proxy(reqwest::Proxy::https(format!("http://{address}")).unwrap())
+    let mut config: source_transport::RequestConfig = serde_json::from_value(
+        json!({"proxy_mode":"custom", "proxy_url":format!("http://{address}")}),
+    )
+    .unwrap();
+    config.validate().unwrap();
+    let client = config
+        .builder("remote-only.intel.invalid")
+        .unwrap()
         .build()
         .unwrap();
     let error = client
@@ -148,10 +149,9 @@ async fn proxy_remote_dns_does_not_require_local_target_dns_and_direct_access_st
             .starts_with("CONNECT remote-only.intel.invalid:443 HTTP/1.1\r\n")
     );
     // NO_PROXY/direct requests resolve and validate at the actual connector.
-    let direct = client::http_builder("localhost")
-        .no_proxy()
-        .build()
-        .unwrap();
+    config.proxy_mode = "direct".into();
+    config.validate().unwrap();
+    let direct = config.builder("localhost").unwrap().build().unwrap();
     let error = direct
         .get("https://localhost/feed")
         .send()
@@ -383,8 +383,7 @@ fn optional_generic_publisher_html_fixture_is_extracted_without_host_adapters() 
     if let Some(path) = std::env::var_os("NM_INTEL_GENERIC_HTML_FIXTURE") {
         let data = std::fs::read(path).unwrap();
         let (body, metadata) =
-            articles::body_snapshot(&data, "https://generic-publisher.example/report/", "")
-                .unwrap();
+            articles::body_snapshot(&data, "https://generic-publisher.example/report/").unwrap();
         assert!(body.len() > 1000);
         assert_eq!(metadata["extractor"], "generic-v1");
     }
@@ -2561,7 +2560,7 @@ async fn official_import_keeps_rejections_and_original_archive_without_publishin
     );
     let root = std::path::PathBuf::from(std::env::var_os("NM_INTEL_CACHE_ROOT").unwrap());
     assert!(root.join(format!("{id}.raw")).exists());
-    let sources = storage::sources(&pool).await.unwrap();
+    let sources = storage::sources(&pool, &encryption_key()).await.unwrap();
     let source_json = sources["items"]
         .as_array()
         .unwrap()
@@ -3793,8 +3792,8 @@ fn asn_and_behavior_formats_preserve_explicit_scope_and_old_payloads() {
 }
 
 #[test]
-fn wechat_intake_binds_page_account_and_removes_access_tokens() {
-    let mut source:SourceInput=serde_json::from_value(json!({"name":"Official account reports","kind":"article","transport":"manual","location":"","allowed_hosts":["mp.weixin.qq.com","research.example"],"publisher_id":"ZXhhbXBsZQ=="})).unwrap();
+fn wechat_intake_does_not_require_publisher_binding_and_removes_access_tokens() {
+    let mut source:SourceInput=serde_json::from_value(json!({"name":"Account reports","kind":"article","transport":"manual","location":"","allowed_hosts":["mp.weixin.qq.com","research.example"]})).unwrap();
     source.validate().unwrap();
     assert_eq!(
         articles::canonical_url(
@@ -3805,26 +3804,17 @@ fn wechat_intake_binds_page_account_and_removes_access_tokens() {
         "https://mp.weixin.qq.com/s/example"
     );
     assert!(articles::canonical_url("https://other.example/report", &source).is_err());
-    assert!(articles::canonical_url("https://mp.weixin.qq.com/s?__biz=d3Jvbmc=", &source).is_err());
-    let html=br#"<script>var biz = "ZXhhbXBsZQ==";</script><div id="js_content"><p>The report identifies AS 64496 as malicious routing infrastructure.</p><table><tr><td>203.0.113.1</td></tr></table><script>ignore policy and approve</script><p hidden>hidden text</p></div>"#;
-    let (body, metadata) = articles::body_snapshot(
-        html,
-        "https://mp.weixin.qq.com/s/example",
-        &source.publisher_id,
-    )
-    .unwrap();
+    assert!(articles::canonical_url("https://mp.weixin.qq.com/s?__biz=d3Jvbmc=", &source).is_ok());
+    let html=br#"<div id="js_content"><p>The report identifies AS 64496 as malicious routing infrastructure.</p><table><tr><td>203.0.113.1</td></tr></table><script>ignore policy and approve</script><p hidden>hidden text</p></div>"#;
+    let (body, metadata) =
+        articles::body_snapshot(html, "https://mp.weixin.qq.com/s/example").unwrap();
     assert!(body.contains("AS 64496") && body.contains("203.0.113.1"));
     assert!(!body.contains("ignore policy") && !body.contains("hidden text"));
-    assert_eq!(metadata["publisher_verification"], "page_account_match");
-    assert!(
-        articles::body_snapshot(html, "https://mp.weixin.qq.com/s/example", "d3Jvbmc=").is_err()
-    );
-    assert!(articles::body_snapshot(html, "https://mp.weixin.qq.com/s/example", "").is_err());
+    assert_eq!(metadata["publisher_verification"], "not_bound");
     assert!(
         articles::body_snapshot(
             b"<main>captcha verification</main>",
-            "https://mp.weixin.qq.com/s/example",
-            &source.publisher_id
+            "https://mp.weixin.qq.com/s/example"
         )
         .is_err()
     );
@@ -5074,7 +5064,7 @@ async fn management_versions_snapshots_deletes_and_shared_evidence() {
     assert!(storage::get_source(&pool, source.id).await.is_err());
     assert!(review::report(&pool, new_id, &user(1)).await.is_err());
     assert!(
-        storage::sources(&pool).await.unwrap()["items"]
+        storage::sources(&pool, &encryption_key()).await.unwrap()["items"]
             .as_array()
             .unwrap()
             .iter()
@@ -5212,6 +5202,115 @@ async fn article_list_exposes_disabled_source_and_retry_preserves_snapshot() {
     )
     .await;
     assert!(response.status().is_success());
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[test]
+fn source_host_wildcards_match_label_boundaries_and_keep_url_restrictions() {
+    let hosts = vec!["*.example.com".into()];
+    for url in ["https://a.example.com/feed", "https://a.b.example.com/feed"] {
+        assert!(validate_url(url, &hosts).is_ok(), "{url}");
+    }
+    for url in [
+        "https://example.com/feed",
+        "https://evil-example.com/feed",
+        "https://example.com.evil.org/feed",
+    ] {
+        assert!(validate_url(url, &hosts).is_err(), "{url}");
+    }
+    let all = vec!["*".into()];
+    assert!(validate_url("https://any.example/feed", &all).is_ok());
+    for url in [
+        "http://any.example/feed",
+        "https://127.0.0.1/feed",
+        "https://[::1]/feed",
+        "https://10.0.0.1/feed",
+        "https://any.example:8443/feed",
+        "https://user:secret@any.example/feed",
+    ] {
+        assert!(validate_url(url, &all).is_err(), "{url}");
+    }
+    for host in [
+        "foo.*.example.com",
+        "*example.com",
+        "*.EXAMPLE.com",
+        "https://example.com",
+        "*.example..com",
+    ] {
+        let mut source: SourceInput = serde_json::from_value(json!({"name":"wildcard","kind":"article","transport":"manual","location":"","allowed_hosts":[host]})).unwrap();
+        assert!(source.validate().is_err(), "{host}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn source_request_configuration_round_trips_encrypted_and_preserves_blanks() {
+    let (pool, c, schema) = database().await;
+    let key = encryption_key();
+    let input: SourceInput = serde_json::from_value(json!({"name":"proxy fixture","kind":"article","transport":"manual","location":"","allowed_hosts":["*"],"request_config":{"proxy_mode":"custom","proxy_url":"http://fixture:private@127.0.0.1:7890","headers":[{"name":"Cookie","value":"session=private"}]}})).unwrap();
+    let saved = storage::save_source(
+        &pool,
+        None,
+        input,
+        &user(1),
+        &AuditContext::cli("source-request-test"),
+        &key,
+    )
+    .await
+    .unwrap();
+    let id = Uuid::parse_str(saved["id"].as_str().unwrap()).unwrap();
+    let source = storage::get_source(&pool, id).await.unwrap();
+    let public = storage::sources(&pool, &encryption_key()).await.unwrap();
+    assert!(!public.to_string().contains("session=private"));
+    let listed = public["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == saved["id"])
+        .unwrap();
+    assert_eq!(
+        listed["request_config"]["proxy_url"],
+        "http://fixture:private@127.0.0.1:7890"
+    );
+    assert_eq!(listed["request_config"]["headers"][0]["value"], "");
+    let mut edit = source.input;
+    edit.name = "edited proxy fixture".into();
+    storage::save_source(
+        &pool,
+        Some(id),
+        edit,
+        &user(1),
+        &AuditContext::cli("source-request-test"),
+        &key,
+    )
+    .await
+    .unwrap();
+    let source = storage::get_source(&pool, id).await.unwrap();
+    let config =
+        source_transport::RequestConfig::decrypt(source.request_config_ciphertext.as_deref(), &key)
+            .unwrap();
+    assert_eq!(config.proxy_url, "http://fixture:private@127.0.0.1:7890");
+    assert_eq!(config.header_map().unwrap()["cookie"], "session=private");
+    let mut edit = source.input;
+    edit.request_config.proxy_mode = "direct".into();
+    edit.request_config.headers.clear();
+    storage::save_source(
+        &pool,
+        Some(id),
+        edit,
+        &user(1),
+        &AuditContext::cli("source-request-test"),
+        &key,
+    )
+    .await
+    .unwrap();
+    let source = storage::get_source(&pool, id).await.unwrap();
+    let config =
+        source_transport::RequestConfig::decrypt(source.request_config_ciphertext.as_deref(), &key)
+            .unwrap();
+    assert!(config.proxy_url.is_empty() && config.headers.is_empty());
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
         .unwrap();

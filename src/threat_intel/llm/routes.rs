@@ -228,7 +228,10 @@ async fn chat(
         Ok(v) => v,
         Err(error) => return response::<Value>(Err(error)),
     };
-    let payload = input.parameters.payload(&settings, json!(input.messages));
+    let mut payload = input.parameters.payload(&settings, json!(input.messages));
+    if transport.stream && settings.ai_protocol == "chat" {
+        payload["stream_options"] = json!({"include_usage":true});
+    }
     let effective_parameters = input.parameters.effective(&settings, &transport);
     let session = digest(
         format!(
@@ -272,7 +275,12 @@ async fn chat(
             Ok(value) => {
                 match ai::response_content(value.to_string().as_bytes(), &settings.ai_protocol) {
                     Ok((text, usage)) => {
-                        json!({"type":"done","text":text,"usage":usage,"elapsed_ms":started.elapsed().as_millis() as u64,"first_delta_ms":first_delta_ms})
+                        let mut event = json!({"type":"done","text":text,"usage":usage,"elapsed_ms":started.elapsed().as_millis() as u64,"first_delta_ms":first_delta_ms});
+                        if !transport.stream || settings.ai_protocol == "responses" {
+                            event["reasoning"] =
+                                json!(debug::reasoning_text(&value, &settings.ai_protocol));
+                        }
+                        event
                     }
                     Err(error) => json!({"type":"error","code":error.code}),
                 }

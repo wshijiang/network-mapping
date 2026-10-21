@@ -176,7 +176,7 @@ pub(super) async fn sync(
                 false,
             ))
         }
-        "eset_github" => github(pool, &s, &data).await,
+        "eset_github" => github(pool, &s, &data, encryption_key).await,
         kind => {
             let (entries, validation) = if kind == "threatfox" {
                 parse::threatfox_document(&data, kind, true)?
@@ -192,7 +192,12 @@ pub(super) async fn sync(
         }
     }
 }
-async fn github(pool: &Pool, s: &Source, data: &[u8]) -> Result<(Value, bool)> {
+async fn github(
+    pool: &Pool,
+    s: &Source,
+    data: &[u8],
+    encryption_key: &str,
+) -> Result<(Value, bool)> {
     let tree: Value =
         serde_json::from_slice(data).map_err(|_| Error::bad("intel_invalid_github_tree"))?;
     if tree.get("truncated") == Some(&json!(true)) {
@@ -271,7 +276,16 @@ async fn github(pool: &Pool, s: &Source, data: &[u8]) -> Result<(Value, bool)> {
                 segments.push(part);
             }
         }
-        let data = client::request(raw.as_str(), &s.input.allowed_hosts, None, None).await?;
+        let data = client::source_request(
+            s,
+            raw.as_str(),
+            None,
+            None,
+            MAX_BYTES,
+            Duration::from_secs(30),
+            encryption_key,
+        )
+        .await?;
         let (count, supported, report) = github_file(pool, s, path, sha, &data).await?;
         validation.merge(report, path);
         added += count;
@@ -506,16 +520,18 @@ async fn extract(
             body
         } else {
             stage = "article_fetch";
-            let data = client::request_bounded(
+            let data = client::source_request(
+                &source,
                 url,
-                &source.input.allowed_hosts,
                 None,
                 None,
                 2 * 1024 * 1024,
+                Duration::from_secs(30),
+                encryption_key,
             )
             .await?;
             stage = "article_parse";
-            let (body, intake) = articles::body_snapshot(&data, url, &source.input.publisher_id)?;
+            let (body, intake) = articles::body_snapshot(&data, url)?;
             metadata["intake"] = intake;
             body
         };

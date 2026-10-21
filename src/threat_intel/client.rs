@@ -143,14 +143,7 @@ pub(super) fn secret(name: &str) -> Result<Option<String>> {
         .map(Some)
         .ok_or_else(|| Error::bad("intel_credential_missing"))
 }
-pub(super) async fn request(
-    location: &str,
-    hosts: &[String],
-    post: Option<&Value>,
-    auth: Option<(&str, &str)>,
-) -> Result<Vec<u8>> {
-    request_bounded(location, hosts, post, auth, MAX_BYTES).await
-}
+#[cfg(test)]
 pub(super) async fn request_bounded(
     location: &str,
     hosts: &[String],
@@ -158,9 +151,44 @@ pub(super) async fn request_bounded(
     auth: Option<(&str, &str)>,
     limit: usize,
 ) -> Result<Vec<u8>> {
-    request_bounded_with_timeout(location, hosts, post, auth, limit, Duration::from_secs(30)).await
+    configured_request(
+        &source_transport::RequestConfig::default(),
+        location,
+        hosts,
+        post,
+        auth,
+        limit,
+        Duration::from_secs(30),
+    )
+    .await
 }
-pub(super) async fn request_bounded_with_timeout(
+pub(super) async fn source_request(
+    source: &storage::Source,
+    location: &str,
+    post: Option<&Value>,
+    auth: Option<(&str, &str)>,
+    limit: usize,
+    timeout: Duration,
+    encryption_key: &str,
+) -> Result<Vec<u8>> {
+    let mut config = source_transport::RequestConfig::decrypt(
+        source.request_config_ciphertext.as_deref(),
+        encryption_key,
+    )?;
+    config.validate()?;
+    configured_request(
+        &config,
+        location,
+        &source.input.allowed_hosts,
+        post,
+        auth,
+        limit,
+        timeout,
+    )
+    .await
+}
+async fn configured_request(
+    config: &source_transport::RequestConfig,
     location: &str,
     hosts: &[String],
     post: Option<&Value>,
@@ -187,24 +215,49 @@ pub(super) async fn request_bounded_with_timeout(
         "method":if post.is_some() {"POST"} else {"GET"},"limit_bytes":limit,
         "proxy_env_keys":proxy_env_keys,"timeout_seconds":timeout.as_secs()});
     let result = async {
-        // Keep reqwest's proxy / NO_PROXY selection and native TLS roots. Direct
+        // Keep native TLS roots and the selected source proxy mode. Direct
         // destinations are validated by the resolver before returning pinned IPs.
         // Proxies must enforce the same public-egress boundary on their remote DNS.
-        let client = http_builder(host)
-            .build()
-            .map_err(|e| transport_error(e).context(json!({"phase":"client_build"})))?;
-        let mut request = if let Some(body) = post {
-            client.post(url.clone()).json(body)
-        } else {
-            client.get(url.clone())
+        let mut current = url.clone();
+        let mut forward_headers = true;
+        let mut redirects = 0;
+        let mut response = loop {
+            let destination = current.host_str().ok_or_else(|| Error::bad("intel_invalid_url"))?;
+            let client = config.builder(destination)?
+                .build()
+                .map_err(|e| transport_error(e).context(json!({"phase":"client_build"})))?;
+            let mut request = if let Some(body) = post {
+                client.post(current.clone()).json(body)
+            } else {
+                client.get(current.clone())
+            };
+            if forward_headers {
+                request = request.headers(config.request_headers(auth)?);
+            }
+            let remaining = timeout.checked_sub(started.elapsed())
+                .filter(|value| !value.is_zero())
+                .ok_or_else(|| Error::bad("intel_source_timeout"))?;
+            // Persist only fixed classifications, never URLs or header values.
+            let response = request.timeout(remaining).send().await.map_err(|e| {
+                transport_error(e).context(json!({"phase":"send"}))
+            })?;
+            if post.is_some() || !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+                break response;
+            }
+            if redirects >= 5 {
+                return Err(Error::bad("intel_source_redirect_limit"));
+            }
+            let location = response.headers().get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| Error::bad("intel_url_not_allowed"))?;
+            let next = current.join(location).map_err(|_| Error::bad("intel_url_not_allowed"))?;
+            let next = validate_url(next.as_str(), hosts)?;
+            // Unknown custom headers can contain secrets too. Once the origin
+            // changes, never forward source headers or credentials again.
+            forward_headers &= current.origin() == next.origin();
+            current = next;
+            redirects += 1;
         };
-        if let Some((header, key)) = auth {
-            request = request.header(header, key);
-        }
-        // Never include reqwest errors or URLs: an upstream export may put a key in its path.
-        let mut response = request.timeout(timeout).send().await.map_err(|e| {
-            transport_error(e).context(json!({"phase":"send"}))
-        })?;
         let status = response.status().as_u16();
         if !response.status().is_success() {
             let code=if status==429 {"intel_source_rate_limited"}else{"intel_source_http_status"};
@@ -403,9 +456,9 @@ pub(super) async fn source_bytes(
             k,
         )
     });
-    request_bounded_with_timeout(
+    source_request(
+        source,
         &source.input.location,
-        &source.input.allowed_hosts,
         post.as_ref(),
         auth,
         MAX_BYTES,
@@ -416,6 +469,7 @@ pub(super) async fn source_bytes(
         } else {
             30
         }),
+        encryption_key,
     )
     .await
 }

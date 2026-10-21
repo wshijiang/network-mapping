@@ -209,10 +209,11 @@ async fn both_sdk_stream_protocols_handle_fragmentation_and_cancellation() {
     use futures_util::StreamExt;
     for protocol in ["chat", "responses"] {
         let wire = if protocol == "chat" {
-            "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\ndata: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_owned()
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"思考\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\ndata: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_owned()
         } else {
             format!(
-                "data: {}\n\ndata: {}\n\n",
+                "data: {}\n\ndata: {}\n\ndata: {}\n\n",
+                json!({"type":"response.reasoning_summary_text.delta","delta":"思考"}),
                 json!({"type":"response.output_text.delta","delta":"你好"}),
                 json!({"type":"response.completed","response":{"status":"completed","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"你好"}]}]}})
             )
@@ -250,6 +251,19 @@ async fn both_sdk_stream_protocols_handle_fragmentation_and_cancellation() {
                 .0,
             "你好"
         );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        transport::collect(&sdk, json!({"stream":true}), protocol, Some(tx))
+            .await
+            .unwrap();
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            json!({"type":"reasoning","text":"思考"})
+        );
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            json!({"type":"delta","text":"你好"})
+        );
+        assert!(rx.recv().await.is_none());
     }
     // Dropping a browser consumer must also stop an idle upstream stream.
     let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

@@ -244,10 +244,14 @@ fn sdk_error(error: OpenAIError) -> Error {
     }
 }
 
-async fn delta(events: &Option<tokio::sync::mpsc::Sender<Value>>, text: &str) -> Result<()> {
+async fn delta(
+    events: &Option<tokio::sync::mpsc::Sender<Value>>,
+    kind: &str,
+    text: &str,
+) -> Result<()> {
     if let Some(events) = events {
         events
-            .send(json!({"type":"delta","text":text}))
+            .send(json!({"type":kind,"text":text}))
             .await
             .map_err(|_| Error::bad("llm_cancelled"))?;
     }
@@ -270,8 +274,16 @@ pub(super) async fn collect(
     let mut aggregate = Aggregate::new(protocol);
     while let Some(event) = stream.next().await {
         let event = event.map_err(|_| Error::bad("llm_stream_failed"))?;
-        if let Some(text) = aggregate.push(event)? {
-            delta(&events, &text).await?;
+        let reasoning = events
+            .as_ref()
+            .and_then(|_| debug::reasoning_delta(&event, protocol))
+            .map(str::to_owned);
+        let text = aggregate.push(event)?;
+        if let Some(reasoning) = reasoning {
+            delta(&events, "reasoning", &reasoning).await?;
+        }
+        if let Some(text) = text {
+            delta(&events, "delta", &text).await?;
         }
     }
     aggregate.finish()

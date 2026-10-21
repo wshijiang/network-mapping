@@ -9,6 +9,7 @@ pub(super) struct Source {
     pub input: SourceInput,
     pub fence: Option<Fence>,
     pub credential_ciphertext: Option<Vec<u8>>,
+    pub request_config_ciphertext: Option<Vec<u8>>,
 }
 #[derive(Clone, Copy)]
 pub(super) enum Fence {
@@ -54,7 +55,7 @@ pub(super) fn source(row: &tokio_postgres::Row) -> Source {
             transport: row.get("transport"),
             location: row.get("location"),
             allowed_hosts: row.get("allowed_hosts"),
-            publisher_id: row.get("publisher_id"),
+            request_config: serde_json::from_value(row.get("request_config")).unwrap_or_default(),
             auth_env: row.get("auth_env"),
             credential: String::new(),
             clear_credential: false,
@@ -66,6 +67,7 @@ pub(super) fn source(row: &tokio_postgres::Row) -> Source {
         },
         fence: None,
         credential_ciphertext: row.get("credential_ciphertext"),
+        request_config_ciphertext: row.get("request_config_ciphertext"),
     }
 }
 pub(super) async fn get_source(pool: &Pool, id: Uuid) -> Result<Source> {
@@ -80,7 +82,7 @@ pub(super) async fn get_source(pool: &Pool, id: Uuid) -> Result<Source> {
         .map(source)
         .ok_or_else(Error::missing)
 }
-pub(super) async fn sources(pool: &Pool) -> Result<Value> {
+pub(super) async fn sources(pool: &Pool, encryption_key: &str) -> Result<Value> {
     let rows=pool.get().await?.query("SELECT s.*, (SELECT JSONB_BUILD_OBJECT('status',j.status,'summary',j.summary,'error_code',j.error_code,'created_at',j.created_at) FROM intel_sync_run j WHERE j.source_id=s.id ORDER BY created_at DESC LIMIT 1) AS last_run,
     (SELECT JSONB_BUILD_OBJECT('stage',CASE WHEN i.source_revision<>s.revision THEN 'cancelled' WHEN i.paused THEN 'paused' ELSE i.stage END,'total',i.record_count,'processed',i.processed_count,'validation',i.validation_summary) FROM intel_import_snapshot i WHERE i.source_id=s.id) AS import_status
     FROM intel_source s WHERE s.deleted_at IS NULL ORDER BY name,id",&[]).await?;
@@ -89,6 +91,11 @@ pub(super) async fn sources(pool: &Pool) -> Result<Value> {
         .map(|row| {
             let s = source(row);
             let mut v = serde_json::to_value(&s.input).unwrap();
+            let config = source_transport::RequestConfig::decrypt(
+                s.request_config_ciphertext.as_deref(),
+                encryption_key,
+            )?;
+            v["request_config"]["proxy_url"] = json!(config.proxy_url);
             v["id"] = json!(s.id);
             v["revision"] = json!(s.revision);
             v["next_check_at"] =
@@ -104,9 +111,9 @@ pub(super) async fn sources(pool: &Pool) -> Result<Value> {
             v["last_run"] = row
                 .get::<_, Option<Value>>("last_run")
                 .unwrap_or(Value::Null);
-            v
+            Ok(v)
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     Ok(
         json!({"items":items,"defaults":{"mitre_stix":86400,"eset_github":3600,"rss":1800,"article":1800,"threatfox":1800,"threatfox_export":3600,"json":1800,"lines":1800}}),
     )
@@ -120,7 +127,6 @@ pub(super) async fn save_source(
     encryption_key: &str,
 ) -> Result<Value> {
     admin(user)?;
-    input.validate()?;
     let encrypted =
         credentials::encrypt_update(&input.credential, input.clear_credential, encryption_key)?;
     let clear = input.clear_credential || input.transport != "https";
@@ -129,7 +135,7 @@ pub(super) async fn save_source(
     let id = id.unwrap_or_else(Uuid::now_v7);
     let old = tx
         .query_opt(
-            "SELECT revision,deleted_at FROM intel_source WHERE id=$1 FOR UPDATE",
+            "SELECT revision,deleted_at,request_config_ciphertext FROM intel_source WHERE id=$1 FOR UPDATE",
             &[&id],
         )
         .await?;
@@ -144,11 +150,17 @@ pub(super) async fn save_source(
         if input.expected_revision != Some(revision) {
             return Err(Error::conflict());
         }
+        let ciphertext: Option<Vec<u8>> = row.get("request_config_ciphertext");
+        let old_config =
+            source_transport::RequestConfig::decrypt(ciphertext.as_deref(), encryption_key)?;
+        input.request_config.preserve(&old_config);
+        input.validate()?;
         tx.execute("UPDATE intel_source SET name=$2,kind=$3,transport=$4,location=$5,allowed_hosts=$6,auth_env=$7,enabled=$8,require_review=$9,interval_seconds=$10,revision=revision+1,next_check_at=NOW(),updated_at=NOW() WHERE id=$1",&[&id,&input.name,&input.kind,&input.transport,&input.location,&input.allowed_hosts,&input.auth_env,&input.enabled,&input.require_review,&input.interval_seconds.unwrap()]).await?;
         tx.execute("DELETE FROM intel_source_file WHERE source_id=$1", &[&id])
             .await?;
         revision + 1
     } else {
+        input.validate()?;
         if input.expected_revision.is_some() {
             return Err(Error::missing());
         }
@@ -167,8 +179,12 @@ pub(super) async fn save_source(
     };
     tx.execute("UPDATE intel_source SET credential_ciphertext=CASE WHEN $2 THEN NULL ELSE COALESCE($3,credential_ciphertext) END,expiry_months=$4 WHERE id=$1", &[&id,&clear,&encrypted,&input.expiry_months]).await?;
     tx.execute(
-        "UPDATE intel_source SET publisher_id=$2 WHERE id=$1",
-        &[&id, &input.publisher_id],
+        "UPDATE intel_source SET request_config=$2,request_config_ciphertext=$3 WHERE id=$1",
+        &[
+            &id,
+            &json!(input.request_config.redact()),
+            &input.request_config.encrypt(encryption_key)?,
+        ],
     )
     .await?;
     audit(&tx,user,context,"intel.source.save",&id.to_string(),json!({"revision":revision,"kind":input.kind,"enabled":input.enabled,"require_review":input.require_review,"interval_seconds":input.interval_seconds,"expiry_months":input.expiry_months,"credential_changed":clear||encrypted.is_some()})).await?;

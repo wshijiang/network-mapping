@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS intel_source (
 ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS credential_ciphertext BYTEA;
 ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS publisher_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS request_config JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS request_config_ciphertext BYTEA;
 ALTER TABLE intel_source DROP CONSTRAINT IF EXISTS intel_source_kind_check;
 ALTER TABLE intel_source ADD CONSTRAINT intel_source_kind_check CHECK(kind IN ('json','lines','threatfox','threatfox_export','eset_github','rss','mitre_stix','article'));
 ALTER TABLE intel_source DROP CONSTRAINT IF EXISTS intel_source_transport_check;

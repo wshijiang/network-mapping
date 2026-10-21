@@ -75,6 +75,9 @@ impl Parameters {
         if effort != "default" {
             if settings.ai_protocol == "responses" {
                 payload["reasoning"] = json!({"effort":effort});
+                if effort != "none" {
+                    payload["reasoning"]["summary"] = json!("auto");
+                }
             } else {
                 payload["reasoning_effort"] = json!(effort);
             }
@@ -94,6 +97,77 @@ impl Parameters {
             "temperature":self.temperature,"top_p":self.top_p,"stream":transport.stream,
             "token_limit_field":if settings.ai_protocol=="responses" {"max_output_tokens"} else {self.token_limit_field.as_deref().unwrap_or("max_tokens")}})
     }
+}
+
+// Only expose provider-returned text to the administrator's transient debug UI.
+// Never decode encrypted reasoning or add this data to subsequent messages.
+pub(super) fn reasoning_delta<'a>(event: &'a Value, protocol: &str) -> Option<&'a str> {
+    if protocol == "responses" {
+        match event.get("type").and_then(Value::as_str) {
+            Some("response.reasoning_summary_text.delta" | "response.reasoning_text.delta") => {
+                event
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+            }
+            _ => None,
+        }
+    } else {
+        [
+            "/choices/0/delta/reasoning_content",
+            "/choices/0/delta/reasoning",
+        ]
+        .into_iter()
+        .find_map(|path| {
+            event
+                .pointer(path)
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+        })
+    }
+}
+
+pub(super) fn reasoning_text(response: &Value, protocol: &str) -> String {
+    if protocol != "responses" {
+        return [
+            "/choices/0/message/reasoning_content",
+            "/choices/0/message/reasoning",
+        ]
+        .into_iter()
+        .find_map(|path| {
+            response
+                .pointer(path)
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+        })
+        .unwrap_or_default()
+        .to_owned();
+    }
+    response
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item["type"] == "reasoning")
+        .flat_map(|item| {
+            // Prefer summaries when the provider returns both forms.
+            let summary = item.get("summary").and_then(Value::as_array);
+            let parts = summary
+                .filter(|parts| !parts.is_empty())
+                .or_else(|| item.get("content").and_then(Value::as_array));
+            parts
+                .into_iter()
+                .flatten()
+                .filter(|part| {
+                    matches!(
+                        part["type"].as_str(),
+                        Some("summary_text" | "reasoning_text")
+                    )
+                })
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 #[cfg(test)]
@@ -133,6 +207,7 @@ mod tests {
             assert_eq!(payload["top_p"], 0.8);
             if protocol == "responses" {
                 assert_eq!(payload["reasoning"]["effort"], "high");
+                assert_eq!(payload["reasoning"]["summary"], "auto");
             } else {
                 assert_eq!(payload["reasoning_effort"], "high");
             }
@@ -202,5 +277,54 @@ mod tests {
         let mut local = settings("responses");
         let mut transport = resolve(&Transport::global(), &Transport::default()).unwrap();
         assert!(parameters.apply(&mut local, &mut transport).is_err());
+    }
+
+    #[test]
+    fn debug_reasoning_only_extracts_provider_text_and_keeps_protocols_separate() {
+        for field in ["reasoning_content", "reasoning"] {
+            let mut chat = json!({"choices":[{"delta":{},"message":{}}]});
+            chat["choices"][0]["delta"][field] = json!("思考增量");
+            chat["choices"][0]["message"][field] = json!("完整思考");
+            assert_eq!(reasoning_delta(&chat, "chat"), Some("思考增量"));
+            assert_eq!(reasoning_text(&chat, "chat"), "完整思考");
+            assert!(reasoning_text(&chat, "responses").is_empty());
+        }
+        for kind in [
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_text.delta",
+        ] {
+            let event = json!({"type":kind,"delta":"思考增量"});
+            assert_eq!(reasoning_delta(&event, "responses"), Some("思考增量"));
+        }
+        assert_eq!(
+            reasoning_delta(
+                &json!({"type":"response.output_text.delta","delta":"answer"}),
+                "responses"
+            ),
+            None
+        );
+        let response = json!({"output":[
+            {"type":"reasoning","summary":[{"type":"summary_text","text":"摘要一"},{"type":"summary_text","text":"摘要二"}],"encrypted_content":"must-not-decode"},
+            {"type":"reasoning","content":[{"type":"reasoning_text","text":"兼容思考"}]},
+            {"type":"message","content":[{"type":"output_text","text":"answer"}]}
+        ]});
+        assert_eq!(
+            reasoning_text(&response, "responses"),
+            "摘要一\n\n摘要二\n\n兼容思考"
+        );
+        assert!(
+            reasoning_text(
+                &json!({"output":[{"type":"reasoning","encrypted_content":"opaque"}]}),
+                "responses"
+            )
+            .is_empty()
+        );
+        let local = settings("responses");
+        let parameters: Parameters = decode(json!({"reasoning_effort":"none"})).unwrap();
+        assert!(
+            parameters.payload(&local, json!([]))["reasoning"]
+                .get("summary")
+                .is_none()
+        );
     }
 }
