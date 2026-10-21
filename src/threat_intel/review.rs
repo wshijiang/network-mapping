@@ -23,7 +23,7 @@ pub(super) async fn queue(pool: &Pool, user: &UserBaseI, q: &storage::ListQuery)
            SELECT r.*,latest.article_id AS review_article FROM intel_record_state r
            LEFT JOIN LATERAL (
              SELECT a.id AS article_id FROM intel_article_record l JOIN intel_article a ON a.id=l.article_id
-             WHERE l.record_id=r.id AND a.source_id=r.source_id ORDER BY a.created_at DESC,a.id DESC LIMIT 1
+             WHERE l.record_id=r.id AND a.source_id=r.source_id AND a.deleted_at IS NULL ORDER BY a.created_at DESC,a.id DESC LIMIT 1
            ) latest ON r.origin='ai'
            WHERE r.status='pending' AND ($1::UUID IS NULL OR r.source_id=$1)
          ), grouped AS (
@@ -50,7 +50,10 @@ pub(super) async fn report(pool: &Pool, id: Uuid, user: &UserBaseI) -> Result<Va
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
     let article = tx
-        .query_opt("SELECT * FROM intel_article WHERE id=$1 FOR SHARE", &[&id])
+        .query_opt(
+            "SELECT * FROM intel_article WHERE id=$1 AND deleted_at IS NULL FOR SHARE",
+            &[&id],
+        )
         .await?
         .ok_or_else(Error::missing)?;
     let body: Option<String> = article.get("body");
@@ -112,7 +115,7 @@ pub(super) async fn submit(
     // Serialize against extraction completion before acquiring any IOC locks.
     let article = tx
         .query_opt(
-            "SELECT source_id,body FROM intel_article WHERE id=$1 FOR UPDATE",
+            "SELECT source_id,body FROM intel_article WHERE id=$1 AND deleted_at IS NULL FOR UPDATE",
             &[&id],
         )
         .await?

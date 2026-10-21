@@ -167,7 +167,7 @@ pub(super) async fn sync(
             let mut added = 0;
             for mut link in links {
                 link.url = articles::canonical_url(&link.url, &s.input)?;
-                added+=tx.execute("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash) SELECT $1,$2,$3,$4,$5,$6 WHERE EXISTS(SELECT 1 FROM intel_source WHERE id=$2 AND revision=$3 AND enabled) ON CONFLICT(source_id,url,feed_hash,source_revision) DO NOTHING",&[&Uuid::now_v7(),&s.id,&s.revision,&link.url,&link.title,&link.fingerprint]).await?;
+                added+=tx.execute("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash) SELECT $1,$2,$3,$4,$5,$6 WHERE EXISTS(SELECT 1 FROM intel_source WHERE id=$2 AND revision=$3 AND enabled) AND NOT EXISTS(SELECT 1 FROM intel_article WHERE source_id=$2 AND source_revision=$3 AND url=$4 AND feed_hash=$6 AND deleted_at IS NOT NULL) ON CONFLICT(source_id,url,feed_hash,source_revision) WHERE deleted_at IS NULL DO NOTHING",&[&Uuid::now_v7(),&s.id,&s.revision,&link.url,&link.title,&link.fingerprint]).await?;
             }
             tx.commit().await?;
             drop(c);
@@ -531,7 +531,7 @@ async fn extract(
         metadata["ai_protocol"] = json!(settings.ai_protocol);
         metadata["max_output_tokens"] = json!(settings.ai_max_output_tokens);
         metadata["reasoning_effort"] = json!(settings.ai_reasoning_effort);
-        let changed=tx.execute("UPDATE intel_article SET body=$3,body_hash=$4,extraction_metadata=$5 WHERE id=$1 AND claim_token=$2 AND lease_until>NOW()",&[&id,&token,&body,&body_hash,&metadata]).await?;
+        let changed=tx.execute("UPDATE intel_article SET body=$3,body_hash=$4,extraction_metadata=$5,revision=revision+1 WHERE id=$1 AND claim_token=$2 AND lease_until>NOW()",&[&id,&token,&body,&body_hash,&metadata]).await?;
         if changed == 0 {
             return Err(Error::bad("intel_ai_lease_lost"));
         }

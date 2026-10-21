@@ -71,7 +71,10 @@ pub(super) fn source(row: &tokio_postgres::Row) -> Source {
 pub(super) async fn get_source(pool: &Pool, id: Uuid) -> Result<Source> {
     pool.get()
         .await?
-        .query_opt("SELECT * FROM intel_source WHERE id=$1", &[&id])
+        .query_opt(
+            "SELECT * FROM intel_source WHERE id=$1 AND deleted_at IS NULL",
+            &[&id],
+        )
         .await?
         .as_ref()
         .map(source)
@@ -80,7 +83,7 @@ pub(super) async fn get_source(pool: &Pool, id: Uuid) -> Result<Source> {
 pub(super) async fn sources(pool: &Pool) -> Result<Value> {
     let rows=pool.get().await?.query("SELECT s.*, (SELECT JSONB_BUILD_OBJECT('status',j.status,'summary',j.summary,'error_code',j.error_code,'created_at',j.created_at) FROM intel_sync_run j WHERE j.source_id=s.id ORDER BY created_at DESC LIMIT 1) AS last_run,
     (SELECT JSONB_BUILD_OBJECT('stage',CASE WHEN i.source_revision<>s.revision THEN 'cancelled' WHEN i.paused THEN 'paused' ELSE i.stage END,'total',i.record_count,'processed',i.processed_count,'validation',i.validation_summary) FROM intel_import_snapshot i WHERE i.source_id=s.id) AS import_status
-    FROM intel_source s ORDER BY name,id",&[]).await?;
+    FROM intel_source s WHERE s.deleted_at IS NULL ORDER BY name,id",&[]).await?;
     let items = rows
         .iter()
         .map(|row| {
@@ -126,12 +129,18 @@ pub(super) async fn save_source(
     let id = id.unwrap_or_else(Uuid::now_v7);
     let old = tx
         .query_opt(
-            "SELECT revision FROM intel_source WHERE id=$1 FOR UPDATE",
+            "SELECT revision,deleted_at FROM intel_source WHERE id=$1 FOR UPDATE",
             &[&id],
         )
         .await?;
     let revision = if let Some(row) = old {
         let revision: i64 = row.get(0);
+        if row
+            .get::<_, Option<chrono::DateTime<chrono::Utc>>>("deleted_at")
+            .is_some()
+        {
+            return Err(Error::missing());
+        }
         if input.expected_revision != Some(revision) {
             return Err(Error::conflict());
         }
@@ -144,7 +153,10 @@ pub(super) async fn save_source(
             return Err(Error::missing());
         }
         let count: i64 = tx
-            .query_one("SELECT COUNT(*) FROM intel_source", &[])
+            .query_one(
+                "SELECT COUNT(*) FROM intel_source WHERE deleted_at IS NULL",
+                &[],
+            )
             .await?
             .get(0);
         if count >= 100 {
@@ -260,7 +272,7 @@ pub(super) async fn enqueue(
     let tx = c.transaction().await?;
     let row = tx
         .query_opt(
-            "SELECT revision,enabled,transport FROM intel_source WHERE id=$1 FOR UPDATE",
+            "SELECT revision,enabled,transport FROM intel_source WHERE id=$1 AND deleted_at IS NULL FOR UPDATE",
             &[&id],
         )
         .await?
@@ -501,7 +513,7 @@ async fn ingest_in<C: GenericClient + Sync>(
     )
     .await?;
     if let Some(article) = article {
-        let rows = tx.query("SELECT r.id,r.payload,r.status FROM intel_record r JOIN intel_article old ON old.id=r.article_id JOIN intel_article current ON current.id=$3 WHERE r.source_id=$1 AND r.external_key=$2 AND r.origin='ai' AND r.status<>'superseded' AND old.body IS NOT DISTINCT FROM current.body ORDER BY (r.status<>'pending') DESC,r.created_at DESC,r.id DESC", &[&s.id,&key,&article]).await?;
+        let rows = tx.query("SELECT r.id,r.payload,r.status FROM intel_record r JOIN intel_article old ON old.id=r.article_id JOIN intel_article current ON current.id=$3 WHERE r.source_id=$1 AND r.external_key=$2 AND r.origin='ai' AND r.status<>'superseded' AND old.deleted_at IS NULL AND old.body IS NOT DISTINCT FROM current.body ORDER BY (r.status<>'pending') DESC,r.created_at DESC,r.id DESC", &[&s.id,&key,&article]).await?;
         let facts = ai_facts(&payload);
         let matches = rows
             .iter()
@@ -590,7 +602,7 @@ pub(super) async fn review_in(
     }
     let identity = tx
         .query_opt(
-            "SELECT source_id,external_key FROM intel_record WHERE id=$1",
+            "SELECT source_id,external_key FROM intel_record_state WHERE id=$1",
             &[&id],
         )
         .await?
@@ -673,7 +685,10 @@ pub(super) fn record_json(r: &tokio_postgres::Row) -> Value {
     let until = r
         .try_get::<_, Option<chrono::DateTime<chrono::Utc>>>("effective_valid_until")
         .unwrap_or_else(|_| r.get("valid_until"));
-    json!({"id":r.get::<_,Uuid>("id"),"source_id":r.get::<_,Uuid>("source_id"),"source_name":r.get::<_,String>("source_name"),"source_revision":r.get::<_,i64>("source_revision"),"origin":r.get::<_,String>("origin"),"status":if status=="approved"&&expired{"expired".to_owned()}else{status},"expired":expired,"type":r.get::<_,String>("kind"),"value":r.get::<_,String>("value"),"content_hash":r.get::<_,String>("content_hash"),"payload":r.get::<_,Value>("payload"),"actor_id":effective_actor,"original_actor_id":original_actor,"reviewed_attribution":attribution,"article_id":r.get::<_,Option<Uuid>>("article_id"),"review_id":r.get::<_,Option<Uuid>>("review_id"),"valid_until":until,"created_at":r.get::<_,chrono::DateTime<chrono::Utc>>("created_at")})
+    let article = r
+        .try_get::<_, Option<Uuid>>("active_article_id")
+        .unwrap_or_else(|_| r.get("article_id"));
+    json!({"id":r.get::<_,Uuid>("id"),"source_id":r.get::<_,Uuid>("source_id"),"source_name":r.get::<_,String>("source_name"),"source_revision":r.get::<_,i64>("source_revision"),"origin":r.get::<_,String>("origin"),"status":if status=="approved"&&expired{"expired".to_owned()}else{status},"expired":expired,"type":r.get::<_,String>("kind"),"value":r.get::<_,String>("value"),"content_hash":r.get::<_,String>("content_hash"),"payload":r.get::<_,Value>("payload"),"actor_id":effective_actor,"original_actor_id":original_actor,"reviewed_attribution":attribution,"article_id":article,"review_id":r.get::<_,Option<Uuid>>("review_id"),"valid_until":until,"created_at":r.get::<_,chrono::DateTime<chrono::Utc>>("created_at")})
 }
 #[derive(Deserialize, Default)]
 pub(super) struct ListQuery {
@@ -711,7 +726,7 @@ pub(super) async fn records(pool: &Pool, user: &UserBaseI, q: &ListQuery) -> Res
         return Err(Error::bad("intel_invalid_query"));
     }
     let c = pool.get().await?;
-    let rows=c.query("SELECT r.*,COALESCE(rv.attribution,'{}'::JSONB) AS reviewed_attribution,COUNT(*) OVER() AS total FROM intel_record_state r LEFT JOIN intel_review rv ON rv.id=r.review_id AND rv.record_id=r.id WHERE ((r.status=$1 AND ($1<>'approved' OR NOT r.expired)) OR ($1='expired' AND r.status='approved' AND r.expired)) AND ($2::UUID IS NULL OR r.source_id=$2) AND ($3='' OR r.value ILIKE '%'||$3||'%' OR r.payload->>'actor_name' ILIKE '%'||$3||'%' OR r.payload->>'malware' ILIKE '%'||$3||'%') AND ($5='' OR r.kind=$5) AND ($6='' OR (r.payload->'attack_types') ? $6) ORDER BY r.created_at DESC,r.id DESC LIMIT 50 OFFSET $4",&[&status,&q.source_id,&query,&offset,&kind,&attack]).await?;
+    let rows=c.query("SELECT r.*,(SELECT a.id FROM intel_article_record l JOIN intel_article a ON a.id=l.article_id WHERE l.record_id=r.id AND a.source_id=r.source_id AND a.deleted_at IS NULL ORDER BY (a.id=r.article_id) DESC,a.created_at DESC,a.id DESC LIMIT 1) AS active_article_id,COALESCE(rv.attribution,'{}'::JSONB) AS reviewed_attribution,COUNT(*) OVER() AS total FROM intel_record_state r LEFT JOIN intel_review rv ON rv.id=r.review_id AND rv.record_id=r.id WHERE ((r.status=$1 AND ($1<>'approved' OR NOT r.expired)) OR ($1='expired' AND r.status='approved' AND r.expired)) AND ($2::UUID IS NULL OR r.source_id=$2) AND ($3='' OR r.value ILIKE '%'||$3||'%' OR r.payload->>'actor_name' ILIKE '%'||$3||'%' OR r.payload->>'malware' ILIKE '%'||$3||'%') AND ($5='' OR r.kind=$5) AND ($6='' OR (r.payload->'attack_types') ? $6) ORDER BY r.created_at DESC,r.id DESC LIMIT 50 OFFSET $4",&[&status,&q.source_id,&query,&offset,&kind,&attack]).await?;
     Ok(
         json!({"items":rows.iter().map(record_json).collect::<Vec<_>>(),"total":rows.first().map(|r|r.get::<_,i64>("total")).unwrap_or(0),"offset":offset}),
     )

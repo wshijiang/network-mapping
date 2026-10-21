@@ -87,12 +87,24 @@ pub(super) async fn submit(
     user: &UserBaseI,
     context: &AuditContext,
 ) -> Result<Value> {
+    save(pool, None, input, user, context).await
+}
+
+pub(super) async fn save(
+    pool: &Pool,
+    edit: Option<(Uuid, i64)>,
+    input: ArticleInput,
+    user: &UserBaseI,
+    context: &AuditContext,
+) -> Result<Value> {
     admin(user)?;
     let source: Source = storage::get_source(pool, input.source_id).await?;
     if source.revision != input.expected_revision {
         return Err(Error::conflict());
     }
-    if source.input.kind != "article" || source.input.transport != "manual" {
+    if (edit.is_none() && (source.input.kind != "article" || source.input.transport != "manual"))
+        || !matches!(source.input.kind.as_str(), "rss" | "article")
+    {
         return Err(Error::bad("intel_invalid_article_source"));
     }
     let url = canonical_url(&input.url, &source.input)?;
@@ -133,20 +145,35 @@ pub(super) async fn submit(
     let body_hash = body.as_ref().map(|body| digest(body.as_bytes()));
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
+    if let Some((id, revision)) = edit {
+        let old = tx.query_opt("SELECT source_id,revision FROM intel_article WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", &[&id]).await?.ok_or_else(Error::missing)?;
+        if old.get::<_, Uuid>("source_id") != source.id || old.get::<_, i64>("revision") != revision
+        {
+            return Err(Error::conflict());
+        }
+        tx.execute("UPDATE intel_article SET deleted_at=NOW(),revision=revision+1,status='cancelled',claim_token=NULL,lease_until=NULL WHERE id=$1", &[&id]).await?;
+    }
     storage::validate_source(&tx, &source).await?;
-    let metadata = json!({"intake":intake});
+    let metadata = json!({"intake":intake,"edit_of":edit.map(|(id,_)|id)});
     let id = Uuid::now_v7();
-    let inserted = tx.query_opt("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash,body,body_hash,extraction_metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(source_id,url,feed_hash,source_revision) DO NOTHING RETURNING id", &[&id,&source.id,&source.revision,&url,&title,&hash,&body,&body_hash,&metadata]).await?;
+    let inserted = tx.query_opt("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash,body,body_hash,extraction_metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(source_id,url,feed_hash,source_revision) WHERE deleted_at IS NULL DO NOTHING RETURNING id", &[&id,&source.id,&source.revision,&url,&title,&hash,&body,&body_hash,&metadata]).await?;
     let id: Uuid = if let Some(row) = inserted {
         row.get(0)
     } else {
-        tx.query_one("SELECT id FROM intel_article WHERE source_id=$1 AND url=$2 AND feed_hash=$3 AND source_revision=$4", &[&source.id,&url,&hash,&source.revision]).await?.get(0)
+        if edit.is_some() {
+            return Err(Error::conflict());
+        }
+        tx.query_one("SELECT id FROM intel_article WHERE source_id=$1 AND url=$2 AND feed_hash=$3 AND source_revision=$4 AND deleted_at IS NULL", &[&source.id,&url,&hash,&source.revision]).await?.get(0)
     };
     audit(
         &tx,
         user,
         context,
-        "intel.article.submit",
+        if edit.is_some() {
+            "intel.article.update"
+        } else {
+            "intel.article.submit"
+        },
         &id.to_string(),
         json!({"source_id":source.id,"snapshot_supplied":body.is_some()}),
     )

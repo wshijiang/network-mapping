@@ -3408,6 +3408,31 @@ async fn rss_rediscovery_preserves_old_snapshots_and_queues_a_new_source_version
     assert!(rows[0].get::<_, Option<String>>(1).is_some());
     assert_eq!(rows[1].get::<_, i64>(0), 2);
     assert!(rows[1].get::<_, Option<String>>(1).is_none());
+    let current: Uuid = c
+        .query_one(
+            "SELECT id FROM intel_article WHERE source_id=$1 AND source_revision=2",
+            &[&source.id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    management::delete_article(
+        &pool,
+        current,
+        1,
+        &user(1),
+        &AuditContext::cli("intel-test"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        worker::sync(&pool, source.id, 2, None, &encryption_key())
+            .await
+            .unwrap()
+            .0["articles_added"],
+        0,
+        "periodic RSS sync must not restore a deleted snapshot"
+    );
     tokio::fs::remove_file(root.join(name)).await.unwrap();
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
@@ -4856,6 +4881,241 @@ async fn local_actor_creation_is_atomic_human_review_and_never_uses_mitre_ids() 
         .unwrap();
     assert!(immutable.get::<_, Option<String>>(0).is_none());
     assert_eq!(immutable.get::<_, Value>(1)["actor_name"], "原文组织");
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[actix_web::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn management_versions_snapshots_deletes_and_shared_evidence() {
+    use actix_web::{App, HttpMessage, dev::Service, test as http_test, web};
+    let (pool, c, schema) = database().await;
+    let (source, article, entries) = report_review_fixture(&pool).await;
+    let context = AuditContext::cli("intel-management-test");
+    storage::ingest_ai_report(
+        &pool,
+        &source,
+        entries,
+        article,
+        storage::settings(&pool).await.unwrap().1,
+        "https://research.example/report",
+    )
+    .await
+    .unwrap();
+    let report = review::report(&pool, article, &user(1)).await.unwrap();
+    review::submit(
+        &pool,
+        article,
+        report_batch(&report, "approved"),
+        &user(1),
+        &context,
+    )
+    .await
+    .unwrap();
+    let keys = vec![vec![("domain".into(), "a.evil.test".into())]];
+    assert!(storage::annotate(&pool, &keys).await[0].risk.is_some());
+    // A second active snapshot can support the same immutable reviewed fact.
+    let shared = Uuid::now_v7();
+    c.execute("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash,body) SELECT $2,source_id,source_revision,url,title,'shared',body FROM intel_article WHERE id=$1", &[&article,&shared]).await.unwrap();
+    c.execute("INSERT INTO intel_article_record(article_id,record_id) SELECT $2,record_id FROM intel_article_record WHERE article_id=$1", &[&article,&shared]).await.unwrap();
+    let app = http_test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(server_config()))
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(user(1));
+                srv.call(req)
+            })
+            .configure(configure),
+    )
+    .await;
+    let list: Value = http_test::call_and_read_body_json(
+        &app,
+        http_test::TestRequest::get()
+            .uri("/api/intel/articles")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(list["data"]["items"].as_array().unwrap().len(), 2);
+    assert_eq!(list["data"]["items"][0]["revision"], 1);
+    let detail: Value = http_test::call_and_read_body_json(
+        &app,
+        http_test::TestRequest::get()
+            .uri(&format!("/api/intel/articles/{article}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(detail["data"]["revision"], 1);
+    assert_eq!(
+        management::delete_article(&pool, article, 1, &user(0), &context)
+            .await
+            .unwrap_err()
+            .status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        management::delete_article(&pool, article, 99, &user(1), &context)
+            .await
+            .unwrap_err()
+            .status,
+        StatusCode::CONFLICT
+    );
+    let update = json!({"source_id":source.id,"expected_revision":source.revision,"expected_article_revision":1,"url":"https://research.example/updated","title":"Updated report","body":"The updated report identifies c.evil.test as malicious DNS infrastructure."});
+    let edited = http_test::call_service(
+        &app,
+        http_test::TestRequest::put()
+            .uri(&format!("/api/intel/articles/{article}"))
+            .set_json(&update)
+            .to_request(),
+    )
+    .await;
+    assert!(
+        edited.status().is_success(),
+        "{}",
+        String::from_utf8_lossy(&http_test::read_body(edited).await)
+    );
+    let edited: Value = http_test::call_and_read_body_json(
+        &app,
+        http_test::TestRequest::get()
+            .uri("/api/intel/articles")
+            .to_request(),
+    )
+    .await;
+    let new_id: Uuid = serde_json::from_value(
+        edited["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["title"] == "Updated report")
+            .unwrap()["id"]
+            .clone(),
+    )
+    .unwrap();
+    assert_ne!(new_id, article);
+    assert!(
+        storage::annotate(&pool, &keys).await[0].risk.is_some(),
+        "shared active evidence remains effective"
+    );
+    let active_records = storage::records(&pool, &user(1), &storage::ListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        active_records["items"][0]["article_id"],
+        json!(shared),
+        "record details must use a remaining active evidence snapshot"
+    );
+    assert_eq!(
+        review::report(&pool, article, &user(1))
+            .await
+            .unwrap_err()
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        c.query_one("SELECT body FROM intel_article WHERE id=$1", &[&article])
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+        report["article"]["body"].as_str().unwrap()
+    );
+    assert!(articles::save(&pool, Some((article, 1)), serde_json::from_value(json!({"source_id":source.id,"expected_revision":source.revision,"url":"https://research.example/updated","title":"Stale update","body":null})).unwrap(), &user(1), &context).await.is_err());
+    management::delete_article(&pool, shared, 1, &user(1), &context)
+        .await
+        .unwrap();
+    assert!(storage::annotate(&pool, &keys).await[0].risk.is_none());
+    let record: Uuid = serde_json::from_value(report["records"][0]["id"].clone()).unwrap();
+    assert!(
+        storage::review(
+            &pool,
+            record,
+            storage::ReviewInput {
+                content_hash: report["records"][0]["content_hash"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+                decision: "revoked".into(),
+                reason: "deleted evidence".into(),
+                attribution: None
+            },
+            &user(1),
+            &context
+        )
+        .await
+        .is_err()
+    );
+    let token = Uuid::new_v4();
+    c.execute("UPDATE intel_article SET status='running',claim_token=$2,lease_until=NOW()+INTERVAL '1 minute' WHERE id=$1", &[&new_id,&token]).await.unwrap();
+    let job = Uuid::now_v7();
+    c.execute("INSERT INTO intel_sync_run(id,source_id,source_revision,status,claim_token,lease_until) VALUES($1,$2,$3,'running',$4,NOW()+INTERVAL '1 minute')", &[&job,&source.id,&source.revision,&token]).await.unwrap();
+    assert!(
+        management::delete_source(&pool, source.id, 99, &user(1), &context)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        c.query_one("SELECT status FROM intel_sync_run WHERE id=$1", &[&job])
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+        "running",
+        "conflict rolls back cancellation"
+    );
+    let deleted = http_test::call_service(
+        &app,
+        http_test::TestRequest::delete()
+            .uri(&format!("/api/intel/sources/{}", source.id))
+            .set_json(json!({"expected_revision":source.revision}))
+            .to_request(),
+    )
+    .await;
+    assert!(deleted.status().is_success());
+    assert!(storage::get_source(&pool, source.id).await.is_err());
+    assert!(review::report(&pool, new_id, &user(1)).await.is_err());
+    assert!(
+        storage::sources(&pool).await.unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["id"] != json!(source.id))
+    );
+    let row = c
+        .query_one(
+            "SELECT status,claim_token FROM intel_article WHERE id=$1",
+            &[&new_id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>(0), "cancelled");
+    assert!(row.get::<_, Option<Uuid>>(1).is_none());
+    let list: Value = http_test::call_and_read_body_json(
+        &app,
+        http_test::TestRequest::get()
+            .uri("/api/intel/articles")
+            .to_request(),
+    )
+    .await;
+    assert!(list["data"]["items"].as_array().unwrap().is_empty());
+    assert!(
+        storage::save_source(
+            &pool,
+            Some(source.id),
+            source.input.clone(),
+            &user(1),
+            &context,
+            &encryption_key()
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        c.query_one("SELECT COUNT(*) FROM intel_review", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        2,
+        "audit evidence is retained"
+    );
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
         .unwrap();
