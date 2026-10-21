@@ -1124,6 +1124,205 @@ async fn local_source(pool: &Pool, review: bool) -> storage::Source {
 
 #[tokio::test]
 #[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn source_run_finalization_cancels_changed_sources_before_cleanup() {
+    let (pool, c, schema) = database().await;
+    for enabled in [false, true] {
+        for state in ["failed", "succeeded", "partial"] {
+            let source = local_source(&pool, false).await;
+            let id = Uuid::now_v7();
+            let token = Uuid::new_v4();
+            c.execute("INSERT INTO intel_sync_run(id,source_id,source_revision,status,claim_token,lease_until) VALUES($1,$2,$3,'running',$4,NOW()+INTERVAL '1 minute')", &[&id,&source.id,&source.revision,&token]).await.unwrap();
+            let bump = i64::from(enabled);
+            c.execute("UPDATE intel_source SET enabled=$2,revision=revision+$3,next_check_at=NOW()+INTERVAL '1 day' WHERE id=$1", &[&source.id,&enabled,&bump]).await.unwrap();
+            worker::finish_source_run(
+                &pool,
+                id,
+                token,
+                state,
+                &json!({"offline_import":true}),
+                Some("intel_revision_conflict"),
+            )
+            .await
+            .unwrap();
+            let row = c.query_one("SELECT status,error_code,claim_token,lease_until,finished_at IS NOT NULL AS finished FROM intel_sync_run WHERE id=$1", &[&id]).await.unwrap();
+            assert_eq!(row.get::<_, String>("status"), "cancelled");
+            assert_eq!(row.get::<_, String>("error_code"), "intel_source_changed");
+            assert!(row.get::<_, Option<Uuid>>("claim_token").is_none());
+            assert!(
+                row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("lease_until")
+                    .is_none()
+            );
+            assert!(row.get::<_, bool>("finished"));
+            assert!(
+                c.query_one(
+                    "SELECT next_check_at>NOW()+INTERVAL '23 hours' FROM intel_source WHERE id=$1",
+                    &[&source.id]
+                )
+                .await
+                .unwrap()
+                .get::<_, bool>(0)
+            );
+        }
+    }
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn source_run_cleanup_retires_claims_and_finalization_preserves_cancellation() {
+    let (pool, c, schema) = database().await;
+    let source = local_source(&pool, false).await;
+    let id = Uuid::now_v7();
+    let token = Uuid::new_v4();
+    c.execute("INSERT INTO intel_sync_run(id,source_id,source_revision,status,claim_token,lease_until) VALUES($1,$2,$3,'running',$4,NOW()+INTERVAL '1 minute')", &[&id,&source.id,&source.revision,&token]).await.unwrap();
+    c.execute(
+        "UPDATE intel_source SET enabled=FALSE WHERE id=$1",
+        &[&source.id],
+    )
+    .await
+    .unwrap();
+    assert!(!worker::source_tick(&pool, &encryption_key()).await.unwrap());
+    let cancelled = c
+        .query_one(
+            "SELECT to_jsonb(j) FROM intel_sync_run j WHERE id=$1",
+            &[&id],
+        )
+        .await
+        .unwrap()
+        .get::<_, Value>(0);
+    assert_eq!(cancelled["status"], "cancelled");
+    assert_eq!(cancelled["error_code"], "intel_source_changed");
+    assert!(cancelled["claim_token"].is_null());
+    assert!(cancelled["lease_until"].is_null());
+    worker::finish_source_run(
+        &pool,
+        id,
+        token,
+        "failed",
+        &json!({}),
+        Some("intel_revision_conflict"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        c.query_one(
+            "SELECT to_jsonb(j) FROM intel_sync_run j WHERE id=$1",
+            &[&id]
+        )
+        .await
+        .unwrap()
+        .get::<_, Value>(0),
+        cancelled
+    );
+
+    // Older instances may have cancelled the job without clearing its claim.
+    c.execute("UPDATE intel_sync_run SET claim_token=$2,lease_until=NOW()+INTERVAL '1 minute' WHERE id=$1", &[&id,&token]).await.unwrap();
+    let legacy = c
+        .query_one(
+            "SELECT to_jsonb(j) FROM intel_sync_run j WHERE id=$1",
+            &[&id],
+        )
+        .await
+        .unwrap()
+        .get::<_, Value>(0);
+    worker::finish_source_run(
+        &pool,
+        id,
+        token,
+        "failed",
+        &json!({}),
+        Some("intel_revision_conflict"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        c.query_one(
+            "SELECT to_jsonb(j) FROM intel_sync_run j WHERE id=$1",
+            &[&id]
+        )
+        .await
+        .unwrap()
+        .get::<_, Value>(0),
+        legacy
+    );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn source_run_finalization_keeps_current_results_and_fences_lost_claims() {
+    let (pool, c, schema) = database().await;
+    for state in ["failed", "succeeded", "partial"] {
+        let source = local_source(&pool, false).await;
+        let id = Uuid::now_v7();
+        let token = Uuid::new_v4();
+        let summary = json!({"offline_import":true,"processed":1000});
+        c.execute("INSERT INTO intel_sync_run(id,source_id,source_revision,status,claim_token,lease_until) VALUES($1,$2,$3,'running',$4,NOW()+INTERVAL '1 minute')", &[&id,&source.id,&source.revision,&token]).await.unwrap();
+        c.execute(
+            "UPDATE intel_source SET next_check_at=NOW()+INTERVAL '1 day' WHERE id=$1",
+            &[&source.id],
+        )
+        .await
+        .unwrap();
+        worker::finish_source_run(&pool, id, Uuid::new_v4(), state, &summary, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            c.query_one("SELECT status FROM intel_sync_run WHERE id=$1", &[&id])
+                .await
+                .unwrap()
+                .get::<_, String>(0),
+            "running"
+        );
+        let error = (state == "failed").then_some("intel_source_transport");
+        worker::finish_source_run(&pool, id, token, state, &summary, error)
+            .await
+            .unwrap();
+        let row = c.query_one("SELECT status,summary,error_code,claim_token,lease_until FROM intel_sync_run WHERE id=$1", &[&id]).await.unwrap();
+        assert_eq!(row.get::<_, String>("status"), state);
+        assert_eq!(row.get::<_, Value>("summary"), summary);
+        assert_eq!(row.get::<_, Option<String>>("error_code").as_deref(), error);
+        assert!(row.get::<_, Option<Uuid>>("claim_token").is_none());
+        assert!(
+            row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("lease_until")
+                .is_none()
+        );
+        assert_eq!(
+            c.query_one(
+                "SELECT next_check_at<NOW()+INTERVAL '1 minute' FROM intel_source WHERE id=$1",
+                &[&source.id]
+            )
+            .await
+            .unwrap()
+            .get::<_, bool>(0),
+            state == "partial"
+        );
+    }
+    let source = local_source(&pool, false).await;
+    let id = Uuid::now_v7();
+    let token = Uuid::new_v4();
+    c.execute("INSERT INTO intel_sync_run(id,source_id,source_revision,status,claim_token,lease_until) VALUES($1,$2,$3,'running',$4,NOW()-INTERVAL '1 second')", &[&id,&source.id,&source.revision,&token]).await.unwrap();
+    worker::finish_source_run(&pool, id, token, "succeeded", &json!({}), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        c.query_one("SELECT status FROM intel_sync_run WHERE id=$1", &[&id])
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+        "running"
+    );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
 async fn mixed_case_github_files_are_parsed_and_legacy_skipped_cursors_are_repaired_once() {
     let (pool, c, schema) = database().await;
     let source = local_source(&pool, false).await;

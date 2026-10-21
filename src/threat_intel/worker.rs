@@ -43,7 +43,7 @@ pub(super) async fn source_tick(pool: &Pool, encryption_key: &str) -> Result<boo
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
     tx.execute("UPDATE intel_sync_run SET status='failed',error_code='intel_attempts_exhausted',finished_at=NOW() WHERE status='running' AND lease_until<NOW() AND attempts>=3",&[]).await?;
-    tx.execute("UPDATE intel_sync_run j SET status='cancelled',error_code='intel_source_changed',finished_at=NOW() FROM intel_source s WHERE j.source_id=s.id AND j.status IN ('queued','running') AND (NOT s.enabled OR s.revision<>j.source_revision)",&[]).await?;
+    tx.execute("UPDATE intel_sync_run j SET status='cancelled',error_code='intel_source_changed',finished_at=NOW(),claim_token=NULL,lease_until=NULL FROM intel_source s WHERE j.source_id=s.id AND j.status IN ('queued','running') AND (NOT s.enabled OR s.revision<>j.source_revision)",&[]).await?;
     let due=tx.query("SELECT s.id,s.revision,s.interval_seconds FROM intel_source s WHERE s.enabled AND s.next_check_at<=NOW() AND ((s.transport NOT IN ('upload','manual') AND s.kind<>'threatfox_export') OR EXISTS(SELECT 1 FROM intel_import_snapshot i WHERE i.source_id=s.id AND i.source_revision=s.revision AND i.stage<>'complete' AND NOT i.paused)) ORDER BY s.next_check_at FOR UPDATE OF s SKIP LOCKED LIMIT 20",&[]).await?;
     for row in due {
         let source: Uuid = row.get("id");
@@ -88,17 +88,52 @@ pub(super) async fn source_tick(pool: &Pool, encryption_key: &str) -> Result<boo
             ("failed", json!({"last_error":diagnostic}), Some(code))
         }
     };
-    let c = pool.get().await?;
-    c.execute("UPDATE intel_sync_run SET status=$3,summary=$4,error_code=$5,finished_at=NOW(),claim_token=NULL,lease_until=NULL WHERE id=$1 AND claim_token=$2 AND lease_until>NOW()",&[&id,&token,&state,&summary,&error]).await?;
-    if state == "partial" {
+    finish_source_run(pool, id, token, state, &summary, error).await?;
+    Ok(true)
+}
+
+pub(super) async fn finish_source_run(
+    pool: &Pool,
+    id: Uuid,
+    token: Uuid,
+    state: &str,
+    summary: &Value,
+    error: Option<&str>,
+) -> Result<()> {
+    let mut c = pool.get().await?;
+    let tx = c.transaction().await?;
+    // Match publication's job -> source lock order and fence both cancellation
+    // cleanup and source edits until the final state is committed.
+    let Some(run) = tx.query_opt("SELECT source_id,source_revision FROM intel_sync_run WHERE id=$1 AND claim_token=$2 AND status='running' AND lease_until>clock_timestamp() FOR UPDATE", &[&id,&token]).await? else {
+        return Ok(());
+    };
+    let source_id: Uuid = run.get("source_id");
+    let revision: i64 = run.get("source_revision");
+    let source = tx
+        .query_one(
+            "SELECT revision,enabled FROM intel_source WHERE id=$1 FOR SHARE",
+            &[&source_id],
+        )
+        .await?;
+    let cancelled =
+        !source.get::<_, bool>("enabled") || source.get::<_, i64>("revision") != revision;
+    let state = if cancelled { "cancelled" } else { state };
+    let error = if cancelled {
+        Some("intel_source_changed")
+    } else {
+        error
+    };
+    let changed = tx.execute("UPDATE intel_sync_run SET status=$3,summary=$4,error_code=$5,finished_at=NOW(),claim_token=NULL,lease_until=NULL WHERE id=$1 AND claim_token=$2 AND status='running' AND lease_until>clock_timestamp()", &[&id,&token,&state,&summary,&error]).await?;
+    if changed == 1 && state == "partial" {
         let delay = if summary.get("offline_import") == Some(&json!(true)) {
             0_i32
         } else {
             5
         };
-        c.execute("UPDATE intel_source SET next_check_at=NOW()+$3::INTEGER*INTERVAL '1 second' WHERE id=$1 AND revision=$2",&[&source_id,&revision,&delay]).await?;
+        tx.execute("UPDATE intel_source SET next_check_at=NOW()+$3::INTEGER*INTERVAL '1 second' WHERE id=$1 AND revision=$2 AND enabled",&[&source_id,&revision,&delay]).await?;
     }
-    Ok(true)
+    tx.commit().await?;
+    Ok(())
 }
 pub(super) async fn sync(
     pool: &Pool,
