@@ -454,5 +454,12 @@ pub(super) fn normalize_models(value: Value, provider: &Provider) -> Result<Vec<
             },
         );
     }
+    // Discovery updates availability, but never silently removes saved metadata.
+    for previous in &provider.models {
+        models.entry(previous.id.clone()).or_insert_with(|| Model {
+            available: false,
+            ..previous.clone()
+        });
+    }
     Ok(models.into_values().collect())
 }

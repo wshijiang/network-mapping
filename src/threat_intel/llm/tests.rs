@@ -3,6 +3,62 @@ use super::*;
 use super::super::tests::{database, encryption_key, server_config, user};
 
 #[test]
+fn model_refresh_retains_missing_entries_and_restores_returning_models() {
+    let provider = Provider {
+        models: vec![
+            Model {
+                id: "missing".into(),
+                name: "Saved label".into(),
+                protocol: "responses".into(),
+                available: true,
+            },
+            Model {
+                id: "returned".into(),
+                name: "Old label".into(),
+                protocol: "responses".into(),
+                available: false,
+            },
+            Model {
+                id: "still-missing".into(),
+                name: "Already unavailable".into(),
+                protocol: "chat".into(),
+                available: false,
+            },
+        ],
+        ..Provider::default()
+    };
+    for catalog in [
+        json!({"data":[{"id":"returned","name":"New label"},{"id":"new"}]}),
+        json!({"models":[{"id":"returned","name":"New label"},{"id":"new"}]}),
+        json!([{"id":"returned","name":"New label"},{"id":"new"}]),
+    ] {
+        let models = normalize_models(catalog, &provider).unwrap();
+        assert_eq!(models.len(), 4);
+        let missing = models.iter().find(|m| m.id == "missing").unwrap();
+        assert!(!missing.available);
+        assert_eq!(missing.name, "Saved label");
+        assert_eq!(missing.protocol, "responses");
+        assert!(
+            !models
+                .iter()
+                .find(|m| m.id == "still-missing")
+                .unwrap()
+                .available
+        );
+        let returned = models.iter().find(|m| m.id == "returned").unwrap();
+        assert!(returned.available);
+        assert_eq!(returned.name, "New label");
+        assert_eq!(returned.protocol, "responses");
+        assert!(models.iter().find(|m| m.id == "new").unwrap().available);
+    }
+    let empty = normalize_models(json!([]), &provider).unwrap();
+    assert_eq!(empty.len(), 3);
+    assert!(empty.iter().all(|m| !m.available));
+    assert!(provider.models[0].available);
+    assert!(normalize_models(json!({}), &provider).is_err());
+}
+
+#[test]
 fn local_overrides_are_explicit_and_headers_are_case_insensitive() {
     let mut global = Transport::global();
     global.stream = Some(true);
