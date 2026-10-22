@@ -205,12 +205,9 @@ mod tests {
             let html = format!(
                 "<html><body><nav>navigation.example</nav><{root}><header>header.example</header><p>{REPORT}</p><aside>sidebar.example</aside><div class='related-articles'>related.example</div><p style='display: none'>hidden.example</p><script>script.example</script><footer>footer.example</footer></{tag}></body></html>"
             );
-            let (body, metadata) = articles::body_snapshot(
-                html.as_bytes(),
-                "https://any-publisher.example/report",
-                "",
-            )
-            .unwrap();
+            let (body, metadata) =
+                articles::body_snapshot(html.as_bytes(), "https://any-publisher.example/report")
+                    .unwrap();
             assert!(body.contains(REPORT), "{root}");
             for excluded in [
                 "navigation.example",
@@ -289,12 +286,9 @@ mod tests {
     #[test]
     fn publisher_preference_falls_back_to_generic_extraction_when_markup_changes() {
         let html = format!("<div class='entry-content'><p>{REPORT}</p></div>");
-        let (body, metadata) = articles::body_snapshot(
-            html.as_bytes(),
-            "https://www.welivesecurity.com/en/report",
-            "",
-        )
-        .unwrap();
+        let (body, metadata) =
+            articles::body_snapshot(html.as_bytes(), "https://www.welivesecurity.com/en/report")
+                .unwrap();
         assert!(body.contains(REPORT));
         assert_ne!(metadata["selector"], ".article-body");
     }

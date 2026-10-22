@@ -2,12 +2,6 @@
 
 [文档中心](README.md) · [部署与升级](DEPLOYMENT.md) · [扫描端更新日志](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/CHANGELOG.md)
 
-## 未发布：服务探测第一批（2026-10-22）
-
-- HTTP/HTTPS 被动识别 Elasticsearch：产品响应头及完整根 JSON，支持明确版本、OpenSearch 排除、冲突和截断状态。service 继续保留 http/https，不增加目标请求。
-- Web 规则修订 6，88 条规则覆盖 53 种技术；现有队列按新修订回填保留的历史证据。查询使用 tech = elasticsearch，外部 API 沿用 web 字段授权。
-- 新增[服务探测分批交付计划](SERVICE_DETECTION_ROADMAP.md)，区分 UDP 库内核、后续任务/端点迁移、原生 Transport 和扩展协议；本批尚未开放 UDP 任务。
-
 ## 未发布（自 v0.1.29 以来）
 
 截至 **2026-10-21（北京时间）**，以最新已发布 tag [v0.1.29](https://github.com/wshijiang/network-mapping/releases/tag/v0.1.29) 为基线，汇总主分支已合入的服务端变动，不包含尚未合入的开发分支或前端独立变动。
@@ -19,7 +13,9 @@
 | 变动范围 | 32 个提交（含合并提交）；[查看完整比较](https://github.com/wshijiang/network-mapping/compare/v0.1.29...919cecb2151ee5612c4cbf2d03d2e20d4c87e6e6) |
 
 ### 新增
-
+- **HTTP/HTTPS 被动识别 Elasticsearch**：产品响应头及完整根 JSON，支持明确版本、OpenSearch 排除、冲突和截断状态。service 继续保留 http/https，不增加目标请求。
+- Web 规则修订 6，88 条规则覆盖 53 种技术；现有队列按新修订回填保留的历史证据。查询使用 tech = elasticsearch，外部 API 沿用 web 字段授权。
+- 新增[服务探测分批交付计划](SERVICE_DETECTION_ROADMAP.md)，区分 UDP 库内核、后续任务/端点迁移、原生 Transport 和扩展协议；本批尚未开放 UDP 任务。
 - **统一通知渠道**：邮件、飞书和 Telegram 支持同级订阅与多渠道独立投递，覆盖健康告警、扫描器掉线/恢复、登录、周报和月报；支持启停、最低级别、连通性测试、投递历史及失败重试。通知使用持久化队列、租约和有限重试；停用通知不影响报告归档。见[通知渠道](NOTIFICATIONS.md)。
 - **分渠道通知模板**：新增飞书、Telegram 按事件管理的模板 API，支持纯文本/受限 HTML、草稿、发布、历史恢复、变量目录和在线预览。测试发送可以使用未保存模板，返回投递 ID 并查询状态；入队不等于发送成功。补充邮件模板通知状态的预览和测试。见[通知模板](NOTIFICATION_TEMPLATES.md)，相关 [#113](https://github.com/wshijiang/network-mapping/pull/113)、[#115](https://github.com/wshijiang/network-mapping/pull/115)。
 - **每渠道通知代理**：邮件、飞书和 Telegram 可独立选择系统默认、直连或自定义 HTTP/HTTPS/SOCKS5/SOCKS5H 代理，代理凭据加密存储；邮件支持代理隧道内的 SMTPS，连接失败不回退直连。见[通知代理](NOTIFICATIONS.md#每渠道投递代理)，相关 [#116](https://github.com/wshijiang/network-mapping/pull/116)。

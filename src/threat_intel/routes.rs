@@ -105,11 +105,15 @@ async fn offline_import(
     )
 }
 
-async fn list_sources(pool: web::Data<Pool>, user: UserBaseI) -> HttpResponse {
+async fn list_sources(
+    pool: web::Data<Pool>,
+    config: web::Data<crate::config::ServerConfig>,
+    user: UserBaseI,
+) -> HttpResponse {
     response(
         async {
             admin(&user)?;
-            storage::sources(&pool).await
+            storage::sources(&pool, &config.encrypt_key).await
         }
         .await,
     )
@@ -149,6 +153,61 @@ async fn update_source(
             &user,
             &AuditContext::from_request(&req),
             &config.encrypt_key,
+        )
+        .await,
+    )
+}
+async fn delete_source(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    id: web::Path<Uuid>,
+    input: web::Json<management::DeleteInput>,
+) -> HttpResponse {
+    response(
+        management::delete_source(
+            &pool,
+            *id,
+            input.expected_revision,
+            &user,
+            &AuditContext::from_request(&req),
+        )
+        .await,
+    )
+}
+async fn delete_article(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    id: web::Path<Uuid>,
+    input: web::Json<management::DeleteInput>,
+) -> HttpResponse {
+    response(
+        management::delete_article(
+            &pool,
+            *id,
+            input.expected_revision,
+            &user,
+            &AuditContext::from_request(&req),
+        )
+        .await,
+    )
+}
+async fn update_article(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    id: web::Path<Uuid>,
+    input: web::Json<management::ArticleUpdate>,
+) -> HttpResponse {
+    let input = input.into_inner();
+    response(
+        articles::save(
+            &pool,
+            Some((*id, input.expected_article_revision)),
+            input.article,
+            &user,
+            &AuditContext::from_request(&req),
         )
         .await,
     )
@@ -321,8 +380,8 @@ async fn jobs(pool: web::Data<Pool>, user: UserBaseI) -> HttpResponse {
 async fn articles(pool: web::Data<Pool>, user: UserBaseI) -> HttpResponse {
     response(async {
     admin(&user)?;
-    let rows=pool.get().await?.query("SELECT a.*,s.name AS source_name,counts.record_count,counts.pending_count FROM (SELECT * FROM intel_article ORDER BY created_at DESC LIMIT 100) a JOIN intel_source s ON s.id=a.source_id CROSS JOIN LATERAL (SELECT COUNT(DISTINCT (r.kind,r.value)) AS record_count,COUNT(DISTINCT r.id) FILTER (WHERE r.status='pending') AS pending_count FROM intel_article_record l JOIN intel_record r ON r.id=l.record_id WHERE l.article_id=a.id AND r.source_id=a.source_id AND r.origin='ai' AND r.status<>'superseded') counts ORDER BY a.created_at DESC",&[]).await?;
-    Ok(json!({"items":rows.iter().map(|r|json!({"id":r.get::<_,Uuid>("id"),"source_name":r.get::<_,String>("source_name"),"url":r.get::<_,String>("url"),"title":r.get::<_,String>("title"),"status":r.get::<_,String>("status"),"record_count":r.get::<_,i64>("record_count"),"pending_count":r.get::<_,i64>("pending_count"),"body_hash":r.get::<_,Option<String>>("body_hash"),"error_code":r.get::<_,Option<String>>("error_code"),"extraction_metadata":r.get::<_,Value>("extraction_metadata"),"created_at":r.get::<_,chrono::DateTime<chrono::Utc>>("created_at")})).collect::<Vec<_>>()}))
+    let rows=pool.get().await?.query("SELECT a.*,s.revision AS current_source_revision,s.enabled AS source_enabled,s.name AS source_name,counts.record_count,counts.pending_count FROM (SELECT a.* FROM intel_article a JOIN intel_source s ON s.id=a.source_id WHERE a.deleted_at IS NULL AND s.deleted_at IS NULL ORDER BY a.created_at DESC LIMIT 100) a JOIN intel_source s ON s.id=a.source_id CROSS JOIN LATERAL (SELECT COUNT(DISTINCT (r.kind,r.value)) AS record_count,COUNT(DISTINCT r.id) FILTER (WHERE r.status='pending') AS pending_count FROM intel_article_record l JOIN intel_record r ON r.id=l.record_id WHERE l.article_id=a.id AND r.source_id=a.source_id AND r.origin='ai' AND r.status<>'superseded') counts ORDER BY a.created_at DESC",&[]).await?;
+    Ok(json!({"items":rows.iter().map(|r|json!({"id":r.get::<_,Uuid>("id"),"source_name":r.get::<_,String>("source_name"),"source_id":r.get::<_,Uuid>("source_id"),"revision":r.get::<_,i64>("revision"),"current_source_revision":r.get::<_,i64>("current_source_revision"),"source_enabled":r.get::<_,bool>("source_enabled"),"url":r.get::<_,String>("url"),"title":r.get::<_,String>("title"),"status":r.get::<_,String>("status"),"record_count":r.get::<_,i64>("record_count"),"pending_count":r.get::<_,i64>("pending_count"),"body_hash":r.get::<_,Option<String>>("body_hash"),"error_code":r.get::<_,Option<String>>("error_code"),"extraction_metadata":r.get::<_,Value>("extraction_metadata"),"created_at":r.get::<_,chrono::DateTime<chrono::Utc>>("created_at")})).collect::<Vec<_>>()}))
 }.await)
 }
 async fn article_detail(
@@ -331,8 +390,8 @@ async fn article_detail(
     id: web::Path<Uuid>,
 ) -> HttpResponse {
     response(async {
-    admin(&user)?;let row=pool.get().await?.query_opt("SELECT url,title,body,body_hash,extraction_metadata FROM intel_article WHERE id=$1",&[&id.into_inner()]).await?.ok_or_else(Error::missing)?;
-    Ok(json!({"url":row.get::<_,String>(0),"title":row.get::<_,String>(1),"body":row.get::<_,Option<String>>(2),"body_hash":row.get::<_,Option<String>>(3),"extraction_metadata":row.get::<_,Value>(4)}))
+    admin(&user)?;let row=pool.get().await?.query_opt("SELECT url,title,body,body_hash,extraction_metadata,a.revision FROM intel_article a JOIN intel_source s ON s.id=a.source_id WHERE a.id=$1 AND a.deleted_at IS NULL AND s.deleted_at IS NULL",&[&id.into_inner()]).await?.ok_or_else(Error::missing)?;
+    Ok(json!({"url":row.get::<_,String>(0),"title":row.get::<_,String>(1),"body":row.get::<_,Option<String>>(2),"body_hash":row.get::<_,Option<String>>(3),"extraction_metadata":row.get::<_,Value>(4),"revision":row.get::<_,i64>(5)}))
 }.await)
 }
 async fn submit_article(
@@ -361,8 +420,8 @@ async fn retry_article(
     admin(&user)?;
     if !storage::settings(&pool).await?.0.ai_enabled{return Err(Error::bad("intel_ai_disabled"));}
     let mut c=pool.get().await?;let tx=c.transaction().await?;let requested=id.into_inner();
-    let row=tx.query_opt("SELECT * FROM intel_article WHERE id=$1 FOR UPDATE",&[&requested]).await?.ok_or_else(Error::missing)?;
-    let source_id:Uuid=row.get("source_id");let source=storage::source(&tx.query_one("SELECT * FROM intel_source WHERE id=$1 FOR SHARE",&[&source_id]).await?);
+    let row=tx.query_opt("SELECT * FROM intel_article WHERE id=$1 AND deleted_at IS NULL FOR UPDATE",&[&requested]).await?.ok_or_else(Error::missing)?;
+    let source_id:Uuid=row.get("source_id");let source=storage::source(&tx.query_opt("SELECT * FROM intel_source WHERE id=$1 AND deleted_at IS NULL FOR SHARE",&[&source_id]).await?.ok_or_else(Error::missing)?);
     if !source.input.enabled{return Err(Error::bad("intel_source_disabled"));}
     if !matches!(source.input.kind.as_str(),"rss"|"article"){return Err(Error::bad("intel_invalid_article_source"));}
     let stale=row.get::<_,i64>("source_revision")!=source.revision;
@@ -371,11 +430,10 @@ async fn retry_article(
         let url:String=row.get("url");validate_url(&url,&source.input.allowed_hosts)?;
         let body:Option<String>=row.get("body");let body_hash:Option<String>=row.get("body_hash");
         let metadata:Value=row.get("extraction_metadata");
-        if !source.input.publisher_id.is_empty() && metadata.pointer("/intake/publisher_id").and_then(Value::as_str).is_some_and(|id|id!=source.input.publisher_id){return Err(Error::bad("intel_article_publisher_mismatch"));}
         target=Uuid::now_v7();
         let intake=json!({"intake":metadata.get("intake"),"retry_of":requested,"snapshot_source_revision":row.get::<_,i64>("source_revision")});
         created=tx.execute("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash,body,body_hash,extraction_metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING",&[&target,&source_id,&source.revision,&url,&row.get::<_,String>("title"),&row.get::<_,String>("feed_hash"),&body,&body_hash,&intake]).await?>0;
-        target=tx.query_one("SELECT id FROM intel_article WHERE source_id=$1 AND source_revision=$2 AND url=$3 AND feed_hash=$4 FOR UPDATE",&[&source_id,&source.revision,&url,&row.get::<_,String>("feed_hash")]).await?.get(0);
+        target=tx.query_one("SELECT id FROM intel_article WHERE source_id=$1 AND source_revision=$2 AND url=$3 AND feed_hash=$4 AND deleted_at IS NULL FOR UPDATE",&[&source_id,&source.revision,&url,&row.get::<_,String>("feed_hash")]).await?.get(0);
     }
     let row=tx.query_one("SELECT status FROM intel_article WHERE id=$1",&[&target]).await?;
     let status:String=row.get(0);
@@ -400,7 +458,7 @@ struct MappingInput {
 async fn mappings(pool: web::Data<Pool>, user: UserBaseI) -> HttpResponse {
     response(async {
     admin(&user)?;let c=pool.get().await?;
-    let rows=c.query("WITH names AS (SELECT source_id,'actor' AS kind,payload->>'actor_name' AS name FROM intel_record WHERE actor_id IS NULL UNION ALL SELECT source_id,'software' AS kind,payload->>'malware' AS name FROM intel_record) SELECT n.source_id,s.name AS source_name,n.name,n.kind,COUNT(*) AS count FROM names n JOIN intel_source s ON s.id=n.source_id WHERE n.name<>'' AND NOT EXISTS(SELECT 1 FROM intel_name_mapping m WHERE m.source_id=n.source_id AND m.kind=n.kind AND m.name_normalized=LOWER(BTRIM(n.name))) AND NOT EXISTS(SELECT 1 FROM intel_entity e WHERE e.kind=n.kind AND e.active AND LOWER(e.name)=LOWER(BTRIM(n.name))) GROUP BY n.source_id,s.name,n.name,n.kind ORDER BY COUNT(*) DESC LIMIT 100",&[]).await?;
+    let rows=c.query("WITH names AS (SELECT source_id,'actor' AS kind,payload->>'actor_name' AS name FROM intel_record_state WHERE actor_id IS NULL UNION ALL SELECT source_id,'software' AS kind,payload->>'malware' AS name FROM intel_record_state) SELECT n.source_id,s.name AS source_name,n.name,n.kind,COUNT(*) AS count FROM names n JOIN intel_source s ON s.id=n.source_id WHERE n.name<>'' AND NOT EXISTS(SELECT 1 FROM intel_name_mapping m WHERE m.source_id=n.source_id AND m.kind=n.kind AND m.name_normalized=LOWER(BTRIM(n.name))) AND NOT EXISTS(SELECT 1 FROM intel_entity e WHERE e.kind=n.kind AND e.active AND LOWER(e.name)=LOWER(BTRIM(n.name))) GROUP BY n.source_id,s.name,n.name,n.kind ORDER BY COUNT(*) DESC LIMIT 100",&[]).await?;
     let mappings=c.query("SELECT m.*,e.name AS canonical_name FROM intel_name_mapping m JOIN intel_entity e ON e.attack_id=m.attack_id ORDER BY m.created_at DESC LIMIT 100",&[]).await?;
     Ok(json!({"unmapped":rows.iter().map(|r|json!({"source_id":r.get::<_,Uuid>(0),"source_name":r.get::<_,String>(1),"name":r.get::<_,String>(2),"kind":r.get::<_,String>(3),"count":r.get::<_,i64>(4)})).collect::<Vec<_>>(),"mappings":mappings.iter().map(|r|json!({"id":r.get::<_,Uuid>("id"),"source_id":r.get::<_,Uuid>("source_id"),"name":r.get::<_,String>("name_normalized"),"kind":r.get::<_,String>("kind"),"attack_id":r.get::<_,String>("attack_id"),"canonical_name":r.get::<_,String>("canonical_name")})).collect::<Vec<_>>()}))
 }.await)
@@ -478,12 +536,14 @@ async fn entity_detail(
 }.await)
 }
 pub fn configure(cfg: &mut web::ServiceConfig) {
+    llm::configure(cfg);
     cfg.service(
         web::scope("/api/intel")
             .app_data(web::JsonConfig::default().limit(128 * 1024))
             .route("/sources", web::get().to(list_sources))
             .route("/sources", web::post().to(add_source))
             .route("/sources/{id}", web::put().to(update_source))
+            .route("/sources/{id}", web::delete().to(delete_source))
             .route("/sources/{id}/sync", web::post().to(sync_source))
             .route("/sources/{id}/import/check", web::post().to(check_import))
             .route("/sources/{id}/import", web::post().to(offline_import))
@@ -503,6 +563,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/articles", web::get().to(articles))
             .route("/articles", web::post().to(submit_article))
             .route("/articles/{id}", web::get().to(article_detail))
+            .route("/articles/{id}", web::put().to(update_article))
+            .route("/articles/{id}", web::delete().to(delete_article))
             .service(
                 web::resource("/articles/{id}/review")
                     .app_data(web::JsonConfig::default().limit(2 * 1024 * 1024))

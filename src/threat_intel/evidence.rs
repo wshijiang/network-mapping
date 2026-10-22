@@ -123,9 +123,79 @@ impl<'a> Document<'a> {
         json!(
             self.blocks
                 .iter()
-                .map(|block| json!({"block_id":block.id,"kind":block.kind,"scope_block_id":block.scope,"text":block.text}))
+                .map(|block| {
+                    let mut value = json!({"block_id":block.id,"kind":block.kind,"scope_block_id":block.scope,"text":block.text});
+                    if let Some(unit) = self.unit_id(block) {
+                        value["evidence_unit_id"] = json!(unit);
+                    }
+                    value
+                })
                 .collect::<Vec<_>>()
         )
+    }
+
+    fn record_title(&self, block: &Block<'_>, kind: &str) -> Option<&Block<'a>> {
+        let title = &self.blocks[block.scope? - 1];
+        let title_kind = malicious_record_kind(title.text)?;
+        normalize(title_kind, field(title.text)?.1).ok()?;
+        (title.kind == "record_heading"
+            && ((block.id == title.id && kind == title_kind)
+                || (block.kind == "record_field"
+                    && kind == "domain"
+                    && self.associated_domain_field(block))))
+        .then_some(title)
+    }
+
+    fn unit_id(&self, block: &Block<'_>) -> Option<String> {
+        let kind = if block.kind == "record_heading" {
+            malicious_record_kind(block.text)?
+        } else {
+            "domain"
+        };
+        let title = self.record_title(block, kind)?;
+        Some(format!("record:{}:block:{}", title.id, block.id))
+    }
+
+    pub fn validate_unit(
+        &self,
+        indicator: &mut Indicator,
+        raw_value: &str,
+        unit: &str,
+    ) -> Result<()> {
+        let missing = || rejected("evidence_unit_not_found");
+        let (scope, id) = unit
+            .strip_prefix("record:")
+            .and_then(|value| value.split_once(":block:"))
+            .ok_or_else(missing)?;
+        let id = id.parse::<usize>().map_err(|_| missing())?;
+        let block = self
+            .blocks
+            .get(id.saturating_sub(1))
+            .filter(|block| block.id == id && self.unit_id(block).as_deref() == Some(unit))
+            .ok_or_else(missing)?;
+        let title = self
+            .record_title(block, &indicator.kind)
+            .ok_or_else(missing)?;
+        if scope.parse::<usize>().ok() != Some(title.id)
+            || !mentions(block.text, &indicator.kind, raw_value, &indicator.value)
+        {
+            return Err(rejected("ioc_not_in_evidence"));
+        }
+        // Only typed, complete source tokens in this selected unit are eligible.
+        // Neither the unit ID nor a model-supplied offset/quote can create an IOC.
+        let data = field(block.text).map_or(block.text, |(_, value)| value);
+        let quote = data
+            .split(|c: char| c.is_whitespace() || ";,、，|".contains(c))
+            .find(|token| {
+                normalize(&indicator.kind, token).is_ok_and(|(_, value)| value == indicator.value)
+            })
+            .ok_or_else(|| rejected("ioc_not_in_evidence"))?;
+        let parts = json!([
+            {"block_id":title.id,"kind":"context","quote":title.text},
+            {"block_id":block.id,"kind":"ioc","quote":quote}
+        ]);
+        self.validate(indicator, raw_value, Some(&parts))
+            .map(|_| ())
     }
 
     pub fn validate(
@@ -133,9 +203,9 @@ impl<'a> Document<'a> {
         indicator: &mut Indicator,
         raw_value: &str,
         parts: Option<&Value>,
-    ) -> Result<()> {
+    ) -> Result<Option<Value>> {
         let Some(parts) = parts else {
-            return self.legacy(indicator, raw_value);
+            return self.legacy(indicator, raw_value).map(|()| None);
         };
         let parts: Vec<Part> = serde_json::from_value(parts.clone())
             .map_err(|_| Error::bad("intel_ai_invalid_schema"))?;
@@ -162,6 +232,43 @@ impl<'a> Document<'a> {
                 quote: self.body[block.start + start..block.start + end].into(),
             });
         }
+        let correction = match self.validate_spans(indicator, raw_value, &spans) {
+            Ok(()) => None,
+            Err(error) => {
+                let Some(corrected) =
+                    self.correct_record_context(indicator, raw_value, &spans, &error)
+                else {
+                    return Err(error);
+                };
+                // Corrections use exactly the same validator as model citations.
+                self.validate_spans(indicator, raw_value, &corrected)?;
+                spans = corrected;
+                let mut diagnostic = error.diagnostic;
+                diagnostic["correction_method"] = json!("record_heading");
+                diagnostic["expected_context_block_id"] = json!(spans[0].block_id);
+                Some(diagnostic)
+            }
+        };
+        let evidence = spans
+            .iter()
+            .map(|span| span.quote.as_str())
+            .collect::<Vec<_>>()
+            .join("\n[…]\n");
+        if evidence.len() > 4000 {
+            return Err(Error::bad("intel_ai_invalid_schema"));
+        }
+        // Store only source substrings and server-computed UTF-8 byte ranges.
+        indicator.evidence = evidence;
+        indicator.evidence_spans = spans;
+        Ok(correction)
+    }
+
+    fn validate_spans(
+        &self,
+        indicator: &Indicator,
+        raw_value: &str,
+        spans: &[VerifiedSpan],
+    ) -> Result<()> {
         let iocs = spans
             .iter()
             .filter(|span| span.kind == PartKind::Ioc)
@@ -184,11 +291,12 @@ impl<'a> Document<'a> {
                 let explicit = !ioc_only(&context.quote, indicator)
                     && mentions(&context.quote, &indicator.kind, raw_value, &indicator.value);
                 if !explicit && !self.related(context, ioc) {
-                    return Err(rejected("evidence_context_scope_mismatch").context(json!({
+                    return Err(rejected(self.context_failure(context, ioc)).context(json!({
                         "context_block_id":context.block_id,"ioc_block_id":ioc.block_id,
                         "context_block_kind":self.blocks[context.block_id-1].kind,
                         "ioc_block_kind":self.blocks[ioc.block_id-1].kind,
-                        "ioc_scope_block_id":self.blocks[ioc.block_id-1].scope
+                        "ioc_scope_block_id":self.blocks[ioc.block_id-1].scope,
+                        "expected_context_block_id":self.blocks[ioc.block_id-1].scope
                     })));
                 }
             }
@@ -200,18 +308,124 @@ impl<'a> Document<'a> {
         {
             return Err(rejected("evidence_context_missing"));
         }
-        let evidence = spans
-            .iter()
-            .map(|span| span.quote.as_str())
-            .collect::<Vec<_>>()
-            .join("\n[…]\n");
-        if evidence.len() > 4000 {
-            return Err(Error::bad("intel_ai_invalid_schema"));
-        }
-        // Store only source substrings and server-computed UTF-8 byte ranges.
-        indicator.evidence = evidence;
-        indicator.evidence_spans = spans;
         Ok(())
+    }
+
+    fn context_failure(&self, context: &VerifiedSpan, ioc: &VerifiedSpan) -> &'static str {
+        let block = &self.blocks[ioc.block_id - 1];
+        let parent = &self.blocks[context.block_id - 1];
+        if matches!(block.kind, "record_heading" | "record_field") {
+            if matches!(
+                parent.kind,
+                "record_heading" | "record_field" | "record_metadata"
+            ) {
+                return if parent.scope != block.scope {
+                    "evidence_context_record_mismatch"
+                } else {
+                    "evidence_context_record_field_unsupported"
+                };
+            }
+            if parent.id < block.scope.unwrap_or(0) {
+                return "evidence_context_record_heading_required";
+            }
+        }
+        "evidence_context_scope_mismatch"
+    }
+
+    fn correct_record_context(
+        &self,
+        indicator: &Indicator,
+        raw_value: &str,
+        spans: &[VerifiedSpan],
+        error: &Error,
+    ) -> Option<Vec<VerifiedSpan>> {
+        if !matches!(
+            error.diagnostic["reason"].as_str()?,
+            "evidence_context_record_field_unsupported"
+                | "evidence_context_record_heading_required"
+                | "evidence_context_missing"
+        ) {
+            return None;
+        }
+        let iocs = spans
+            .iter()
+            .filter(|span| span.kind == PartKind::Ioc)
+            .collect::<Vec<_>>();
+        let scope = self.blocks[iocs.first()?.block_id - 1].scope?;
+        let title = self.record_title(&self.blocks[iocs[0].block_id - 1], &indicator.kind)?;
+        // An exact malicious field label and a complete, typed title value are
+        // required. Merely sharing a structural scope is never sufficient.
+        if !iocs.iter().all(|ioc| {
+            let block = &self.blocks[ioc.block_id - 1];
+            block.scope == Some(scope)
+                && mentions(&ioc.quote, &indicator.kind, raw_value, &indicator.value)
+                && mentions(block.text, &indicator.kind, raw_value, &indicator.value)
+                && self.record_title(block, &indicator.kind).is_some()
+        }) {
+            return None;
+        }
+        // Only known metadata from THIS record or its contiguous list's exact
+        // introductory heading may be replaced. Never discard cross-record,
+        // benign/recommended, arbitrary narrative or unresolved citations.
+        for context in spans.iter().filter(|span| span.kind == PartKind::Context) {
+            let block = &self.blocks[context.block_id - 1];
+            let same_title = block.id == scope;
+            let metadata = block.scope == Some(scope)
+                && field(block.text).is_some_and(|(label, _)| {
+                    matches!(label, "日控制规模" | "归属地" | "关联端口" | "相关端口")
+                });
+            if !same_title && !metadata && !self.record_introduction(block.id, scope) {
+                return None;
+            }
+        }
+        let mut corrected = vec![VerifiedSpan {
+            block_id: title.id,
+            kind: PartKind::Context,
+            start: title.start,
+            end: title.end,
+            quote: title.text.into(),
+        }];
+        corrected.extend(iocs.into_iter().cloned());
+        (corrected.len() <= 8
+            && corrected.iter().map(|span| span.quote.len()).sum::<usize>() <= 4000)
+            .then_some(corrected)
+    }
+
+    fn associated_domain_field(&self, block: &Block<'_>) -> bool {
+        for parent in self.blocks[..block.id].iter().rev() {
+            if parent.scope != block.scope || parent.kind != "record_field" {
+                return false;
+            }
+            if let Some((label, _)) = field(parent.text) {
+                return matches!(
+                    label.to_ascii_lowercase().as_str(),
+                    "关联域名"
+                        | "相关域名"
+                        | "associated domain"
+                        | "associated domains"
+                        | "related domain"
+                        | "related domains"
+                );
+            }
+        }
+        false
+    }
+
+    fn record_introduction(&self, context_id: usize, scope: usize) -> bool {
+        let intro = self.blocks[..scope - 1].iter().rev().find(|block| {
+            !matches!(
+                block.kind,
+                "record_heading" | "record_field" | "record_metadata"
+            )
+        });
+        intro.is_some_and(|block| {
+            block.id == context_id
+                && block.kind == "heading"
+                && matches!(
+                    block.text.trim_end_matches(['：', ':']),
+                    "恶意网络资产信息如下" | "恶意网络资产信息" | "恶意网络资产" | "恶意资产列表"
+                )
+        })
     }
 
     fn legacy(&self, indicator: &mut Indicator, raw_value: &str) -> Result<()> {
@@ -320,6 +534,27 @@ fn associated_field(text: &str) -> bool {
         .iter()
         .any(|prefix| label.starts_with(prefix))
         && (value.is_empty() || data_line(value))
+}
+
+fn malicious_record_kind(text: &str) -> Option<&'static str> {
+    if !numbered_record(text) {
+        return None;
+    }
+    let (label, _) = field(text)?;
+    let end = label.find(['）', ')', '、', '.', '．'])?;
+    let label = label[end..]
+        .chars()
+        .next()
+        .map(|c| &label[end + c.len_utf8()..])?;
+    let label = label
+        .split_whitespace()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match label.as_str() {
+        "恶意ip地址" | "恶意ip" | "maliciousipaddress" | "maliciousip" => Some("ip"),
+        "恶意域名" | "maliciousdomain" => Some("domain"),
+        _ => None,
+    }
 }
 
 fn rejected(reason: &'static str) -> Error {
@@ -776,7 +1011,7 @@ mod tests {
         crossed["type"] = json!("domain");
         assert_eq!(
             parse_item(body, crossed).unwrap_err().diagnostic["reason"],
-            "evidence_context_scope_mismatch"
+            "evidence_context_record_mismatch"
         );
         assert!(parse_item(body, item("8.8.8.8", 2, first, 10, "8.8.8.8")).is_err());
         let benign_field = "（一）恶意IP地址：177.4.3.99\n推荐公共DNS：8.8.8.8";
@@ -807,3 +1042,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "evidence_record_tests.rs"]
+mod record_tests;

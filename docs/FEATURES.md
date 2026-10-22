@@ -2,6 +2,7 @@
 
 可信来源 IOC 自动标记、Web 来源管理与必须人工审核的 AI 补充提取见
 [威胁情报、可信 IOC 与 AI 审核](THREAT_INTELLIGENCE.md)。
+独立 LLM 导航提供供应商／模型单选、全局与局部配置及在线对话调试，见 [LLM 配置](LLM.md)。
 
 [返回项目首页](../README.md) · [文档索引](README.md)
 
@@ -116,7 +117,7 @@ repeat_after_seconds = 604800
 
 ## 开源项目清单
 
-`GET /api/open-source/projects` 返回编译进服务端的主要直接依赖清单。升级 `Cargo.toml`、扫描器依赖或前端 `package.json` 后，应同步复核 `source/open_source_projects.json` 中的版本、许可证和上游链接。
+`GET /api/open-source/projects` 返回编译进服务端的第三方直接包依赖清单，包含构建与开发依赖。升级 `Cargo.toml`、扫描器依赖或前端 `package.json` 后，应同步复核 `source/open_source_projects.json` 中的声明范围、许可证和上游链接，并运行 `python3 scripts/check-open-source-catalog.py`。范围、复核依据与维护步骤见[第三方依赖清单维护](OPEN_SOURCE_CATALOG.md)。
 
 ## 扫描器错误与日志诊断
 

@@ -772,13 +772,40 @@ fn ai_result_checked(
                     return Err(Error::bad("intel_ai_invalid_schema"));
                 }
                 let parts = object.remove("evidence_parts");
+                let unit = object.remove("evidence_unit_id");
+                let uses_unit = unit.is_some();
+                if unit.is_some() && (parts.is_some() || object.contains_key("evidence")) {
+                    return Err(Error::bad("intel_ai_invalid_schema"));
+                }
                 let mut i: Indicator = serde_json::from_value(fields)
                     .map_err(|_| Error::bad("intel_ai_invalid_schema"))?;
                 let raw = i.value.clone();
                 i.normalize()?;
-                document
-                    .validate(&mut i, &raw, parts.as_ref())
-                    .map_err(|error| error.context(json!({"record":index+1})))?;
+                let correction = if let Some(unit) = unit {
+                    document
+                        .validate_unit(
+                            &mut i,
+                            &raw,
+                            unit.as_str()
+                                .ok_or_else(|| Error::bad("intel_ai_invalid_schema"))?,
+                        )
+                        .map(|()| None)
+                } else {
+                    document.validate(&mut i, &raw, parts.as_ref())
+                }
+                .map_err(|error| error.context(json!({"record":index+1})))?;
+                if let Some(mut diagnostic) = correction {
+                    validation.corrected += 1;
+                    if validation.correction_samples.len() < 100 {
+                        diagnostic["record"] = json!(index + 1);
+                        validation.correction_samples.push(diagnostic);
+                    }
+                } else {
+                    validation.direct_accepted += 1;
+                    if uses_unit {
+                        validation.unit_accepted += 1;
+                    }
+                }
                 Ok(i)
             })();
             match result {

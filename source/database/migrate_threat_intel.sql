@@ -23,8 +23,11 @@ CREATE TABLE IF NOT EXISTS intel_source (
     next_check_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS credential_ciphertext BYTEA;
 ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS publisher_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS request_config JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE intel_source ADD COLUMN IF NOT EXISTS request_config_ciphertext BYTEA;
 ALTER TABLE intel_source DROP CONSTRAINT IF EXISTS intel_source_kind_check;
 ALTER TABLE intel_source ADD CONSTRAINT intel_source_kind_check CHECK(kind IN ('json','lines','threatfox','threatfox_export','eset_github','rss','mitre_stix','article'));
 ALTER TABLE intel_source DROP CONSTRAINT IF EXISTS intel_source_transport_check;
@@ -132,13 +135,18 @@ CREATE TABLE IF NOT EXISTS intel_article (
     CONSTRAINT intel_article_source_version UNIQUE(source_id,url,feed_hash,source_revision),
     UNIQUE(source_id,id)
 );
+ALTER TABLE intel_article ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+ALTER TABLE intel_article ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
+-- Deleted snapshots retain evidence but do not reserve the intake identity.
+ALTER TABLE intel_article DROP CONSTRAINT IF EXISTS intel_article_source_version;
+DROP INDEX IF EXISTS intel_article_source_version;
 -- Upgrade existing installations without changing old snapshots/review evidence.
 ALTER TABLE intel_article DROP CONSTRAINT IF EXISTS intel_article_status_check;
 ALTER TABLE intel_article ADD CONSTRAINT intel_article_status_check
  CHECK(status IN ('queued','running','proposed','succeeded','failed','cancelled'));
 ALTER TABLE intel_article DROP CONSTRAINT IF EXISTS intel_article_source_id_url_feed_hash_key;
 CREATE UNIQUE INDEX IF NOT EXISTS intel_article_source_version
- ON intel_article(source_id,url,feed_hash,source_revision);
+ ON intel_article(source_id,url,feed_hash,source_revision) WHERE deleted_at IS NULL;
 
 -- Only accepted indicators enter this table. AI drafts live in intel_record.
 CREATE TABLE IF NOT EXISTS intel_ioc (
@@ -244,7 +252,11 @@ CREATE OR REPLACE VIEW intel_record_state AS
  SELECT q.*,(q.effective_valid_until IS NOT NULL AND q.effective_valid_until<=NOW()) AS expired
  FROM (SELECT r.*,s.name AS source_name,
    LEAST(r.valid_until,CASE WHEN s.expiry_months>0 THEN COALESCE(r.observed_at,r.created_at)+make_interval(months=>s.expiry_months) END) AS effective_valid_until
-   FROM intel_record r JOIN intel_source s ON s.id=r.source_id) q;
+   FROM intel_record r JOIN intel_source s ON s.id=r.source_id
+   WHERE s.deleted_at IS NULL AND (r.origin<>'ai' OR EXISTS (
+     SELECT 1 FROM intel_article_record l JOIN intel_article a ON a.id=l.article_id
+     WHERE l.record_id=r.id AND a.deleted_at IS NULL
+   ))) q;
 -- Preserve the original public view's column order when upgrading.
 CREATE OR REPLACE VIEW intel_published AS
  SELECT r.id,r.source_id,r.source_revision,r.external_key,r.content_hash,r.origin,r.status,r.kind,r.value,

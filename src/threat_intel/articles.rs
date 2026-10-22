@@ -20,9 +20,6 @@ pub(super) fn canonical_url(raw: &str, source: &SourceInput) -> Result<String> {
         }
         let mut identity = Vec::new();
         for (key, value) in url.query_pairs() {
-            if key == "__biz" && !source.publisher_id.is_empty() && value != source.publisher_id {
-                return Err(Error::bad("intel_article_publisher_mismatch"));
-            }
             if matches!(key.as_ref(), "__biz" | "mid" | "idx" | "sn") {
                 identity.push((key.into_owned(), value.into_owned()));
             }
@@ -36,7 +33,7 @@ pub(super) fn canonical_url(raw: &str, source: &SourceInput) -> Result<String> {
     Ok(url.to_string())
 }
 
-pub(super) fn body_snapshot(data: &[u8], url: &str, publisher: &str) -> Result<(String, Value)> {
+pub(super) fn body_snapshot(data: &[u8], url: &str) -> Result<(String, Value)> {
     let parsed = reqwest::Url::parse(url).ok();
     if parsed
         .as_ref()
@@ -53,31 +50,10 @@ pub(super) fn body_snapshot(data: &[u8], url: &str, publisher: &str) -> Result<(
     if !wechat {
         return article_body::extract(data, None);
     }
-    if publisher.is_empty() {
-        return Err(Error::bad("intel_article_publisher_required"));
-    }
-    let input = std::str::from_utf8(data).map_err(|_| Error::bad("intel_article_not_utf8"))?;
-    let html = scraper::Html::parse_document(input);
-    let script = scraper::Selector::parse("script").expect("static selector");
-    let pattern =
-        regex::Regex::new(r#"\bbiz\s*=\s*["']([A-Za-z0-9+/=]{1,128})["']"#).expect("static regex");
-    let ids = html
-        .select(&script)
-        .flat_map(|node| {
-            let script = node.text().collect::<String>();
-            pattern
-                .captures_iter(&script)
-                .map(|c| c[1].to_owned())
-                .collect::<Vec<_>>()
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    if ids.len() != 1 || !ids.contains(publisher) {
-        return Err(Error::bad("intel_article_publisher_mismatch"));
-    }
     let body = parse::article_text_with_selector(data, "#js_content")?;
     Ok((
         body,
-        json!({"method":"remote_wechat","publisher_id":publisher,"publisher_verification":"page_account_match"}),
+        json!({"method":"remote_wechat","publisher_verification":"not_bound"}),
     ))
 }
 
@@ -87,12 +63,24 @@ pub(super) async fn submit(
     user: &UserBaseI,
     context: &AuditContext,
 ) -> Result<Value> {
+    save(pool, None, input, user, context).await
+}
+
+pub(super) async fn save(
+    pool: &Pool,
+    edit: Option<(Uuid, i64)>,
+    input: ArticleInput,
+    user: &UserBaseI,
+    context: &AuditContext,
+) -> Result<Value> {
     admin(user)?;
     let source: Source = storage::get_source(pool, input.source_id).await?;
     if source.revision != input.expected_revision {
         return Err(Error::conflict());
     }
-    if source.input.kind != "article" || source.input.transport != "manual" {
+    if (edit.is_none() && (source.input.kind != "article" || source.input.transport != "manual"))
+        || !matches!(source.input.kind.as_str(), "rss" | "article")
+    {
         return Err(Error::bad("intel_invalid_article_source"));
     }
     let url = canonical_url(&input.url, &source.input)?;
@@ -110,14 +98,6 @@ pub(super) async fn submit(
     {
         return Err(Error::bad("intel_invalid_article"));
     }
-    if body.is_none()
-        && reqwest::Url::parse(&url)
-            .ok()
-            .is_some_and(|u| u.host_str() == Some("mp.weixin.qq.com"))
-        && source.input.publisher_id.is_empty()
-    {
-        return Err(Error::bad("intel_article_publisher_required"));
-    }
     // Plain text is explicitly administrator supplied, never claimed to be a
     // network-verified official publication or a structured trusted feed.
     let intake = if body.is_some() {
@@ -133,20 +113,35 @@ pub(super) async fn submit(
     let body_hash = body.as_ref().map(|body| digest(body.as_bytes()));
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
+    if let Some((id, revision)) = edit {
+        let old = tx.query_opt("SELECT source_id,revision FROM intel_article WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", &[&id]).await?.ok_or_else(Error::missing)?;
+        if old.get::<_, Uuid>("source_id") != source.id || old.get::<_, i64>("revision") != revision
+        {
+            return Err(Error::conflict());
+        }
+        tx.execute("UPDATE intel_article SET deleted_at=NOW(),revision=revision+1,status='cancelled',claim_token=NULL,lease_until=NULL WHERE id=$1", &[&id]).await?;
+    }
     storage::validate_source(&tx, &source).await?;
-    let metadata = json!({"intake":intake});
+    let metadata = json!({"intake":intake,"edit_of":edit.map(|(id,_)|id)});
     let id = Uuid::now_v7();
-    let inserted = tx.query_opt("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash,body,body_hash,extraction_metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(source_id,url,feed_hash,source_revision) DO NOTHING RETURNING id", &[&id,&source.id,&source.revision,&url,&title,&hash,&body,&body_hash,&metadata]).await?;
+    let inserted = tx.query_opt("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash,body,body_hash,extraction_metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(source_id,url,feed_hash,source_revision) WHERE deleted_at IS NULL DO NOTHING RETURNING id", &[&id,&source.id,&source.revision,&url,&title,&hash,&body,&body_hash,&metadata]).await?;
     let id: Uuid = if let Some(row) = inserted {
         row.get(0)
     } else {
-        tx.query_one("SELECT id FROM intel_article WHERE source_id=$1 AND url=$2 AND feed_hash=$3 AND source_revision=$4", &[&source.id,&url,&hash,&source.revision]).await?.get(0)
+        if edit.is_some() {
+            return Err(Error::conflict());
+        }
+        tx.query_one("SELECT id FROM intel_article WHERE source_id=$1 AND url=$2 AND feed_hash=$3 AND source_revision=$4 AND deleted_at IS NULL", &[&source.id,&url,&hash,&source.revision]).await?.get(0)
     };
     audit(
         &tx,
         user,
         context,
-        "intel.article.submit",
+        if edit.is_some() {
+            "intel.article.update"
+        } else {
+            "intel.article.submit"
+        },
         &id.to_string(),
         json!({"source_id":source.id,"snapshot_supplied":body.is_some()}),
     )

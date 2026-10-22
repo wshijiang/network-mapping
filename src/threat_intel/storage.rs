@@ -9,6 +9,7 @@ pub(super) struct Source {
     pub input: SourceInput,
     pub fence: Option<Fence>,
     pub credential_ciphertext: Option<Vec<u8>>,
+    pub request_config_ciphertext: Option<Vec<u8>>,
 }
 #[derive(Clone, Copy)]
 pub(super) enum Fence {
@@ -54,7 +55,7 @@ pub(super) fn source(row: &tokio_postgres::Row) -> Source {
             transport: row.get("transport"),
             location: row.get("location"),
             allowed_hosts: row.get("allowed_hosts"),
-            publisher_id: row.get("publisher_id"),
+            request_config: serde_json::from_value(row.get("request_config")).unwrap_or_default(),
             auth_env: row.get("auth_env"),
             credential: String::new(),
             clear_credential: false,
@@ -66,26 +67,35 @@ pub(super) fn source(row: &tokio_postgres::Row) -> Source {
         },
         fence: None,
         credential_ciphertext: row.get("credential_ciphertext"),
+        request_config_ciphertext: row.get("request_config_ciphertext"),
     }
 }
 pub(super) async fn get_source(pool: &Pool, id: Uuid) -> Result<Source> {
     pool.get()
         .await?
-        .query_opt("SELECT * FROM intel_source WHERE id=$1", &[&id])
+        .query_opt(
+            "SELECT * FROM intel_source WHERE id=$1 AND deleted_at IS NULL",
+            &[&id],
+        )
         .await?
         .as_ref()
         .map(source)
         .ok_or_else(Error::missing)
 }
-pub(super) async fn sources(pool: &Pool) -> Result<Value> {
+pub(super) async fn sources(pool: &Pool, encryption_key: &str) -> Result<Value> {
     let rows=pool.get().await?.query("SELECT s.*, (SELECT JSONB_BUILD_OBJECT('status',j.status,'summary',j.summary,'error_code',j.error_code,'created_at',j.created_at) FROM intel_sync_run j WHERE j.source_id=s.id ORDER BY created_at DESC LIMIT 1) AS last_run,
     (SELECT JSONB_BUILD_OBJECT('stage',CASE WHEN i.source_revision<>s.revision THEN 'cancelled' WHEN i.paused THEN 'paused' ELSE i.stage END,'total',i.record_count,'processed',i.processed_count,'validation',i.validation_summary) FROM intel_import_snapshot i WHERE i.source_id=s.id) AS import_status
-    FROM intel_source s ORDER BY name,id",&[]).await?;
+    FROM intel_source s WHERE s.deleted_at IS NULL ORDER BY name,id",&[]).await?;
     let items = rows
         .iter()
         .map(|row| {
             let s = source(row);
             let mut v = serde_json::to_value(&s.input).unwrap();
+            let config = source_transport::RequestConfig::decrypt(
+                s.request_config_ciphertext.as_deref(),
+                encryption_key,
+            )?;
+            v["request_config"]["proxy_url"] = json!(config.proxy_url);
             v["id"] = json!(s.id);
             v["revision"] = json!(s.revision);
             v["next_check_at"] =
@@ -101,9 +111,9 @@ pub(super) async fn sources(pool: &Pool) -> Result<Value> {
             v["last_run"] = row
                 .get::<_, Option<Value>>("last_run")
                 .unwrap_or(Value::Null);
-            v
+            Ok(v)
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     Ok(
         json!({"items":items,"defaults":{"mitre_stix":86400,"eset_github":3600,"rss":1800,"article":1800,"threatfox":1800,"threatfox_export":3600,"json":1800,"lines":1800}}),
     )
@@ -117,7 +127,6 @@ pub(super) async fn save_source(
     encryption_key: &str,
 ) -> Result<Value> {
     admin(user)?;
-    input.validate()?;
     let encrypted =
         credentials::encrypt_update(&input.credential, input.clear_credential, encryption_key)?;
     let clear = input.clear_credential || input.transport != "https";
@@ -126,25 +135,40 @@ pub(super) async fn save_source(
     let id = id.unwrap_or_else(Uuid::now_v7);
     let old = tx
         .query_opt(
-            "SELECT revision FROM intel_source WHERE id=$1 FOR UPDATE",
+            "SELECT revision,deleted_at,request_config_ciphertext FROM intel_source WHERE id=$1 FOR UPDATE",
             &[&id],
         )
         .await?;
     let revision = if let Some(row) = old {
         let revision: i64 = row.get(0);
+        if row
+            .get::<_, Option<chrono::DateTime<chrono::Utc>>>("deleted_at")
+            .is_some()
+        {
+            return Err(Error::missing());
+        }
         if input.expected_revision != Some(revision) {
             return Err(Error::conflict());
         }
+        let ciphertext: Option<Vec<u8>> = row.get("request_config_ciphertext");
+        let old_config =
+            source_transport::RequestConfig::decrypt(ciphertext.as_deref(), encryption_key)?;
+        input.request_config.preserve(&old_config);
+        input.validate()?;
         tx.execute("UPDATE intel_source SET name=$2,kind=$3,transport=$4,location=$5,allowed_hosts=$6,auth_env=$7,enabled=$8,require_review=$9,interval_seconds=$10,revision=revision+1,next_check_at=NOW(),updated_at=NOW() WHERE id=$1",&[&id,&input.name,&input.kind,&input.transport,&input.location,&input.allowed_hosts,&input.auth_env,&input.enabled,&input.require_review,&input.interval_seconds.unwrap()]).await?;
         tx.execute("DELETE FROM intel_source_file WHERE source_id=$1", &[&id])
             .await?;
         revision + 1
     } else {
+        input.validate()?;
         if input.expected_revision.is_some() {
             return Err(Error::missing());
         }
         let count: i64 = tx
-            .query_one("SELECT COUNT(*) FROM intel_source", &[])
+            .query_one(
+                "SELECT COUNT(*) FROM intel_source WHERE deleted_at IS NULL",
+                &[],
+            )
             .await?
             .get(0);
         if count >= 100 {
@@ -155,13 +179,24 @@ pub(super) async fn save_source(
     };
     tx.execute("UPDATE intel_source SET credential_ciphertext=CASE WHEN $2 THEN NULL ELSE COALESCE($3,credential_ciphertext) END,expiry_months=$4 WHERE id=$1", &[&id,&clear,&encrypted,&input.expiry_months]).await?;
     tx.execute(
-        "UPDATE intel_source SET publisher_id=$2 WHERE id=$1",
-        &[&id, &input.publisher_id],
+        "UPDATE intel_source SET request_config=$2,request_config_ciphertext=$3 WHERE id=$1",
+        &[
+            &id,
+            &json!(input.request_config.redact()),
+            &input.request_config.encrypt(encryption_key)?,
+        ],
     )
     .await?;
     audit(&tx,user,context,"intel.source.save",&id.to_string(),json!({"revision":revision,"kind":input.kind,"enabled":input.enabled,"require_review":input.require_review,"interval_seconds":input.interval_seconds,"expiry_months":input.expiry_months,"credential_changed":clear||encrypted.is_some()})).await?;
     tx.commit().await?;
     Ok(json!({"id":id,"revision":revision}))
+}
+fn runtime_settings(mut document: Value) -> Result<Settings> {
+    if let Some(fields) = document.as_object_mut() {
+        fields.remove("llm_managed");
+        fields.remove("llm_provider_id");
+    }
+    serde_json::from_value(document).map_err(|_| Error::unavailable())
 }
 pub(super) async fn settings(pool: &Pool) -> Result<(Settings, i64)> {
     let row = pool
@@ -172,15 +207,11 @@ pub(super) async fn settings(pool: &Pool) -> Result<(Settings, i64)> {
             &[],
         )
         .await?;
-    Ok((
-        serde_json::from_value(row.get("document")).map_err(|_| Error::unavailable())?,
-        row.get("revision"),
-    ))
+    Ok((runtime_settings(row.get("document"))?, row.get("revision")))
 }
 pub(super) async fn settings_json(pool: &Pool) -> Result<Value> {
     let row=pool.get().await?.query_one("SELECT document,revision,credential_ciphertext IS NOT NULL AS stored FROM intel_settings WHERE singleton",&[]).await?;
-    let s: Settings =
-        serde_json::from_value(row.get("document")).map_err(|_| Error::unavailable())?;
+    let s = runtime_settings(row.get("document"))?;
     let stored: bool = row.get("stored");
     let (kind, configured) = credentials::status(stored, &s.ai_key_env);
     Ok(
@@ -203,8 +234,20 @@ pub(super) async fn ai_credential(
         .await?
         .ok_or_else(Error::conflict)?;
     let ciphertext: Option<Vec<u8>> = row.get(0);
-    credentials::resolve(ciphertext.as_deref(), &s.ai_key_env, key)?
-        .ok_or_else(|| Error::bad("intel_credential_missing"))
+    let transport = llm::runtime_transport(pool, revision, key).await?;
+    let has_authorization = transport.headers.contains_key("authorization");
+    if let Some(value) = credentials::resolve_with_authorization(
+        ciphertext.as_deref(),
+        &s.ai_key_env,
+        key,
+        has_authorization,
+    )? {
+        return Ok(value);
+    }
+    if has_authorization {
+        return Ok(String::new());
+    }
+    Err(Error::bad("intel_credential_missing"))
 }
 pub(super) async fn save_settings(
     pool: &Pool,
@@ -219,6 +262,10 @@ pub(super) async fn save_settings(
     let encrypted = credentials::encrypt_update(&s.credential, s.clear_credential, encryption_key)?;
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
+    let managed: bool = tx.query_one("SELECT COALESCE((document->>'llm_managed')::BOOLEAN,FALSE) FROM intel_settings WHERE singleton FOR UPDATE", &[]).await?.get(0);
+    if managed {
+        return Err(Error::bad("llm_settings_moved"));
+    }
     let row=tx.query_opt("UPDATE intel_settings SET document=$1,revision=revision+1,updated_at=NOW(),credential_ciphertext=CASE WHEN $3 THEN NULL ELSE COALESCE($4,credential_ciphertext) END WHERE singleton AND revision=$2 RETURNING revision",&[&json!(s),&expected,&s.clear_credential,&encrypted]).await?.ok_or_else(Error::conflict)?;
     let revision: i64 = row.get(0);
     audit(
@@ -244,7 +291,7 @@ pub(super) async fn enqueue(
     let tx = c.transaction().await?;
     let row = tx
         .query_opt(
-            "SELECT revision,enabled,transport FROM intel_source WHERE id=$1 FOR UPDATE",
+            "SELECT revision,enabled,transport FROM intel_source WHERE id=$1 AND deleted_at IS NULL FOR UPDATE",
             &[&id],
         )
         .await?
@@ -485,7 +532,7 @@ async fn ingest_in<C: GenericClient + Sync>(
     )
     .await?;
     if let Some(article) = article {
-        let rows = tx.query("SELECT r.id,r.payload,r.status FROM intel_record r JOIN intel_article old ON old.id=r.article_id JOIN intel_article current ON current.id=$3 WHERE r.source_id=$1 AND r.external_key=$2 AND r.origin='ai' AND r.status<>'superseded' AND old.body IS NOT DISTINCT FROM current.body ORDER BY (r.status<>'pending') DESC,r.created_at DESC,r.id DESC", &[&s.id,&key,&article]).await?;
+        let rows = tx.query("SELECT r.id,r.payload,r.status FROM intel_record r JOIN intel_article old ON old.id=r.article_id JOIN intel_article current ON current.id=$3 WHERE r.source_id=$1 AND r.external_key=$2 AND r.origin='ai' AND r.status<>'superseded' AND old.deleted_at IS NULL AND old.body IS NOT DISTINCT FROM current.body ORDER BY (r.status<>'pending') DESC,r.created_at DESC,r.id DESC", &[&s.id,&key,&article]).await?;
         let facts = ai_facts(&payload);
         let matches = rows
             .iter()
@@ -574,7 +621,7 @@ pub(super) async fn review_in(
     }
     let identity = tx
         .query_opt(
-            "SELECT source_id,external_key FROM intel_record WHERE id=$1",
+            "SELECT source_id,external_key FROM intel_record_state WHERE id=$1",
             &[&id],
         )
         .await?
@@ -657,7 +704,10 @@ pub(super) fn record_json(r: &tokio_postgres::Row) -> Value {
     let until = r
         .try_get::<_, Option<chrono::DateTime<chrono::Utc>>>("effective_valid_until")
         .unwrap_or_else(|_| r.get("valid_until"));
-    json!({"id":r.get::<_,Uuid>("id"),"source_id":r.get::<_,Uuid>("source_id"),"source_name":r.get::<_,String>("source_name"),"source_revision":r.get::<_,i64>("source_revision"),"origin":r.get::<_,String>("origin"),"status":if status=="approved"&&expired{"expired".to_owned()}else{status},"expired":expired,"type":r.get::<_,String>("kind"),"value":r.get::<_,String>("value"),"content_hash":r.get::<_,String>("content_hash"),"payload":r.get::<_,Value>("payload"),"actor_id":effective_actor,"original_actor_id":original_actor,"reviewed_attribution":attribution,"article_id":r.get::<_,Option<Uuid>>("article_id"),"review_id":r.get::<_,Option<Uuid>>("review_id"),"valid_until":until,"created_at":r.get::<_,chrono::DateTime<chrono::Utc>>("created_at")})
+    let article = r
+        .try_get::<_, Option<Uuid>>("active_article_id")
+        .unwrap_or_else(|_| r.get("article_id"));
+    json!({"id":r.get::<_,Uuid>("id"),"source_id":r.get::<_,Uuid>("source_id"),"source_name":r.get::<_,String>("source_name"),"source_revision":r.get::<_,i64>("source_revision"),"origin":r.get::<_,String>("origin"),"status":if status=="approved"&&expired{"expired".to_owned()}else{status},"expired":expired,"type":r.get::<_,String>("kind"),"value":r.get::<_,String>("value"),"content_hash":r.get::<_,String>("content_hash"),"payload":r.get::<_,Value>("payload"),"actor_id":effective_actor,"original_actor_id":original_actor,"reviewed_attribution":attribution,"article_id":article,"review_id":r.get::<_,Option<Uuid>>("review_id"),"valid_until":until,"created_at":r.get::<_,chrono::DateTime<chrono::Utc>>("created_at")})
 }
 #[derive(Deserialize, Default)]
 pub(super) struct ListQuery {
@@ -695,7 +745,7 @@ pub(super) async fn records(pool: &Pool, user: &UserBaseI, q: &ListQuery) -> Res
         return Err(Error::bad("intel_invalid_query"));
     }
     let c = pool.get().await?;
-    let rows=c.query("SELECT r.*,COALESCE(rv.attribution,'{}'::JSONB) AS reviewed_attribution,COUNT(*) OVER() AS total FROM intel_record_state r LEFT JOIN intel_review rv ON rv.id=r.review_id AND rv.record_id=r.id WHERE ((r.status=$1 AND ($1<>'approved' OR NOT r.expired)) OR ($1='expired' AND r.status='approved' AND r.expired)) AND ($2::UUID IS NULL OR r.source_id=$2) AND ($3='' OR r.value ILIKE '%'||$3||'%' OR r.payload->>'actor_name' ILIKE '%'||$3||'%' OR r.payload->>'malware' ILIKE '%'||$3||'%') AND ($5='' OR r.kind=$5) AND ($6='' OR (r.payload->'attack_types') ? $6) ORDER BY r.created_at DESC,r.id DESC LIMIT 50 OFFSET $4",&[&status,&q.source_id,&query,&offset,&kind,&attack]).await?;
+    let rows=c.query("SELECT r.*,(SELECT a.id FROM intel_article_record l JOIN intel_article a ON a.id=l.article_id WHERE l.record_id=r.id AND a.source_id=r.source_id AND a.deleted_at IS NULL ORDER BY (a.id=r.article_id) DESC,a.created_at DESC,a.id DESC LIMIT 1) AS active_article_id,COALESCE(rv.attribution,'{}'::JSONB) AS reviewed_attribution,COUNT(*) OVER() AS total FROM intel_record_state r LEFT JOIN intel_review rv ON rv.id=r.review_id AND rv.record_id=r.id WHERE ((r.status=$1 AND ($1<>'approved' OR NOT r.expired)) OR ($1='expired' AND r.status='approved' AND r.expired)) AND ($2::UUID IS NULL OR r.source_id=$2) AND ($3='' OR r.value ILIKE '%'||$3||'%' OR r.payload->>'actor_name' ILIKE '%'||$3||'%' OR r.payload->>'malware' ILIKE '%'||$3||'%') AND ($5='' OR r.kind=$5) AND ($6='' OR (r.payload->'attack_types') ? $6) ORDER BY r.created_at DESC,r.id DESC LIMIT 50 OFFSET $4",&[&status,&q.source_id,&query,&offset,&kind,&attack]).await?;
     Ok(
         json!({"items":rows.iter().map(record_json).collect::<Vec<_>>(),"total":rows.first().map(|r|r.get::<_,i64>("total")).unwrap_or(0),"offset":offset}),
     )

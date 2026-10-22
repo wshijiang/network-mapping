@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - 'src/threat_intel/**'
+      - 'src/frontend.rs'
+      - 'src/db/mod.rs'
       - 'source/database/**'
       - 'Cargo.*'
       - '.github/workflows/threat-intelligence.yml'
@@ -11,6 +13,8 @@ on:
     branches: [main]
     paths:
       - 'src/threat_intel/**'
+      - 'src/frontend.rs'
+      - 'src/db/mod.rs'
       - 'source/database/**'
       - 'Cargo.*'
       - '.github/workflows/threat-intelligence.yml'

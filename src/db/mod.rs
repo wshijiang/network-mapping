@@ -292,6 +292,9 @@ pub async fn init_database_table(
             "../../source/database/migrate_threat_intel.sql"
         ))
         .await?;
+    transaction
+        .batch_execute(include_str!("../../source/database/migrate_llm.sql"))
+        .await?;
     transaction.commit().await?;
 
     Ok(())

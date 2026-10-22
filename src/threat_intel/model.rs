@@ -8,7 +8,9 @@ pub(super) const MAX_AI_IOCS: usize = 2000;
 pub(super) const MAX_AI_OUTPUT_TOKENS: u32 = 393_216;
 pub(super) const DEFAULT_AI_OUTPUT_TOKENS: u32 = 65_536;
 pub(super) const MAX_AI_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-pub(super) const PROMPT_VERSION: &str = "ioc-evidence-v7";
+pub(super) const PROMPT_VERSION: &str = "ioc-evidence-v8";
+pub(super) const DEFAULT_AI_PROMPT: &str = include_str!("ai_prompt.txt");
+pub(super) const MAX_AI_PROMPT_BYTES: usize = 64 * 1024;
 pub(super) const ATTACK_TYPES: &[&str] = &[
     "bgp_hijacking",
     "route_leak",
@@ -36,10 +38,30 @@ pub(super) const IOC_ROLES: &[&str] = &[
 pub(super) struct ValidationReport {
     pub rejected: i64,
     pub rejection_samples: Vec<Value>,
+    #[serde(default)]
+    pub direct_accepted: i64,
+    // A subset of direct_accepted: model selected a server-described record unit.
+    #[serde(default)]
+    pub unit_accepted: i64,
+    #[serde(default)]
+    pub corrected: i64,
+    #[serde(default)]
+    pub correction_samples: Vec<Value>,
 }
 impl ValidationReport {
     pub fn merge(&mut self, other: Self, file: &str) {
         self.rejected += other.rejected;
+        self.direct_accepted += other.direct_accepted;
+        self.unit_accepted += other.unit_accepted;
+        self.corrected += other.corrected;
+        for mut sample in other
+            .correction_samples
+            .into_iter()
+            .take(100_usize.saturating_sub(self.correction_samples.len()))
+        {
+            sample["file"] = json!(file.chars().take(512).collect::<String>());
+            self.correction_samples.push(sample);
+        }
         for mut sample in other
             .rejection_samples
             .into_iter()
@@ -107,7 +129,7 @@ pub(super) struct SourceInput {
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
     #[serde(default)]
-    pub publisher_id: String,
+    pub request_config: source_transport::RequestConfig,
     #[serde(default)]
     pub auth_env: String,
     #[serde(default, skip_serializing)]
@@ -169,19 +191,15 @@ impl SourceInput {
         }
         self.allowed_hosts.sort();
         self.allowed_hosts.dedup();
-        if self.allowed_hosts.len() > 20 || self.allowed_hosts.iter().any(|host| !valid_host(host))
+        if self.allowed_hosts.len() > 20
+            || self
+                .allowed_hosts
+                .iter()
+                .any(|host| !valid_host_pattern(host))
         {
             return Err(Error::bad("intel_invalid_hosts"));
         }
-        self.publisher_id = self.publisher_id.trim().to_owned();
-        if self.publisher_id.len() > 128
-            || !self
-                .publisher_id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
-        {
-            return Err(Error::bad("intel_invalid_publisher"));
-        }
+        self.request_config.validate()?;
         if self.kind == "article" && self.transport != "manual" {
             return Err(Error::bad("intel_invalid_article_source"));
         }
@@ -253,9 +271,27 @@ fn valid_host(host: &str) -> bool {
         && host == host.to_ascii_lowercase()
         && host.split('.').all(|p| {
             !p.is_empty()
+                && p.len() <= 63
                 && !p.starts_with('-')
                 && !p.ends_with('-')
                 && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+fn valid_host_pattern(pattern: &str) -> bool {
+    pattern == "*" || valid_host(pattern.strip_prefix("*.").unwrap_or(pattern))
+}
+fn host_matches(pattern: &str, host: &str) -> bool {
+    if pattern == host {
+        return true;
+    }
+    if !valid_host_pattern(pattern) {
+        return false;
+    }
+    pattern == "*"
+        || pattern == host
+        || pattern.strip_prefix("*.").is_some_and(|base| {
+            host.strip_suffix(base)
+                .is_some_and(|prefix| prefix.ends_with('.') && prefix.len() > 1)
         })
 }
 pub(super) fn public_ip(ip: IpAddr) -> bool {
@@ -322,7 +358,7 @@ pub(super) fn validate_url(value: &str, hosts: &[String]) -> Result<reqwest::Url
         || url.password().is_some()
         || url.fragment().is_some()
         || url.port_or_known_default() != Some(443)
-        || !hosts.iter().any(|h| h == host)
+        || !hosts.iter().any(|h| host_matches(h, host))
         || literal.parse::<IpAddr>().is_ok_and(|ip| !public_ip(ip))
     {
         return Err(Error::bad("intel_url_not_allowed"));
@@ -345,6 +381,9 @@ pub(super) struct Settings {
     pub ai_max_output_tokens: u32,
     #[serde(default = "default_ai_reasoning_effort")]
     pub ai_reasoning_effort: String,
+    /// Empty means follow the bundled default, including future default updates.
+    #[serde(default)]
+    pub ai_prompt: String,
     #[serde(default, skip_serializing)]
     pub credential: String,
     #[serde(default, skip_serializing)]
@@ -363,7 +402,20 @@ fn default_ai_timeout_seconds() -> u64 {
     180
 }
 impl Settings {
+    pub fn system_prompt(&self) -> &str {
+        if self.ai_prompt.is_empty() {
+            DEFAULT_AI_PROMPT
+        } else {
+            &self.ai_prompt
+        }
+    }
+
+    pub fn prompt_version(&self) -> String {
+        ai_prompt_version(&self.ai_prompt)
+    }
+
     pub fn validate(&self) -> Result<()> {
+        validate_ai_prompt(&self.ai_prompt)?;
         let url = reqwest::Url::parse(&self.ai_endpoint)
             .map_err(|_| Error::bad("intel_invalid_ai_endpoint"))?;
         validate_url(
@@ -400,6 +452,29 @@ impl Settings {
 
     pub fn ai_lease_seconds(&self) -> i32 {
         self.ai_processing_timeout().as_secs() as i32 + 30
+    }
+}
+
+pub(super) fn validate_ai_prompt(prompt: &str) -> Result<()> {
+    if prompt.len() > MAX_AI_PROMPT_BYTES
+        || (!prompt.is_empty() && prompt.trim().is_empty())
+        || prompt
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    {
+        return Err(Error::bad("intel_invalid_ai_prompt"));
+    }
+    Ok(())
+}
+
+pub(super) fn ai_prompt_version(prompt: &str) -> String {
+    if prompt.is_empty() {
+        PROMPT_VERSION.into()
+    } else {
+        format!(
+            "{PROMPT_VERSION}-custom-{}",
+            &digest(prompt.as_bytes())[..12]
+        )
     }
 }
 

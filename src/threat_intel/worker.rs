@@ -167,7 +167,7 @@ pub(super) async fn sync(
             let mut added = 0;
             for mut link in links {
                 link.url = articles::canonical_url(&link.url, &s.input)?;
-                added+=tx.execute("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash) SELECT $1,$2,$3,$4,$5,$6 WHERE EXISTS(SELECT 1 FROM intel_source WHERE id=$2 AND revision=$3 AND enabled) ON CONFLICT(source_id,url,feed_hash,source_revision) DO NOTHING",&[&Uuid::now_v7(),&s.id,&s.revision,&link.url,&link.title,&link.fingerprint]).await?;
+                added+=tx.execute("INSERT INTO intel_article(id,source_id,source_revision,url,title,feed_hash) SELECT $1,$2,$3,$4,$5,$6 WHERE EXISTS(SELECT 1 FROM intel_source WHERE id=$2 AND revision=$3 AND enabled) AND NOT EXISTS(SELECT 1 FROM intel_article WHERE source_id=$2 AND source_revision=$3 AND url=$4 AND feed_hash=$6 AND deleted_at IS NOT NULL) ON CONFLICT(source_id,url,feed_hash,source_revision) WHERE deleted_at IS NULL DO NOTHING",&[&Uuid::now_v7(),&s.id,&s.revision,&link.url,&link.title,&link.fingerprint]).await?;
             }
             tx.commit().await?;
             drop(c);
@@ -176,7 +176,7 @@ pub(super) async fn sync(
                 false,
             ))
         }
-        "eset_github" => github(pool, &s, &data).await,
+        "eset_github" => github(pool, &s, &data, encryption_key).await,
         kind => {
             let (entries, validation) = if kind == "threatfox" {
                 parse::threatfox_document(&data, kind, true)?
@@ -192,7 +192,12 @@ pub(super) async fn sync(
         }
     }
 }
-async fn github(pool: &Pool, s: &Source, data: &[u8]) -> Result<(Value, bool)> {
+async fn github(
+    pool: &Pool,
+    s: &Source,
+    data: &[u8],
+    encryption_key: &str,
+) -> Result<(Value, bool)> {
     let tree: Value =
         serde_json::from_slice(data).map_err(|_| Error::bad("intel_invalid_github_tree"))?;
     if tree.get("truncated") == Some(&json!(true)) {
@@ -271,7 +276,16 @@ async fn github(pool: &Pool, s: &Source, data: &[u8]) -> Result<(Value, bool)> {
                 segments.push(part);
             }
         }
-        let data = client::request(raw.as_str(), &s.input.allowed_hosts, None, None).await?;
+        let data = client::source_request(
+            s,
+            raw.as_str(),
+            None,
+            None,
+            MAX_BYTES,
+            Duration::from_secs(30),
+            encryption_key,
+        )
+        .await?;
         let (count, supported, report) = github_file(pool, s, path, sha, &data).await?;
         validation.merge(report, path);
         added += count;
@@ -404,7 +418,9 @@ pub(super) async fn ai_tick(pool: &Pool, encryption_key: &str) -> Result<bool> {
         Ok(summary) => {
             tracing::info!(event="IntelArticleExtractionSucceeded",article_id=%id,source_id=%source_id,
                 claim_token=%token,indicators=summary.parsed,inserted=summary.inserted,
-                rejected=summary.validation.rejected);
+                rejected=summary.validation.rejected,corrected=summary.validation.corrected,
+                unit_accepted=summary.validation.unit_accepted,
+                direct_accepted=summary.validation.direct_accepted);
             (summary.state(), None, Value::Null, json!(summary))
         }
         Err(e) => {
@@ -504,16 +520,18 @@ async fn extract(
             body
         } else {
             stage = "article_fetch";
-            let data = client::request_bounded(
+            let data = client::source_request(
+                &source,
                 url,
-                &source.input.allowed_hosts,
                 None,
                 None,
                 2 * 1024 * 1024,
+                Duration::from_secs(30),
+                encryption_key,
             )
             .await?;
             stage = "article_parse";
-            let (body, intake) = articles::body_snapshot(&data, url, &source.input.publisher_id)?;
+            let (body, intake) = articles::body_snapshot(&data, url)?;
             metadata["intake"] = intake;
             body
         };
@@ -524,14 +542,16 @@ async fn extract(
         storage::validate_source(&tx, &source).await?;
         metadata["model"] = json!(settings.ai_model);
         metadata["settings_revision"] = json!(settings_revision);
-        metadata["prompt_version"] = json!(PROMPT_VERSION);
-        metadata["evidence_version"] = json!("block-spans-v1");
+        metadata["prompt_version"] = json!(settings.prompt_version());
+        metadata["prompt_hash"] = json!(digest(settings.system_prompt().as_bytes()));
+        metadata["prompt_source"] = json!(if settings.ai_prompt.is_empty() { "default" } else { "custom" });
+        metadata["evidence_version"] = json!("block-spans-v2");
         metadata["body_hash"] = json!(body_hash);
         metadata.as_object_mut().map(|fields| fields.remove("candidates_hash"));
         metadata["ai_protocol"] = json!(settings.ai_protocol);
         metadata["max_output_tokens"] = json!(settings.ai_max_output_tokens);
         metadata["reasoning_effort"] = json!(settings.ai_reasoning_effort);
-        let changed=tx.execute("UPDATE intel_article SET body=$3,body_hash=$4,extraction_metadata=$5 WHERE id=$1 AND claim_token=$2 AND lease_until>NOW()",&[&id,&token,&body,&body_hash,&metadata]).await?;
+        let changed=tx.execute("UPDATE intel_article SET body=$3,body_hash=$4,extraction_metadata=$5,revision=revision+1 WHERE id=$1 AND claim_token=$2 AND lease_until>NOW()",&[&id,&token,&body,&body_hash,&metadata]).await?;
         if changed == 0 {
             return Err(Error::bad("intel_ai_lease_lost"));
         }
@@ -541,10 +561,12 @@ async fn extract(
         if !storage::settings(pool).await?.0.ai_enabled {
             return Err(Error::bad("intel_ai_disabled"));
         }
+        let transport = llm::runtime_transport(pool, settings_revision, encryption_key).await?;
         let key = storage::ai_credential(pool, settings, settings_revision, encryption_key).await?;
         let blocks = evidence::Document::new(&body).prompt_blocks();
         stage = "ai_request";
-        let (data, input_diagnostic) = ai::request(settings, &key, &blocks, url).await?;
+        let session = digest(format!("ioc:{id}:{body_hash}:{settings_revision}").as_bytes());
+        let (data, input_diagnostic) = llm::ioc_request(pool, id, settings, &key, encryption_key, &blocks, url, &transport, &session).await?;
         stage = "ai_response";
         let (content, mut response_diagnostic) = ai::response_content(&data, &settings.ai_protocol)
             .map_err(|error| error.context(input_diagnostic.clone()))?;

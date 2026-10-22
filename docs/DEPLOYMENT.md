@@ -11,6 +11,7 @@ Docker 环境变量的全部字段、默认值及 Compose 设置见 [完整配�
 `NM_INTEL_LOCAL_ROOT`、只读来源文件挂载，并在 Web 保存数据库加密凭据或配置服务端凭据
 环境变量；数据库凭据复用长期保留的 `server.encrypt_key`。默认来源会定时同步，AI
 默认关闭。迁移、网络白名单和配套前端要求见[威胁情报部署说明](THREAT_INTELLIGENCE.md)。
+LLM 供应商与旧 AI 配置迁移需同时更新后端、控制台及发布所用 frontend-ref，见 [LLM 升级说明](LLM.md#迁移并发与部署)。
 ThreatFox 持续更新使用 API；JSON/CSV/ZIP 历史文件由管理员离线上传。
 导入需将 `NM_INTEL_CACHE_ROOT`（默认 `/var/lib/network-mapping/intel-cache`）配置为服务账户
 可写的持久化目录，多实例共享；本地手动导入的输入目录 `NM_INTEL_LOCAL_ROOT` 可只读挂载。

@@ -1,17 +1,16 @@
 //! async-openai owns protocol dispatch/JSON decoding. Its custom transport uses
 //! our bounded reqwest 0.12 path to preserve DNS, TLS, proxy and redirect policy.
 use super::*;
+#[cfg(test)]
 use async_openai::{
     Client, config::OpenAIConfig, error::OpenAIError, middleware::HttpRequestFactory,
 };
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+#[cfg(test)]
+use std::sync::Arc;
 
-fn payload(settings: &Settings, blocks: &Value, report_url: &str) -> Value {
+pub(super) fn payload(settings: &Settings, blocks: &Value, report_url: &str) -> Value {
     let input = json!({"report_url":report_url,"untrusted_report_blocks":blocks}).to_string();
-    let messages = json!([{"role":"system","content":include_str!("ai_prompt.txt")},{"role":"user","content":input}]);
+    let messages = json!([{"role":"system","content":settings.system_prompt()},{"role":"user","content":input}]);
     let mut request = if settings.ai_protocol == "responses" {
         json!({"model":settings.ai_model,"input":messages,"text":{"format":{"type":"json_object"}},"max_output_tokens":settings.ai_max_output_tokens,"store":false,"stream":false})
     } else {
@@ -23,6 +22,16 @@ fn payload(settings: &Settings, blocks: &Value, report_url: &str) -> Value {
         } else {
             request["reasoning_effort"] = json!(settings.ai_reasoning_effort);
         }
+    }
+    request
+}
+
+pub(super) fn retained_payload(settings: &Settings, blocks: &Value, report_url: &str) -> Value {
+    let mut request = payload(settings, blocks, report_url);
+    if settings.ai_protocol == "responses"
+        && !matches!(settings.ai_reasoning_effort.as_str(), "default" | "none")
+    {
+        request["reasoning"]["summary"] = json!("auto");
     }
     request
 }
@@ -68,94 +77,27 @@ pub(super) async fn request(
     key: &str,
     blocks: &Value,
     report_url: &str,
+    transport: &llm::Resolved,
+    session: &str,
+    events: Option<tokio::sync::mpsc::Sender<Value>>,
 ) -> Result<(Vec<u8>, Value)> {
     settings.validate()?;
-    let (endpoint, endpoint_format, base) = endpoint(settings)?;
-    let request = payload(settings, blocks, report_url);
-    let mut input = json!({"request_bytes":request.to_string().len(),"system_prompt_bytes":include_str!("ai_prompt.txt").len(),"report_blocks_bytes":blocks.to_string().len(),"report_block_count":blocks.as_array().map_or(0,Vec::len),"actor_candidate_count":0,"ai_protocol":settings.ai_protocol,"max_output_tokens":settings.ai_max_output_tokens,"reasoning_effort":settings.ai_reasoning_effort,"prompt_version":PROMPT_VERSION});
-    let transport_error = Arc::new(Mutex::new(None));
-    let response_size = Arc::new(Mutex::new(0usize));
-    input["endpoint_format"] = json!(endpoint_format);
-    let timeout = settings.ai_timeout_seconds;
-    let service = {
-        let failure = transport_error.clone();
-        let size = response_size.clone();
-        tower::service_fn(move |factory: HttpRequestFactory| {
-            let endpoint = endpoint.clone();
-            let failure = failure.clone();
-            let size = size.clone();
-            async move {
-                let request = factory.build().await?;
-                let body = request
-                    .body()
-                    .and_then(|body| body.as_bytes())
-                    .ok_or_else(|| OpenAIError::InvalidArgument("expected JSON body".into()))?;
-                let body: Value = serde_json::from_slice(body)
-                    .map_err(|_| OpenAIError::InvalidArgument("expected JSON body".into()))?;
-                let authorization = request
-                    .headers()
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| OpenAIError::InvalidArgument("missing authorization".into()))?;
-                let url = reqwest::Url::parse(&endpoint)
-                    .map_err(|_| OpenAIError::InvalidArgument("invalid endpoint".into()))?;
-                match client::request_bounded_with_timeout(
-                    &endpoint,
-                    &[url.host_str().unwrap_or("").into()],
-                    Some(&body),
-                    Some(("Authorization", authorization)),
-                    MAX_AI_RESPONSE_BYTES,
-                    Duration::from_secs(timeout),
-                )
-                .await
-                {
-                    Ok(bytes) => {
-                        *size.lock().map_err(|_| {
-                            OpenAIError::InvalidArgument("transport state".into())
-                        })? = bytes.len();
-                        let response = http::Response::builder()
-                            .status(200)
-                            .header("content-type", "application/json")
-                            .body(bytes)
-                            .map_err(|_| OpenAIError::InvalidArgument("response headers".into()))?;
-                        Ok(response.into())
-                    }
-                    Err(error) => {
-                        *failure.lock().map_err(|_| {
-                            OpenAIError::InvalidArgument("transport state".into())
-                        })? = Some(worker::ai_request_error(error));
-                        Err(OpenAIError::InvalidArgument(
-                            "bounded transport failed".into(),
-                        ))
-                    }
-                }
-            }
-        })
+    let (_, endpoint_format, _) = endpoint(settings)?;
+    let request = if events.is_some() {
+        retained_payload(settings, blocks, report_url)
+    } else {
+        payload(settings, blocks, report_url)
     };
-    // A custom service replaces the SDK's retry service. One queue attempt makes
-    // exactly one paid request; never silently replay a costly reasoning call.
-    let sdk = Client::with_config(OpenAIConfig::new().with_api_base(base).with_api_key(key))
-        .with_http_service(service);
-    let result = dispatch(&sdk, request, &settings.ai_protocol).await;
-    if let Some(error) = transport_error
-        .lock()
-        .map_err(|_| Error::unavailable())?
-        .take()
-    {
-        return Err(error.context(input));
-    }
-    input["response_bytes"] = json!(*response_size.lock().map_err(|_| Error::unavailable())?);
-    let value = result.map_err(|error| {
-        let mut classified = Error::bad("intel_ai_invalid_response").context(input.clone());
-        if let OpenAIError::JSONDeserialize(error, _) = error {
-            classified = classified.context(parse::json_error_diagnostic(&error));
-        }
-        classified.context(json!({"response_bytes":response_size.lock().map(|v|*v).unwrap_or(0),"reason":"sdk_response_decode"})).stage("ai_response")
-    })?;
+    let mut input = json!({"request_bytes":request.to_string().len(),"system_prompt_bytes":settings.system_prompt().len(),"report_blocks_bytes":blocks.to_string().len(),"report_block_count":blocks.as_array().map_or(0,Vec::len),"actor_candidate_count":0,"ai_protocol":settings.ai_protocol,"max_output_tokens":settings.ai_max_output_tokens,"reasoning_effort":settings.ai_reasoning_effort,"prompt_version":settings.prompt_version(),"prompt_source":if settings.ai_prompt.is_empty(){"default"}else{"custom"},"prompt_hash":digest(settings.system_prompt().as_bytes()),"endpoint_format":endpoint_format,"stream":transport.stream,"provider_id":transport.provider_id});
+    let value = llm::execute(settings, key, transport, request, session, events)
+        .await
+        .map_err(|error| error.context(input.clone()))?;
     let bytes = serde_json::to_vec(&value).map_err(|_| Error::bad("intel_ai_invalid_response"))?;
+    input["response_bytes"] = json!(bytes.len());
     Ok((bytes, input))
 }
 
+#[cfg(test)]
 async fn dispatch(
     sdk: &Client<OpenAIConfig>,
     request: Value,
@@ -296,6 +238,64 @@ mod tests {
     use super::*;
     fn settings(protocol: &str) -> Settings {
         serde_json::from_value(json!({"ai_enabled":true,"ai_endpoint":format!("https://api.example/v1/{}",if protocol=="responses" {"responses"}else{"chat/completions"}),"ai_model":"deepseek/test","ai_key_env":"NM_INTEL_TEST_KEY","ai_protocol":protocol})).unwrap()
+    }
+    #[test]
+    fn history_requests_summaries_without_changing_disabled_or_default_request_parameters() {
+        let mut settings = settings("responses");
+        settings.ai_reasoning_effort = "high".into();
+        let original = payload(&settings, &json!([]), "https://report.example");
+        let retained = retained_payload(&settings, &json!([]), "https://report.example");
+        assert!(original["reasoning"].get("summary").is_none());
+        assert_eq!(retained["reasoning"]["summary"], "auto");
+        assert_eq!(original["input"], retained["input"]);
+        for effort in ["none", "default"] {
+            settings.ai_reasoning_effort = effort.into();
+            assert_eq!(
+                payload(&settings, &json!([]), "https://report.example"),
+                retained_payload(&settings, &json!([]), "https://report.example")
+            );
+        }
+    }
+    #[test]
+    fn custom_prompts_reach_both_protocols_and_empty_override_tracks_the_default() {
+        for protocol in ["chat", "responses"] {
+            let mut s = settings(protocol);
+            let field = if protocol == "chat" {
+                "messages"
+            } else {
+                "input"
+            };
+            assert_eq!(
+                payload(&s, &json!([]), "https://report.example")[field][0]["content"],
+                DEFAULT_AI_PROMPT
+            );
+            assert_eq!(s.prompt_version(), PROMPT_VERSION);
+            s.ai_prompt = "自定义 IOC 提取规则。\n返回 JSON，并保留原文证据。\t".into();
+            s.validate().unwrap();
+            assert_eq!(
+                payload(&s, &json!([]), "https://report.example")[field][0]["content"],
+                s.ai_prompt
+            );
+            let custom_version = s.prompt_version();
+            assert!(custom_version.starts_with(&format!("{PROMPT_VERSION}-custom-")));
+            s.ai_prompt.push('。');
+            assert_ne!(s.prompt_version(), custom_version);
+            s.ai_prompt.clear();
+            assert_eq!(s.system_prompt(), DEFAULT_AI_PROMPT);
+            assert_eq!(s.prompt_version(), PROMPT_VERSION);
+        }
+        for invalid in [
+            "  \n".into(),
+            "bad\0prompt".into(),
+            "bad\u{85}prompt".into(),
+            "中".repeat(MAX_AI_PROMPT_BYTES / 3 + 1),
+        ] {
+            assert_eq!(
+                validate_ai_prompt(&invalid).unwrap_err().code,
+                "intel_invalid_ai_prompt"
+            );
+        }
+        validate_ai_prompt(&"a".repeat(MAX_AI_PROMPT_BYTES)).unwrap();
     }
     #[test]
     fn both_protocols_preserve_the_full_model_output_budget() {

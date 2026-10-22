@@ -1,0 +1,74 @@
+“银狐”木马专项——恶意域名及恶意IP（一）
+
+近期，中国互联网网络安全威胁治理联盟启动了“银狐”木马专项打击行动。
+本周，CCTGA研判确认了“银狐”木马使用的一批恶意网络资产，现予以披露。
+
+一、黑客团伙概述
+“银狐”黑产团伙长期通过仿冒软件下载站、搜索引擎恶意推广、钓鱼邮件及即时通信等渠道传播恶意程序。
+
+恶意网络资产信息如下：
+
+（一）恶意IP地址：134.122.164.65
+关联域名：alonesad.com; brosclam.com; duooi.com; fohuq.com; happy238.com; happy788.com; heumio.com; joluw.com; kaol.one; loisud.com; nekeu.com; oploa.com; opsuey.com; qaz23.com; rowele.com; ruskiu.com; sbido.com; soulio.one; theaigaming.com; titamic.com; umilac.com; umou.one; waveboo.com; xbcued.com; xumeno.com
+关联端口：2869
+归属地：日本 东京都
+日控制规模：18229
+
+（二）恶意IP地址：194.41.37.69
+关联域名：115.mlcrosoft.vip
+关联端口：443
+归属地：中国 香港
+日控制规模：16813
+
+（三）恶意IP地址：194.41.37.47
+关联域名：114.mlcrosoft.vip
+关联端口：443
+归属地：中国 香港
+日控制规模：12320
+
+（四）恶意IP地址：194.41.37.253
+关联域名：113.mlcrosoft.vip
+关联端口：443
+归属地：中国 香港
+日控制规模：12156
+
+（五）恶意IP地址：38.190.225.210
+关联域名：10.mlcrosoft.vip; 19.mlcro.net; 20.mlcro.net
+关联端口：443
+归属地：中国 香港
+日控制规模：6271
+
+（六）恶意IP地址：206.119.191.105
+关联域名：21.mlcro.net
+关联端口：443
+归属地：美国 加利福尼亚州
+日控制规模：5398
+
+（七）恶意IP地址：38.190.252.38
+关联域名：1120.mlcrosoft.vip
+关联端口：443
+归属地：中国 香港
+日控制规模：5092
+
+（八）恶意IP地址：206.119.174.208
+关联域名：113.mlcrosoft.vip
+关联端口：443
+归属地：中国 香港
+日控制规模：4609
+
+（九）恶意IP地址：43.225.47.236
+关联域名：20.mlcro.net
+关联端口：443
+归属地：中国 香港
+日控制规模：4387
+
+（十）恶意IP地址：194.41.37.202
+关联域名：18.mlcro.net; local6.mlcrosoft.my; local7.mlcrosoft.my
+关联端口：443
+归属地：中国 香港
+日控制规模：4373
+
+二、排查方法
+详细查看分析近期浏览器历史记录、DNS请求及网络流量。
+三、处置建议
+向“银狐”木马专项打击行动线索征集邮箱silverfox@cert.org.cn报告相关线索及样本信息。

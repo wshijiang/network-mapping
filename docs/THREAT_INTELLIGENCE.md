@@ -82,16 +82,27 @@ ESET 分别承担规范化、IOC 提供和报告分析角色，不作为三个�
 `eset/feed.json`。路径穿越、目录和指向根目录外部的符号链接均被拒绝。服务进程只读取
 文件，不修改来源文件。容器部署时将文件目录只读挂载到配置的根目录即可。
 
-远程来源使用 HTTPS、443 端口和完整域名白名单。来源 URL、RSS 文章地址与 GitHub
-文件获取均执行边界检查；不跟随重定向，不访问私网、环回、链路本地或云元数据地址。
+远程来源使用 HTTPS、443 端口和域名白名单。允许完整小写域名、`*.example.com`
+（仅匹配子域名，主域名须单独添加）及 `*`（允许全部域名）。来源 URL、RSS 文章地址与
+GitHub 文件获取均执行边界检查；GET 最多跟随 5 次跳转，每次重新校验白名单，
+跨站跳转后不再转发自定义请求头和来源凭据。POST 不跟随跳转。仍不访问私网、环回、
+链路本地或云元数据地址。
 使用系统 HTTPS 代理的部署还应在代理侧执行公共目的地址限制，因为代理可能自行解析
 DNS。保持 TLS 校验和系统 CA 信任；报告内的 IOC 不会被主动访问，也不会创建扫描任务。
 
-客户端遵循 reqwest 的 `HTTPS_PROXY` / `ALL_PROXY` 和 `NO_PROXY` 规则及大小写变量。
+每个来源可指定系统代理、直连或自定义代理，应用于同步及文章正文抓取。
+自定义代理支持 HTTP、HTTPS、SOCKS5、SOCKS5H，可在 URL 中配置认证。
+还可添加 User-Agent、Cookie、Authorization 等请求头，最多 64 项、总计 32 KiB，
+单值最多 8192 字节；Host、Content-Length 等传输控制头不可覆盖。已有专用来源凭据
+优先于同名自定义认证头。代理完整地址与请求头值使用服务器主密钥加密保存，管理员 API
+返回完整代理地址，编辑和详情中直接显示；请求头仅返回配置状态和名称，值留空保留。
+删除头后保存或切换系统/直连即可清除。
+
+系统代理模式遵循 reqwest 的 `HTTPS_PROXY` / `ALL_PROXY` 和 `NO_PROXY` 规则及大小写变量。
 HTTP CONNECT、socks5h 由代理解析目标域名，不再先强制本机解析。直连（含 NO_PROXY）
 在连接时解析并检查全部地址，再直接使用检查后的地址连接；socks5 本机解析仍受检查。
 代理自身可位于内部网络，但必须在代理侧禁止访问私网和元数据目标，来源域名白名单、
-HTTPS、禁止重定向和证书校验仍然执行。
+HTTPS、跳转白名单和证书校验仍然执行。
 
 同步提示 `intel_dns_failed` 时，检查服务进程/容器的 DNS 与 NO_PROXY 是否误将目标旁路；
 `intel_proxy_dns_failed` 表示代理主机自身无法解析。浏览器能打开网站不证明服务端可访问。
@@ -435,24 +446,25 @@ Network activity、Artifacts dropped、Payload delivery 类别的目标 IP、域
 
 ## AI 配置与审核
 
+配置入口已迁至 **LLM → 基础 / 供应商**。供应商、模型、全局覆盖、session、流式与旧设置迁移见 [LLM 配置与调试](LLM.md)。本页的 `ai_*` 字段用于说明 IOC worker 的兼容运行投影，迁移后的管理写入使用 `/api/llm/*`。
+
 ### 手动文章与微信公众号
 
-新建 `kind=article`、`transport=manual` 来源，location 与凭据留空，配置允许的完整
-文章域名。在 Web“文章”页展开“提交文章链接 / 正文快照”，选择来源并填写标题和原文
+新建 `kind=article`、`transport=manual` 来源，location 与来源凭据留空，配置允许的
+文章域名，以及可选的代理和请求头。在 Web“文章”页展开“提交文章链接 / 正文快照”，选择来源并填写标题和原文
 HTTPS 地址。正文可留空由后台抓取，或粘贴 40～100,000 UTF-8 字节的纯文本。
 手动来源不执行周期抓取，“立即同步”不适用于此类型。AI 关闭时仍可保存文章，队列
 等待 AI 开启；所有提议固定人工审核，来源 require_review 不能绕过这一门槛。
 
-微信远程抓取需要在来源填写具体账号的 `publisher_id`（文章完整链接中的 `__biz`），
-不能填公众号昵称。抓取后核对页面脚本中的账号标识并读取 `#js_content`，保留正文和
-表格文本，排除脚本、导航及隐藏文本。不执行页面脚本、不绕过验证页；账号不一致、
-正文缺失或网络受限时失败并可重试。`mp.weixin.qq.com` 域名白名单本身不代表账号可信。
+微信远程抓取不再要求配置发布账号 `publisher_id` / `__biz`。直接读取 `#js_content`，
+保留正文和表格文本，排除脚本、导航及隐藏文本。不执行页面脚本、不绕过验证页；
+正文缺失或网络受限时失败并可重试。域名白名单本身不代表账号可信，AI 提议仍须审核。
 普通文章使用通用静态正文提取：优先识别 `articleBody`、WordPress/Ghost 等常见正文
 容器与 `<article>`，再读取明确标为 Article/NewsArticle/BlogPosting 等类型的 JSON-LD
 `articleBody`；随后尝试 `<main>` 与主体角色，最后按段落数量、正文占比和链接占比选择
 无标准标记的内容块。排除导航、页头页尾、侧栏、推荐文章、脚本和隐藏文本；内联标签
 不拆散 IOC；段落、标题和列表项保留换行，同一表格行的单元格使用 ` | ` 分隔。WeLiveSecurity 的 `.article-body` 仅为优先适配，失败后同样
-走通用流程；RSS 来源和 AI 分析不限定厂商。RSS 发现的微信链接仍执行账号核对。
+走通用流程；RSS 来源和 AI 分析不限定厂商。RSS 发现的微信链接采用相同正文提取流程。
 
 RSS 2.0 与 Atom 使用同一发现队列，Atom 链接支持自闭合/成对标签和 XML 实体解码。
 来源需要显式允许 RSS 主机和文章主机；不会自动访问白名单外的文章域名。通用提取
@@ -462,7 +474,8 @@ RSS 2.0 与 Atom 使用同一发现队列，Atom 链接支持自闭合/成对标
 微信链接只保留文章身份参数 __biz、mid、idx、sn；去掉 poc_token 等访问/跟踪参数，
 规范化地址用于保存、抓取、引用和 AI 输入。手动正文标记为
 `intake.publisher_verification=administrator_supplied`，不宣称已从官方网络页面核验；
-微信远程账号匹配记录为 page_account_match。审核页可查看 intake 元数据和正文。
+微信远程抓取记录为 `publisher_verification=not_bound`，不宣称已核验发布账号。
+审核页可查看 intake 元数据和正文。
 以上方式均保存快照哈希与来源 revision，重复提交同一内容幂等，新正文保留为独立快照；
 重试复用已保存快照。修改或停用来源会取消旧版本排队/运行任务。
 
@@ -475,8 +488,8 @@ ai_review_required=true。管理员权限、现有 CSRF 与审计规则保持执
 
 ### 提取与审核
 
-管理页选择 `ai_protocol=chat`（Chat Completions，默认）或 `responses`，填写匹配协议的完整
-HTTPS 接口地址、模型和凭据，再开启 AI。也接受以 `/v1` 结尾的 SDK 基础地址，按所选
+在 LLM 供应商页选择 Chat Completions 或 Responses，填写匹配协议的完整
+HTTPS 接口地址、模型和凭据，再在基础页选择唯一组合并开启提取。也接受以 `/v1` 结尾的 SDK 基础地址，按所选
 协议追加一次 `/chat/completions` 或 `/responses`；完整地址不会重复追加，明确与协议
 冲突的地址拒绝保存。其他自定义路径保留原样，不猜测服务商前缀。
 例如 Command Code 使用 `https://api.commandcode.ai/provider/v1`，其完整 Chat 地址为
@@ -487,11 +500,11 @@ Chat 读取 `choices[0].message.content`；Responses 只接收 `status=completed
 `output_text`，拒绝不完整结果、拒答及未请求的工具调用。接口必须支持 JSON 对象输出。
 系统提示词明确要求输出有效 JSON，并包含 `JSON` 字样，满足 DeepSeek 等提供方的 JSON 模式校验，
 不依赖文章正文偶然包含该关键字。
-两种协议当前均显式使用非流式；流式不减少输入 token，也不解除输出预算，后续接入需要
-独立的 SSE 完整性处理。SDK 支持某协议不代表所选服务商一定支持。
+两种协议均支持全局或供应商局部选择流式传输；默认关闭。SSE 必须正常结束，累积完整输出后才做 JSON 和原文证据校验；断流不入库。
+流式不减少输入 token，也不解除输出预算。SDK 支持某协议不代表所选服务商一定支持。
 首版提取只有一个独立 worker，单次正文
 最多 100,000 字节、输出最多 2,000 条 IOC，模型回复预算默认 65,536 tokens；文章
-HTTP 读取上限为 2 MiB，AI 响应读取上限为 16 MiB，RSS/Atom 解析上限 4 MiB。管理页的“AI 请求超时（秒）”
+HTTP 读取上限为 2 MiB，AI 响应读取上限为 16 MiB，RSS/Atom 解析上限 4 MiB。供应商页的“请求超时（秒）”
 默认 180 秒，可设为 1～1800 的整数，对应设置 API 的 `ai_timeout_seconds`；旧配置缺省时
 自动使用 180 秒。该时限覆盖 AI 请求到响应体读取完成；连接阶段仍限制为 10 秒。
 文章总处理时限为 AI 请求超时加 120 秒，任务租约再多 30 秒，避免长请求提前失去租约。
@@ -756,7 +769,11 @@ AI 设置请求为 `{"expected_revision":1,"settings":{"ai_enabled":false,...}}`
 设置修改采用乐观版本检查。固定 AI 审核字段不可在请求中修改，未知字段拒绝。
 
 来源 `transport` 支持 local/https/upload/manual，`expiry_months` 默认 6。manual 仅用于
-article 来源，须配置 allowed_hosts；publisher_id 可绑定微信账号。upload/manual 的 location 和
+article 来源，须配置 allowed_hosts；不再接收 publisher_id。`request_config` 包含
+proxy_mode（system/direct/custom）、proxy_url、proxy_configured 和 headers
+（name/value/configured 数组）。管理员响应返回完整代理 URL，对请求头值脱敏；带 configured 的空值
+编辑保留旧值，移除数组项清除该头。旧库的 publisher_id 列仅保留兼容，不再使用。
+upload/manual 的 location 和
 凭据字段必须为空。来源响应的 `import_status` 返回 stage、total、processed、validation；
 作业 summary 同样包含 validation。无文件时 import_status 为
 null。records 的 status=approved 只列当前有效证据，status=expired 列已接纳的过期证据
