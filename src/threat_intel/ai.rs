@@ -8,7 +8,7 @@ use async_openai::{
 #[cfg(test)]
 use std::sync::Arc;
 
-fn payload(settings: &Settings, blocks: &Value, report_url: &str) -> Value {
+pub(super) fn payload(settings: &Settings, blocks: &Value, report_url: &str) -> Value {
     let input = json!({"report_url":report_url,"untrusted_report_blocks":blocks}).to_string();
     let messages = json!([{"role":"system","content":settings.system_prompt()},{"role":"user","content":input}]);
     let mut request = if settings.ai_protocol == "responses" {
@@ -22,6 +22,16 @@ fn payload(settings: &Settings, blocks: &Value, report_url: &str) -> Value {
         } else {
             request["reasoning_effort"] = json!(settings.ai_reasoning_effort);
         }
+    }
+    request
+}
+
+pub(super) fn retained_payload(settings: &Settings, blocks: &Value, report_url: &str) -> Value {
+    let mut request = payload(settings, blocks, report_url);
+    if settings.ai_protocol == "responses"
+        && !matches!(settings.ai_reasoning_effort.as_str(), "default" | "none")
+    {
+        request["reasoning"]["summary"] = json!("auto");
     }
     request
 }
@@ -69,12 +79,17 @@ pub(super) async fn request(
     report_url: &str,
     transport: &llm::Resolved,
     session: &str,
+    events: Option<tokio::sync::mpsc::Sender<Value>>,
 ) -> Result<(Vec<u8>, Value)> {
     settings.validate()?;
     let (_, endpoint_format, _) = endpoint(settings)?;
-    let request = payload(settings, blocks, report_url);
+    let request = if events.is_some() {
+        retained_payload(settings, blocks, report_url)
+    } else {
+        payload(settings, blocks, report_url)
+    };
     let mut input = json!({"request_bytes":request.to_string().len(),"system_prompt_bytes":settings.system_prompt().len(),"report_blocks_bytes":blocks.to_string().len(),"report_block_count":blocks.as_array().map_or(0,Vec::len),"actor_candidate_count":0,"ai_protocol":settings.ai_protocol,"max_output_tokens":settings.ai_max_output_tokens,"reasoning_effort":settings.ai_reasoning_effort,"prompt_version":settings.prompt_version(),"prompt_source":if settings.ai_prompt.is_empty(){"default"}else{"custom"},"prompt_hash":digest(settings.system_prompt().as_bytes()),"endpoint_format":endpoint_format,"stream":transport.stream,"provider_id":transport.provider_id});
-    let value = llm::execute(settings, key, transport, request, session, None)
+    let value = llm::execute(settings, key, transport, request, session, events)
         .await
         .map_err(|error| error.context(input.clone()))?;
     let bytes = serde_json::to_vec(&value).map_err(|_| Error::bad("intel_ai_invalid_response"))?;
@@ -223,6 +238,23 @@ mod tests {
     use super::*;
     fn settings(protocol: &str) -> Settings {
         serde_json::from_value(json!({"ai_enabled":true,"ai_endpoint":format!("https://api.example/v1/{}",if protocol=="responses" {"responses"}else{"chat/completions"}),"ai_model":"deepseek/test","ai_key_env":"NM_INTEL_TEST_KEY","ai_protocol":protocol})).unwrap()
+    }
+    #[test]
+    fn history_requests_summaries_without_changing_disabled_or_default_request_parameters() {
+        let mut settings = settings("responses");
+        settings.ai_reasoning_effort = "high".into();
+        let original = payload(&settings, &json!([]), "https://report.example");
+        let retained = retained_payload(&settings, &json!([]), "https://report.example");
+        assert!(original["reasoning"].get("summary").is_none());
+        assert_eq!(retained["reasoning"]["summary"], "auto");
+        assert_eq!(original["input"], retained["input"]);
+        for effort in ["none", "default"] {
+            settings.ai_reasoning_effort = effort.into();
+            assert_eq!(
+                payload(&settings, &json!([]), "https://report.example"),
+                retained_payload(&settings, &json!([]), "https://report.example")
+            );
+        }
     }
     #[test]
     fn custom_prompts_reach_both_protocols_and_empty_override_tracks_the_default() {

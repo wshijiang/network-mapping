@@ -122,6 +122,8 @@ async fn header_auth_works_without_the_fallback_env_and_never_hides_crypto_failu
         revision = storage::save_settings(
             &pool,
             storage::SettingsInput {
+                retain_ioc_conversations: None,
+                retain_debug_conversations: None,
                 expected_revision: revision,
                 enabled: true,
                 provider_id: Some(id),
@@ -494,9 +496,10 @@ async fn both_sdk_stream_protocols_handle_fragmentation_and_cancellation() {
             "你好"
         );
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-        transport::collect(&sdk, json!({"stream":true}), protocol, Some(tx))
+        let captured = transport::collect(&sdk, json!({"stream":true}), protocol, Some(tx))
             .await
             .unwrap();
+        assert_eq!(debug::reasoning_text(&captured, protocol), "思考");
         assert_eq!(
             rx.recv().await.unwrap(),
             json!({"type":"reasoning","text":"思考"})
@@ -636,6 +639,8 @@ async fn migration_crud_secret_retention_and_single_selection_share_the_ioc_fenc
     storage::save_settings(
         &pool,
         storage::SettingsInput {
+            retain_ioc_conversations: None,
+            retain_debug_conversations: None,
             expected_revision: revision,
             enabled: true,
             provider_id: Some(id),
@@ -782,6 +787,8 @@ async fn management_endpoints_require_admin_and_enforce_model_ownership() {
     let err = storage::save_settings(
         &pool,
         storage::SettingsInput {
+            retain_ioc_conversations: None,
+            retain_debug_conversations: None,
             expected_revision: revision,
             enabled: true,
             provider_id: Some(Uuid::now_v7()),
@@ -892,6 +899,8 @@ async fn online_prompt_edits_reset_and_provider_updates_share_the_runtime_fence(
     let chosen = storage::save_settings(
         &pool,
         storage::SettingsInput {
+            retain_ioc_conversations: None,
+            retain_debug_conversations: None,
             expected_revision: created["revision"].as_i64().unwrap(),
             enabled: true,
             provider_id: Some(decode(created["id"].clone()).unwrap()),

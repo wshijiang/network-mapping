@@ -272,6 +272,7 @@ pub(super) async fn collect(
     }
     .map_err(|_| Error::bad("llm_stream_failed"))?;
     let mut aggregate = Aggregate::new(protocol);
+    aggregate.retain_reasoning = events.is_some();
     while let Some(event) = stream.next().await {
         let event = event.map_err(|_| Error::bad("llm_stream_failed"))?;
         let reasoning = events
@@ -297,6 +298,8 @@ pub(super) struct Aggregate {
     received: usize,
     refusal: bool,
     reasoning: bool,
+    reasoning_text: String,
+    retain_reasoning: bool,
 }
 impl Aggregate {
     pub fn new(protocol: &str) -> Self {
@@ -309,6 +312,8 @@ impl Aggregate {
             received: 0,
             refusal: false,
             reasoning: false,
+            reasoning_text: String::new(),
+            retain_reasoning: false,
         }
     }
     pub fn push(&mut self, event: Value) -> Result<Option<String>> {
@@ -318,6 +323,9 @@ impl Aggregate {
         }
         if event.get("error").is_some() {
             return Err(Error::bad("llm_stream_failed"));
+        }
+        if let Some(text) = debug::reasoning_delta(&event, &self.protocol) {
+            self.reasoning_text.push_str(text);
         }
         let text = if self.protocol == "responses" {
             match event.get("type").and_then(Value::as_str) {
@@ -374,10 +382,19 @@ impl Aggregate {
         }
         Ok(None)
     }
-    pub fn finish(self) -> Result<Value> {
+    pub fn finish(mut self) -> Result<Value> {
         if self.protocol == "responses" {
-            self.response
-                .ok_or_else(|| Error::bad("llm_stream_incomplete"))
+            let mut response = self
+                .response
+                .take()
+                .ok_or_else(|| Error::bad("llm_stream_incomplete"))?;
+            if debug::reasoning_text(&response, "responses").is_empty()
+                && !self.reasoning_text.is_empty()
+                && let Some(output) = response["output"].as_array_mut()
+            {
+                output.push(json!({"type":"reasoning","summary":[{"type":"summary_text","text":self.reasoning_text}]}));
+            }
+            Ok(response)
         } else {
             let reason = self
                 .finish
@@ -385,7 +402,7 @@ impl Aggregate {
             Ok(
                 json!({"choices":[{"finish_reason":reason,"message":{"content":self.text,
                 "refusal":if self.refusal {Some("present")}else{None},
-                "reasoning_content":if self.reasoning {Some("present")}else{None}}}],"usage":self.usage}),
+                "reasoning_content":if self.reasoning {Some(if self.retain_reasoning {self.reasoning_text} else {"present".into()})}else{None}}}],"usage":self.usage}),
             )
         }
     }

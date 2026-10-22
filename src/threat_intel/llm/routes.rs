@@ -13,7 +13,9 @@ async fn read(
     response(
         async {
             admin(&user)?;
-            storage::read(&pool, &config.encrypt_key).await
+            let mut data = storage::read(&pool, &config.encrypt_key).await?;
+            data["current_user_id"] = json!(user.id);
+            Ok(data)
         }
         .await,
     )
@@ -140,6 +142,8 @@ pub(super) struct ChatInput {
     pub provider_id: Uuid,
     pub model_id: String,
     pub session_id: Uuid,
+    #[serde(default)]
+    pub history_id: Option<Uuid>,
     pub messages: Vec<Message>,
     #[serde(default)]
     pub parameters: debug::Parameters,
@@ -150,7 +154,7 @@ impl ChatInput {
         if self.model_id.len() > 100
             || self.messages.is_empty()
             || self.messages.len() > 64
-            || self.messages.iter().map(|m| m.content.len()).sum::<usize>() > 128 * 1024
+            || self.messages.iter().map(|m| m.content.len()).sum::<usize>() > 4 * 1024 * 1024
             || self.messages.iter().enumerate().any(|(i, m)| {
                 m.content.trim().is_empty()
                     || !matches!(m.role.as_str(), "user" | "assistant" | "system")
@@ -211,6 +215,15 @@ async fn chat(
         )
         .await?;
         input.parameters.apply(&mut settings, &mut transport)?;
+        let resumed = if let Some(id) = input.history_id {
+            let data = history::internal(&pool,id,&user,&config.encrypt_key).await?;
+            if data["provider_id"] != json!(input.provider_id) || data["model_id"] != json!(input.model_id) {
+                return Err(Error::bad("llm_history_configuration_changed"));
+            }
+            let session: history::Session = decode(data["session"].clone())?;
+            session.restore(&settings,&mut transport)?;
+            Some((session.wire, data["request"].clone(), data["messages"].clone()))
+        } else { None };
         let c = pool.get().await?;
         audit(
             &c,
@@ -221,10 +234,10 @@ async fn chat(
             json!({"model":input.model_id,"parameters":input.parameters.effective(&settings, &transport)}),
         )
         .await?;
-        Ok::<_, Error>((lease, settings, transport, key))
+        Ok::<_, Error>((lease, settings, transport, key, resumed))
     }
     .await;
-    let (lease, settings, transport, key) = match setup {
+    let (lease, settings, transport, key, resumed) = match setup {
         Ok(v) => v,
         Err(error) => return response::<Value>(Err(error)),
     };
@@ -233,13 +246,38 @@ async fn chat(
         payload["stream_options"] = json!({"include_usage":true});
     }
     let effective_parameters = input.parameters.effective(&settings, &transport);
-    let session = digest(
+    let default_session = digest(
         format!(
             "debug:{}:{}:{}:{}",
             user.id, input.session_id, input.provider_id, input.model_id
         )
         .as_bytes(),
     );
+    let session = resumed
+        .as_ref()
+        .map(|(session, _, _)| session.clone())
+        .unwrap_or(default_session);
+    if let Some((_, request, _)) = &resumed {
+        for field in ["response_format", "text"] {
+            if let Some(value) = request.get(field) {
+                payload[field] = value.clone();
+            }
+        }
+    }
+    let snapshot_messages = history::messages_with_metadata(
+        json!(input.messages),
+        resumed.as_ref().map(|(_, _, messages)| messages),
+    );
+    let capture = history::begin(&pool,history::NewConversation {
+        kind:"debug",owner:Some(user.id),session_id:input.session_id,article_id:None,
+        provider_id:Some(input.provider_id),model_id:input.model_id.clone(),
+        document:json!({"messages":snapshot_messages,"request":payload,"parameters":effective_parameters,"session":match history::Session::capture(&settings,&transport,&session) { Ok(s)=>s,Err(e)=>return response::<Value>(Err(e)) }}),
+    },&config.encrypt_key).await;
+    let capture = match capture {
+        Ok(c) => c,
+        Err(e) => return response::<Value>(Err(e)),
+    };
+    let (history_id, history_events, history_task) = history::spawn(capture);
     let (wire, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
     tokio::spawn(async move {
         let _lease = lease;
@@ -248,7 +286,7 @@ async fn chat(
         let result = execute(&settings, &key, &transport, payload, &session, Some(events));
         tokio::pin!(result);
         let _ = wire
-            .send(sse(json!({"type":"started","stream":transport.stream,"parameters":effective_parameters})))
+            .send(sse(json!({"type":"started","stream":transport.stream,"parameters":effective_parameters,"history_id":history_id})))
             .await;
         let mut deltas_open = true;
         let mut first_delta_ms = None;
@@ -259,6 +297,7 @@ async fn chat(
                 event=deltas.recv(),if deltas_open=>{
                     if let Some(event)=event {
                         if first_delta_ms.is_none(){first_delta_ms=Some(started.elapsed().as_millis() as u64);}
+                        if let Some(history) = &history_events { let _ = history.send(event.clone()).await; }
                         if wire.send(sse(event)).await.is_err(){return;}
                     }else{deltas_open=false;}
                 }
@@ -267,11 +306,14 @@ async fn chat(
         };
         // Drain queued deltas before emitting the terminal event.
         while let Ok(event) = deltas.try_recv() {
+            if let Some(history) = &history_events {
+                let _ = history.send(event.clone()).await;
+            }
             if wire.send(sse(event)).await.is_err() {
                 return;
             }
         }
-        let event = match result {
+        let mut event = match result {
             Ok(value) => {
                 match ai::response_content(value.to_string().as_bytes(), &settings.ai_protocol) {
                     Ok((text, usage)) => {
@@ -282,11 +324,16 @@ async fn chat(
                         }
                         event
                     }
-                    Err(error) => json!({"type":"error","code":error.code}),
+                    Err(_) => history::terminal(&value, &settings.ai_protocol),
                 }
             }
             Err(error) => json!({"type":"error","code":error.code}),
         };
+        if let Some(history) = history_events {
+            let _ = history.send(event.clone()).await;
+        }
+        event["history_id"] = json!(history_id);
+        event["history_saved"] = json!(history_task.await.unwrap_or(false));
         let _ = wire.send(sse(event)).await;
     });
     let stream = futures::stream::unfold(rx, |mut rx| async move {
@@ -307,7 +354,7 @@ fn sse(event: Value) -> Vec<u8> {
 pub(in crate::threat_intel) fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api/llm")
-            .app_data(web::JsonConfig::default().limit(1024 * 1024))
+            .app_data(web::JsonConfig::default().limit(5 * 1024 * 1024))
             .route("/settings", web::get().to(read))
             .route("/settings", web::put().to(settings))
             .route("/prompt", web::put().to(prompt))
@@ -316,6 +363,7 @@ pub(in crate::threat_intel) fn configure(cfg: &mut web::ServiceConfig) {
             .route("/providers/{id}", web::put().to(update))
             .route("/providers/{id}", web::delete().to(delete))
             .route("/providers/{id}/models/refresh", web::post().to(models))
+            .configure(history::configure)
             .route("/debug/chat", web::post().to(chat)),
     );
 }

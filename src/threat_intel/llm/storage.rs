@@ -8,6 +8,8 @@ pub(super) struct State {
     pub model_id: Option<String>,
     pub global: Transport,
     pub ioc_prompt: String,
+    pub retain_ioc_conversations: bool,
+    pub retain_debug_conversations: bool,
 }
 pub(super) async fn state<C: deadpool_postgres::GenericClient + Sync>(
     c: &C,
@@ -23,6 +25,8 @@ pub(super) async fn state<C: deadpool_postgres::GenericClient + Sync>(
         model_id: r.get("model_id"),
         global: decrypt(r.get("transport_ciphertext"), r.get("global_config"), key)?,
         ioc_prompt: r.get("ioc_prompt"),
+        retain_ioc_conversations: r.get("retain_ioc_conversations"),
+        retain_debug_conversations: r.get("retain_debug_conversations"),
     })
 }
 pub(super) async fn provider<C: deadpool_postgres::GenericClient + Sync>(
@@ -76,7 +80,7 @@ pub(super) async fn read(pool: &Pool, key: &str) -> Result<Value> {
     }
     tx.commit().await?;
     Ok(
-        json!({"revision":s.revision,"enabled":s.enabled,"provider_id":s.provider_id,"model_id":s.model_id,"global":s.global.redact(),"providers":providers,"presets":presets(),"effective":effective,"ioc_prompt":s.ioc_prompt,"default_ioc_prompt":DEFAULT_AI_PROMPT,"prompt_version":ai_prompt_version(&s.ioc_prompt),"prompt_max_bytes":MAX_AI_PROMPT_BYTES}),
+        json!({"revision":s.revision,"enabled":s.enabled,"provider_id":s.provider_id,"model_id":s.model_id,"global":s.global.redact(),"providers":providers,"presets":presets(),"effective":effective,"ioc_prompt":s.ioc_prompt,"default_ioc_prompt":DEFAULT_AI_PROMPT,"prompt_version":ai_prompt_version(&s.ioc_prompt),"prompt_max_bytes":MAX_AI_PROMPT_BYTES,"retain_ioc_conversations":s.retain_ioc_conversations,"retain_debug_conversations":s.retain_debug_conversations}),
     )
 }
 async fn lock(tx: &Transaction<'_>, expected: i64) -> Result<()> {
@@ -135,6 +139,7 @@ async fn publish(tx: &Transaction<'_>, s: &State, key: &str) -> Result<i64> {
     let public = json!(s.global.redact());
     let encrypted = encrypt(&s.global, key)?;
     tx.execute("UPDATE llm_settings SET revision=$1,enabled=$2,provider_id=$3,model_id=$4,global_config=$5,transport_ciphertext=$6 WHERE singleton",&[&revision,&s.enabled,&s.provider_id,&s.model_id,&public,&encrypted]).await?;
+    tx.execute("UPDATE llm_settings SET retain_ioc_conversations=$1,retain_debug_conversations=$2 WHERE singleton", &[&s.retain_ioc_conversations,&s.retain_debug_conversations]).await?;
     Ok(revision)
 }
 #[derive(Deserialize)]
@@ -145,6 +150,10 @@ pub(super) struct SettingsInput {
     pub provider_id: Option<Uuid>,
     pub model_id: Option<String>,
     pub global: Transport,
+    #[serde(default)]
+    pub retain_ioc_conversations: Option<bool>,
+    #[serde(default)]
+    pub retain_debug_conversations: Option<bool>,
 }
 pub(super) async fn save_settings(
     pool: &Pool,
@@ -167,6 +176,12 @@ pub(super) async fn save_settings(
         model_id: input.model_id,
         global: input.global,
         ioc_prompt: old.ioc_prompt,
+        retain_ioc_conversations: input
+            .retain_ioc_conversations
+            .unwrap_or(old.retain_ioc_conversations),
+        retain_debug_conversations: input
+            .retain_debug_conversations
+            .unwrap_or(old.retain_debug_conversations),
     };
     let revision = publish(&tx, &s, key).await?;
     audit(

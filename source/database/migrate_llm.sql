@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS llm_settings (
  FOREIGN KEY(provider_id,model_id) REFERENCES llm_model(provider_id,model_id) DEFERRABLE INITIALLY DEFERRED
 );
 
+ALTER TABLE llm_settings ADD COLUMN IF NOT EXISTS retain_ioc_conversations BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE llm_settings ADD COLUMN IF NOT EXISTS retain_debug_conversations BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- The singleton is the migration marker. Re-running startup never overwrites edits.
 INSERT INTO llm_provider(id,document,credential_ciphertext)
 SELECT '01800000-0000-7000-8000-000000000100',
@@ -53,3 +56,19 @@ UPDATE intel_settings SET document=document || jsonb_build_object('llm_managed',
  'ai_enabled',(SELECT enabled FROM llm_settings WHERE singleton),
  'llm_provider_id',(SELECT provider_id FROM llm_settings WHERE singleton))
  WHERE singleton AND NOT COALESCE((document->>'llm_managed')::BOOLEAN,FALSE);
+
+CREATE TABLE IF NOT EXISTS llm_conversation (
+ id UUID PRIMARY KEY,
+ kind TEXT NOT NULL CHECK(kind IN ('ioc','debug')),
+ owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+ session_id UUID NOT NULL,
+ article_id UUID REFERENCES intel_article(id) ON DELETE SET NULL,
+ provider_id UUID,
+ model_id TEXT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'running',
+ run_id UUID NOT NULL,
+ document_ciphertext BYTEA NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS llm_conversation_recent ON llm_conversation(updated_at DESC,id);

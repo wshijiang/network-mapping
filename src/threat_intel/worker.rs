@@ -566,7 +566,7 @@ async fn extract(
         let blocks = evidence::Document::new(&body).prompt_blocks();
         stage = "ai_request";
         let session = digest(format!("ioc:{id}:{body_hash}:{settings_revision}").as_bytes());
-        let (data, input_diagnostic) = ai::request(settings, &key, &blocks, url, &transport, &session).await?;
+        let (data, input_diagnostic) = llm::ioc_request(pool, id, settings, &key, encryption_key, &blocks, url, &transport, &session).await?;
         stage = "ai_response";
         let (content, mut response_diagnostic) = ai::response_content(&data, &settings.ai_protocol)
             .map_err(|error| error.context(input_diagnostic.clone()))?;

@@ -1,7 +1,7 @@
 //! Per-request debug overrides. These never write provider or IOC settings.
 use super::*;
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct Parameters {
     pub reasoning_effort: Option<String>,
@@ -99,7 +99,7 @@ impl Parameters {
     }
 }
 
-// Only expose provider-returned text to the administrator's transient debug UI.
+// Only expose provider-returned text to the administrator's UI or opt-in history.
 // Never decode encrypted reasoning or add this data to subsequent messages.
 pub(super) fn reasoning_delta<'a>(event: &'a Value, protocol: &str) -> Option<&'a str> {
     if protocol == "responses" {

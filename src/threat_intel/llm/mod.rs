@@ -3,6 +3,8 @@ use super::*;
 use std::collections::BTreeMap;
 
 mod debug;
+mod history;
+pub(super) use history::ioc_request;
 mod model;
 mod routes;
 mod storage;

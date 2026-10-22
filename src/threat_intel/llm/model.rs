@@ -121,7 +121,7 @@ impl Transport {
         Ok(())
     }
 }
-fn header_name(value: &str) -> Result<HeaderName> {
+pub(super) fn header_name(value: &str) -> Result<HeaderName> {
     let name = HeaderName::from_bytes(value.as_bytes()).map_err(|_| invalid())?;
     if matches!(
         name.as_str(),
