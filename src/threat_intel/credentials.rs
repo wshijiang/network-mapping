@@ -24,6 +24,20 @@ pub(super) fn resolve(ciphertext: Option<&[u8]>, env: &str, key: &str) -> Result
         None => client::secret(env),
     }
 }
+pub(super) fn resolve_with_authorization(
+    ciphertext: Option<&[u8]>,
+    env: &str,
+    key: &str,
+    has_authorization: bool,
+) -> Result<Option<String>> {
+    match resolve(ciphertext, env, key) {
+        // LLM requests can authenticate through their effective custom header.
+        // Only a missing fallback is optional; invalid references and corrupt
+        // database credentials must still fail rather than changing identity.
+        Err(error) if has_authorization && error.code == "intel_credential_missing" => Ok(None),
+        result => result,
+    }
+}
 pub(super) fn status(ciphertext_present: bool, env: &str) -> (&'static str, bool) {
     if ciphertext_present {
         ("database", true)

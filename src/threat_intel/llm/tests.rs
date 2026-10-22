@@ -3,6 +3,246 @@ use super::*;
 use super::super::tests::{database, encryption_key, server_config, user};
 
 #[test]
+fn header_auth_only_allows_a_missing_fallback_not_invalid_or_corrupt_credentials() {
+    let key = encryption_key();
+    let env = format!("NM_INTEL_TEST_UNSET_{}", Uuid::new_v4().simple()).to_uppercase();
+    assert!(std::env::var_os(&env).is_none());
+    assert!(
+        credentials::resolve_with_authorization(None, &env, &key, true)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        credentials::resolve_with_authorization(None, &env, &key, false)
+            .unwrap_err()
+            .code,
+        "intel_credential_missing"
+    );
+    // Unauthenticated model catalogs with no configured key reference still work.
+    assert!(
+        credentials::resolve_with_authorization(None, "", &key, false)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        credentials::resolve_with_authorization(None, "INVALID_REFERENCE", &key, true)
+            .unwrap_err()
+            .code,
+        "intel_invalid_key_reference"
+    );
+    let encrypted = credentials::encrypt_update("fixture-key", false, &key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        credentials::resolve_with_authorization(Some(&encrypted), &env, &key, true)
+            .unwrap()
+            .as_deref(),
+        Some("fixture-key")
+    );
+    assert_eq!(
+        credentials::resolve_with_authorization(Some(&[0_u8; 32]), &env, &key, true)
+            .unwrap_err()
+            .code,
+        "intel_credential_crypto_failed"
+    );
+    assert_eq!(
+        credentials::resolve(None, &env, &key).unwrap_err().code,
+        "intel_credential_missing"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn header_auth_works_without_the_fallback_env_and_never_hides_crypto_failure() {
+    let (pool, c, schema) = database().await;
+    c.batch_execute(include_str!("../../../source/database/migrate_llm.sql"))
+        .await
+        .unwrap();
+    let key = encryption_key();
+    let operator = user(1);
+    let context = AuditContext::cli("llm-header-auth-test");
+    let env = format!("NM_INTEL_TEST_UNSET_{}", Uuid::new_v4().simple()).to_uppercase();
+    assert!(std::env::var_os(&env).is_none());
+    let mut p = Provider {
+        name: "header-auth".into(),
+        models_url: "https://api.example/models".into(),
+        key_env: env,
+        models: vec![Model {
+            id: "fixture".into(),
+            ..Model::default()
+        }],
+        ..Provider::default()
+    };
+    let revision = storage::read(&pool, &key).await.unwrap()["revision"]
+        .as_i64()
+        .unwrap();
+    let created = storage::save_provider(
+        &pool,
+        None,
+        storage::ProviderInput {
+            expected_revision: revision,
+            provider: p.clone(),
+        },
+        &key,
+        &operator,
+        &context,
+    )
+    .await
+    .unwrap();
+    let id: Uuid = decode(created["id"].clone()).unwrap();
+    let mut revision = created["revision"].as_i64().unwrap();
+    for local in [false, true] {
+        let header = Header {
+            name: "Authorization".into(),
+            value: "Bearer fixture-header".into(),
+            ..Header::default()
+        };
+        let global = Transport {
+            headers: vec![header.clone()],
+            ..Transport::global()
+        };
+        if local {
+            p.transport.headers = vec![header];
+            revision = storage::save_provider(
+                &pool,
+                Some(id),
+                storage::ProviderInput {
+                    expected_revision: revision,
+                    provider: p.clone(),
+                },
+                &key,
+                &operator,
+                &context,
+            )
+            .await
+            .unwrap()["revision"]
+                .as_i64()
+                .unwrap();
+        }
+        revision = storage::save_settings(
+            &pool,
+            storage::SettingsInput {
+                expected_revision: revision,
+                enabled: true,
+                provider_id: Some(id),
+                model_id: Some("fixture".into()),
+                global,
+            },
+            &key,
+            &operator,
+            &context,
+        )
+        .await
+        .unwrap()["revision"]
+            .as_i64()
+            .unwrap();
+        let (_, transport, credential) = storage::debug_runtime(&pool, id, "fixture", &key)
+            .await
+            .unwrap();
+        assert!(credential.is_empty());
+        assert_eq!(
+            transport.request_headers(&credential, "").unwrap()["authorization"],
+            "Bearer fixture-header"
+        );
+        let (settings, _) = super::super::storage::settings(&pool).await.unwrap();
+        assert!(
+            super::super::storage::ai_credential(&pool, &settings, revision, &key)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    // An effective local removal must not count an inherited Authorization as usable.
+    p.transport.headers[0].remove = true;
+    revision = storage::save_provider(
+        &pool,
+        Some(id),
+        storage::ProviderInput {
+            expected_revision: revision,
+            provider: p.clone(),
+        },
+        &key,
+        &operator,
+        &context,
+    )
+    .await
+    .unwrap()["revision"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(
+        storage::debug_runtime(&pool, id, "fixture", &key)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "intel_credential_missing"
+    );
+    let (settings, _) = super::super::storage::settings(&pool).await.unwrap();
+    assert_eq!(
+        super::super::storage::ai_credential(&pool, &settings, revision, &key)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "intel_credential_missing"
+    );
+    p.transport.headers[0].remove = false;
+    p.credential = "fixture-database-key".into();
+    revision = storage::save_provider(
+        &pool,
+        Some(id),
+        storage::ProviderInput {
+            expected_revision: revision,
+            provider: p,
+        },
+        &key,
+        &operator,
+        &context,
+    )
+    .await
+    .unwrap()["revision"]
+        .as_i64()
+        .unwrap();
+    // Corrupt only the API key envelope; the valid encrypted Authorization stays intact.
+    c.execute(
+        "UPDATE llm_provider SET credential_ciphertext=$2 WHERE id=$1",
+        &[&id, &vec![0_u8; 32]],
+    )
+    .await
+    .unwrap();
+    c.execute(
+        "UPDATE intel_settings SET credential_ciphertext=$1 WHERE singleton",
+        &[&vec![0_u8; 32]],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        storage::debug_runtime(&pool, id, "fixture", &key)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "intel_credential_crypto_failed"
+    );
+    let (settings, _) = super::super::storage::settings(&pool).await.unwrap();
+    assert_eq!(
+        super::super::storage::ai_credential(&pool, &settings, revision, &key)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "intel_credential_crypto_failed"
+    );
+    assert_eq!(
+        storage::models(&pool, id, &key).await.err().unwrap().code,
+        "intel_credential_crypto_failed"
+    );
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[test]
 fn model_refresh_retains_missing_entries_and_restores_returning_models() {
     let provider = Provider {
         models: vec![
@@ -67,14 +307,16 @@ fn local_overrides_are_explicit_and_headers_are_case_insensitive() {
         value: "global".into(),
         ..Header::default()
     }];
-    let mut local = Transport::default();
-    local.proxy_mode = "direct".into();
-    local.stream = Some(false);
-    local.headers = vec![Header {
-        name: "x-test".into(),
-        value: "local".into(),
-        ..Header::default()
-    }];
+    let mut local = Transport {
+        proxy_mode: "direct".into(),
+        stream: Some(false),
+        headers: vec![Header {
+            name: "x-test".into(),
+            value: "local".into(),
+            ..Header::default()
+        }],
+        ..Transport::default()
+    };
     let resolved = resolve(&global, &local).unwrap();
     assert!(!resolved.stream);
     assert_eq!(resolved.proxy_mode, "direct");

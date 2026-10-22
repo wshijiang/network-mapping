@@ -378,7 +378,13 @@ pub(super) async fn debug_runtime(
         )
         .await?;
     let cipher: Option<Vec<u8>> = row.get(0);
-    let credential = credentials::resolve(cipher.as_deref(), &p.key_env, key)?.unwrap_or_default();
+    let credential = credentials::resolve_with_authorization(
+        cipher.as_deref(),
+        &p.key_env,
+        key,
+        transport.headers.contains_key("authorization"),
+    )?
+    .unwrap_or_default();
     if credential.is_empty() && !transport.headers.contains_key("authorization") {
         return Err(Error::bad("intel_credential_missing"));
     }
@@ -406,7 +412,13 @@ pub(super) async fn models(pool: &Pool, id: Uuid, key: &str) -> Result<Vec<Model
         )
         .await?;
     let cipher: Option<Vec<u8>> = row.get(0);
-    let credential = credentials::resolve(cipher.as_deref(), &p.key_env, key)?.unwrap_or_default();
+    let credential = credentials::resolve_with_authorization(
+        cipher.as_deref(),
+        &p.key_env,
+        key,
+        resolved.headers.contains_key("authorization"),
+    )?
+    .unwrap_or_default();
     tx.commit().await?;
     let bytes = transport::get(&p.models_url, &resolved, &credential).await?;
     normalize_models(

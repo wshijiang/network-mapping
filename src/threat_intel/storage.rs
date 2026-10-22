@@ -234,14 +234,17 @@ pub(super) async fn ai_credential(
         .await?
         .ok_or_else(Error::conflict)?;
     let ciphertext: Option<Vec<u8>> = row.get(0);
-    if let Some(value) = credentials::resolve(ciphertext.as_deref(), &s.ai_key_env, key)? {
+    let transport = llm::runtime_transport(pool, revision, key).await?;
+    let has_authorization = transport.headers.contains_key("authorization");
+    if let Some(value) = credentials::resolve_with_authorization(
+        ciphertext.as_deref(),
+        &s.ai_key_env,
+        key,
+        has_authorization,
+    )? {
         return Ok(value);
     }
-    if llm::runtime_transport(pool, revision, key)
-        .await?
-        .headers
-        .contains_key("authorization")
-    {
+    if has_authorization {
         return Ok(String::new());
     }
     Err(Error::bad("intel_credential_missing"))
