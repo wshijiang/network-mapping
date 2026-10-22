@@ -621,6 +621,8 @@ has_endpoint(os.family = windows) AND has_endpoint(port = 445)
 `web.status` 查询 `pending/identified/unknown/partial/unsupported/not_web`。
 
 ```text
+tech = elasticsearch
+tech = "elasticsearch@8.19.0"
 tech = nginx
 tech = "jquery@3.7.1"
 tech IN (wordpress, drupal)

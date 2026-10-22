@@ -28,6 +28,7 @@ HTML 使用 scraper 解析 DOM，不把页面正文当作产品名称词典。
 | `resource` | src/href 中 HTTP(S) 资源的 path |
 | `title` | title 的有界文本，不能选择任意页面正文 |
 | `s3_xml` | XML 媒体类型下已验证的 S3 结构标记 |
+| `elasticsearch_json` | 完整 JSON 根响应的产品、tagline、版本、Lucene 版本和构建哈希；仅输出固定标记与版本 |
 | `git_advertisement` | 媒体类型与 pkt-line 一致的 Git 广告标记 |
 
 `source=composite` 使用 `all`、`any`、`not` 数组。all 全部满足，非空 any 至少一项满足，
@@ -144,3 +145,7 @@ OS_TEST_ELASTICSEARCH_URL='http://127.0.0.1:9200' \
 
 新协议上线必须先升级服务端，再灰度扫描器。回滚前停止新任务领取并排空本地待上传批次，
 不删除 SQLite 状态或上传回执来绕过版本问题。
+
+## Elasticsearch JSON 规则
+
+`src/web_detection/elasticsearch.rs` 使用有类型 JSON 解析拒绝重复的身份/版本字段，仅接受明确 release 三段版本或 -SNAPSHOT；不保留集群身份字段。JSON 特征要求单一受支持媒体类型和完整响应。产品头不包含版本，明确 OpenSearch 响应或冲突产品头使该响应的 ES 规则跳过。`elasticsearch_json` 不允许用于 not；解析失败不能证明协议不存在。规则修订已升至 6，沿用现有 backfill 水位和条件写入机制。

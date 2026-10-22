@@ -4,7 +4,7 @@
 
 ## 当前支持目录
 
-当前内置 **86 条规则、52 种技术**，规则版本 `2026-10-18.5`。以下名称是识别对象，命中取决于保留的具体响应。
+当前内置 **88 条规则、53 种技术**，规则版本 `2026-10-22.6`。以下名称是识别对象，命中取决于保留的具体响应。
 
 | 组件 ID | 技术 | 类别 | 证据类型 |
 | --- | --- | --- | --- |
@@ -23,6 +23,7 @@
 | `drupal` | Drupal | `cms` | HTML 标记或资源路径 |
 | `echarts` | ECharts | `javascript_library` | HTML 标记或资源路径 |
 | `element-plus` | Element Plus | `ui_library` | HTML 标记或资源路径 |
+| `elasticsearch` | Elasticsearch | `database` | 产品响应头、结构化根 JSON |
 | `express` | Express | `backend_framework` | 指定响应头 |
 | `gatsby` | Gatsby | `site_generator` | HTML 标记或资源路径 |
 | `ghost` | Ghost | `cms` | HTML 标记或资源路径 |
@@ -111,3 +112,7 @@ tech = git
 tech = "jetty@12.0.16"
 tech IN (alpinejs, htmx, phpmyadmin, swagger-ui)
 ```
+
+## Elasticsearch REST 数据库指纹
+
+使用 `tech = elasticsearch` 或 `tech = "elasticsearch@8.19.0"` 查询。产品头可在 401/403 中命中，但不推断版本或认证是否可绕过。JSON 规则只处理完整的 application/json 或 application/vnd.elasticsearch+json 根响应，同时验证 tagline、版本、Lucene 版本和构建哈希；明确的 OpenSearch 特征会排除 ES。证据只输出固定标记及明确版本，不复制集群名称、UUID、节点名或错误正文。原生 Transport 和 UDP 交付状态见[分批计划](SERVICE_DETECTION_ROADMAP.md)。

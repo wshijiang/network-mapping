@@ -2,6 +2,12 @@
 
 [文档中心](README.md) · [部署与升级](DEPLOYMENT.md) · [扫描端更新日志](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/CHANGELOG.md)
 
+## 未发布：服务探测第一批（2026-10-22）
+
+- HTTP/HTTPS 被动识别 Elasticsearch：产品响应头及完整根 JSON，支持明确版本、OpenSearch 排除、冲突和截断状态。service 继续保留 http/https，不增加目标请求。
+- Web 规则修订 6，88 条规则覆盖 53 种技术；现有队列按新修订回填保留的历史证据。查询使用 tech = elasticsearch，外部 API 沿用 web 字段授权。
+- 新增[服务探测分批交付计划](SERVICE_DETECTION_ROADMAP.md)，区分 UDP 库内核、后续任务/端点迁移、原生 Transport 和扩展协议；本批尚未开放 UDP 任务。
+
 ## 未发布（自 v0.1.29 以来）
 
 截至 **2026-10-21（北京时间）**，以最新已发布 tag [v0.1.29](https://github.com/wshijiang/network-mapping/releases/tag/v0.1.29) 为基线，汇总主分支已合入的服务端变动，不包含尚未合入的开发分支或前端独立变动。

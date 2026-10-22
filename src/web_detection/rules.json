@@ -1184,5 +1184,27 @@
         "field": "content-type"
       }
     ]
+  },
+  {
+    "id": "elasticsearch-product-header",
+    "technology": "elasticsearch",
+    "name": "Elasticsearch",
+    "category": "database",
+    "source": "header",
+    "field": "x-elastic-product",
+    "pattern": "^Elasticsearch$",
+    "confidence": "high",
+    "usage": "response_marker"
+  },
+  {
+    "id": "elasticsearch-root-json",
+    "technology": "elasticsearch",
+    "name": "Elasticsearch",
+    "category": "database",
+    "source": "elasticsearch_json",
+    "pattern": "^Elasticsearch ([0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}(?:-SNAPSHOT)?)$",
+    "version_group": 1,
+    "confidence": "high",
+    "usage": "response_marker"
   }
 ]

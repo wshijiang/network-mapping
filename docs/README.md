@@ -10,6 +10,7 @@
 
 | 文档 | 内容 |
 | --- | --- |
+| [服务探测分批计划](SERVICE_DETECTION_ROADMAP.md) | Elasticsearch 与 UDP 的当前交付、迁移及验收边界 |
 | [更新日志](CHANGELOG.md) | 自上次发布 tag 以来的服务端变动、固定比较范围与升级兼容注意 |
 
 ## 从这里开始

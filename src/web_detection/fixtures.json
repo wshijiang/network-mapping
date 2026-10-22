@@ -350,5 +350,27 @@
     "expected": {
       "git": null
     }
+  },
+  {
+    "id": "elasticsearch-product-header-auth-required",
+    "headers": {
+      "X-Elastic-Product": [
+        "Elasticsearch"
+      ]
+    },
+    "body": "{\"error\":\"authentication required\"}",
+    "expected": {
+      "elasticsearch": null
+    }
+  },
+  {
+    "id": "elasticsearch-root-json",
+    "headers": {
+      "Content-Type": "application/json; charset=UTF-8"
+    },
+    "body": "{\"name\": \"PRIVATE\", \"cluster_name\": \"PRIVATE\", \"cluster_uuid\": \"PRIVATE\", \"version\": {\"number\": \"8.19.0\", \"lucene_version\": \"9.12.2\", \"build_hash\": \"0123456789abcdef\"}, \"tagline\": \"You Know, for Search\"}",
+    "expected": {
+      "elasticsearch": "8.19.0"
+    }
   }
 ]

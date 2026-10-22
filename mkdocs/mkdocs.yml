@@ -56,6 +56,7 @@ nav:
       - 周报与月报: reports.md
       - 业务时区与常规设置: SYSTEM_TIME.md
   - 扫描与资产:
+      - 服务探测分批计划: SERVICE_DETECTION_ROADMAP.md
       - 扫描流水线与结果协议: SCAN_PIPELINE.md
       - 双栈与自动目标: DUAL_STACK_SCANNING.md
       - 智能目标与扫描器分配: SMART_SCANNING.md

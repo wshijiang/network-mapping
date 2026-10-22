@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
-pub(crate) const RULESET_REVISION: i64 = 5;
-pub(crate) const RULESET_VERSION: &str = "2026-10-18.5";
+pub(crate) const RULESET_REVISION: i64 = 6;
+pub(crate) const RULESET_VERSION: &str = "2026-10-22.6";
 const MAX_BODY: usize = 256 * 1024;
 const MAX_FEATURES: usize = 512;
 const MAX_TEXT: usize = 4096;
@@ -63,6 +63,7 @@ impl WebInference {
     }
 }
 
+mod elasticsearch;
 mod protocol;
 
 #[derive(Clone, Default, Deserialize)]
@@ -144,6 +145,7 @@ fn compile_condition(condition: Condition, usage: &str) -> Result<CompiledCondit
             | "title"
             | "s3_xml"
             | "git_advertisement"
+            | "elasticsearch_json"
     ) {
         return Err("unsupported condition source".into());
     }
@@ -262,7 +264,10 @@ fn compile_rules(input: &str) -> Result<Vec<CompiledRule>, String> {
                 )?)
             };
             if rule.exclusions.iter().any(|condition| {
-                matches!(condition.source.as_str(), "s3_xml" | "git_advertisement")
+                matches!(
+                    condition.source.as_str(),
+                    "s3_xml" | "git_advertisement" | "elasticsearch_json"
+                )
             }) {
                 return Err("protocol parse failure cannot prove a negative condition".into());
             }
@@ -378,6 +383,8 @@ struct ResponseView<'a> {
     html: Option<Html>,
     s3_xml: Option<String>,
     git_advertisement: Option<&'static str>,
+    elasticsearch_json: Option<String>,
+    explicitly_opensearch: bool,
     complete: bool,
 }
 
@@ -474,11 +481,27 @@ impl<'a> ResponseView<'a> {
         };
         let git_advertisement =
             body.and_then(|body| protocol::git_advertisement_feature(&content_types, body));
+        let json_type = media_types.len() == 1
+            && media_types.first().is_some_and(|t| {
+                t == "application/json" || t == "application/vnd.elasticsearch+json"
+            });
+        let elasticsearch_json = if json_type && complete {
+            body.and_then(elasticsearch::root_feature)
+        } else {
+            None
+        };
+        let explicitly_opensearch = body.is_some_and(elasticsearch::explicitly_opensearch)
+            || headers.iter().any(|h| {
+                h.name == "x-elastic-product"
+                    && h.values.iter().any(|v| v.trim() != "Elasticsearch")
+            });
         Self {
             headers,
             html: body.map(Html::parse_document),
             s3_xml,
             git_advertisement,
+            elasticsearch_json,
+            explicitly_opensearch,
             complete,
         }
     }
@@ -636,11 +659,11 @@ fn find_matches(compiled: &CompiledCondition, view: &ResponseView<'_>, prefix: &
                 }
             }
         }
-        "s3_xml" | "git_advertisement" => {
-            let feature = if condition.source == "s3_xml" {
-                view.s3_xml.as_deref()
-            } else {
-                view.git_advertisement
+        "s3_xml" | "git_advertisement" | "elasticsearch_json" => {
+            let feature = match condition.source.as_str() {
+                "s3_xml" => view.s3_xml.as_deref(),
+                "elasticsearch_json" => view.elasticsearch_json.as_deref(),
+                _ => view.git_advertisement,
             };
             if let Some(feature) = feature {
                 capture(
@@ -667,6 +690,9 @@ fn apply_rules(
 ) {
     out.truncated |= !view.complete;
     for compiled in rules {
+        if compiled.rule.technology == "elasticsearch" && view.explicitly_opensearch {
+            continue;
+        }
         let mut positive = Vec::new();
         if let Some(primary) = &compiled.primary {
             let matches = find_matches(primary, view, prefix);

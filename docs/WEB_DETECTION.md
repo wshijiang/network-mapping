@@ -37,7 +37,7 @@
 
 ## 覆盖范围与边界
 
-当前内置 86 条规则，覆盖 52 种技术。完整类别、组件 ID、MinIO/S3 区分及分批状态见
+当前内置 88 条规则，覆盖 53 种技术。完整类别、组件 ID、MinIO/S3 区分及分批状态见
 [Web 技术目录](WEB_TECHNOLOGY_CATALOG.md)。规则清单以 [rules.json](../src/web_detection/rules.json) 为准；
 列表不代表每个产品在所有部署下都可被识别。
 
@@ -54,6 +54,8 @@ MinIO 产品身份、S3 兼容性、GitLab 产品与 Git smart HTTP 服务分别
 ## 搜索
 
 ```text
+tech = elasticsearch
+tech = "elasticsearch@8.19.0"
 tech = nginx
 tech = minio
 tech = s3
@@ -83,3 +85,7 @@ has_endpoint(port = 8443 AND tech = nextjs)
 
 当前版本尚未实现域名虚拟主机建模、额外 JS/CSS/favicon 下载、Nuclei 独立技术结果或浏览器
 运行时识别；分阶段演进见 [开发与维护](WEB_DETECTION_DEVELOPMENT.md)。
+
+## Elasticsearch REST
+
+新增数据库类别，复用 HTTP/HTTPS 证据，服务标签继续保持 http/https。产品响应头与结构化根 JSON 分别提供产品及版本线索；明确 OpenSearch、普通产品文字和端口号不能产生 Elasticsearch 结论。认证响应仅有产品头时版本为空；截断不补全版本。原生 TCP/TLS Transport 与 UDP 尚未开放，见[分批计划](SERVICE_DETECTION_ROADMAP.md)。

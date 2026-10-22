@@ -1,5 +1,156 @@
 use super::*;
 
+fn elasticsearch_root(version: &str) -> String {
+    json!({
+        "name":"PRIVATE", "cluster_name":"PRIVATE", "cluster_uuid":"PRIVATE",
+        "version":{"number":version,"lucene_version":"9.12.2","build_hash":"0123456789abcdef"},
+        "tagline":"You Know, for Search"
+    })
+    .to_string()
+}
+
+#[test]
+fn elasticsearch_http_and_https_keep_versions_and_only_sanitized_markers() {
+    for module in ["http", "https"] {
+        for version in ["7.17.28", "8.19.0", "9.5.0", "9.5.0-SNAPSHOT"] {
+            let web = infer(
+                Some(module),
+                None,
+                Some(&json!({"schema_version":2,
+                    "evidence":[{"module":module,"result":{"response":{
+                        "headers":{"Content-Type":["application/json"],"X-Elastic-Product":["Elasticsearch"]},
+                        "body":elasticsearch_root(version)
+                    }}}]
+                })),
+                19200,
+                1,
+                Some("index/observation"),
+            );
+            assert_eq!(web.status, "identified");
+            assert_eq!(web.technologies.len(), 1);
+            let tech = &web.technologies[0];
+            assert_eq!(tech.id, "elasticsearch");
+            assert_eq!(tech.version.as_deref(), Some(version));
+            assert_eq!(tech.category, "database");
+            assert_eq!(tech.evidence.len(), 2);
+            assert!(!serde_json::to_string(&web).unwrap().contains("PRIVATE"));
+        }
+    }
+}
+
+#[test]
+fn elasticsearch_rejects_unrelated_json_opensearch_and_conflicting_product_headers() {
+    for body in [
+        r#"{"version":{"number":"8.19.0"},"tagline":"You Know, for Search"}"#.to_owned(),
+        r#"{"message":"Elasticsearch 8.19.0"}"#.to_owned(),
+        elasticsearch_root("<script>"),
+        elasticsearch_root("8.19.0").replace("0123456789abcdef", "PRIVATE"),
+        elasticsearch_root("8.19.0").replace("\"number\":", "\"number\":\"9.0.0\",\"number\":"),
+        format!("<html>{}</html>", elasticsearch_root("8.19.0")),
+    ] {
+        assert!(
+            identify(json!({"content-type":"application/json"}), &body)
+                .technologies
+                .is_empty()
+        );
+    }
+    let mut root: Value = serde_json::from_str(&elasticsearch_root("2.19.0")).unwrap();
+    root["version"]["distribution"] = json!("opensearch");
+    for body in [
+        root.to_string(),
+        r#"{"tagline":"The OpenSearch Project: https://opensearch.org/"}"#.into(),
+    ] {
+        assert!(
+            identify(
+                json!({"content-type":"application/json","x-elastic-product":"Elasticsearch"}),
+                &body
+            )
+            .technologies
+            .is_empty()
+        );
+    }
+    assert!(identify(json!({"content-type":"application/json","x-elastic-product":["Elasticsearch","OpenSearch"]}), &elasticsearch_root("8.19.0")).technologies.is_empty());
+    assert!(
+        identify(
+            json!({"content-type":"text/html"}),
+            &elasticsearch_root("8.19.0")
+        )
+        .technologies
+        .is_empty()
+    );
+}
+
+#[test]
+fn elasticsearch_auth_headers_do_not_guess_versions_and_truncation_is_explicit() {
+    for status in [401, 403] {
+        let web = infer(
+            Some("https"),
+            None,
+            Some(&json!({"schema_version":2,"evidence":[{
+                "module":"https","result":{"response":{"status_code":status,
+                    "headers":{"x-elastic-product":"Elasticsearch"},"body":""}}
+            }]})),
+            9200,
+            1,
+            None,
+        );
+        assert_eq!(web.technologies[0].id, "elasticsearch");
+        assert_eq!(web.technologies[0].version, None);
+        assert!(
+            identify(
+                json!({"www-authenticate":"Basic realm=security"}),
+                "Unauthorized"
+            )
+            .technologies
+            .is_empty()
+        );
+    }
+    let web = infer(
+        Some("http"),
+        None,
+        Some(&json!({"schema_version":2,"evidence":[{
+            "module":"http","truncated":true,"result":{"response":{
+                "headers":{"content-type":"application/json","x-elastic-product":"Elasticsearch"},
+                "body":elasticsearch_root("8.19.0")}}
+        }]})),
+        9200,
+        1,
+        None,
+    );
+    assert_eq!(web.status, "partial");
+    assert_eq!(web.technologies[0].version, None);
+}
+
+#[test]
+fn elasticsearch_keeps_version_conflicts_and_never_reads_tcp_as_http() {
+    let evidence = ["8.19.0", "9.5.0"].map(|v| {
+        json!({"module":"https","result":{"response":{
+        "headers":{"content-type":"application/json"},"body":elasticsearch_root(v)}}})
+    });
+    let web = infer(
+        Some("https"),
+        None,
+        Some(&json!({"schema_version":2,"evidence":evidence})),
+        9200,
+        1,
+        None,
+    );
+    assert!(web.technologies[0].version_conflict);
+    assert_eq!(web.technologies[0].version, None);
+    let web = infer(
+        Some("tls"),
+        None,
+        Some(&json!({"schema_version":2,"evidence":[{
+            "module":"tls","result":{"response":{"headers":{"x-elastic-product":"Elasticsearch"},"body":elasticsearch_root("8.19.0")}}
+        }]})),
+        9300,
+        1,
+        None,
+    );
+    assert_eq!(web.status, "not_web");
+    assert!(web.technologies.is_empty());
+}
+
 #[derive(Deserialize)]
 struct TechnologyFixture {
     id: String,
