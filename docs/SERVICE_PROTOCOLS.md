@@ -21,32 +21,34 @@
 | `enip_io` | IPv4 UDP/2222 等 | 被动接收 CPF Sequenced Address + Connected Data，校验连接标识与长度；只识别帧格式，不证明会话有效或端口开放 |
 | `opcua_pubsub` | IPv4 UDP/4840 等 | 被动接收 UADP v1 DataSet NetworkMessage，要求 Publisher/WriterGroup/Payload 标头及结构完整的 Variant keyframe。支持有界标量；加密/签名、分块、RawData、DataValue、数组、增量帧和复杂 Variant 暂不确认 |
 
-工业主动请求只有显式选择后才发送，不会加入无选择的 exhaustive 扫描。MQTT 原已有协议名称，本次替换为可验证版本、认证拒绝及 TLS 的原生握手。EtherNet/IP 不等同于罗克韦尔产品；OPC UA UDP 是 UADP PubSub，与 TCP HEL 识别独立。
+所有已实现 TCP 服务均纳入自动识别候选，包括工业协议；用户无需预先选择服务名称。端口只决定探测顺序，确认仍依赖合法响应。MQTT 原已有协议名称，本次替换为可验证版本、认证拒绝及 TLS 的原生握手。EtherNet/IP 不等同于罗克韦尔产品；OPC UA UDP 是 UADP PubSub，与 TCP HEL 识别独立。
 
 ## TCP 任务
 
-`POST /api/task/create` 和 `/api/task/placement-preview` 支持 `required_services` 与 `service_probe_options`。TCP 使用既有 `service_inventory` / `vulnerability_scan`，plan v1。选中后仅尝试所选协议，不启用通用回退；留空保留原有策略。必需阶段执行完整即可完成任务，不要求所有目标识别成功。
+`POST /api/task/create` 和 `/api/task/placement-preview` 支持 `service_probe_options`。TCP 使用既有 `service_inventory` / `vulnerability_scan`，plan v1；默认省略或留空 `required_services`，自动识别全部已实现协议。旧 API 非空 `required_services` 仍可限制探测范围，创建页不再要求选择协议。必需阶段执行完整即可完成任务，不要求所有目标识别成功。
+
+节点默认采用 adaptive：按端口线索执行应用握手及 Banner/TLS/HTTP(S)，再用剩余预算回退；工业 TCP 502/44818/102/4840、DNS/DoT、VNC、MQTT/MQTTS 均有端口映射。HTTPS 常用端口会尝试 DoH；非标准端口发现 HTTPS 后，预算允许时细分 DoH，合法完整 RFB 问候可直接确认 VNC。standard 保留端口优先探测（HTTPS 同时确认 DoH），exhaustive 尝试所有支持的 TCP 模块，包括工业协议。非标准端口覆盖受策略、预算和期限限制，不保证每个端点都执行全部握手。
 
 ```json
 {
   "ip": "192.0.2.53", "port": "443", "level": 1,
-  "scan_profile": "service_inventory", "required_services": ["doh"],
+  "scan_profile": "service_inventory",
   "service_probe_options": {"server_name": "dns.internal", "doh_path": "/dns-query"}
 }
 ```
 
 TLS 的 `server_name` 仅控制 Host/SNI 与证书名校验，实际连接固定到任务 IP/端口，不重新解析或跟随跳转。默认信任系统 CA，可用 `tls_ca_pem` 增加公开 CA（最多 64 KiB，拒绝私钥）；不提供跳过校验模式。TLS 失败保留诊断类别，不能据此确认应用；当前不细分所有 mTLS 与证书错误。
 
-其他选项：`modbus_unit_id` 为 0–255（默认 1）；`s7_tsap` 为 0–65535（默认 258 / 0x0102，仅一组 TSAP）；`mqtt_version` 为 4（默认，MQTT 3.1.1）或 5。选项需与所选协议匹配。DoH 路径最多 256 字节，只支持单一路径 POST，不含 GET、JSON DNS API、HTTP/3、DoQ 或路径枚举。
+其他选项：`modbus_unit_id` 为 0–255（默认 1）；`s7_tsap` 为 0–65535（默认 258 / 0x0102，仅一组 TSAP）；`mqtt_version` 为 4（默认，MQTT 3.1.1）或 5。自动识别可直接配置上述参数，不限制候选协议；旧 API 使用非空协议列表时，参数仍需匹配该列表。DoH 路径最多 256 字节，只支持单一路径 POST，不含 GET、JSON DNS API、HTTP/3、DoQ 或路径枚举。
 
 ## UDP 主动与被动任务
 
-UDP 使用 plan v2，结果仍为上传协议 3；与 TCP 分开创建任务，当前不支持同一任务混合 TCP/UDP 或自动域名后续任务。两类 UDP 任务都显式选择协议，最多 256 个单播来源/目标地址；`udp_inventory` 最多 32 个明确端口，不使用隐式全端口扫描。
+UDP 使用 plan v2，结果仍为上传协议 3；与 TCP 分开创建任务，当前不支持同一任务混合 TCP/UDP 或自动域名后续任务。服务端启动初始化更新任务 profile 约束，允许 `udp_inventory` / `udp_passive`；升级部署须同步程序随附的数据库初始化 SQL。两类 UDP 任务均自动识别其支持的全部协议，无需手动勾选；服务端将规范化的默认集合写入 plan，预览、创建、调度与恢复共用此集合。主动默认 DNS、EtherNet/IP、BACnet/IP；经典 BACnet/IP 仅适用于 IPv4。被动默认 EtherNet/IP I/O 与 OPC UA UADP。旧 API 非空列表仍可限制范围。最多 256 个单播来源/目标地址；`udp_inventory` 最多 32 个明确端口，不使用隐式全端口扫描。
 
 ```json
 {
   "ip": "192.0.2.53", "port": "53", "level": 1,
-  "scan_profile": "udp_inventory", "required_services": ["dns_udp"]
+  "scan_profile": "udp_inventory"
 }
 ```
 
@@ -55,7 +57,7 @@ UDP 使用 plan v2，结果仍为上传协议 3；与 TCP 分开创建任务，�
 ```json
 {
   "ip": "192.0.2.20", "port": "4840", "level": 1,
-  "scan_profile": "udp_passive", "required_services": ["opcua_pubsub"],
+  "scan_profile": "udp_passive",
   "dispatch_mode": "selected", "scanner_ids": ["019c0000-0000-7000-8000-000000000001"],
   "service_probe_options": {
     "passive_bind": "192.0.2.10", "passive_window_seconds": 10,
@@ -74,7 +76,7 @@ UDP 使用 plan v2，结果仍为上传协议 3；与 TCP 分开创建任务，�
 
 Worker IPC 升为 **3**。升级时先暂停分配并排空旧 generation 的任务和检查点，再配套升级 Agent、Worker 与完整 IPC 3 模块包。不得混用旧 Worker 或通过删除状态库绕过预检。plan v1 与上传协议 3 保持兼容，新增 UDP 任务要求 plan v2；SQLite schema 不变。
 
-前端沿用现有 daisyUI 的表单、复选框、badge 和 details，显示协议证据、MQTT 认证拒绝及被动来源；动态字符串按文本转义。资产历史按 IP/端口/传输协议过滤，表格键区分 TCP/UDP。
+前端沿用现有 daisyUI 的表单、badge 和 details；任务创建默认自动识别，移除协议勾选，TLS/SNI、DoH 路径、Unit ID、TSAP 与 MQTT 版本集中在可折叠的高级参数内。显示协议证据、MQTT 认证拒绝及被动来源，动态字符串按文本转义。资产历史按 IP/端口/传输协议过滤，表格键区分 TCP/UDP。
 
 ## 存储升级与回滚
 

@@ -2,6 +2,13 @@
 
 [文档中心](README.md) · [部署与升级](DEPLOYMENT.md) · [扫描端更新日志](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/CHANGELOG.md)
 
+## 未发布：全部服务自动识别（2026-10-23）
+
+- TCP 服务任务默认自动识别，TLS/SNI/CA、DoH 路径及工业参数无需选择协议即可配置；保留旧 API 定向列表的兼容性。
+- 修复数据库 scan_task_profile_check 遗漏 UDP 两种任务类型导致真实创建返回 500；启动初始化同步更新约束。
+- UDP 主动/被动任务省略协议列表时自动采用全部已支持协议，将集合写入计划；预览、创建、节点预算及恢复共用规范化集合，避免能力或预算不足的节点被选中。
+- 同步默认行为、端口映射、识别预算和 daisyUI 页面说明，并增加自动参数/UDP 计划及实际 PostgreSQL 预览与创建一致性回归。
+
 ## 未发布：PR review 与 CI 核验修复（2026-10-23）
 
 - 修复迁移/发布将 `_refresh` 的 `total>0, successful=0, failed=0` 当作成功的问题；刷新缺少计数或没有成功分片时停止，传输端点重建不推进失败执行的断点和运行标记。补充失败后恢复重跑测试。

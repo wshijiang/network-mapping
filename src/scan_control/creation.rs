@@ -87,6 +87,8 @@ pub fn build_service_scan_plan_with_options(
     options: &ServiceProbeOptions,
 ) -> Result<Value, &'static str> {
     options.validate()?;
+    let automatic_tcp =
+        services.is_empty() && matches!(profile, "service_inventory" | "vulnerability_scan");
     let has_passive = options.passive_bind.is_some()
         || options.passive_group.is_some()
         || options.passive_interface.is_some()
@@ -101,22 +103,25 @@ pub fn build_service_scan_plan_with_options(
         return Err("UDP inventory does not accept TCP probe options");
     }
     if (options.server_name.is_some() || options.tls_ca_pem.is_some())
+        && !automatic_tcp
         && !services
             .iter()
             .any(|s| matches!(s.as_str(), "dot" | "doh" | "mqtts"))
     {
         return Err("TLS options require an encrypted protocol");
     }
-    if options.doh_path.is_some() && !services.iter().any(|s| s == "doh") {
+    if options.doh_path.is_some() && !automatic_tcp && !services.iter().any(|s| s == "doh") {
         return Err("DoH path requires DoH selection");
     }
-    if options.modbus_unit_id.is_some() && !services.iter().any(|s| s == "modbus") {
+    if options.modbus_unit_id.is_some() && !automatic_tcp && !services.iter().any(|s| s == "modbus")
+    {
         return Err("unit ID requires Modbus selection");
     }
-    if options.s7_tsap.is_some() && !services.iter().any(|s| s == "s7") {
+    if options.s7_tsap.is_some() && !automatic_tcp && !services.iter().any(|s| s == "s7") {
         return Err("TSAP requires S7 selection");
     }
     if options.mqtt_version.is_some()
+        && !automatic_tcp
         && !services
             .iter()
             .any(|s| matches!(s.as_str(), "mqtt" | "mqtts"))
@@ -175,11 +180,21 @@ pub fn build_scan_plan(profile: &str) -> Result<Value, &'static str> {
     }))
 }
 
-/// Explicit native service selection is persisted inside the existing plan JSON.
+/// Empty TCP requirements enable automatic detection. UDP plans persist their
+/// automatic protocol set so dispatch, recovery and workers share requirements.
 pub fn build_service_scan_plan(profile: &str, services: &[String]) -> Result<Value, &'static str> {
     if matches!(profile, "udp_inventory" | "udp_passive") {
-        if services.is_empty()
-            || services.len() > if profile == "udp_passive" { 2 } else { 3 }
+        let defaults = if profile == "udp_passive" {
+            vec!["opcua_pubsub".into(), "enip_io".into()]
+        } else {
+            vec!["dns_udp".into(), "enip_udp".into(), "bacnet".into()]
+        };
+        let services = if services.is_empty() {
+            &defaults
+        } else {
+            services
+        };
+        if services.len() > if profile == "udp_passive" { 2 } else { 3 }
             || services.iter().any(|s| {
                 if profile == "udp_passive" {
                     !matches!(s.as_str(), "opcua_pubsub" | "enip_io")
@@ -193,7 +208,7 @@ pub fn build_service_scan_plan(profile: &str, services: &[String]) -> Result<Val
                 .len()
                 != services.len()
         {
-            return Err("UDP inventory requires explicit UDP protocols");
+            return Err("unsupported UDP service protocols");
         }
         let mut plan = build_scan_plan(profile)?;
         plan["required_services"] = serde_json::json!(services);
@@ -503,6 +518,44 @@ fn validate_passive_options(o: &ServiceProbeOptions) -> Result<(), &'static str>
 mod protocol_options_tests {
     use super::*;
     #[test]
+    fn automatic_detection_accepts_protocol_options_without_restricting_services() {
+        let options = ServiceProbeOptions {
+            server_name: Some("probe.internal".into()),
+            doh_path: Some("/custom-dns".into()),
+            modbus_unit_id: Some(7),
+            s7_tsap: Some(258),
+            mqtt_version: Some(5),
+            ..Default::default()
+        };
+        for profile in ["service_inventory", "vulnerability_scan"] {
+            let plan = build_service_scan_plan_with_options(profile, &[], &options).unwrap();
+            assert!(plan.get("required_services").is_none());
+            assert_eq!(plan["service_probe_options"]["mqtt_version"], 5);
+        }
+        for profile in ["port_only", "dns_records", "udp_inventory"] {
+            assert!(build_service_scan_plan_with_options(profile, &[], &options).is_err());
+        }
+    }
+
+    #[test]
+    fn automatic_udp_requirements_are_persisted_for_dispatch_and_recovery() {
+        let plan = build_service_scan_plan("udp_inventory", &[]).unwrap();
+        assert_eq!(
+            plan["required_services"],
+            serde_json::json!(["dns_udp", "enip_udp", "bacnet"])
+        );
+        let options = ServiceProbeOptions {
+            passive_bind: Some("192.0.2.1".into()),
+            ..Default::default()
+        };
+        let plan = build_service_scan_plan_with_options("udp_passive", &[], &options).unwrap();
+        assert_eq!(
+            plan["required_services"],
+            serde_json::json!(["opcua_pubsub", "enip_io"])
+        );
+    }
+
+    #[test]
     fn encrypted_and_industrial_options_are_scoped_and_roundtrip() {
         let options = ServiceProbeOptions {
             server_name: Some("dns.internal".into()),
@@ -564,7 +617,7 @@ mod protocol_options_tests {
         );
     }
     #[test]
-    fn udp_profiles_are_explicit_version_two_and_bounded() {
+    fn udp_profiles_support_automatic_protocols_and_remain_version_two_and_bounded() {
         let plan = build_service_scan_plan_with_options(
             "udp_inventory",
             &["dns_udp".into(), "enip_udp".into()],
@@ -573,7 +626,7 @@ mod protocol_options_tests {
         .unwrap();
         assert_eq!(plan["version"], 2);
         assert_eq!(plan["stages"].as_array().unwrap().len(), 1);
-        assert!(build_service_scan_plan("udp_inventory", &[]).is_err());
+        assert!(build_service_scan_plan("udp_inventory", &[]).is_ok());
         assert!(build_service_scan_plan("udp_inventory", &["dns".into()]).is_err());
         assert!(build_service_scan_plan("service_inventory", &["dns_udp".into()]).is_err());
         assert!(

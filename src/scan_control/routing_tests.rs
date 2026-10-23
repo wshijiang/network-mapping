@@ -1150,6 +1150,80 @@ async fn native_service_creation_and_preview_agree_on_node_capabilities() {
         );
     }
     drop(c);
+    // Omitting UDP requirements must normalize the same protocol set for the
+    // preview, selected-node creation and the persisted recovery plan.
+    for budget in [2_i32, 3] {
+        f.pool.get().await.unwrap().execute(
+            "UPDATE scanner_info SET scan_capabilities=$2 WHERE scanner_id=$1",
+            &[&scanner.to_string(), &json!({"profiles":["udp_inventory"],"max_service_probes":budget,"service_protocols":["dns_udp","enip_udp","bacnet"]})]
+        ).await.unwrap();
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/task/placement-preview")
+                .set_json(
+                    json!({"targets":["192.0.2.1"],"port":"53","scan_profile":"udp_inventory"}),
+                )
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let data: Value = test::read_body_json(response).await;
+        assert_eq!(
+            data["data"]["candidates"].as_array().unwrap().len(),
+            usize::from(budget == 3)
+        );
+        let response = test::call_service(&app, test::TestRequest::post().uri("/api/task/create")
+            .set_json(json!({"ip":"192.0.2.1","port":"53","level":1,"scan_profile":"udp_inventory","dispatch_mode":"selected","scanner_ids":[scanner]})).to_request()).await;
+        assert_eq!(
+            response.status(),
+            if budget == 3 {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        );
+    }
+    let plan: Value = f
+        .pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT scan_plan FROM scan_task WHERE scan_profile='udp_inventory'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        plan["required_services"],
+        json!(["dns_udp", "enip_udp", "bacnet"])
+    );
+    f.pool.get().await.unwrap().execute(
+        "UPDATE scanner_info SET scan_capabilities=$2 WHERE scanner_id=$1",
+        &[&scanner.to_string(), &json!({"profiles":["udp_passive"],"max_service_probes":2,"service_protocols":["opcua_pubsub","enip_io"]})]
+    ).await.unwrap();
+    let response = test::call_service(&app, test::TestRequest::post().uri("/api/task/create")
+        .set_json(json!({"ip":"192.0.2.1","port":"2222","level":1,"scan_profile":"udp_passive","dispatch_mode":"selected","scanner_ids":[scanner],"service_probe_options":{"passive_bind":"192.0.2.10"}})).to_request()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let plan: Value = f
+        .pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT scan_plan FROM scan_task WHERE scan_profile='udp_passive'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        plan["required_services"],
+        json!(["opcua_pubsub", "enip_io"])
+    );
+    assert_eq!(plan["version"], 2);
     drop(app);
     f.finish().await;
 }

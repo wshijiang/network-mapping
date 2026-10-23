@@ -2214,7 +2214,10 @@ pub(crate) async fn create_task(
         return HttpResponse::BadRequest()
             .json(serde_json::json!({"success":false,"message":message}));
     }
-    let required_services = serde_json::json!(create_data.required_services);
+    let required_services = scan_plan
+        .get("required_services")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
     let capability_filter = if address_family == "ipv6" {
         "supports_ipv6 AND ipv6_ready"
     } else {

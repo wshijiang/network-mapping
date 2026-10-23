@@ -48,15 +48,15 @@ pub async fn placement_preview(
         return HttpResponse::Forbidden().finish();
     }
     let profile = input.scan_profile.trim().to_ascii_lowercase();
+    let plan = crate::scan_control::creation::build_service_scan_plan_with_options(
+        &profile,
+        &input.required_services,
+        &input.service_probe_options,
+    );
     if input.targets.is_empty()
         || input.targets.len() > 100
         || input.targets.iter().any(|t| t.len() > 253)
-        || crate::scan_control::creation::build_service_scan_plan_with_options(
-            &profile,
-            &input.required_services,
-            &input.service_probe_options,
-        )
-        .is_err()
+        || plan.is_err()
         || crate::scan_control::creation::validate_udp_targets(
             &profile,
             &input.targets,
@@ -120,10 +120,15 @@ pub async fn placement_preview(
         }
         family.unwrap_or("ipv4")
     };
+    let required_services = plan
+        .unwrap()
+        .get("required_services")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
     let result: Result<Value, Error> = async {
         let client = pool.get().await?;
         let cfg = routing::config(&client).await?;
-        let nodes = routing::candidates(&client, &maxmind, &input.targets, family, &profile, &input.port, user.id, &resolvers, &json!(input.required_services), &cfg).await?;
+        let nodes = routing::candidates(&client, &maxmind, &input.targets, family, &profile, &input.port, user.id, &resolvers, &required_services, &cfg).await?;
         let preferred = cfg.enabled.then(|| nodes.iter().find(|n| !n.busy).map(|n| n.scanner_id.clone())).flatten();
         Ok(json!({"enabled":cfg.enabled,"target_geo":routing::target_geo(&input.targets,&maxmind),"preferred_scanner_id":preferred,"candidates":nodes,"reason":if !cfg.enabled{"disabled"}else if preferred.is_some(){"ranked_candidate"}else{"no_idle_candidate"}}))
     }.await;
