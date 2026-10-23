@@ -243,6 +243,35 @@ async fn projection_resumes_pages_and_retries_refresh_without_republishing() {
     assert_eq!(row.get::<_, String>(0), "refreshing");
     assert!(row.get::<_, bool>(1));
     fixture.state.lock().unwrap().fail_path = None;
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .refresh_responses
+        .push_back(json!({"_shards":{"total":1,"successful":0,"failed":0}}));
+    pool.get()
+        .await
+        .unwrap()
+        .batch_execute("UPDATE scan_projection_outbox SET available_at=clock_timestamp()")
+        .await
+        .unwrap();
+    let error = restarted
+        .process_scan_projection_outbox(&pool)
+        .await
+        .unwrap_err();
+    assert!(error.contains("successful=0"), "{error}");
+    let complete: bool = pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT processed_at IS NOT NULL FROM scan_projection_outbox",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(!complete);
     pool.get()
         .await
         .unwrap()

@@ -69,6 +69,9 @@ impl ElasticsearchService {
             let api_client_id: Option<i32> = row.get(2);
             let context = load_scan_batch_context(&connection, after).await?;
             drop(connection);
+            info!(event = "TransportEndpointRebuildStarted", execution_db_id = after, execution_id = %context.execution_id, "开始重建执行端点");
+            let execution_started = Instant::now();
+            let mut replayed_observations = 0_usize;
             let mut cursor: Option<Value> = None;
             loop {
                 let mut query = json!({"size":200,"track_total_hits":false,"query":{"term":{"execution_id":context.execution_id}},"sort":[{"observed_at":"asc"},{"upload_id":"asc"},{"batch_index":"asc"},{"observation_key":"asc"}]});
@@ -114,17 +117,30 @@ impl ElasticsearchService {
                     return Err("扫描事实重建分页没有前进".into());
                 }
                 cursor = Some(next);
+                replayed_observations += hits.len();
+                info!(
+                    event = "TransportEndpointRebuildPage",
+                    execution_db_id = after,
+                    observations = replayed_observations,
+                    elapsed_ms = execution_started.elapsed().as_millis(),
+                    "执行端点事实重放进度"
+                );
                 if hits.len() < 200 {
                     break;
                 }
             }
-            self.send_json_request(
-                ElasticsearchOperation::IndexAdmin,
-                Method::POST,
-                &format!("/{}/_refresh", self.inner.config.execution_endpoint_index),
-                |r| r,
-            )
-            .await?;
+            let refreshed = self
+                .send_json_request(
+                    ElasticsearchOperation::IndexAdmin,
+                    Method::POST,
+                    &format!("/{}/_refresh", self.inner.config.execution_endpoint_index),
+                    |r| r,
+                )
+                .await
+                .map_err(|error| {
+                    format!("重建 execution_db_id={after} 刷新执行端点失败：{error}")
+                })?;
+            validate_scan_refresh_response(&refreshed)?;
             if succeeded {
                 // Include API client scope, preserving ownership during replay.
                 let mut cursor = None;
@@ -155,6 +171,13 @@ impl ElasticsearchService {
             let checkpoint = json!({"target":target_key,"last_execution_id":after});
             pool.get().await.map_err(|e|e.to_string())?.execute("INSERT INTO scan_storage_state(state_key,state_value) VALUES('transport_endpoints_rebuild',$1) ON CONFLICT(state_key) DO UPDATE SET state_value=EXCLUDED.state_value,updated_at=NOW()",&[&checkpoint]).await.map_err(|e|e.to_string())?;
             count += 1;
+            info!(
+                event = "TransportEndpointRebuildCheckpoint",
+                execution_db_id = after,
+                observations = replayed_observations,
+                elapsed_ms = execution_started.elapsed().as_millis(),
+                "执行端点重建已保存断点"
+            );
         }
         let replayed_through = after;
         self.refresh_current_projection().await?;
@@ -250,6 +273,32 @@ mod tests {
         pool.get().await.unwrap().batch_execute("UPDATE scan_task_execution SET execution_status='succeeded' WHERE id=1;INSERT INTO scan_result_batch(execution_id,upload_id,batch_index,is_final,observation_count,storage_backend) VALUES(1,'upload',0,true,3,'elasticsearch');INSERT INTO scan_projection_outbox(execution_id,cursor,phase,attempts,last_error,claim_token,lease_expires_at) VALUES(1,'[\"192.0.2.1\",53]'::jsonb,'promoting',3,'legacy cursor',gen_random_uuid(),NOW()+INTERVAL '1 hour');").await.unwrap();
         let previous = json!({"observation_index_prefix":service.inner.config.observation_index_prefix,"execution_endpoint_index":"legacy-execution","current_endpoint_index":"legacy-current","dns_observation_data_stream":service.inner.config.dns_observation_data_stream,"dns_record_index":service.inner.config.dns_record_index});
         pool.get().await.unwrap().execute("INSERT INTO scan_storage_state(state_key,state_value) VALUES('elasticsearch_runtime',$1)",&[&previous]).await.unwrap();
+        fixture
+            .state
+            .lock()
+            .unwrap()
+            .refresh_responses
+            .push_back(json!({"_shards":{"total":1,"successful":0,"failed":0}}));
+        let error = service
+            .rebuild_transport_endpoints(&pool)
+            .await
+            .unwrap_err();
+        assert!(error.contains("successful=0"), "{error}");
+        let connection = pool.get().await.unwrap();
+        let unchanged: Value = connection.query_one("SELECT state_value FROM scan_storage_state WHERE state_key='elasticsearch_runtime'",&[]).await.unwrap().get(0);
+        assert_eq!(unchanged, previous);
+        assert!(connection.query_opt("SELECT state_value FROM scan_storage_state WHERE state_key='transport_endpoints_rebuild'",&[]).await.unwrap().is_none());
+        let published: bool = connection
+            .query_one(
+                "SELECT processed_at IS NOT NULL FROM scan_projection_outbox WHERE execution_id=1",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(!published);
+        drop(connection);
+        // Restore shard availability and rerun without deleting facts or state.
         assert_eq!(service.rebuild_transport_endpoints(&pool).await.unwrap(), 1);
         assert_eq!(service.rebuild_transport_endpoints(&pool).await.unwrap(), 0);
         assert!(

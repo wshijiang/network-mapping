@@ -89,6 +89,32 @@ network_mapping_server --config config.toml --rebuild-analytics-snapshots
 
 重建持有与服务互斥的存储锁，逐执行重放原始事实、保留源批次引用、重算端点计数、发布各权限范围、恢复 PG 当前标签并重新排队 OS/Web 补全；按执行保存游标，可重试。完整重放和刷新后，清除已发布执行的旧 outbox 游标/租约并标记完成，与运行标记切换在同一 PG 事务提交；纯漏洞观察不生成端点 Bulk。完成前不切换运行标记，旧索引不删除。仅切换到空索引会被启动检查拒绝。迁移期间不能同时清理事实保留期或变更 DNS/observation 存储位置。
 
+### 刷新失败与超时排查
+
+`error sending request ... /_refresh` 只是客户端发送请求失败，不能单凭这一行判断超时。新的错误详情包含 `timeout`、`connect`、耗时和底层错误链；重建日志包含执行 ID、已重放观察数和断点进度。`timeout=true` 表示请求期限已到，`connect=true` 表示建立连接失败（连接超时时两者可以同时为 true）。
+
+即使 HTTP 200、`_shards.failed=0`，`{"_shards":{"total":1,"successful":0,"failed":0}}` 也没有成功刷新分片。ES 9.5 的广播复制操作遇到分片不可用时，可以不将其计入 `failed`；迁移现在拒绝把这种响应确认为完成。先在已认证且验证 TLS 的 ES 控制台查询实际目标索引，例如：
+
+```text
+GET /_cluster/health/network-mapping-execution-endpoints-v2?level=shards
+GET /_cat/shards/network-mapping-execution-endpoints-v2?v=true
+POST /_cluster/allocation/explain
+{"index":"network-mapping-execution-endpoints-v2","shard":0,"primary":true}
+```
+
+将示例索引名替换为错误日志中的目标；只有存在未分配主分片时才对该主分片执行 allocation explain。先解决实际返回的磁盘、分配、恢复或节点问题，再重跑原命令，不删除事实或迁移状态。如果日志仍指向 `execution-endpoints-v1`，核对实际生效配置；旧部署的传输端点重建需要全新 execution/current 目标名，配置中的显式旧值不会自动随默认值升级。
+
+`elasticsearch.request_timeout_seconds` 默认 **30 秒，限制单次 HTTP 请求**，并非整个迁移的总时限。分片健康且确实出现 `timeout=true` 时，可在停服迁移使用的配置中按负载调整，例如：
+
+```toml
+[elasticsearch]
+request_timeout_seconds = 180
+```
+
+对应环境变量为 `NM__ELASTICSEARCH__REQUEST_TIMEOUT_SECONDS`，注意环境变量可覆盖文件值。Bulk 另受 `bulk_total_timeout_seconds`（默认 25 秒）约束；只增加 HTTP 超时不会增加 Bulk 总预算，也不会修复未分配主分片。失败的执行未保存完成断点，重跑会幂等重放该执行；已完成执行继续从原断点恢复。
+
+若手动 GET 刷新约 1 分钟后返回零成功分片，而程序使用默认 30 秒请求期限，程序可能在 ES 等待分片期间提前超时。GET 与 POST 都受刷新语义约束；应先确认分片状态，不能仅改用 GET 或延长等待便认定迁移成功。
+
 回滚需停服并恢复配套旧程序、旧 execution/current 配置和迁移前 PG 运行标记；重建保存的 `transport_endpoints_previous_runtime` 可供核对，但生产回滚以备份及部署变更记录为准。启用 UDP 后产生的新结果须保留，旧程序不能完整展示这些结果，不应回滚后删除新事实。
 
 ## 验证范围

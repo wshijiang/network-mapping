@@ -13,6 +13,7 @@ pub(super) struct FixtureState {
     pub(super) max_request_line_bytes: Option<usize>,
     pub(super) count_responses: std::collections::VecDeque<Value>,
     pub(super) search_responses: std::collections::VecDeque<Value>,
+    pub(super) refresh_responses: std::collections::VecDeque<Value>,
     pub(super) delay_path: Option<String>,
     pub(super) delay_ms: u64,
     pub(super) projection_bulk_sizes: Vec<usize>,
@@ -111,8 +112,14 @@ impl EsFixture {
                 } else {
                     response.to_string()
                 };
-                write!(socket, "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    if fail { "503 Unavailable" } else { "200 OK" }, response.len(), response).unwrap();
+                // Timeout tests can close the client before this delayed reply.
+                let _ = write!(
+                    socket,
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    if fail { "503 Unavailable" } else { "200 OK" },
+                    response.len(),
+                    response
+                );
             }
         });
         Self {
@@ -140,7 +147,60 @@ impl Drop for EsFixture {
     }
 }
 
+#[tokio::test]
+async fn request_diagnostics_distinguish_timeout_and_connection_failure_without_credentials() {
+    let fixture = EsFixture::start();
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.delay_path = Some("_refresh".into());
+        state.delay_ms = 150;
+    }
+    let url = fixture
+        .url
+        .replacen("http://", "http://test-user:test-password@", 1);
+    let service = ElasticsearchService::new(ElasticsearchConfig {
+        url,
+        ..ElasticsearchConfig::default()
+    })
+    .unwrap();
+    let error = service
+        .send_json_request(
+            ElasticsearchOperation::IndexAdmin,
+            Method::POST,
+            "/test/_refresh?private-query=test-value",
+            |request| request.timeout(Duration::from_millis(30)),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("POST /test/_refresh"), "{error}");
+    assert!(error.contains("timeout=true"), "{error}");
+    assert!(error.contains("caused_by="), "{error}");
+    for secret in ["test-user", "test-password", "private-query", "test-value"] {
+        assert!(!error.contains(secret), "{error}");
+    }
+    drop(fixture);
+    let error = service
+        .send_request(
+            ElasticsearchOperation::IndexAdmin,
+            Method::POST,
+            "/test/_refresh",
+            |r| r,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("timeout=false"), "{error}");
+    assert!(error.contains("connect=true"), "{error}");
+    assert!(error.contains("caused_by="), "{error}");
+    assert!(!error.contains("test-password"), "{error}");
+}
+
 fn fixture_response(state: &mut FixtureState, _method: &str, path: &str, body: &str) -> Value {
+    if path.contains("/_refresh") {
+        return state
+            .refresh_responses
+            .pop_front()
+            .unwrap_or_else(|| json!({"_shards":{"total":1,"successful":1,"failed":0}}));
+    }
     if path == "/" {
         return json!({"version": {"number": state.server_version.as_deref().unwrap_or("9.5.3")}});
     }

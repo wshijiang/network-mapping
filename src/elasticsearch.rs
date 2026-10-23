@@ -733,7 +733,7 @@ impl ElasticsearchService {
     {
         let (trace_id, traceparent) = new_trace_context();
         let started = Instant::now();
-        let response = configure(self.request(method, path, operation, &traceparent))
+        let response = configure(self.request(method.clone(), path, operation, &traceparent))
             .send()
             .await;
         let response = match response {
@@ -747,7 +747,7 @@ impl ElasticsearchService {
                     None,
                     Some("network"),
                 );
-                return Err(error.to_string());
+                return Err(elasticsearch_request_error(error, &method, path, started));
             }
         };
         let status = response.status();
@@ -782,7 +782,7 @@ impl ElasticsearchService {
     {
         let (trace_id, traceparent) = new_trace_context();
         let started = Instant::now();
-        match configure(self.request(method, path, operation, &traceparent))
+        match configure(self.request(method.clone(), path, operation, &traceparent))
             .send()
             .await
         {
@@ -807,7 +807,7 @@ impl ElasticsearchService {
                     None,
                     Some("network"),
                 );
-                Err(error.to_string())
+                Err(elasticsearch_request_error(error, &method, path, started))
             }
         }
     }
@@ -1303,7 +1303,7 @@ impl ElasticsearchService {
                 |request| request,
             )
             .await?;
-        validate_scan_search_response(&refreshed)?;
+        validate_scan_refresh_response(&refreshed)?;
         let size = expected_ids
             .len()
             .checked_add(1)
@@ -1730,7 +1730,7 @@ impl ElasticsearchService {
                         |request| request,
                     )
                     .await?;
-                validate_scan_search_response(&refreshed)?;
+                validate_scan_refresh_response(&refreshed)?;
                 chunk_stage.finish(true);
             }
             stage.finish(true);
@@ -3005,6 +3005,40 @@ impl ElasticsearchService {
             ));
         }
         Ok(())
+    }
+}
+
+fn elasticsearch_request_error(
+    error: reqwest::Error,
+    method: &Method,
+    path: &str,
+    started: Instant,
+) -> String {
+    let timed_out = error.is_timeout();
+    let connect = error.is_connect();
+    // A configured URL may contain credentials; diagnostics need the operation
+    // and source chain, not the URL or query string.
+    let error = error.without_url();
+    let chain = crate::logs::write::error_chain_diagnostics(&error);
+    format!(
+        "Elasticsearch {method} {} 请求失败（timeout={timed_out}, connect={connect}, elapsed_ms={}）：{chain}",
+        path.split('?').next().unwrap_or_default(),
+        started.elapsed().as_millis()
+    )
+}
+
+fn validate_scan_refresh_response(result: &Value) -> Result<(), String> {
+    validate_scan_search_response(result)?;
+    let total = result.pointer("/_shards/total").and_then(Value::as_u64);
+    let successful = result
+        .pointer("/_shards/successful")
+        .and_then(Value::as_u64);
+    match (total, successful) {
+        (Some(total), Some(0)) if total > 0 => Err(format!(
+            "Elasticsearch 刷新未成功处理任何分片（total={total}, successful=0）；请检查目标索引主分片分配与集群健康，不能将 failed=0 视为刷新完成"
+        )),
+        (Some(_), Some(_)) => Ok(()),
+        _ => Err("Elasticsearch 刷新响应缺少分片计数，拒绝确认发布完成".into()),
     }
 }
 
@@ -4582,6 +4616,31 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn refresh_rejects_unavailable_shards_even_without_reported_failures() {
+        for shards in [
+            serde_json::json!({"total":1,"successful":0,"failed":0}),
+            serde_json::json!({"total":1,"successful":0,"failed":1}),
+            serde_json::json!({"failed":0}),
+        ] {
+            assert!(
+                super::validate_scan_refresh_response(&serde_json::json!({"_shards":shards}))
+                    .is_err()
+            );
+        }
+        // Unassigned replicas alone are allowed, as is an empty wildcard target.
+        for shards in [
+            serde_json::json!({"total":2,"successful":1,"failed":0}),
+            serde_json::json!({"total":1,"successful":1,"failed":0}),
+            serde_json::json!({"total":0,"successful":0,"failed":0}),
+        ] {
+            assert!(
+                super::validate_scan_refresh_response(&serde_json::json!({"_shards":shards}))
+                    .is_ok()
+            );
+        }
     }
 
     #[test]

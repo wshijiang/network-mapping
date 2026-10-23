@@ -239,7 +239,7 @@ impl ElasticsearchService {
                 |r| r,
             )
             .await?;
-        validate_scan_search_response(&response)
+        validate_scan_refresh_response(&response)
     }
 
     pub(super) async fn promote_execution_page(
