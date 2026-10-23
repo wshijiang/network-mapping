@@ -78,8 +78,8 @@ write_wait_for_active_shards = "1"
 # 可选私有 CA 文件路径，无默认值；省略时使用系统 CA。
 # ca_certificate_file = "/etc/network-mapping/tls/elasticsearch-ca.pem"
 # observation_index_prefix = "network-mapping-scan-observations-v1"
-# execution_endpoint_index = "network-mapping-execution-endpoints-v1"
-# current_endpoint_index = "network-mapping-endpoints-current-v2"
+# execution_endpoint_index = "network-mapping-execution-endpoints-v2"
+# current_endpoint_index = "network-mapping-endpoints-current-v3"
 # dns_observation_data_stream = "network-mapping-dns-observations"
 # dns_record_index = "network-mapping-dns-records-v1"
 # dns_observation_retention_days = 180

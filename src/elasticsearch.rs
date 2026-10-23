@@ -1949,6 +1949,10 @@ impl ElasticsearchService {
                 &event,
             )?;
         }
+        // Vulnerability-only batches have no endpoint projection actions.
+        if body.is_empty() {
+            return Ok(());
+        }
         let result = self
             .send_bulk_with_retry(
                 &format!(

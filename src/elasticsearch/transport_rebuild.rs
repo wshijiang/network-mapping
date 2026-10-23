@@ -156,6 +156,7 @@ impl ElasticsearchService {
             pool.get().await.map_err(|e|e.to_string())?.execute("INSERT INTO scan_storage_state(state_key,state_value) VALUES('transport_endpoints_rebuild',$1) ON CONFLICT(state_key) DO UPDATE SET state_value=EXCLUDED.state_value,updated_at=NOW()",&[&checkpoint]).await.map_err(|e|e.to_string())?;
             count += 1;
         }
+        let replayed_through = after;
         self.refresh_current_projection().await?;
         // Tags are mutable authorization inputs. Replay their current PG state
         // after all historic facts, including removed assignments, before cutover.
@@ -189,7 +190,13 @@ impl ElasticsearchService {
             }
         }
         let target = json!({"observation_index_prefix":self.inner.config.observation_index_prefix,"execution_endpoint_index":self.inner.config.execution_endpoint_index,"current_endpoint_index":self.inner.config.current_endpoint_index,"dns_observation_data_stream":self.inner.config.dns_observation_data_stream,"dns_record_index":self.inner.config.dns_record_index,"endpoint_identity_version":2});
-        pool.get().await.map_err(|e|e.to_string())?.execute("INSERT INTO scan_storage_state(state_key,state_value) VALUES('elasticsearch_runtime',$1) ON CONFLICT(state_key) DO UPDATE SET state_value=EXCLUDED.state_value,updated_at=NOW()",&[&target]).await.map_err(|e|e.to_string())?;
+        let mut connection = pool.get().await.map_err(|e| e.to_string())?;
+        let transaction = connection.transaction().await.map_err(|e| e.to_string())?;
+        // Replay has published and refreshed these executions. Retire old sort
+        // cursors atomically with cutover, including executions skipped on resume.
+        transaction.execute("INSERT INTO scan_projection_outbox(execution_id,phase,cursor,processed_at,processed_endpoints) SELECT e.id,'refreshing',NULL,clock_timestamp(),COALESCE(e.result_port_count,0) FROM scan_task_execution e WHERE e.id<=$1 AND e.execution_status='succeeded' AND EXISTS(SELECT 1 FROM scan_result_batch b WHERE b.execution_id=e.id) ON CONFLICT(execution_id) DO UPDATE SET phase='refreshing',cursor=NULL,processed_at=clock_timestamp(),processed_endpoints=EXCLUDED.processed_endpoints,claim_token=NULL,lease_expires_at=NULL,attempts=0,last_error=NULL,updated_at=clock_timestamp()",&[&replayed_through]).await.map_err(|e|e.to_string())?;
+        transaction.execute("INSERT INTO scan_storage_state(state_key,state_value) VALUES('elasticsearch_runtime',$1) ON CONFLICT(state_key) DO UPDATE SET state_value=EXCLUDED.state_value,updated_at=NOW()",&[&target]).await.map_err(|e|e.to_string())?;
+        transaction.commit().await.map_err(|e| e.to_string())?;
         Ok(count)
     }
 }
@@ -219,6 +226,7 @@ mod tests {
         let observations = vec![
             json!({"observation_key":"tcp","kind":"service","ip_address":"192.0.2.1","port":53,"protocol":"tcp","service":"dns","observed_at":1000}),
             json!({"observation_key":"udp","kind":"service","ip_address":"192.0.2.1","port":53,"protocol":"udp","service":"dns","observed_at":1000}),
+            json!({"observation_key":"vulnerability","kind":"vulnerability","ip_address":"192.0.2.1","port":53,"protocol":"tcp","observed_at":1000,"data":{"template_id":"test-only"}}),
         ];
         service
             .persist_scan_batch_prepared(&context, &observations, None)
@@ -239,7 +247,7 @@ mod tests {
             .unwrap()
             .documents
             .retain(|(index, _), _| !index.contains("endpoints"));
-        pool.get().await.unwrap().batch_execute("UPDATE scan_task_execution SET execution_status='succeeded' WHERE id=1;INSERT INTO scan_result_batch(execution_id,upload_id,batch_index,is_final,observation_count,storage_backend) VALUES(1,'upload',0,true,2,'elasticsearch');").await.unwrap();
+        pool.get().await.unwrap().batch_execute("UPDATE scan_task_execution SET execution_status='succeeded' WHERE id=1;INSERT INTO scan_result_batch(execution_id,upload_id,batch_index,is_final,observation_count,storage_backend) VALUES(1,'upload',0,true,3,'elasticsearch');INSERT INTO scan_projection_outbox(execution_id,cursor,phase,attempts,last_error,claim_token,lease_expires_at) VALUES(1,'[\"192.0.2.1\",53]'::jsonb,'promoting',3,'legacy cursor',gen_random_uuid(),NOW()+INTERVAL '1 hour');").await.unwrap();
         let previous = json!({"observation_index_prefix":service.inner.config.observation_index_prefix,"execution_endpoint_index":"legacy-execution","current_endpoint_index":"legacy-current","dns_observation_data_stream":service.inner.config.dns_observation_data_stream,"dns_record_index":service.inner.config.dns_record_index});
         pool.get().await.unwrap().execute("INSERT INTO scan_storage_state(state_key,state_value) VALUES('elasticsearch_runtime',$1)",&[&previous]).await.unwrap();
         assert_eq!(service.rebuild_transport_endpoints(&pool).await.unwrap(), 1);
@@ -281,9 +289,39 @@ mod tests {
             .unwrap()
             .get(0);
         assert_eq!(ports, 2);
+        let publication=connection.query_one("SELECT cursor,processed_at IS NOT NULL AS complete,claim_token,attempts,processed_endpoints FROM scan_projection_outbox WHERE execution_id=1",&[]).await.unwrap();
+        assert!(publication.get::<_, Option<Value>>("cursor").is_none());
+        assert!(publication.get::<_, bool>("complete"));
+        assert!(publication.get::<_, Option<Uuid>>("claim_token").is_none());
+        assert_eq!(publication.get::<_, i32>("attempts"), 0);
+        assert_eq!(publication.get::<_, i64>("processed_endpoints"), 2);
+        let ready:i64=connection.query_one("SELECT COUNT(*) FROM os_detection_outbox o JOIN scan_projection_outbox p USING(execution_id) WHERE p.processed_at IS NOT NULL AND o.processed_at IS NULL",&[]).await.unwrap().get(0);
+        assert_eq!(ready, 1);
+
         connection
             .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
             .await
             .unwrap();
+    }
+    #[tokio::test]
+    async fn vulnerability_only_projection_does_not_send_an_empty_bulk() {
+        let fixture = EsFixture::start();
+        let service = fixture.service();
+        let context = ScanBatchContext {
+            task_id: "task".into(),
+            execution_id: "execution".into(),
+            user_id: 1,
+            task_source: "user".into(),
+            scanner_id: "scanner".into(),
+            scanner_name: None,
+            upload_id: "upload".into(),
+            batch_index: 0,
+            is_final: true,
+        };
+        service
+            .update_scan_endpoint_projections(&context, &[json!({"kind":"vulnerability"})])
+            .await
+            .unwrap();
+        assert!(fixture.state.lock().unwrap().requests.is_empty());
     }
 }

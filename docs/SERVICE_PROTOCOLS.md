@@ -87,7 +87,7 @@ network_mapping_server --config config.toml --rebuild-transport-endpoints
 network_mapping_server --config config.toml --rebuild-analytics-snapshots
 ```
 
-重建持有与服务互斥的存储锁，逐执行重放原始事实、保留源批次引用、重算端点计数、发布各权限范围、恢复 PG 当前标签并重新排队 OS/Web 补全；按执行保存游标，可重试。完成前不切换运行标记，旧索引不删除。仅切换到空索引会被启动检查拒绝。迁移期间不能同时清理事实保留期或变更 DNS/observation 存储位置。
+重建持有与服务互斥的存储锁，逐执行重放原始事实、保留源批次引用、重算端点计数、发布各权限范围、恢复 PG 当前标签并重新排队 OS/Web 补全；按执行保存游标，可重试。完整重放和刷新后，清除已发布执行的旧 outbox 游标/租约并标记完成，与运行标记切换在同一 PG 事务提交；纯漏洞观察不生成端点 Bulk。完成前不切换运行标记，旧索引不删除。仅切换到空索引会被启动检查拒绝。迁移期间不能同时清理事实保留期或变更 DNS/observation 存储位置。
 
 回滚需停服并恢复配套旧程序、旧 execution/current 配置和迁移前 PG 运行标记；重建保存的 `transport_endpoints_previous_runtime` 可供核对，但生产回滚以备份及部署变更记录为准。启用 UDP 后产生的新结果须保留，旧程序不能完整展示这些结果，不应回滚后删除新事实。
 

@@ -2,6 +2,12 @@
 
 [文档中心](README.md) · [部署与升级](DEPLOYMENT.md) · [扫描端更新日志](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/CHANGELOG.md)
 
+## 未发布：PR review 与 CI 核验修复（2026-10-23）
+
+- 核实 PR #127 的两项迁移意见：纯漏洞观察不再发送空端点 Bulk 请求；完整重建并刷新后，与运行标记切换在同一事务内完成已发布任务的 outbox，清除旧排序游标及残留租约，恢复 OS/Web 后续处理。
+- 扩展混合服务/漏洞重建、旧游标与 enrichment 就绪回归；不可变原始事实保持原样。
+- 同步 Docker 的 `.env.example` 和 `config.example.toml` 中 execution/current 默认索引名，修复 amd64/arm64 制品契约检查失败。
+
 ## 未发布：加密 DNS、工业与 UDP 服务识别（2026-10-23）
 
 - 服务任务和预览增加加密 DNS、工业协议选项、公开 CA 与协议参数；能力、领取/重领/恢复和路由同时校验协议与节点探测预算。
