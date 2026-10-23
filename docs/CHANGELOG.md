@@ -2,6 +2,19 @@
 
 [文档中心](README.md) · [部署与升级](DEPLOYMENT.md) · [扫描端更新日志](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/CHANGELOG.md)
 
+## 未发布：DNS TCP / VNC 任务能力（2026-10-23）
+
+- IP/CIDR 服务识别、漏洞扫描任务及分配预览支持 `required_services=["dns","vnc"]`（可选择其一）；列表持久化于已有 scan_plan，并将服务阶段设为必需。含义是选择探测协议，不保证目标一定存在该服务。
+- 心跳保留有界的 `service_protocols` 能力声明；指定/全部节点选择、智能分配、普通领取、重领及任务恢复均过滤能力不足的节点。旧节点仍可执行未设置新要求的旧任务。
+- 无新增数据库列或端点身份变更，DNS UDP 未开放；已有服务观察、权限、查询、历史及 CSV 使用原服务字段。服务端需先于配套扫描器/前端部署，见[扫描流水线](SCAN_PIPELINE.md)。
+
+## 未发布：服务识别扩展规划（2026-10-23）
+
+- 补充 [DNS、DoH、DoT 与 VNC 服务识别扩展计划](DNS_DOH_DOT_VNC_PLAN.md)，明确协议确认、原生适配器、DoH/HTTPS 证据共存、节点能力、UDP 端点迁移、daisyUI 展示和分批验收。
+- 本条仅记录规划文档；不表示新协议已接入任务、完成迁移或通过真实服务验收。
+- 补齐已有第三方依赖清单维护页的文档首页和 MkDocs 导航入口，修复文档严格构建的遗漏页面警告。
+- 追加[工业与物联网服务识别规划](INDUSTRIAL_SERVICE_DETECTION_PLAN.md)：Modbus TCP、EtherNet/IP、S7、OPC UA、BACnet/IP 及已有 MQTT/MQTTS 补强；区分 UDP/44818 发现与 UDP/2222 I/O、OPC UA TCP 与 UDP PubSub，补充 D/E/F 批次及证据/端点边界，尚未实现新协议。
+
 ## 未发布（自 v0.1.29 以来）
 
 截至 **2026-10-21（北京时间）**，以最新已发布 tag [v0.1.29](https://github.com/wshijiang/network-mapping/releases/tag/v0.1.29) 为基线，汇总主分支已合入的服务端变动，不包含尚未合入的开发分支或前端独立变动。

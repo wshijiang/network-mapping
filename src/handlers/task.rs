@@ -402,6 +402,8 @@ pub struct ScannerScanCapabilities {
     stages: Vec<String>,
     #[serde(default)]
     explicit_dns_resolvers: bool,
+    #[serde(default)]
+    service_protocols: Vec<String>,
 }
 
 impl Default for ScannerScanCapabilities {
@@ -411,12 +413,21 @@ impl Default for ScannerScanCapabilities {
             profiles: vec!["legacy".into()],
             stages: vec!["port_discovery".into()],
             explicit_dns_resolvers: false,
+            service_protocols: vec![],
         }
     }
 }
 
 impl ScannerScanCapabilities {
     fn validate(&self) -> Result<(), &'static str> {
+        if self.service_protocols.len() > 2
+            || self
+                .service_protocols
+                .iter()
+                .any(|s| !matches!(s.as_str(), "dns" | "vnc"))
+        {
+            return Err("unsupported service protocols");
+        }
         if self.plan_versions.len() > 8 || self.profiles.len() > 8 || self.stages.len() > 16 {
             return Err("too many scan capabilities");
         }
@@ -2084,7 +2095,7 @@ async fn get_dns_comparison(
 }
 
 #[post("/api/task/create")]
-async fn create_task(
+pub(crate) async fn create_task(
     req: HttpRequest,
     maxmind: web::Data<MaxMindState>,
     pool: web::Data<Pool>,
@@ -2156,13 +2167,17 @@ async fn create_task(
             "message": "DNS scan profiles require the domain task endpoint"
         }));
     }
-    let scan_plan = match build_scan_plan(&scan_profile) {
+    let scan_plan = match crate::scan_control::creation::build_service_scan_plan(
+        &scan_profile,
+        &create_data.required_services,
+    ) {
         Ok(plan) => plan,
         Err(message) => {
             return HttpResponse::BadRequest()
                 .json(serde_json::json!({"success": false, "message": message}));
         }
     };
+    let required_services = serde_json::json!(create_data.required_services);
     let capability_filter = if address_family == "ipv6" {
         "supports_ipv6 AND ipv6_ready"
     } else {
@@ -2185,9 +2200,10 @@ async fn create_task(
             let query = format!(
                 "SELECT scanner_id FROM scanner_info WHERE scanner_id = ANY($1::text[]) \
                  AND is_enable = true AND deleted_at IS NULL AND {capability_filter} \
-                 AND ($2 = 'legacy' OR scan_capabilities->'profiles' ? $2);"
+                 AND ($2 = 'legacy' OR scan_capabilities->'profiles' ? $2) \
+                 AND COALESCE(scan_capabilities->'service_protocols','[]'::jsonb) @> $3::jsonb;"
             );
-            let rows = match connection.query(&query, &[&values, &scan_profile]).await {
+            let rows = match connection.query(&query, &[&values, &scan_profile, &required_services]).await {
                 Ok(rows) => rows,
                 Err(error) => { error_logs_error(&req, "ResolveTaskScannersError", "resolve_selected_scanners", &error); return HttpResponse::InternalServerError().finish(); }
             };
@@ -2207,9 +2223,10 @@ async fn create_task(
             let query = format!(
                 "SELECT scanner_id FROM scanner_info WHERE is_enable = true AND deleted_at IS NULL \
                  AND {capability_filter} \
-                 AND ($1 = 'legacy' OR scan_capabilities->'profiles' ? $1) ORDER BY scanner_id;"
+                 AND ($1 = 'legacy' OR scan_capabilities->'profiles' ? $1) \
+                 AND COALESCE(scan_capabilities->'service_protocols','[]'::jsonb) @> $2::jsonb ORDER BY scanner_id;"
             );
-            let rows = match connection.query(&query, &[&scan_profile]).await {
+            let rows = match connection.query(&query, &[&scan_profile, &required_services]).await {
                 Ok(rows) => rows,
                 Err(error) => { error_logs_error(&req, "ResolveTaskScannersError", "resolve_all_scanners", &error); return HttpResponse::InternalServerError().finish(); }
             };
@@ -3185,6 +3202,7 @@ mod tests {
             ],
             stages: vec!["port_discovery".into(), "vulnerability_detection".into()],
             explicit_dns_resolvers: false,
+            service_protocols: vec![],
         };
         assert!(valid.validate().is_ok());
 
@@ -3193,6 +3211,7 @@ mod tests {
             profiles: vec!["run_arbitrary_command".into()],
             stages: vec!["port_discovery".into()],
             explicit_dns_resolvers: false,
+            service_protocols: vec![],
         };
         assert!(invalid.validate().is_err());
     }

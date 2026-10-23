@@ -12,6 +12,8 @@
 | 文档 | 内容 |
 | --- | --- |
 | [服务探测分批计划](SERVICE_DETECTION_ROADMAP.md) | Elasticsearch 与 UDP 的当前交付、迁移及验收边界 |
+| [DNS 与 VNC 服务识别扩展计划](DNS_DOH_DOT_VNC_PLAN.md) | DNS TCP/VNC 首批已接入；DoH、DoT、UDP 待实现，含前端统一样式及验收计划 |
+| [工业与物联网服务识别扩展计划](INDUSTRIAL_SERVICE_DETECTION_PLAN.md) | 待实现：Modbus TCP、EtherNet/IP、S7、OPC UA、BACnet/IP；已有 MQTT/MQTTS 核验及 daisyUI 展示 |
 | [更新日志](CHANGELOG.md) | 自上次发布 tag 以来的服务端变动、固定比较范围与升级兼容注意 |
 
 ## 从这里开始
@@ -106,6 +108,7 @@
 | [模块化实现与热更新](MODULE_RUNTIME_IMPLEMENTATION.md) | 当前实现：Workspace、报表渲染 Worker、版本切换和回滚 |
 | [模块化架构设计](MODULAR_ARCHITECTURE.md) | 整体目标架构与后续设计；已实现能力以实现说明为准 |
 | [进程替换原型](examples/modular-hot-update/README.md) | 独立实验：验证进程替换生命周期，未集成生产服务 |
+| [第三方依赖清单维护](OPEN_SOURCE_CATALOG.md) | 直接依赖范围、版本与许可证口径及清单校验 |
 | [文档维护与本地预览](DOCUMENTATION.md) | 内容归属、导航维护、站内链接和 MkDocs 构建检查 |
 
 机器可读接口规范：[下载 OpenAPI 3.1 JSON](open-api/openapi.json)。

@@ -4,6 +4,10 @@
 
 本计划覆盖 Elasticsearch HTTP/HTTPS/原生 TCP Transport 和 UDP 服务识别。每批独立提交和评审，状态以对应实现与验证记录为准。
 
+DNS TCP/UDP、DoH、DoT 与 VNC 的新增范围、原生探测编排、证据契约、前端 daisyUI 适配和分批验收见 [DNS 与 VNC 服务识别扩展计划](DNS_DOH_DOT_VNC_PLAN.md)。该专题 A 批次 DNS TCP/VNC 已接入并完成本地验证，B/C 待实现；DNS UDP 与本计划第二批共用端点迁移和任务能力前置条件。
+
+后续新增 Modbus TCP、EtherNet/IP、S7、OPC UA、BACnet/IP 及已有 MQTT/MQTTS 补强见[工业与物联网服务识别扩展计划](INDUSTRIAL_SERVICE_DETECTION_PLAN.md)。区分 TCP 握手、UDP 单播发现与 PubSub/I/O 被动观察；这些范围均为待实现规划，BACnet 从第四批专项在该专题展开。
+
 | 批次 | 交付范围 | 完成条件 | 当前状态 |
 | --- | --- | --- | --- |
 | 1 | Elasticsearch REST 被动指纹；DNS/NTP/STUN UDP 库内核；前端数据库标签 | 协议反例、HTTP/HTTPS 证据与 UI 测试通过，文档和 CHANGELOG 同步 | 本轮实现；UDP 尚未接入任务 |

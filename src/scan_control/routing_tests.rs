@@ -934,3 +934,198 @@ async fn smart_generator_refills_authorized_targets_without_repeating_fresh_or_a
     drop(c);
     f.finish().await;
 }
+
+#[tokio::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn native_service_requirements_gate_claim_resume_and_candidates() {
+    let f = Fixture::new().await;
+    let scanner = f.scanner().await;
+    let (task, id, _) = f.task("automatic", None).await;
+    let c = f.pool.get().await.unwrap();
+    let plan = crate::scan_control::creation::build_service_scan_plan(
+        "vulnerability_scan",
+        &["dns".into(), "vnc".into()],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE scan_task SET scan_profile='vulnerability_scan', scan_plan=$2 WHERE id=$1",
+        &[&task, &plan],
+    )
+    .await
+    .unwrap();
+    drop(c);
+    assert!(matches!(
+        apply_task(&f.pool, scanner, &token(scanner), PEPPER).await,
+        Err(ApplyTaskError::NoTask)
+    ));
+    let c = f.pool.get().await.unwrap();
+    c.execute(
+        "UPDATE scanner_info SET scan_capabilities=$2 WHERE scanner_id=$1",
+        &[
+            &scanner.to_string(),
+            &json!({"profiles":["vulnerability_scan"],"service_protocols":["dns"]}),
+        ],
+    )
+    .await
+    .unwrap();
+    let cfg = RoutingConfig::default();
+    let geo = MaxMindState::from_directory("/workspace/work/absent-mmdb");
+    let required = json!(["dns", "vnc"]);
+    assert!(
+        candidates(
+            &c,
+            &geo,
+            &["192.0.2.1".into()],
+            "ipv4",
+            "vulnerability_scan",
+            "443",
+            f.owner,
+            &json!([]),
+            &required,
+            &cfg
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    drop(c);
+    assert!(matches!(
+        apply_task(&f.pool, scanner, &token(scanner), PEPPER).await,
+        Err(ApplyTaskError::NoTask)
+    ));
+    let c = f.pool.get().await.unwrap();
+    c.execute(
+        "UPDATE scanner_info SET scan_capabilities=$2 WHERE scanner_id=$1",
+        &[
+            &scanner.to_string(),
+            &json!({"profiles":["vulnerability_scan"],"service_protocols":["dns","vnc"]}),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        candidates(
+            &c,
+            &geo,
+            &["192.0.2.1".into()],
+            "ipv4",
+            "vulnerability_scan",
+            "443",
+            f.owner,
+            &json!([]),
+            &required,
+            &cfg
+        )
+        .await
+        .unwrap()
+        .len(),
+        1
+    );
+    drop(c);
+    apply_task(&f.pool, scanner, &token(scanner), PEPPER)
+        .await
+        .unwrap();
+    let c = f.pool.get().await.unwrap();
+    c.execute(
+        "UPDATE scanner_info SET scan_capabilities=$2 WHERE scanner_id=$1",
+        &[
+            &scanner.to_string(),
+            &json!({"profiles":["vulnerability_scan"]}),
+        ],
+    )
+    .await
+    .unwrap();
+    drop(c);
+    assert!(matches!(
+        recover_scanner_task(&f.pool, scanner, Some(id), None, &token(scanner), PEPPER).await,
+        Err(ApplyTaskError::NoTask)
+    ));
+    f.finish().await;
+}
+
+#[actix_web::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn native_service_creation_and_preview_agree_on_node_capabilities() {
+    use actix_web::{App, HttpMessage, dev::Service, http::StatusCode, test, web};
+    let f = Fixture::new().await;
+    let scanner = f.scanner().await;
+    let owner = f.owner;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(f.pool.clone()))
+            .app_data(web::Data::new(MaxMindState::from_directory(
+                "/workspace/work/absent-mmdb",
+            )))
+            .wrap_fn(move |req, srv| {
+                req.extensions_mut().insert(crate::admin::UserBaseI {
+                    id: owner,
+                    username: "routing".into(),
+                    role: 1,
+                    email: None,
+                    limit_login: false,
+                    enable_2fa: false,
+                });
+                srv.call(req)
+            })
+            .service(crate::handlers::scan_routing::placement_preview)
+            .service(crate::handlers::task::create_task),
+    )
+    .await;
+    for supported in [false, true] {
+        if supported {
+            f.pool
+                .get()
+                .await
+                .unwrap()
+                .execute(
+                    "UPDATE scanner_info SET scan_capabilities=$2 WHERE scanner_id=$1",
+                    &[
+                        &scanner.to_string(),
+                        &json!({"profiles":["vulnerability_scan"],"service_protocols":["vnc"]}),
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+        let response=test::call_service(&app,test::TestRequest::post().uri("/api/task/placement-preview").set_json(json!({"targets":["192.0.2.1"],"port":"5900","scan_profile":"vulnerability_scan","required_services":["vnc"]})).to_request()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let data: Value = test::read_body_json(response).await;
+        assert_eq!(
+            data["data"]["candidates"].as_array().unwrap().len(),
+            usize::from(supported)
+        );
+        for mode in ["selected", "all"] {
+            let ids = if mode == "selected" {
+                json!([scanner])
+            } else {
+                json!([])
+            };
+            let response=test::call_service(&app,test::TestRequest::post().uri("/api/task/create").set_json(json!({"ip":"192.0.2.1","port":"5900","level":1,"scan_profile":"vulnerability_scan","dispatch_mode":mode,"scanner_ids":ids,"required_services":["vnc"]})).to_request()).await;
+            assert_eq!(
+                response.status(),
+                if supported {
+                    StatusCode::OK
+                } else if mode == "all" {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::BAD_REQUEST
+                }
+            );
+        }
+    }
+    let c = f.pool.get().await.unwrap();
+    let plans = c
+        .query("SELECT scan_plan FROM scan_task", &[])
+        .await
+        .unwrap();
+    assert_eq!(plans.len(), 2);
+    for row in plans {
+        assert_eq!(
+            row.get::<_, Value>("scan_plan")["required_services"],
+            json!(["vnc"])
+        );
+    }
+    drop(c);
+    drop(app);
+    f.finish().await;
+}

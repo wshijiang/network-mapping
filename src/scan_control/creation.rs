@@ -23,6 +23,8 @@ pub struct CreateTask {
     pub scanner_ids: Vec<Uuid>,
     #[serde(default)]
     pub scan_profile: Option<String>,
+    #[serde(default)]
+    pub required_services: Vec<String>,
 }
 
 pub(crate) fn default_dispatch_mode() -> String {
@@ -65,6 +67,55 @@ pub fn build_scan_plan(profile: &str) -> Result<Value, &'static str> {
         "profile": profile,
         "stages": stages,
     }))
+}
+
+/// Explicit native service selection is persisted inside the existing plan JSON.
+pub fn build_service_scan_plan(profile: &str, services: &[String]) -> Result<Value, &'static str> {
+    if services.len() > 2
+        || services
+            .iter()
+            .any(|s| !matches!(s.as_str(), "dns" | "vnc"))
+        || services
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != services.len()
+        || (!services.is_empty() && !matches!(profile, "service_inventory" | "vulnerability_scan"))
+    {
+        return Err("unsupported required service protocols or scan profile");
+    }
+    let mut plan = build_scan_plan(profile)?;
+    if !services.is_empty() {
+        plan["required_services"] = serde_json::json!(services);
+        for stage in plan["stages"].as_array_mut().unwrap() {
+            if stage["type"] == "service_detection" {
+                stage["required"] = Value::Bool(true);
+            }
+        }
+    }
+    Ok(plan)
+}
+
+#[cfg(test)]
+mod service_plan_tests {
+    use super::*;
+    #[test]
+    fn explicit_service_requirements_are_bounded_and_need_a_service_stage() {
+        let plan =
+            build_service_scan_plan("vulnerability_scan", &["dns".into(), "vnc".into()]).unwrap();
+        assert_eq!(plan["required_services"], serde_json::json!(["dns", "vnc"]));
+        assert_eq!(plan["stages"][1]["required"], true);
+        assert!(build_service_scan_plan("port_only", &["dns".into()]).is_err());
+        assert!(build_service_scan_plan("dns_records", &["dns".into()]).is_err());
+        assert!(build_service_scan_plan("service_inventory", &["dot".into()]).is_err());
+        assert!(
+            build_service_scan_plan("service_inventory", &["dns".into(), "dns".into()]).is_err()
+        );
+        assert_eq!(
+            build_service_scan_plan("port_only", &[]).unwrap(),
+            build_scan_plan("port_only").unwrap()
+        );
+    }
 }
 
 /// Profiles valid for IP/CIDR tasks and the system-wide default. DNS profiles

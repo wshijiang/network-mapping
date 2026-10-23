@@ -9,7 +9,6 @@ use crate::{
     config::SecurityConfig,
     maxmind::MaxMindState,
     scan_control::{
-        creation::build_scan_plan,
         dispatch::{ApplyTaskError, validate_scanner_credentials_with_client},
         routing::{self, Performance},
     },
@@ -26,6 +25,8 @@ pub struct PlacementRequest {
     port: String,
     #[serde(default = "empty_resolvers")]
     dns_resolvers: Value,
+    #[serde(default)]
+    required_services: Vec<String>,
 }
 fn default_ports() -> String {
     "1-65535".into()
@@ -48,7 +49,11 @@ pub async fn placement_preview(
     if input.targets.is_empty()
         || input.targets.len() > 100
         || input.targets.iter().any(|t| t.len() > 253)
-        || build_scan_plan(&profile).is_err()
+        || crate::scan_control::creation::build_service_scan_plan(
+            &profile,
+            &input.required_services,
+        )
+        .is_err()
         || !crate::scan_control::target::check_port(&input.port)
         || !input.dns_resolvers.is_array()
         || input.dns_resolvers.as_array().is_some_and(|r| r.len() > 8)
@@ -109,7 +114,7 @@ pub async fn placement_preview(
     let result: Result<Value, Error> = async {
         let client = pool.get().await?;
         let cfg = routing::config(&client).await?;
-        let nodes = routing::candidates(&client, &maxmind, &input.targets, family, &profile, &input.port, user.id, &resolvers, &cfg).await?;
+        let nodes = routing::candidates(&client, &maxmind, &input.targets, family, &profile, &input.port, user.id, &resolvers, &json!(input.required_services), &cfg).await?;
         let preferred = cfg.enabled.then(|| nodes.iter().find(|n| !n.busy).map(|n| n.scanner_id.clone())).flatten();
         Ok(json!({"enabled":cfg.enabled,"target_geo":routing::target_geo(&input.targets,&maxmind),"preferred_scanner_id":preferred,"candidates":nodes,"reason":if !cfg.enabled{"disabled"}else if preferred.is_some(){"ranked_candidate"}else{"no_idle_candidate"}}))
     }.await;
