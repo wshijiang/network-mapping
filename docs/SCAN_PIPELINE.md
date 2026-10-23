@@ -241,25 +241,6 @@ PostgreSQL 模式下 `scan_observation` 是事实来源，`ips`、`ports` 是资
 本版本不增加扫描阶段或改变结果协议；仅端口任务不会生成新的 Web 证据。
 原始事实和上传 checksum 不含识别结果。见 [使用说明](WEB_DETECTION.md)与[维护说明](WEB_DETECTION_DEVELOPMENT.md)。
 
-## DNS TCP / VNC 定向服务探测
+## 扩展服务协议
 
-配套扫描器新增原生 `dns`（TCP）和 `vnc`。节点心跳的 `scan_capabilities.service_protocols` 声明这些可选能力，缺失字段按无新能力处理。它不是现有 `dns_lookup` 域名解析能力，也不开放 UDP。
-
-`POST /api/task/create` 与 `/api/task/placement-preview` 可携带 `required_services`，仅适用于 IP/CIDR 的 `service_inventory`、`vulnerability_scan`。最多两个不重复值，当前只接受 `dns`、`vnc`；留空保持既有行为。示例：
-
-```json
-{
-  "ip": "192.0.2.1",
-  "port": "53,5900",
-  "level": 1,
-  "dispatch_mode": "automatic",
-  "scan_profile": "service_inventory",
-  "required_services": ["dns", "vnc"]
-}
-```
-
-分配预览使用原有 `targets` 数组代替创建接口的 `ip` 字段。要求存入 `scan_plan.required_services`，服务阶段成为必需，表示完整尝试选定协议，不保证存在匹配服务；节点只对已发现的开放 TCP 端点执行所选握手，不增加端口范围。指定/全部节点、智能候选、优先领取、过期重领及恢复均检查协议能力。域名任务和开放平台任务暂不提供该定向参数。
-
-服务仍通过已有 observation / 上传协议 3 入库，`source=native`、`data.schema_version=2`，保存有界请求关联结果或 RFB 协议版本。现有 `service = "dns"`、`service = "vnc"` 查询、端点权限、历史和 CSV 沿用；没有新增数据库列或 UDP 端点身份迁移。
-
-先部署服务端能力/任务支持，再配套更新扫描器与控制台；模块启用的扫描器注意 Worker IPC 2 的完整升级要求。当前验证包括合成/回环协议与本地 Worker、PostgreSQL 调度，不等于线上部署或具体产品兼容认证。
+DNS TCP/UDP、DoH、DoT、VNC、工业 TCP/UDP 发现与实时流量被动接收已接入任务、能力、Worker 和端点存储。完整协议表、请求示例、参数、限制和停服投影迁移步骤见[服务协议识别与部署](SERVICE_PROTOCOLS.md)。TCP 沿用 plan v1；UDP 使用独立 plan v2 profiles，暂不混合 TCP/UDP 或自动域名后续任务。模块部署要求 IPC 3 Worker。

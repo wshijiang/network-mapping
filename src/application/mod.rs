@@ -48,7 +48,8 @@ pub async fn run(args: Clis) -> io::Result<()> {
         && (args.reset_admin_password.is_some()
             || args.refresh_ip_intel
             || args.migrate_scan_data_to_elasticsearch
-            || args.rebuild_analytics_snapshots)
+            || args.rebuild_analytics_snapshots
+            || args.rebuild_transport_endpoints)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -155,7 +156,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
 
     let _storage_lease = crate::scan_migration::acquire_storage_lease(
         &db_config,
-        args.migrate_scan_data_to_elasticsearch,
+        args.migrate_scan_data_to_elasticsearch || args.rebuild_transport_endpoints,
     )
     .await
     .map_err(io::Error::other)?;
@@ -190,6 +191,14 @@ pub async fn run(args: Clis) -> io::Result<()> {
     }
     let elasticsearch_service = ElasticsearchService::new(elasticsearch_config)
         .map_err(|error| io::Error::other(format!("创建 Elasticsearch 客户端失败：{error}")))?;
+    if args.rebuild_transport_endpoints {
+        let count = elasticsearch_service
+            .rebuild_transport_endpoints(&db_pool)
+            .await
+            .map_err(io::Error::other)?;
+        println!("端点投影重建完成：{count} 个执行；旧索引保留供回滚");
+        return Ok(());
+    }
     if args.migrate_scan_data_to_elasticsearch {
         if args.refresh_ip_intel {
             crate::scan_migration::prepare(&db_pool, &crate::cli_progress::NoopProgressReporter)

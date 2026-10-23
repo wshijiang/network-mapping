@@ -27,6 +27,8 @@ pub struct PlacementRequest {
     dns_resolvers: Value,
     #[serde(default)]
     required_services: Vec<String>,
+    #[serde(default)]
+    service_probe_options: crate::scan_control::creation::ServiceProbeOptions,
 }
 fn default_ports() -> String {
     "1-65535".into()
@@ -49,9 +51,16 @@ pub async fn placement_preview(
     if input.targets.is_empty()
         || input.targets.len() > 100
         || input.targets.iter().any(|t| t.len() > 253)
-        || crate::scan_control::creation::build_service_scan_plan(
+        || crate::scan_control::creation::build_service_scan_plan_with_options(
             &profile,
             &input.required_services,
+            &input.service_probe_options,
+        )
+        .is_err()
+        || crate::scan_control::creation::validate_udp_targets(
+            &profile,
+            &input.targets,
+            &input.port,
         )
         .is_err()
         || !crate::scan_control::target::check_port(&input.port)

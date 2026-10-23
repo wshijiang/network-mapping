@@ -328,7 +328,7 @@ pub async fn candidates<C: GenericClient + Sync>(
         AND s.last_seen_at >= NOW()-({})*INTERVAL '1 second' \
         AND (($1='ipv4' AND s.supports_ipv4 AND s.ipv4_ready) OR ($1='ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
         AND ($2='legacy' OR s.scan_capabilities->'profiles' ? $2) \
-        AND COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> $5::jsonb \
+        AND COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> $5::jsonb AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length($5::jsonb) \
         AND (NOT $3 OR (s.supports_ipv6 AND s.ipv6_ready)) \
         AND (NOT $4 OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN,FALSE)) ORDER BY s.scanner_id LIMIT 256",
         scanner_health::seconds_sql()

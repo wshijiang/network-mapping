@@ -454,8 +454,8 @@ impl Default for ElasticsearchConfig {
             scan_storage: ScanStorageMode::Elasticsearch,
             url: "https://127.0.0.1:9200".to_owned(),
             observation_index_prefix: "network-mapping-scan-observations-v1".to_owned(),
-            execution_endpoint_index: "network-mapping-execution-endpoints-v1".to_owned(),
-            current_endpoint_index: "network-mapping-endpoints-current-v2".to_owned(),
+            execution_endpoint_index: "network-mapping-execution-endpoints-v2".to_owned(),
+            current_endpoint_index: "network-mapping-endpoints-current-v3".to_owned(),
             dns_observation_data_stream: "network-mapping-dns-observations".to_owned(),
             dns_record_index: "network-mapping-dns-records-v1".to_owned(),
             dns_observation_retention_days: 180,
@@ -2433,6 +2433,10 @@ pub struct Clis {
     /// 从所有已成功的 IP 扫描执行重建分析快照后退出；不会修改扫描原始事实
     #[arg(long)]
     pub rebuild_analytics_snapshots: bool,
+
+    /// 停服后，从不可变 ES 扫描事实重建带 TCP/UDP 维度的新端点投影
+    #[arg(long, conflicts_with_all=["migrate_scan_data_to_elasticsearch","rebuild_analytics_snapshots","reset_admin_password"])]
+    pub rebuild_transport_endpoints: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

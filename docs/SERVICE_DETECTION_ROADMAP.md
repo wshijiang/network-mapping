@@ -4,14 +4,14 @@
 
 本计划覆盖 Elasticsearch HTTP/HTTPS/原生 TCP Transport 和 UDP 服务识别。每批独立提交和评审，状态以对应实现与验证记录为准。
 
-DNS TCP/UDP、DoH、DoT 与 VNC 的新增范围、原生探测编排、证据契约、前端 daisyUI 适配和分批验收见 [DNS 与 VNC 服务识别扩展计划](DNS_DOH_DOT_VNC_PLAN.md)。该专题 A 批次 DNS TCP/VNC 已接入并完成本地验证，B/C 待实现；DNS UDP 与本计划第二批共用端点迁移和任务能力前置条件。
+DNS TCP/UDP、DoH、DoT 与 VNC 的新增范围、原生探测编排、证据契约、前端 daisyUI 适配和分批验收见 [DNS 与 VNC 服务识别扩展计划](DNS_DOH_DOT_VNC_PLAN.md)。该专题 A/B/C 基础范围已接入，详见[当前支持与部署](SERVICE_PROTOCOLS.md)；UDP 采用独立 profile 而非混合 port_sets。
 
-后续新增 Modbus TCP、EtherNet/IP、S7、OPC UA、BACnet/IP 及已有 MQTT/MQTTS 补强见[工业与物联网服务识别扩展计划](INDUSTRIAL_SERVICE_DETECTION_PLAN.md)。区分 TCP 握手、UDP 单播发现与 PubSub/I/O 被动观察；这些范围均为待实现规划，BACnet 从第四批专项在该专题展开。
+后续新增 Modbus TCP、EtherNet/IP、S7、OPC UA、BACnet/IP 及已有 MQTT/MQTTS 补强见[工业与物联网服务识别扩展计划](INDUSTRIAL_SERVICE_DETECTION_PLAN.md)。区分 TCP 握手、UDP 单播发现与 PubSub/I/O 被动观察；D/E 基础握手与单播发现已接入，F 为有限的 IPv4 被动接收；完整抓包及产品验收仍需后续扩展。
 
 | 批次 | 交付范围 | 完成条件 | 当前状态 |
 | --- | --- | --- | --- |
-| 1 | Elasticsearch REST 被动指纹；DNS/NTP/STUN UDP 库内核；前端数据库标签 | 协议反例、HTTP/HTTPS 证据与 UI 测试通过，文档和 CHANGELOG 同步 | 本轮实现；UDP 尚未接入任务 |
-| 2 | UDP 端到端任务、能力协商、端点迁移、查询与 UI | 同一 IP 的 TCP/UDP 同端口互不覆盖；旧节点不领取 UDP；可恢复与回滚 | 待实现 |
+| 1 | Elasticsearch REST 被动指纹；DNS/NTP/STUN UDP 库内核；前端数据库标签 | 协议反例、HTTP/HTTPS 证据与 UI 测试通过，文档和 CHANGELOG 同步 | 首批已完成；NTP/STUN 保持库 API |
+| 2 | UDP 端到端任务、能力协商、端点迁移、查询与 UI | 同一 IP 的 TCP/UDP 同端口互不覆盖；旧节点不领取 UDP；可恢复与回滚 | 基础范围已实现；混合任务/域名继承仍待扩展 |
 | 3 | Elasticsearch 原生 Transport 明文/TLS | 有界协议确认；兼容实现区分；mTLS 受限状态；Worker 与恢复验证 | 待实现 |
 | 4 | 其余 UDP 协议 | 逐协议解析器、事务关联、速率和真实服务验收 | 待实现 |
 
@@ -21,7 +21,7 @@ DNS TCP/UDP、DoH、DoT 与 VNC 的新增范围、原生探测编排、证据契
 
 `service` 保持 http/https，新增 `web.technologies[].id=elasticsearch`，查询使用 `tech = elasticsearch` 或 `tech = "elasticsearch@8.19.0"`。规则修订 6 通过现有队列触发历史证据回填，不修改原始观察、checksum 或权限。原始响应缺失或被截断时不能补出版本。前端使用现有共享技术标签、daisyUI 徽标和 Lucide 通用数据库符号。
 
-扫描端的 `udp_probe` 是独立库 API，仅含定向 DNS/NTP/STUN 请求与解析。它不修改现有任务、心跳能力、扫描配置或线上执行路径。协议测试和本地回环测试不能代替端到端 UDP 验收。
+扫描端的 `udp_probe` 是独立库 API，仅含定向 DNS/NTP/STUN 请求与解析。该独立 API 保留；另有原生 UDP 引擎将 DNS、EtherNet/IP、BACnet 接入任务，NTP/STUN 仍仅为库 API。协议测试和本地回环测试不能代替端到端 UDP 验收。
 
 ## 第二批：先修正协议身份，再开放 UDP
 

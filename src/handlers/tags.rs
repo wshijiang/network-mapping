@@ -1347,7 +1347,7 @@ pub(crate) async fn remove_tag(
     HttpResponse::Ok().json(json!({"success": true}))
 }
 
-async fn refresh_elasticsearch_tags(
+pub(crate) async fn refresh_elasticsearch_tags(
     pool: &Pool,
     elasticsearch: &ElasticsearchService,
     ip: &str,
@@ -1366,6 +1366,7 @@ async fn refresh_elasticsearch_tags(
         .await
         .map_err(|error| error.to_string())?;
     let tags = rows.iter().map(tag_from_row).collect::<Vec<_>>();
+    drop(connection);
     elasticsearch.refresh_scan_asset_tags(ip, &tags).await
 }
 

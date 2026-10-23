@@ -399,8 +399,11 @@ async fn save_scanner_results_inner(
         .map_err(scanner_result_database_error)?;
         let endpoint_id = openssl::sha::sha256(
             format!(
-                "{}\0{}\0{}",
-                public_execution_id, ip_network, observation.port
+                "{}\0{}\0{}\0{}",
+                public_execution_id,
+                ip_network,
+                observation.port,
+                observation.protocol.as_deref().unwrap_or("unknown")
             )
             .as_bytes(),
         )

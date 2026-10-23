@@ -963,7 +963,7 @@ async fn native_service_requirements_gate_claim_resume_and_candidates() {
         "UPDATE scanner_info SET scan_capabilities=$2 WHERE scanner_id=$1",
         &[
             &scanner.to_string(),
-            &json!({"profiles":["vulnerability_scan"],"service_protocols":["dns"]}),
+            &json!({"profiles":["vulnerability_scan"],"max_service_probes":10,"service_protocols":["dns"]}),
         ],
     )
     .await
@@ -994,11 +994,35 @@ async fn native_service_requirements_gate_claim_resume_and_candidates() {
         Err(ApplyTaskError::NoTask)
     ));
     let c = f.pool.get().await.unwrap();
+    c.execute("UPDATE scanner_info SET scan_capabilities=$2 WHERE scanner_id=$1",&[&scanner.to_string(),&json!({"profiles":["vulnerability_scan"],"max_service_probes":1,"service_protocols":["dns","vnc"]})]).await.unwrap();
+    assert!(
+        candidates(
+            &c,
+            &geo,
+            &["192.0.2.1".into()],
+            "ipv4",
+            "vulnerability_scan",
+            "443",
+            f.owner,
+            &json!([]),
+            &required,
+            &cfg
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    drop(c);
+    assert!(matches!(
+        apply_task(&f.pool, scanner, &token(scanner), PEPPER).await,
+        Err(ApplyTaskError::NoTask)
+    ));
+    let c = f.pool.get().await.unwrap();
     c.execute(
         "UPDATE scanner_info SET scan_capabilities=$2 WHERE scanner_id=$1",
         &[
             &scanner.to_string(),
-            &json!({"profiles":["vulnerability_scan"],"service_protocols":["dns","vnc"]}),
+            &json!({"profiles":["vulnerability_scan"],"max_service_probes":10,"service_protocols":["dns","vnc"]}),
         ],
     )
     .await
@@ -1081,7 +1105,7 @@ async fn native_service_creation_and_preview_agree_on_node_capabilities() {
                     "UPDATE scanner_info SET scan_capabilities=$2 WHERE scanner_id=$1",
                     &[
                         &scanner.to_string(),
-                        &json!({"profiles":["vulnerability_scan"],"service_protocols":["vnc"]}),
+                        &json!({"profiles":["vulnerability_scan"],"max_service_probes":10,"service_protocols":["vnc"]}),
                     ],
                 )
                 .await

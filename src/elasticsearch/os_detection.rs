@@ -225,7 +225,14 @@ impl ElasticsearchService {
             let params = json!({"reference":{"id":id,"index":index,"observed_at":at},"execution_id":job.context.execution_id,"user_id":job.context.user_id,"observed_at":at,"service":service,"banner":banner,"revision":RULESET_REVISION,"os":os});
             let mut targets = vec![(
                 self.inner.config.execution_endpoint_index.as_str(),
-                sha256_hex(format!("{}\0{ip}\0{port}", job.context.execution_id).as_bytes()),
+                sha256_hex(
+                    format!(
+                        "{}\0{ip}\0{port}\0{}",
+                        job.context.execution_id,
+                        endpoint_protocol(source)
+                    )
+                    .as_bytes(),
+                ),
             )];
             let mut scopes = vec![("global", 0), ("user", job.context.user_id)];
             if let Some(id) = job.api_client_id {
@@ -234,7 +241,10 @@ impl ElasticsearchService {
             for (scope, id) in scopes {
                 targets.push((
                     self.inner.config.current_endpoint_index.as_str(),
-                    sha256_hex(format!("{scope}\0{id}\0{ip}\0{port}").as_bytes()),
+                    sha256_hex(
+                        format!("{scope}\0{id}\0{ip}\0{port}\0{}", endpoint_protocol(source))
+                            .as_bytes(),
+                    ),
                 ));
             }
             for (index, id) in targets {
@@ -484,7 +494,7 @@ mod tests {
             // OS conclusion, and replaying the older job must not restore it.
             let mut newer=observation.clone(); newer["observation_key"]=json!("ssh-2");newer["banner"]=json!("SSH-2.0-OpenSSH_for_Windows_9.5");
             let event=endpoint_projection_document(&context,&newer,at+1000);
-            let current_id=sha256_hex(format!("user\0{}\0{}\0{}",1,"192.0.2.1",2222).as_bytes());
+            let current_id=sha256_hex(format!("user\0{}\0{}\0{}\0tcp",1,"192.0.2.1",2222).as_bytes());
             let mut bulk=String::new(); append_projection_update(&mut bulk,&service.inner.config.current_endpoint_index,&current_id,&event)?;
             let response=service.send_bulk_with_retry("/_bulk",&bulk,false).await?;assert_eq!(response["errors"],false);
             service.enrich_os_page(&job).await?;

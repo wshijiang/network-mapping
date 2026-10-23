@@ -14,10 +14,10 @@ struct ProjectionJob {
     api_client_id: Option<i32>,
 }
 
-struct ProjectionPage {
-    cursor: Option<Value>,
+pub(super) struct ProjectionPage {
+    pub(super) cursor: Option<Value>,
     endpoints: i64,
-    done: bool,
+    pub(super) done: bool,
 }
 
 impl ElasticsearchService {
@@ -230,7 +230,7 @@ impl ElasticsearchService {
         self.refresh_current_projection().await
     }
 
-    async fn refresh_current_projection(&self) -> Result<(), String> {
+    pub(super) async fn refresh_current_projection(&self) -> Result<(), String> {
         let response = self
             .send_json_request(
                 ElasticsearchOperation::IndexAdmin,
@@ -242,7 +242,7 @@ impl ElasticsearchService {
         validate_scan_search_response(&response)
     }
 
-    async fn promote_execution_page(
+    pub(super) async fn promote_execution_page(
         &self,
         context: &ScanBatchContext,
         cursor: Option<&Value>,
@@ -251,7 +251,7 @@ impl ElasticsearchService {
         let page_size = self.inner.config.projection_page_size;
         let mut query = json!({"size": page_size, "track_total_hits": false,
             "query": {"term": {"execution_id": context.execution_id}},
-            "sort": [{"ip": "asc"}, {"port": "asc"}]});
+            "sort": [{"endpoint_key": "asc"}]});
         if let Some(cursor) = cursor {
             query["search_after"] = cursor.clone();
         }
@@ -302,7 +302,13 @@ impl ElasticsearchService {
                 let mut scoped = source.clone();
                 scoped["scope_type"] = json!(scope_type);
                 scoped["scope_id"] = json!(scope_id);
-                let id = sha256_hex(format!("{scope_type}\0{scope_id}\0{ip}\0{port}").as_bytes());
+                let id = sha256_hex(
+                    format!(
+                        "{scope_type}\0{scope_id}\0{ip}\0{port}\0{}",
+                        endpoint_protocol(source)
+                    )
+                    .as_bytes(),
+                );
                 let mut action = String::new();
                 append_projection_update(
                     &mut action,

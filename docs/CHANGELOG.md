@@ -2,6 +2,13 @@
 
 [文档中心](README.md) · [部署与升级](DEPLOYMENT.md) · [扫描端更新日志](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/CHANGELOG.md)
 
+## 未发布：加密 DNS、工业与 UDP 服务识别（2026-10-23）
+
+- 服务任务和预览增加加密 DNS、工业协议选项、公开 CA 与协议参数；能力、领取/重领/恢复和路由同时校验协议与节点探测预算。
+- plan v2 提供独立 UDP 主动/被动 profiles，显式目标、端口及接收窗口；TCP 仍为 v1，不隐式扩大扫描范围。
+- 端点 ID、分页、历史、OS/Web 补全增加 TCP/UDP/unknown 维度；默认执行/当前投影升级 v2/v3。新增停服 `--rebuild-transport-endpoints`，从不可变事实重建、按执行恢复、保留旧投影并重新排队补全；既有部署必须迁移。
+- DoH 保留 HTTP/TLS 搜索证据，TLS 验证失败不确认为服务。详见[服务协议识别与部署](SERVICE_PROTOCOLS.md)的完整协议表、限制、升级和回滚步骤。
+
 ## 未发布：DNS TCP / VNC 任务能力（2026-10-23）
 
 - IP/CIDR 服务识别、漏洞扫描任务及分配预览支持 `required_services=["dns","vnc"]`（可选择其一）；列表持久化于已有 scan_plan，并将服务阶段设为必需。含义是选择探测协议，不保证目标一定存在该服务。

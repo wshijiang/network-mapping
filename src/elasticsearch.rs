@@ -14,6 +14,7 @@ use tokio::sync::{Notify, Semaphore};
 mod domain_discovery;
 mod os_detection;
 mod projection;
+mod transport_rebuild;
 mod web_detection;
 use os_detection::service_observation_reference;
 use tokio::time::{interval, sleep, timeout};
@@ -40,7 +41,7 @@ struct BulkTiming {
 
 const OUTBOX_LOCK_TIMEOUT_MINUTES: i64 = 5;
 const SCAN_INDEX_SCHEMA_VERSION: &str = "5";
-const ENDPOINT_INDEX_SCHEMA_VERSION: &str = "7";
+const ENDPOINT_INDEX_SCHEMA_VERSION: &str = "8";
 // Leave headroom beneath Elasticsearch's default 4 KiB HTTP request-line limit.
 const SCAN_REQUEST_LINE_BUDGET: usize = 3 * 1024;
 const SCAN_INDEX_OPTIONS: &str = "allow_no_indices=true&ignore_unavailable=true";
@@ -1933,8 +1934,14 @@ impl ElasticsearchService {
                 .and_then(Value::as_i64)
                 .ok_or_else(|| "扫描观察缺少 observed_at".to_owned())?;
             let event = endpoint_projection_document(context, observation, observed_at_ms);
-            let execution_id =
-                sha256_hex(format!("{}\0{ip}\0{port}", context.execution_id).as_bytes());
+            let execution_id = sha256_hex(
+                format!(
+                    "{}\0{ip}\0{port}\0{}",
+                    context.execution_id,
+                    endpoint_protocol(observation)
+                )
+                .as_bytes(),
+            );
             append_projection_update(
                 &mut body,
                 &self.inner.config.execution_endpoint_index,
@@ -2720,7 +2727,7 @@ impl ElasticsearchService {
                     let network: String = row.get("ip_network");
                     let port: i32 = row.get("port");
                     let endpoint_id =
-                        sha256_hex(format!("{execution_id}\0{network}\0{port}").as_bytes());
+                        sha256_hex(format!("{execution_id}\0{network}\0{port}\0{}",row.get::<_,Option<String>>("protocol").as_deref().unwrap_or("unknown")).as_bytes());
                     let data = row.get::<_, Option<Value>>("data");
                     let extracted = crate::search_content::extract_search_content(data.as_ref());
                     let title = row.get::<_, Option<String>>("title").or(extracted.title);
@@ -2861,6 +2868,7 @@ impl ElasticsearchService {
             "current_endpoint_index": self.inner.config.current_endpoint_index,
             "dns_observation_data_stream": self.inner.config.dns_observation_data_stream,
             "dns_record_index": self.inner.config.dns_record_index,
+            "endpoint_identity_version": 2,
         });
         if runtime.as_ref().is_some_and(|state| state != &target) {
             return Err(
@@ -3266,7 +3274,7 @@ where
          LEFT JOIN scanner_info scanner ON scanner.scanner_id = \
             COALESCE(e.assigned_scanner_id, e.requested_scanner_id) \
          JOIN LATERAL (SELECT upload_id, batch_index FROM scan_result_batch \
-            WHERE execution_id = e.id AND is_final ORDER BY batch_index DESC LIMIT 1) batch ON true \
+            WHERE execution_id = e.id ORDER BY is_final DESC, batch_index DESC LIMIT 1) batch ON true \
          WHERE e.id = $1;",
         &[&execution_db_id],
     ).await.map_err(|error| error.to_string())?;
@@ -4146,6 +4154,13 @@ fn scan_endpoint_index_definition(replicas: u32) -> Value {
     })
 }
 
+fn endpoint_protocol(observation: &Value) -> &str {
+    match observation.get("protocol").and_then(Value::as_str) {
+        Some("tcp") => "tcp",
+        Some("udp") => "udp",
+        _ => "unknown",
+    }
+}
 fn endpoint_projection_document(
     context: &ScanBatchContext,
     observation: &Value,
@@ -4200,7 +4215,7 @@ fn endpoint_projection_document(
     json!({
         "scope_type": "execution",
         "scope_id": 0,
-        "endpoint_key": format!("{}|{}", ip.as_str().unwrap_or_default(), port.as_i64().unwrap_or_default()),
+        "endpoint_key": format!("{}|{}|{}", ip.as_str().unwrap_or_default(), port.as_i64().unwrap_or_default(), endpoint_protocol(observation)),
         "task_id": context.task_id,
         "execution_id": context.execution_id,
         "user_id": context.user_id,
@@ -4209,7 +4224,7 @@ fn endpoint_projection_document(
         "scanner_name": context.scanner_name,
         "ip": ip,
         "port": port,
-        "protocol": observation.get("protocol").cloned().unwrap_or(Value::Null),
+        "protocol": endpoint_protocol(observation),
         "service": observation.get("service").cloned().unwrap_or(Value::Null),
         "banner": observation.get("banner").cloned().unwrap_or(Value::Null),
         "title": observation.get("title").cloned().unwrap_or(Value::Null),
@@ -4589,11 +4604,12 @@ mod tests {
     use super::{
         ENSURE_SCAN_MIGRATION_INDEX_SQL, ElasticsearchOperation, ElasticsearchService,
         ScanBatchContext, SearchSort, bulk_response_is_retryable, bulk_retry_delay,
-        collect_domain_addresses, dns_task_observations_search_body, index_mapping_update,
-        initialization_retry_delay, new_trace_context, observation_search_target, parse_asn,
-        parse_dns_observation_bulk_result, parse_storage_metrics, replace_domain_filters,
-        scan_batch_payload_checksum, scan_endpoint_index_definition,
-        scan_observation_compatibility_mapping, scan_observation_template,
+        collect_domain_addresses, dns_task_observations_search_body, endpoint_projection_document,
+        index_mapping_update, initialization_retry_delay, new_trace_context,
+        observation_search_target, parse_asn, parse_dns_observation_bulk_result,
+        parse_storage_metrics, replace_domain_filters, scan_batch_payload_checksum,
+        scan_endpoint_index_definition, scan_observation_compatibility_mapping,
+        scan_observation_template,
     };
     use crate::config::ElasticsearchConfig;
     use std::collections::BTreeSet;
@@ -4826,8 +4842,8 @@ mod tests {
         let matching = serde_json::json!({
             "status": "in_progress",
             "observation_index_prefix": "network-mapping-scan-observations-v1",
-            "execution_endpoint_index": "network-mapping-execution-endpoints-v1",
-            "current_endpoint_index": "network-mapping-endpoints-current-v2",
+            "execution_endpoint_index": "network-mapping-execution-endpoints-v2",
+            "current_endpoint_index": "network-mapping-endpoints-current-v3",
             "high_watermark": 42
         });
         assert!(service.scan_migration_state_is_resumable(&matching));
@@ -4949,6 +4965,24 @@ mod tests {
             batch_index: 0,
             is_final: true,
         };
+        let tcp = endpoint_projection_document(
+            &context,
+            &serde_json::json!({"ip_address":"192.0.2.1","port":53,"protocol":"tcp"}),
+            1,
+        );
+        let udp = endpoint_projection_document(
+            &context,
+            &serde_json::json!({"ip_address":"192.0.2.1","port":53,"protocol":"udp"}),
+            1,
+        );
+        let unknown = endpoint_projection_document(
+            &context,
+            &serde_json::json!({"ip_address":"192.0.2.1","port":53}),
+            1,
+        );
+        assert_ne!(tcp["endpoint_key"], udp["endpoint_key"]);
+        assert_ne!(udp["endpoint_key"], unknown["endpoint_key"]);
+        assert_eq!(unknown["protocol"], "unknown");
         let original = serde_json::json!({
             "observation_key": "key", "ip_address": "192.0.2.1", "port": 443,
             "banner": "first", "observed_at": 1, "asn": "4134", "tags": []

@@ -752,7 +752,7 @@ fn extract(
     reference: Option<&str>,
     upstream_truncated: bool,
 ) -> bool {
-    if !matches!(module, "http" | "https") {
+    if !matches!(module, "http" | "https" | "doh") {
         return false;
     }
     let Some(response) = result.get("response").and_then(Value::as_object) else {
@@ -777,7 +777,7 @@ pub(crate) fn infer(
     let mut inference = WebInference::pending(at);
     inference.status = "not_web".into();
     let Some(data) = data else {
-        if matches!(service, Some("http" | "https")) {
+        if matches!(service, Some("http" | "https" | "doh")) {
             inference.status = "unknown".into();
         }
         return inference;
@@ -804,7 +804,7 @@ pub(crate) fn infer(
                     reference,
                     item.get("truncated").and_then(Value::as_bool) == Some(true),
                 );
-                if matches!(module, "http" | "https") {
+                if matches!(module, "http" | "https" | "doh") {
                     out.truncated |= item.get("truncated").and_then(Value::as_bool) == Some(true);
                 }
             }
@@ -831,7 +831,7 @@ pub(crate) fn infer(
         }
     }
     inference.status = if !found {
-        if matches!(service, Some("http" | "https")) {
+        if matches!(service, Some("http" | "https" | "doh")) {
             "unknown"
         } else {
             "not_web"

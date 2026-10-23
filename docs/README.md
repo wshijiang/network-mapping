@@ -12,8 +12,9 @@
 | 文档 | 内容 |
 | --- | --- |
 | [服务探测分批计划](SERVICE_DETECTION_ROADMAP.md) | Elasticsearch 与 UDP 的当前交付、迁移及验收边界 |
-| [DNS 与 VNC 服务识别扩展计划](DNS_DOH_DOT_VNC_PLAN.md) | DNS TCP/VNC 首批已接入；DoH、DoT、UDP 待实现，含前端统一样式及验收计划 |
-| [工业与物联网服务识别扩展计划](INDUSTRIAL_SERVICE_DETECTION_PLAN.md) | 待实现：Modbus TCP、EtherNet/IP、S7、OPC UA、BACnet/IP；已有 MQTT/MQTTS 核验及 daisyUI 展示 |
+| [服务协议识别与部署](SERVICE_PROTOCOLS.md) | 当前支持矩阵、主动/被动任务、TLS/工业参数、能力和投影升级回滚 |
+| [DNS 与 VNC 服务识别扩展计划](DNS_DOH_DOT_VNC_PLAN.md) | A/B/C 已实现基础范围；保留原计划及当前交付边界 |
+| [工业与物联网服务识别扩展计划](INDUSTRIAL_SERVICE_DETECTION_PLAN.md) | D/E 已实现；F 为受限被动接收，包含 MQTT/MQTTS 补强及 daisyUI 展示 |
 | [更新日志](CHANGELOG.md) | 自上次发布 tag 以来的服务端变动、固定比较范围与升级兼容注意 |
 
 ## 从这里开始

@@ -15,10 +15,10 @@ async fn seed(pool: &Pool, fixture: &EsFixture, count: usize) {
     for port in 1..=count {
         state.documents.insert(
             (
-                "network-mapping-execution-endpoints-v1".into(),
+                "network-mapping-execution-endpoints-v2".into(),
                 port.to_string(),
             ),
-            json!({"execution_id":"execution","ip":"192.0.2.1","port":port,"observed_at_ms":1000}),
+            json!({"execution_id":"execution","ip":"192.0.2.1","port":port,"protocol":"tcp","endpoint_key":format!("192.0.2.1|{port}|tcp"),"observed_at_ms":1000}),
         );
     }
 }
@@ -143,7 +143,7 @@ async fn projection_wait_releases_single_connection_and_renews_during_slow_es() 
     seed(&pool, &fixture, 1).await;
     {
         let mut state = fixture.state.lock().unwrap();
-        state.delay_path = Some("execution-endpoints-v1/_search".into());
+        state.delay_path = Some("execution-endpoints-v2/_search".into());
         state.delay_ms = 3500; // exceeds the initial 3 second lease
     }
     let probe = async {
@@ -154,7 +154,7 @@ async fn projection_wait_releases_single_connection_and_renews_during_slow_es() 
                 .unwrap()
                 .requests
                 .iter()
-                .any(|path| path.contains("execution-endpoints-v1/_search"))
+                .any(|path| path.contains("execution-endpoints-v2/_search"))
             {
                 break;
             }
@@ -205,7 +205,7 @@ async fn projection_resumes_pages_and_retries_refresh_without_republishing() {
         )
         .await
         .unwrap();
-    assert_eq!(row.get::<_, Value>(0), json!(["192.0.2.1", 2]));
+    assert_eq!(row.get::<_, Value>(0), json!(["192.0.2.1|2|tcp"]));
     assert_eq!(row.get::<_, i64>(1), 2);
     // A new service has no in-memory continuation; resume entirely from PG.
     let restarted = self::service(&fixture);
@@ -223,7 +223,7 @@ async fn projection_resumes_pages_and_retries_refresh_without_republishing() {
     );
     let before = fixture.state.lock().unwrap().projection_bulk_sizes.len();
     assert!(before > 3, "three pages must be split by the byte limit");
-    fixture.state.lock().unwrap().fail_path = Some("endpoints-current-v2/_refresh".into());
+    fixture.state.lock().unwrap().fail_path = Some("endpoints-current-v3/_refresh".into());
     assert!(
         restarted
             .process_scan_projection_outbox(&pool)
@@ -336,7 +336,7 @@ async fn final_upload_and_duplicate_do_not_wait_for_current_projection() {
     let maxmind = crate::maxmind::MaxMindState::from_directory("/tmp/nm-es-no-maxmind");
     let follow_up = crate::dns_follow_up::DnsFollowUpConfig::default();
     service.ensure_scan_indices().await.unwrap();
-    fixture.state.lock().unwrap().fail_path = Some("endpoints-current-v2".into());
+    fixture.state.lock().unwrap().fail_path = Some("endpoints-current-v3".into());
     for expected in [1, 0] {
         let saved = timeout(
             Duration::from_secs(5),
@@ -362,7 +362,7 @@ async fn final_upload_and_duplicate_do_not_wait_for_current_projection() {
             .unwrap()
             .requests
             .iter()
-            .any(|path| path.contains("endpoints-current-v2/_refresh"))
+            .any(|path| path.contains("endpoints-current-v3/_refresh"))
     );
     let row = pool.get().await.unwrap().query_one("SELECT e.execution_status,p.processed_at IS NULL,p.attempts FROM scan_task_execution e JOIN scan_projection_outbox p ON p.execution_id=e.id", &[]).await.unwrap();
     assert_eq!(row.get::<_, String>(0), "succeeded");

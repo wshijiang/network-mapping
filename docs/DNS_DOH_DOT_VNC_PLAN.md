@@ -2,7 +2,7 @@
 
 [文档中心](README.md) · [服务探测分批计划](SERVICE_DETECTION_ROADMAP.md) · [DNS 测绘](DNS_MAPPING.md)
 
-规划日期：2026-10-23（北京时间）。A 批次的 DNS TCP/VNC 已接入并完成本地验证，操作与兼容说明见[扫描流水线](SCAN_PIPELINE.md)；B/C 及后续工业批次仍待实现，尚未部署或完成真实产品验收。
+当前交付（2026-10-23）：A/B/C、D/E 基础范围已实现，F 提供明确配置的 IPv4 被动接收和保守的帧格式识别。当前操作方式和准确限制以[服务协议识别与部署](SERVICE_PROTOCOLS.md)为准；下文保留原设计与后续验收计划，其中混合 port_sets、自动域名 UDP 子任务、完整 UADP 类型、镜像抓包与真实设备认证仍非当前交付。尚未线上部署。
 
 后续 Modbus TCP、EtherNet/IP、S7、OPC UA、MQTT/MQTTS 与 BACnet/IP 见[工业与物联网服务识别扩展计划](INDUSTRIAL_SERVICE_DETECTION_PLAN.md)，继续复用本文的统一编排、协议端点迁移和前端样式，追加 D/E/F 批次。
 
@@ -10,7 +10,7 @@
 
 目标是在扫描节点完成协议确认，并贯通任务、能力协商、结果上传、资产搜索、历史、统计、导出和控制台展示。DNS 同时覆盖 TCP 与 UDP；DoH 首批覆盖 HTTPS 上的 RFC 8484 二进制 DNS；DoT 覆盖 TLS 上的 DNS；VNC 覆盖 RFB 协议识别。
 
-以下为实施前的基线，A 批次已增加 DNS/VNC 探测、显式任务选择和前端展示，其余限制按后续批次处理：
+以下为实施前基线，用于解释设计动机；当前实现以操作文档为准：
 
 - 扫描端 `src/scan/detection.rs` 的 `ProbeKind` 没有 DNS、DoH、DoT、VNC；`unique_tcp_endpoints` 仅接受 TCP，853 默认映射为通用 TLS。
 - `src/udp_probe.rs` 已有 DNS UDP 请求、解析和回环测试，但未接入任务、CLI、能力、全局限速与持久化。现有 `dns_lookup` / `dns_records` 是域名解析任务，不能据此宣称发现了目标 DNS 服务。

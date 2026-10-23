@@ -58,6 +58,7 @@ nav:
       - 业务时区与常规设置: SYSTEM_TIME.md
   - 扫描与资产:
       - 服务探测分批计划: SERVICE_DETECTION_ROADMAP.md
+      - 服务协议识别与部署: SERVICE_PROTOCOLS.md
       - DNS 与 VNC 服务识别扩展计划: DNS_DOH_DOT_VNC_PLAN.md
       - 工业与物联网服务识别扩展计划: INDUSTRIAL_SERVICE_DETECTION_PLAN.md
       - 扫描流水线与结果协议: SCAN_PIPELINE.md

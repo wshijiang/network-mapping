@@ -273,6 +273,26 @@ fn fixture_response(state: &mut FixtureState, _method: &str, path: &str, body: &
         if request.pointer("/aggs/indices").is_some() {
             return json!({"aggregations": {"indices": {"buckets": []}}, "_shards": {"failed":0}});
         }
+        if request.pointer("/sort/0/endpoint_key").is_some() {
+            let execution = request
+                .pointer("/query/term/execution_id")
+                .and_then(Value::as_str);
+            let mut hits = state
+                .documents
+                .iter()
+                .filter(|((index, _), doc)| {
+                    path.contains(index)
+                        && doc.get("execution_id").and_then(Value::as_str) == execution
+                })
+                .map(|((_, id), doc)| json!({"_id":id,"_source":doc,"sort":[doc["endpoint_key"]]}))
+                .collect::<Vec<_>>();
+            hits.sort_by_key(|h| h["sort"][0].as_str().unwrap().to_owned());
+            if let Some(after) = request.get("search_after") {
+                hits.retain(|h| h["sort"][0].as_str() > after[0].as_str());
+            }
+            hits.truncate(request["size"].as_u64().unwrap() as usize);
+            return json!({"hits":{"hits":hits},"_shards":{"failed":0}});
+        }
         if request.pointer("/sort/0/ip").is_some() {
             let execution = request
                 .pointer("/query/term/execution_id")

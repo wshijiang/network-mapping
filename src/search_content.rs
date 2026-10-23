@@ -158,7 +158,7 @@ fn has_truncated_http_evidence(data: &Value) -> bool {
                 items.iter().any(|item| {
                     matches!(
                         item.get("module").and_then(Value::as_str),
-                        Some("http" | "https")
+                        Some("http" | "https" | "doh")
                     ) && item.pointer("/result/truncated").and_then(Value::as_bool) == Some(true)
                 })
             })
@@ -180,7 +180,7 @@ fn classify_tls_mode(module: &str, result: &Value) -> &'static str {
     if find_value_by_key(result, &["implicit_tls"], 0).and_then(Value::as_bool) == Some(true)
         || matches!(
             module,
-            "https" | "smtps" | "imaps" | "pop3s" | "ftps" | "mqtts"
+            "https" | "dot" | "doh" | "smtps" | "imaps" | "pop3s" | "ftps" | "mqtts"
         )
     {
         "implicit"
@@ -425,5 +425,18 @@ mod tests {
             extract_search_content(Some(&json!({"status": "success"}))),
             Default::default()
         );
+    }
+}
+
+#[cfg(test)]
+mod encrypted_dns_tests {
+    use super::*;
+    #[test]
+    fn doh_keeps_http_headers_and_verified_tls_fingerprint_without_dns_body() {
+        let d = serde_json::json!({"schema_version":2,"evidence":[{"module":"doh","result":{"tls":{"implicit_tls":true,"certificate_verified":true,"handshake_log":{"server_certificates":{"certificate":{"parsed":{"fingerprint_sha256":"abcd"}}}}},"response":{"status_line":"HTTP 200 OK","headers":{"server":["resolver"],"content_type":["application/dns-message"]}}}}]});
+        let v = extract_search_content(Some(&d));
+        assert_eq!(v.tls_mode.as_deref(), Some("implicit"));
+        assert_eq!(v.tls_fingerprint_sha256.as_deref(), Some("abcd"));
+        assert!(v.http_body.is_none());
     }
 }
