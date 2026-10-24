@@ -109,6 +109,8 @@ ALTER TABLE scan_task ADD CONSTRAINT scan_task_profile_check
         'port_only',
         'service_inventory',
         'vulnerability_scan',
+        'udp_inventory',
+        'udp_passive',
         'dns_records',
         'dns_ports',
         'dns_full'

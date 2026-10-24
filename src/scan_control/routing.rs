@@ -309,6 +309,7 @@ pub async fn candidates<C: GenericClient + Sync>(
     ports: &str,
     owner: i32,
     resolvers: &Value,
+    required_services: &Value,
     cfg: &RoutingConfig,
 ) -> Result<Vec<Candidate>, Error> {
     let require_v6 = resolvers.as_array().is_some_and(|v| {
@@ -327,13 +328,23 @@ pub async fn candidates<C: GenericClient + Sync>(
         AND s.last_seen_at >= NOW()-({})*INTERVAL '1 second' \
         AND (($1='ipv4' AND s.supports_ipv4 AND s.ipv4_ready) OR ($1='ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
         AND ($2='legacy' OR s.scan_capabilities->'profiles' ? $2) \
+        AND COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> $5::jsonb AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length($5::jsonb) \
         AND (NOT $3 OR (s.supports_ipv6 AND s.ipv6_ready)) \
         AND (NOT $4 OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN,FALSE)) ORDER BY s.scanner_id LIMIT 256",
         scanner_health::seconds_sql()
     );
     let explicit = resolvers.as_array().is_some_and(|r| !r.is_empty());
     let rows = client
-        .query(&sql, &[&family, &profile, &require_v6, &explicit])
+        .query(
+            &sql,
+            &[
+                &family,
+                &profile,
+                &require_v6,
+                &explicit,
+                &required_services,
+            ],
+        )
         .await?;
     let key = target_key(targets, family, profile, ports);
     let history = client.query("SELECT * FROM scanner_target_feedback WHERE owner_id=$1 AND target_key=$2 AND updated_at >= NOW()-$3::BIGINT*INTERVAL '1 hour'", &[&owner, &key, &i64::from(cfg.feedback_max_age_hours)]).await?;
@@ -390,6 +401,7 @@ pub fn claim_guard(scanner_parameter: &str) -> String {
         AND p.last_seen_at>=NOW()-({})*INTERVAL '1 second' \
         AND ((t.address_family='ipv4' AND p.supports_ipv4 AND p.ipv4_ready) OR (t.address_family='ipv6' AND p.supports_ipv6 AND p.ipv6_ready)) \
         AND (t.scan_profile='legacy' OR p.scan_capabilities->'profiles' ? t.scan_profile) \
+        AND COALESCE(p.scan_capabilities->'service_protocols','[]'::jsonb) @> COALESCE(t.scan_plan->'required_services','[]'::jsonb) \
         AND (jsonb_array_length(t.dns_resolvers)=0 OR COALESCE((p.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN,FALSE)) \
         AND (NOT EXISTS(SELECT 1 FROM jsonb_array_elements(t.dns_resolvers) d WHERE d->>'ip' LIKE '%:%') OR (p.supports_ipv6 AND p.ipv6_ready)) \
         AND NOT EXISTS(SELECT 1 FROM scan_task_execution busy WHERE busy.assigned_scanner_id=p.scanner_id AND busy.execution_status='running')))",
@@ -431,7 +443,7 @@ pub async fn plan_queue(pool: &Pool, maxmind: &MaxMindState) -> Result<(), Error
         return Ok(());
     }
     let rows = tx.query("SELECT t.id, t.user_id, CASE WHEN t.task_kind='dns' THEN t.dns_targets ELSE t.task_target::TEXT[] END AS targets, \
-        t.address_family, t.scan_profile, t.task_port, t.dns_resolvers, r.preferred_scanner_id, r.prefer_until \
+        t.address_family, t.scan_profile, t.task_port, t.dns_resolvers, t.scan_plan, r.preferred_scanner_id, r.prefer_until \
         FROM scan_task_execution e JOIN scan_task t ON t.id=e.task_id LEFT JOIN scan_task_routing r ON r.task_id=t.id \
         WHERE t.dispatch_mode='automatic' AND t.task_status IN ('pending','running') AND e.execution_status='pending' AND e.requested_scanner_id IS NULL \
         ORDER BY t.task_level DESC,t.task_create_time,t.id FOR UPDATE OF e SKIP LOCKED LIMIT $1", &[&i64::from(cfg.candidate_limit)]).await?;
@@ -448,6 +460,10 @@ pub async fn plan_queue(pool: &Pool, maxmind: &MaxMindState) -> Result<(), Error
             row.get("task_port"),
             row.get("user_id"),
             &row.get("dns_resolvers"),
+            &row.get::<_, Value>("scan_plan")
+                .get("required_services")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
             &cfg,
         )
         .await?;

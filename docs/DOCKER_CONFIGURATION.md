@@ -155,8 +155,8 @@ docker compose --env-file docker/.env -f docker/compose.example.yml up -d --forc
 | `NM__ELASTICSEARCH__PASSWORD` | 可选字符串 | 未设置 | 必须与 USERNAME 同时提供；也支持 `NM__ELASTICSEARCH__PASSWORD_FILE` |
 | `NM__ELASTICSEARCH__CA_CERTIFICATE_FILE` | 可选路径字符串 | 未设置，使用系统 CA | 私有 CA 的容器内文件路径；可放入已挂载的 TLS 目录 |
 | `NM__ELASTICSEARCH__OBSERVATION_INDEX_PREFIX` | 字符串 | `network-mapping-scan-observations-v1` | 原始扫描观察月索引前缀 |
-| `NM__ELASTICSEARCH__EXECUTION_ENDPOINT_INDEX` | 字符串 | `network-mapping-execution-endpoints-v1` | 执行端点索引 |
-| `NM__ELASTICSEARCH__CURRENT_ENDPOINT_INDEX` | 字符串 | `network-mapping-endpoints-current-v2` | 当前端点投影索引 |
+| `NM__ELASTICSEARCH__EXECUTION_ENDPOINT_INDEX` | 字符串 | `network-mapping-execution-endpoints-v2` | 执行端点索引 |
+| `NM__ELASTICSEARCH__CURRENT_ENDPOINT_INDEX` | 字符串 | `network-mapping-endpoints-current-v3` | 当前端点投影索引 |
 | `NM__ELASTICSEARCH__DNS_OBSERVATION_DATA_STREAM` | 字符串 | `network-mapping-dns-observations` | DNS 观察 Data Stream 名称 |
 | `NM__ELASTICSEARCH__DNS_RECORD_INDEX` | 字符串 | `network-mapping-dns-records-v1` | 当前 DNS 记录投影索引 |
 | `NM__ELASTICSEARCH__DNS_OBSERVATION_RETENTION_DAYS` | 整数，天 | `180` | DNS 观察保留期，30–365 |

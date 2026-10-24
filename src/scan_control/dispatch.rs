@@ -347,7 +347,8 @@ pub async fn recover_scanner_task_with_failure(
              t.task_port, t.address_family, t.scan_plan, t.dns_resolvers \
              FROM scan_task_execution e JOIN scan_task t ON t.id = e.task_id \
              JOIN scanner_info s ON s.scanner_id = $1 \
-             WHERE e.cancel_requested = false AND api_scan_task_enabled(t) AND dns_scan_task_enabled(t) AND ( \
+             WHERE COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> COALESCE(t.scan_plan->'required_services','[]'::jsonb) AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length(COALESCE(t.scan_plan->'required_services','[]'::jsonb)) \
+             AND e.cancel_requested = false AND api_scan_task_enabled(t) AND dns_scan_task_enabled(t) AND ( \
                  (e.execution_status = 'running' AND e.assigned_scanner_id = $1 \
                   AND ($2::TEXT IS NULL OR t.task_id = $2)) \
                  OR ($2::TEXT IS NOT NULL AND t.task_id = $2 AND e.execution_status = 'pending' \
@@ -356,6 +357,7 @@ pub async fn recover_scanner_task_with_failure(
                      AND ((t.address_family = 'ipv4' AND s.supports_ipv4 AND s.ipv4_ready) \
                        OR (t.address_family = 'ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
                      AND (t.scan_profile = 'legacy' OR s.scan_capabilities->'profiles' ? t.scan_profile) \
+           AND COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> COALESCE(t.scan_plan->'required_services','[]'::jsonb) AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length(COALESCE(t.scan_plan->'required_services','[]'::jsonb)) \
                      AND (jsonb_array_length(t.dns_resolvers) = 0 \
                        OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
            AND (NOT EXISTS(SELECT 1 FROM jsonb_array_elements(t.dns_resolvers) d WHERE d->>'ip' LIKE '%:%') OR (s.supports_ipv6 AND s.ipv6_ready)))) \
@@ -498,6 +500,7 @@ pub async fn apply_task(
            AND ((t.address_family = 'ipv4' AND s.supports_ipv4 AND s.ipv4_ready) \
              OR (t.address_family = 'ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
            AND (t.scan_profile = 'legacy' OR s.scan_capabilities->'profiles' ? t.scan_profile) \
+           AND COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> COALESCE(t.scan_plan->'required_services','[]'::jsonb) AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length(COALESCE(t.scan_plan->'required_services','[]'::jsonb)) \
            AND (jsonb_array_length(t.dns_resolvers) = 0 \
              OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
            AND (NOT EXISTS(SELECT 1 FROM jsonb_array_elements(t.dns_resolvers) d WHERE d->>'ip' LIKE '%:%') OR (s.supports_ipv6 AND s.ipv6_ready)) \
@@ -536,6 +539,7 @@ pub async fn apply_task(
                    AND ((t.address_family = 'ipv4' AND s.supports_ipv4 AND s.ipv4_ready) \
                      OR (t.address_family = 'ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
                    AND (t.scan_profile = 'legacy' OR s.scan_capabilities->'profiles' ? t.scan_profile) \
+           AND COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> COALESCE(t.scan_plan->'required_services','[]'::jsonb) AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length(COALESCE(t.scan_plan->'required_services','[]'::jsonb)) \
                    AND (jsonb_array_length(t.dns_resolvers) = 0 \
                      OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
            AND (NOT EXISTS(SELECT 1 FROM jsonb_array_elements(t.dns_resolvers) d WHERE d->>'ip' LIKE '%:%') OR (s.supports_ipv6 AND s.ipv6_ready)) \

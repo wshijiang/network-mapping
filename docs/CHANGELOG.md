@@ -2,6 +2,41 @@
 
 [文档中心](README.md) · [部署与升级](DEPLOYMENT.md) · [扫描端更新日志](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/CHANGELOG.md)
 
+## 未发布：全部服务自动识别（2026-10-23）
+
+- TCP 服务任务默认自动识别，TLS/SNI/CA、DoH 路径及工业参数无需选择协议即可配置；保留旧 API 定向列表的兼容性。
+- 修复数据库 scan_task_profile_check 遗漏 UDP 两种任务类型导致真实创建返回 500；启动初始化同步更新约束。
+- UDP 主动/被动任务省略协议列表时自动采用全部已支持协议，将集合写入计划；预览、创建、节点预算及恢复共用规范化集合，避免能力或预算不足的节点被选中。
+- 同步默认行为、端口映射、识别预算和 daisyUI 页面说明，并增加自动参数/UDP 计划及实际 PostgreSQL 预览与创建一致性回归。
+
+## 未发布：PR review 与 CI 核验修复（2026-10-23）
+
+- 修复迁移/发布将 `_refresh` 的 `total>0, successful=0, failed=0` 当作成功的问题；刷新缺少计数或没有成功分片时停止，传输端点重建不推进失败执行的断点和运行标记。补充失败后恢复重跑测试。
+- Elasticsearch 请求错误保留超时/连接类别、请求路径、耗时与底层错误链，去除 URL 凭据及查询参数；重建增加逐执行/分页/断点日志，文档说明分片状态与单请求超时排查。
+- 核实 PR #127 的两项迁移意见：纯漏洞观察不再发送空端点 Bulk 请求；完整重建并刷新后，与运行标记切换在同一事务内完成已发布任务的 outbox，清除旧排序游标及残留租约，恢复 OS/Web 后续处理。
+- 扩展混合服务/漏洞重建、旧游标与 enrichment 就绪回归；不可变原始事实保持原样。
+- 同步 Docker 的 `.env.example` 和 `config.example.toml` 中 execution/current 默认索引名，修复 amd64/arm64 制品契约检查失败。
+
+## 未发布：加密 DNS、工业与 UDP 服务识别（2026-10-23）
+
+- 服务任务和预览增加加密 DNS、工业协议选项、公开 CA 与协议参数；能力、领取/重领/恢复和路由同时校验协议与节点探测预算。
+- plan v2 提供独立 UDP 主动/被动 profiles，显式目标、端口及接收窗口；TCP 仍为 v1，不隐式扩大扫描范围。
+- 端点 ID、分页、历史、OS/Web 补全增加 TCP/UDP/unknown 维度；默认执行/当前投影升级 v2/v3。新增停服 `--rebuild-transport-endpoints`，从不可变事实重建、按执行恢复、保留旧投影并重新排队补全；既有部署必须迁移。
+- DoH 保留 HTTP/TLS 搜索证据，TLS 验证失败不确认为服务。详见[服务协议识别与部署](SERVICE_PROTOCOLS.md)的完整协议表、限制、升级和回滚步骤。
+
+## 未发布：DNS TCP / VNC 任务能力（2026-10-23）
+
+- IP/CIDR 服务识别、漏洞扫描任务及分配预览支持 `required_services=["dns","vnc"]`（可选择其一）；列表持久化于已有 scan_plan，并将服务阶段设为必需。含义是选择探测协议，不保证目标一定存在该服务。
+- 心跳保留有界的 `service_protocols` 能力声明；指定/全部节点选择、智能分配、普通领取、重领及任务恢复均过滤能力不足的节点。旧节点仍可执行未设置新要求的旧任务。
+- 无新增数据库列或端点身份变更，DNS UDP 未开放；已有服务观察、权限、查询、历史及 CSV 使用原服务字段。服务端需先于配套扫描器/前端部署，见[扫描流水线](SCAN_PIPELINE.md)。
+
+## 未发布：服务识别扩展规划（2026-10-23）
+
+- 补充 [DNS、DoH、DoT 与 VNC 服务识别扩展计划](DNS_DOH_DOT_VNC_PLAN.md)，明确协议确认、原生适配器、DoH/HTTPS 证据共存、节点能力、UDP 端点迁移、daisyUI 展示和分批验收。
+- 本条仅记录规划文档；不表示新协议已接入任务、完成迁移或通过真实服务验收。
+- 补齐已有第三方依赖清单维护页的文档首页和 MkDocs 导航入口，修复文档严格构建的遗漏页面警告。
+- 追加[工业与物联网服务识别规划](INDUSTRIAL_SERVICE_DETECTION_PLAN.md)：Modbus TCP、EtherNet/IP、S7、OPC UA、BACnet/IP 及已有 MQTT/MQTTS 补强；区分 UDP/44818 发现与 UDP/2222 I/O、OPC UA TCP 与 UDP PubSub，补充 D/E/F 批次及证据/端点边界，尚未实现新协议。
+
 ## 未发布（自 v0.1.29 以来）
 
 截至 **2026-10-21（北京时间）**，以最新已发布 tag [v0.1.29](https://github.com/wshijiang/network-mapping/releases/tag/v0.1.29) 为基线，汇总主分支已合入的服务端变动，不包含尚未合入的开发分支或前端独立变动。

@@ -192,10 +192,11 @@ pub(crate) fn normalize_upload_observations(
                 .as_ref()
                 .is_some_and(|value| value.len() > 16)
             || (is_typed
+                && observation.kind != "vulnerability"
                 && observation
                     .protocol
                     .as_ref()
-                    .is_none_or(|value| value.is_empty()))
+                    .is_none_or(|value| !matches!(value.as_str(), "tcp" | "udp")))
             || observation.source.is_empty()
             || observation.source.len() > 64
             || observation

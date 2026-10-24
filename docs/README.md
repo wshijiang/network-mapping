@@ -12,6 +12,9 @@
 | 文档 | 内容 |
 | --- | --- |
 | [服务探测分批计划](SERVICE_DETECTION_ROADMAP.md) | Elasticsearch 与 UDP 的当前交付、迁移及验收边界 |
+| [服务协议识别与部署](SERVICE_PROTOCOLS.md) | 当前支持矩阵、主动/被动任务、TLS/工业参数、能力和投影升级回滚 |
+| [DNS 与 VNC 服务识别扩展计划](DNS_DOH_DOT_VNC_PLAN.md) | A/B/C 已实现基础范围；保留原计划及当前交付边界 |
+| [工业与物联网服务识别扩展计划](INDUSTRIAL_SERVICE_DETECTION_PLAN.md) | D/E 已实现；F 为受限被动接收，包含 MQTT/MQTTS 补强及 daisyUI 展示 |
 | [更新日志](CHANGELOG.md) | 自上次发布 tag 以来的服务端变动、固定比较范围与升级兼容注意 |
 
 ## 从这里开始
@@ -106,6 +109,7 @@
 | [模块化实现与热更新](MODULE_RUNTIME_IMPLEMENTATION.md) | 当前实现：Workspace、报表渲染 Worker、版本切换和回滚 |
 | [模块化架构设计](MODULAR_ARCHITECTURE.md) | 整体目标架构与后续设计；已实现能力以实现说明为准 |
 | [进程替换原型](examples/modular-hot-update/README.md) | 独立实验：验证进程替换生命周期，未集成生产服务 |
+| [第三方依赖清单维护](OPEN_SOURCE_CATALOG.md) | 直接依赖范围、版本与许可证口径及清单校验 |
 | [文档维护与本地预览](DOCUMENTATION.md) | 内容归属、导航维护、站内链接和 MkDocs 构建检查 |
 
 机器可读接口规范：[下载 OpenAPI 3.1 JSON](open-api/openapi.json)。

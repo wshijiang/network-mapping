@@ -402,6 +402,10 @@ pub struct ScannerScanCapabilities {
     stages: Vec<String>,
     #[serde(default)]
     explicit_dns_resolvers: bool,
+    #[serde(default)]
+    service_protocols: Vec<String>,
+    #[serde(default)]
+    max_service_probes: u16,
 }
 
 impl Default for ScannerScanCapabilities {
@@ -411,13 +415,40 @@ impl Default for ScannerScanCapabilities {
             profiles: vec!["legacy".into()],
             stages: vec!["port_discovery".into()],
             explicit_dns_resolvers: false,
+            service_protocols: vec![],
+            max_service_probes: 0,
         }
     }
 }
 
 impl ScannerScanCapabilities {
     fn validate(&self) -> Result<(), &'static str> {
-        if self.plan_versions.len() > 8 || self.profiles.len() > 8 || self.stages.len() > 16 {
+        if self.max_service_probes > 32
+            || self.service_protocols.len() > 15
+            || self.service_protocols.iter().any(|s| {
+                !matches!(
+                    s.as_str(),
+                    "dns"
+                        | "vnc"
+                        | "dot"
+                        | "doh"
+                        | "modbus"
+                        | "enip"
+                        | "s7"
+                        | "opcua"
+                        | "mqtt"
+                        | "mqtts"
+                        | "dns_udp"
+                        | "enip_udp"
+                        | "bacnet"
+                        | "opcua_pubsub"
+                        | "enip_io"
+                )
+            })
+        {
+            return Err("unsupported service protocols");
+        }
+        if self.plan_versions.len() > 8 || self.profiles.len() > 16 || self.stages.len() > 16 {
             return Err("too many scan capabilities");
         }
         if self.profiles.iter().any(|value| {
@@ -430,6 +461,8 @@ impl ScannerScanCapabilities {
                     | "dns_records"
                     | "dns_ports"
                     | "dns_full"
+                    | "udp_inventory"
+                    | "udp_passive"
             )
         }) || self.stages.iter().any(|value| {
             !matches!(
@@ -2084,7 +2117,7 @@ async fn get_dns_comparison(
 }
 
 #[post("/api/task/create")]
-async fn create_task(
+pub(crate) async fn create_task(
     req: HttpRequest,
     maxmind: web::Data<MaxMindState>,
     pool: web::Data<Pool>,
@@ -2150,19 +2183,41 @@ async fn create_task(
             }
         },
     };
-    if !crate::scan_control::creation::is_ip_scan_profile(&scan_profile) {
+    if !crate::scan_control::creation::is_ip_scan_profile(&scan_profile)
+        && !matches!(scan_profile.as_str(), "udp_inventory" | "udp_passive")
+    {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "success": false,
             "message": "DNS scan profiles require the domain task endpoint"
         }));
     }
-    let scan_plan = match build_scan_plan(&scan_profile) {
+    let scan_plan = match crate::scan_control::creation::build_service_scan_plan_with_options(
+        &scan_profile,
+        &create_data.required_services,
+        &create_data.service_probe_options,
+    ) {
         Ok(plan) => plan,
         Err(message) => {
             return HttpResponse::BadRequest()
                 .json(serde_json::json!({"success": false, "message": message}));
         }
     };
+    if let Err(message) = crate::scan_control::creation::validate_udp_targets(
+        &scan_profile,
+        &task_info
+            .ip
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        &create_data.port,
+    ) {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({"success":false,"message":message}));
+    }
+    let required_services = scan_plan
+        .get("required_services")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
     let capability_filter = if address_family == "ipv6" {
         "supports_ipv6 AND ipv6_ready"
     } else {
@@ -2170,6 +2225,12 @@ async fn create_task(
     };
 
     let dispatch_mode = create_data.dispatch_mode.trim().to_lowercase();
+    if scan_profile == "udp_passive"
+        && (dispatch_mode != "selected" || create_data.scanner_ids.len() != 1)
+    {
+        return HttpResponse::BadRequest().json(serde_json::json!({"success":false,"message":"被动接收需明确指定一台具有接收接口的扫描节点"}));
+    }
+
     let requested_scanners: Vec<Option<String>> = match dispatch_mode.as_str() {
         "automatic" if create_data.scanner_ids.is_empty() => vec![None],
         "selected" if !create_data.scanner_ids.is_empty() => {
@@ -2185,9 +2246,10 @@ async fn create_task(
             let query = format!(
                 "SELECT scanner_id FROM scanner_info WHERE scanner_id = ANY($1::text[]) \
                  AND is_enable = true AND deleted_at IS NULL AND {capability_filter} \
-                 AND ($2 = 'legacy' OR scan_capabilities->'profiles' ? $2);"
+                 AND ($2 = 'legacy' OR scan_capabilities->'profiles' ? $2) \
+                 AND COALESCE(scan_capabilities->'service_protocols','[]'::jsonb) @> $3::jsonb AND COALESCE((scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length($3::jsonb);"
             );
-            let rows = match connection.query(&query, &[&values, &scan_profile]).await {
+            let rows = match connection.query(&query, &[&values, &scan_profile, &required_services]).await {
                 Ok(rows) => rows,
                 Err(error) => { error_logs_error(&req, "ResolveTaskScannersError", "resolve_selected_scanners", &error); return HttpResponse::InternalServerError().finish(); }
             };
@@ -2207,9 +2269,10 @@ async fn create_task(
             let query = format!(
                 "SELECT scanner_id FROM scanner_info WHERE is_enable = true AND deleted_at IS NULL \
                  AND {capability_filter} \
-                 AND ($1 = 'legacy' OR scan_capabilities->'profiles' ? $1) ORDER BY scanner_id;"
+                 AND ($1 = 'legacy' OR scan_capabilities->'profiles' ? $1) \
+                 AND COALESCE(scan_capabilities->'service_protocols','[]'::jsonb) @> $2::jsonb AND COALESCE((scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length($2::jsonb) ORDER BY scanner_id;"
             );
-            let rows = match connection.query(&query, &[&scan_profile]).await {
+            let rows = match connection.query(&query, &[&scan_profile, &required_services]).await {
                 Ok(rows) => rows,
                 Err(error) => { error_logs_error(&req, "ResolveTaskScannersError", "resolve_all_scanners", &error); return HttpResponse::InternalServerError().finish(); }
             };
@@ -3185,6 +3248,8 @@ mod tests {
             ],
             stages: vec!["port_discovery".into(), "vulnerability_detection".into()],
             explicit_dns_resolvers: false,
+            service_protocols: vec![],
+            max_service_probes: 0,
         };
         assert!(valid.validate().is_ok());
 
@@ -3193,6 +3258,8 @@ mod tests {
             profiles: vec!["run_arbitrary_command".into()],
             stages: vec!["port_discovery".into()],
             explicit_dns_resolvers: false,
+            service_protocols: vec![],
+            max_service_probes: 0,
         };
         assert!(invalid.validate().is_err());
     }

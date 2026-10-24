@@ -34,14 +34,21 @@ impl ElasticsearchService {
     /// only enable that fallback when no other service observation exists at
     /// the same user's endpoint and service time. Ignore content equality:
     /// rejecting more old matches is preferable to installing the wrong ref.
+    #[allow(clippy::too_many_arguments)]
     async fn web_legacy_evidence_is_unique(
         &self,
         user_id: i32,
         ip: &str,
         port: u16,
+        protocol: &str,
         at: i64,
         observation_id: &str,
     ) -> Result<bool, String> {
+        let transport = if protocol == "unknown" {
+            json!({"bool":{"must_not":{"terms":{"protocol":["tcp","udp"]}}}})
+        } else {
+            json!({"term":{"protocol":protocol}})
+        };
         let query = json!({
             "size": 1, "track_total_hits": false, "_source": false,
             "query": {"bool": {
@@ -49,6 +56,7 @@ impl ElasticsearchService {
                     {"term": {"user_id": user_id}},
                     {"term": {"ip_address": ip}},
                     {"term": {"port": port}},
+                    transport,
                     {"term": {"kind": "service"}},
                     {"term": {"observed_at": at}}
                 ],
@@ -245,12 +253,26 @@ impl ElasticsearchService {
                 Some(&reference),
             );
             let allow_legacy = self
-                .web_legacy_evidence_is_unique(job.context.user_id, ip, port, at, id)
+                .web_legacy_evidence_is_unique(
+                    job.context.user_id,
+                    ip,
+                    port,
+                    endpoint_protocol(source),
+                    at,
+                    id,
+                )
                 .await?;
             let params = json!({"reference":{"id":id,"index":index,"observed_at":at},"allow_legacy":allow_legacy,"execution_id":job.context.execution_id,"user_id":job.context.user_id,"observed_at":at,"service":service,"banner":banner,"revision":RULESET_REVISION,"web":web});
             let mut targets = vec![(
                 self.inner.config.execution_endpoint_index.as_str(),
-                sha256_hex(format!("{}\0{ip}\0{port}", job.context.execution_id).as_bytes()),
+                sha256_hex(
+                    format!(
+                        "{}\0{ip}\0{port}\0{}",
+                        job.context.execution_id,
+                        endpoint_protocol(source)
+                    )
+                    .as_bytes(),
+                ),
             )];
             let mut scopes = vec![("global", 0), ("user", job.context.user_id)];
             if let Some(id) = job.api_client_id {
@@ -259,7 +281,10 @@ impl ElasticsearchService {
             for (scope, id) in scopes {
                 targets.push((
                     self.inner.config.current_endpoint_index.as_str(),
-                    sha256_hex(format!("{scope}\0{id}\0{ip}\0{port}").as_bytes()),
+                    sha256_hex(
+                        format!("{scope}\0{id}\0{ip}\0{port}\0{}", endpoint_protocol(source))
+                            .as_bytes(),
+                    ),
                 ));
             }
             for (index, id) in targets {
@@ -526,7 +551,7 @@ mod tests {
                 let result=service.scan_query(ScanQueryIndex::CurrentEndpoints,&json!({"size":10,"query":filter})).await?;
                 assert_eq!(result.pointer("/hits/total/value").and_then(Value::as_i64),Some(expected));
             }
-            let current_id=sha256_hex(format!("user\0{}\0{}\0{}",1,"192.0.2.1",2222).as_bytes());
+            let current_id=sha256_hex(format!("user\0{}\0{}\0{}\0tcp",1,"192.0.2.1",2222).as_bytes());
             // Re-publication of the same observation must retain enrichment.
             let event=endpoint_projection_document(&context,&observation,at);
             let mut bulk=String::new(); append_projection_update(&mut bulk,&service.inner.config.current_endpoint_index,&current_id,&event)?;
@@ -611,7 +636,7 @@ mod tests {
             // Web conclusion, and replaying the older job must not restore it.
             let mut newer=observation.clone(); newer["observation_key"]=json!("http-2");newer["banner"]=json!("HTTP/1.1 201 Created");
             let event=endpoint_projection_document(&context,&newer,at+1000);
-            let current_id=sha256_hex(format!("user\0{}\0{}\0{}",1,"192.0.2.1",2222).as_bytes());
+            let current_id=sha256_hex(format!("user\0{}\0{}\0{}\0tcp",1,"192.0.2.1",2222).as_bytes());
             let mut bulk=String::new(); append_projection_update(&mut bulk,&service.inner.config.current_endpoint_index,&current_id,&event)?;
             let response=service.send_bulk_with_retry("/_bulk",&bulk,false).await?;assert_eq!(response["errors"],false);
             service.enrich_web_page(&job).await?;

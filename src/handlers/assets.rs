@@ -31,6 +31,7 @@ pub(crate) struct AssetPortsQuery {
 #[derive(Deserialize)]
 pub(crate) struct AssetPortHistoryQuery {
     ip: String,
+    protocol: Option<String>,
     port: u16,
     limit: Option<i64>,
     offset: Option<i64>,
@@ -39,6 +40,7 @@ pub(crate) struct AssetPortHistoryQuery {
 #[derive(Serialize)]
 struct AssetPortCurrent {
     port: i32,
+    data: Option<Value>,
     intel: crate::threat_intel::Annotation,
     protocol: Option<String>,
     service: Option<String>,
@@ -207,6 +209,13 @@ pub(crate) async fn get_asset_port_history(
         Ok(value) => value,
         Err(message) => return bad_request(message),
     };
+    if query
+        .protocol
+        .as_ref()
+        .is_some_and(|p| !matches!(p.as_str(), "tcp" | "udp" | "unknown"))
+    {
+        return bad_request("传输协议无效");
+    }
     let port = i32::from(query.port);
 
     return get_asset_history_from_elasticsearch(
@@ -214,6 +223,7 @@ pub(crate) async fn get_asset_port_history(
         elasticsearch.get_ref(),
         &ip,
         port,
+        query.protocol.as_deref(),
         limit,
         offset,
         &user,
@@ -460,7 +470,7 @@ async fn get_asset_ports_from_elasticsearch(
             &json!({
                 "from": offset, "size": limit, "track_total_hits": true,
                 "query": {"bool": {"filter": filters}},
-                "sort": [{"port": "asc"}]
+                "sort": [{"port": "asc"}, {"protocol": "asc"}]
             }),
         )
         .await
@@ -490,6 +500,7 @@ async fn get_asset_ports_from_elasticsearch(
                 .unwrap_or(0);
             let service_observed_at = source.get("service_observed_at_ms").and_then(Value::as_i64);
             AssetPortCurrent {
+                data: source.get("data").filter(|d| !d.is_null()).cloned(),
                 intel: Default::default(),
                 port: source.get("port").and_then(Value::as_i64).unwrap_or(0) as i32,
                 protocol: source
@@ -563,11 +574,13 @@ async fn get_asset_ports_from_elasticsearch(
     }}))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_asset_history_from_elasticsearch(
     req: &HttpRequest,
     elasticsearch: &ElasticsearchService,
     ip: &str,
     port: i32,
+    protocol: Option<&str>,
     limit: i64,
     offset: i64,
     user: &UserBaseI,
@@ -575,6 +588,13 @@ async fn get_asset_history_from_elasticsearch(
     let mut filters = observation_access_filters(user);
     filters.push(json!({"term": {"ip_address": ip}}));
     filters.push(json!({"term": {"port": port}}));
+    if let Some(protocol) = protocol {
+        if protocol == "unknown" {
+            filters.push(json!({"bool":{"must_not":{"terms":{"protocol":["tcp","udp"]}}}}));
+        } else {
+            filters.push(json!({"term":{"protocol":protocol}}));
+        }
+    }
     let result = match elasticsearch
         .scan_query(
             ScanQueryIndex::Observations,

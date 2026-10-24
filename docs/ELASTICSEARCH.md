@@ -14,6 +14,8 @@ Bulk、搜索聚合及恢复流程。此次范围调整未新增真实 ES 集群
 任务、执行状态、扫描器、上传回执、补偿队列和紧凑分析快照，不再读写完整扫描事实。
 `postgres`、`dual` 配置已不支持；PG 历史结果仅通过离线 PG → ES 迁移读取。
 
+端点身份升级为 IP + 端口 + 传输协议。既有部署必须按[服务协议部署](SERVICE_PROTOCOLS.md#存储升级与回滚)停服重建投影，不能仅修改索引名启动。
+
 ## 配置与新安装
 
 ```toml
@@ -24,8 +26,8 @@ scan_storage = "elasticsearch"
 fallback_to_postgres = false
 url = "https://127.0.0.1:9200"
 observation_index_prefix = "network-mapping-scan-observations-v1"
-execution_endpoint_index = "network-mapping-execution-endpoints-v1"
-current_endpoint_index = "network-mapping-endpoints-current-v2"
+execution_endpoint_index = "network-mapping-execution-endpoints-v2"
+current_endpoint_index = "network-mapping-endpoints-current-v3"
 dns_observation_data_stream = "network-mapping-dns-observations"
 dns_record_index = "network-mapping-dns-records-v1"
 dns_observation_retention_days = 180
@@ -75,8 +77,8 @@ ES 是必需依赖；禁用 ES、禁用读取或启用 PG 回退会被配置检�
 ## 索引与提交协议
 
 - `network-mapping-scan-observations-v1-YYYY.MM`：不可变原始观察，月份由扫描器 `observed_at` 确定。
-- `network-mapping-execution-endpoints-v1`：每次执行的端点投影。
-- `network-mapping-endpoints-current-v2`：`global/user` 权限范围内的当前端点投影。
+- `network-mapping-execution-endpoints-v2`：每次执行的端点投影。
+- `network-mapping-endpoints-current-v3`：`global/user` 权限范围内的当前端点投影。
 - `network-mapping-dns-observations`：DNS 查询证据 Data Stream。
 - `network-mapping-dns-records-v1`：当前 DNS RR 投影。
 

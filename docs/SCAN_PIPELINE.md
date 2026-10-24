@@ -240,3 +240,7 @@ PostgreSQL 模式下 `scan_observation` 是事实来源，`ips`、`ports` 是资
 服务端在执行成功、端点发布后异步处理已有 HTTP/HTTPS 服务证据，独立保存技术栈派生结果。
 本版本不增加扫描阶段或改变结果协议；仅端口任务不会生成新的 Web 证据。
 原始事实和上传 checksum 不含识别结果。见 [使用说明](WEB_DETECTION.md)与[维护说明](WEB_DETECTION_DEVELOPMENT.md)。
+
+## 扩展服务协议
+
+DNS TCP/UDP、DoH、DoT、VNC、工业 TCP/UDP 发现与实时流量被动接收已接入任务、能力、Worker 和端点存储。完整协议表、请求示例、参数、限制和停服投影迁移步骤见[服务协议识别与部署](SERVICE_PROTOCOLS.md)。TCP 沿用 plan v1；UDP 使用独立 plan v2 profiles，暂不混合 TCP/UDP 或自动域名后续任务。模块部署要求 IPC 3 Worker。
