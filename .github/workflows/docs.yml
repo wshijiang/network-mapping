@@ -20,6 +20,7 @@ jobs:
           .venv-docs/bin/python -m pip install -r mkdocs/requirements.txt
       - name: Check hooks and build both languages
         run: |
+          node --test mkdocs/language.test.cjs
           .venv-docs/bin/python -m unittest discover -s mkdocs -p 'test_*.py'
           .venv-docs/bin/python scripts/build-docs.py
           test -f mkdocs/site/index.html

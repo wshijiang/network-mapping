@@ -14,7 +14,7 @@ UI language does not change business time zone, date order, clock format, timest
 
 ## Documentation languages
 
-Chinese keeps the original URLs; English is under `en/`. The menu links to the same translated page when available, otherwise to the language home. The documentation home uses the browser/cookie preference. Selecting a documentation language explicitly saves the same cookie. Ordinary topic pages are not forced into another language.
+Chinese keeps the original URLs; English is under `en/`. The menu links to the same translated page when available, otherwise to the language home. The documentation home uses the browser/cookie preference. Selecting a documentation language explicitly saves the same cookie. Menu URLs carry a validated `docs-lang=en` or `docs-lang=zh-CN` parameter, which takes precedence on the destination home even when cookies are rejected. This also works on reload, copied links and new tabs. A fresh home URL without this parameter still uses the cookie/browser preference. Ordinary topic pages are not forced into another language.
 
 Only the home, deployment and language-maintenance pages are translated in this first documentation release. Untranslated topics are explicitly linked to the Chinese reference. Theme strings, search, navigation and edit links are configured independently for each language.
 
@@ -43,6 +43,9 @@ Run:
 ```sh
 python scripts/build-docs.py
 python -m unittest discover -s mkdocs -p 'test_*.py'
+node --test mkdocs/language.test.cjs
 ```
 
 Check language links, missing-translation fallback, search, edit links, anchors and repository file links. The hook derives the repository root from its own location, not from the active language directory. Existing repository files outside the language root link to GitHub; missing/out-of-repository links are not silently rewritten.
+
+The language-script regression checks require Node.js 20.19 or newer and no npm dependencies.

@@ -1,17 +1,28 @@
 // A manual choice shares the console's host-only language preference.
 ;(() => {
   const cookieName = 'network_mapping_locale'
+  const supported = value => value === 'en' || value === 'zh-CN'
   function preference() {
+    // Menu URLs carry intent even when all browser storage is unavailable.
+    const explicit = new URL(location.href).searchParams.get('docs-lang')
+    if (supported(explicit)) return explicit
     try {
       for (const part of document.cookie.split(';')) {
         const [key, ...rest] = part.trim().split('=')
         if (key === cookieName) {
           const value = decodeURIComponent(rest.join('='))
-          if (value === 'en' || value === 'zh-CN') return value
+          if (supported(value)) return value
         }
       }
     } catch { /* Browser restrictions do not prevent reading documentation. */ }
     return /^zh(?:-|$)/i.test(navigator.languages?.[0] || navigator.language || '') ? 'zh-CN' : 'en'
+  }
+  // Prepare actual hrefs so modified clicks, new tabs and copied links also work.
+  for (const link of document.querySelectorAll('a[hreflang]')) {
+    if (!supported(link.hreflang)) continue
+    const target = new URL(link.href, location.href)
+    target.searchParams.set('docs-lang', link.hreflang)
+    link.href = target.href
   }
   document.addEventListener('click', event => {
     const link = event.target.closest('a[hreflang]')
