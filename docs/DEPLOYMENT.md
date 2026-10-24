@@ -460,3 +460,7 @@ sudo journalctl -u network-mapping-server -n 100 --no-pager
 ## 可选登录人机验证
 
 默认关闭。启用 Cloudflare Turnstile 前先部署配套前端，准备 widget 密钥、允许域名和浏览器/服务端出站访问；管理员在“设置 → 登录保护”保存，对新登录生效，已打开的登录页需刷新。文件/env 只初始化缺失记录，Secret 在数据库中加密，需保管并备份 `server.encrypt_key`；多实例共用数据库及主密钥。启用后旧客户端必须携带证明。完整参数、CSP、升级与停用步骤见[登录人机验证](HUMAN_VERIFICATION.md)。
+
+## actix-files 0.7 文件响应
+
+前端资源与扫描器诊断下载使用 `NamedFile::open`，文件打开及元数据读取通过 Actix `web::block` 调度，避免阻塞请求执行器。actix-files 0.7 已移除旧 `open_async` 接口；不存在文件的处理、管理员权限、已就绪快照检查及下载文件名保持原语义。升级时用前端资源 GET/HEAD/缓存/404 和诊断下载回归验证。

@@ -350,7 +350,10 @@ async fn favicon(
 }
 
 async fn open_frontend_file(path: PathBuf) -> actix_web::Result<Option<NamedFile>> {
-    match NamedFile::open_async(path).await {
+    let opened = web::block(move || NamedFile::open(path))
+        .await
+        .map_err(|_| actix_web::error::ErrorInternalServerError("frontend_file_open_failed"))?;
+    match opened {
         Ok(file) => Ok(Some(file)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),

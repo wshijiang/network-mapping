@@ -265,8 +265,15 @@ pub async fn download(
             public_error(actix_web::http::StatusCode::NOT_FOUND, "log_file_not_ready")
         })?;
     let snapshot: Snapshot = serde_json::from_value(row.get(0)).map_err(internal)?;
-    let file = NamedFile::open_async(state.file_path(id))
+    let file_path = state.file_path(id);
+    let file = web::block(move || NamedFile::open(file_path))
         .await
+        .map_err(|_| {
+            public_error(
+                actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "log_file_open_failed",
+            )
+        })?
         .map_err(|_| public_error(actix_web::http::StatusCode::NOT_FOUND, "log_file_expired"))?;
     let event = AuditEvent::user("scanner", "scanner.log.download", "success", &user)
         .resource("scanner_log", id.to_string());

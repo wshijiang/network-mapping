@@ -2,6 +2,11 @@
 
 [文档中心](README.md) · [部署与升级](DEPLOYMENT.md) · [扫描端更新日志](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/CHANGELOG.md)
 
+## 未发布：actix-files 0.7 升级适配（2026-10-24）
+
+- 修复 actix-files 0.7 移除 NamedFile::open_async 后，前端资源和扫描器日志下载无法编译的问题；在 Actix 阻塞池中执行文件打开及元数据读取，保留原 HTTP 状态、下载鉴权和响应头。
+- 与当前主分支同步，保留协议迁移与自动服务识别修复；升级依赖不绕过文件访问或摘要校验。诊断下载在独立 PostgreSQL 数据库验证管理员/归属/内容，并加入 CI。
+
 ## 未发布：全部服务自动识别（2026-10-23）
 
 - TCP 服务任务默认自动识别，TLS/SNI/CA、DoH 路径及工业参数无需选择协议即可配置；保留旧 API 定向列表的兼容性。
