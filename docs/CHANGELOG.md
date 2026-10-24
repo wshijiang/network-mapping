@@ -2,6 +2,10 @@
 
 [文档中心](README.md) · [部署与升级](DEPLOYMENT.md) · [扫描端更新日志](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/CHANGELOG.md)
 
+## 未发布：同步前端镜像引用（2026-10-24）
+
+- 更新 `.github/frontend-ref` 到本批前端 PR 合并后的主分支提交 `6bf338a996d4546de9886fe1b5947e2b9e4ab30e`，打包服务自动识别、代理明文输入与统一请求头 select；保持构建、验证和发布使用同一不可变前端版本。
+
 ## 未发布：actix-files 0.7 升级适配（2026-10-24）
 
 - 修复 actix-files 0.7 移除 NamedFile::open_async 后，前端资源和扫描器日志下载无法编译的问题；在 Actix 阻塞池中执行文件打开及元数据读取，保留原 HTTP 状态、下载鉴权和响应头。

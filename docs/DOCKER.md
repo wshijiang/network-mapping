@@ -16,6 +16,9 @@ Rust 使用 1.99.0、Node 26.11.1、pnpm 11.9.0；构建与运行环境采用 De
 
 `.github/frontend-ref` 必须是前端完整 40 位提交。前端与后端独立版本，修改前端后先提交并推送前端，
 再通过后端 PR 更新 frontend-ref；不会因前端分支移动自动更换服务端镜像中的代码。
+
+按前端 → 服务端 → 扫描器合并时，先完成本批前端 PR 合并，再读取前端 `main` 的最终完整 SHA（合并或 squash 后的主分支提交可能不同于 PR 头）。服务端阶段先合并更新 `.github/frontend-ref` 的 PR，其余未修改该文件的依赖 PR 会保留该引用。提交引用更新前验证 SHA 已在前端主分支上，并复核相应前端 CI；不要使用浮动分支名代替固定 SHA。
+
 GitHub 服务端构建使用 `FRONTEND_REPO_TOKEN` 只读检出私有前端；前端公开时可不配置这个 Secret。
 源码 artifact 由 git archive 的明确文件清单导出，不含 .git、凭据、开发 TLS 或环境文件。
 
