@@ -57,3 +57,8 @@ python -m mkdocs build --strict -f mkdocs/mkdocs.yml
 构建产物位于 `mkdocs/site/`，可交给现有静态站点发布流程。虚拟环境和构建产物已在 `.gitignore` 排除，不提交到源码仓库。
 
 严格构建会把未加入导航的 Markdown 页面、失效文档链接及锚点警告视为失败。修复源文件、首页索引或导航后再提交；远程 URL 的可访问性仍需单独核对。
+
+
+## 多语言与构建
+
+当前语言规则、英文首批覆盖与完整中英构建命令见[语言切换与多语言文档](LOCALIZATION.md)。使用 `python scripts/build-docs.py` 依次严格构建中文和英文；只构建中文会清理英文产物。

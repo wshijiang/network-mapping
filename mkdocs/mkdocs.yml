@@ -4,9 +4,13 @@ site_url: https://blog.abdc.world
 
 docs_dir: ../docs
 site_dir: site
+exclude_docs: |
+  /en/
+  /INTERNATIONALIZATION_PLAN.md
 
 theme:
   name: material
+  custom_dir: overrides
   language: zh
   features:
     - navigation.tabs
@@ -97,13 +101,14 @@ nav:
       - 进程替换原型: examples/modular-hot-update/README.md
       - 第三方依赖清单维护: OPEN_SOURCE_CATALOG.md
       - 文档维护与本地预览: DOCUMENTATION.md
+      - 语言切换与文档维护: LOCALIZATION.md
 
 hooks:
   - hooks.py
 
 repo_url: https://github.com/wshijiang/network-mapping
 repo_name: wshijiang/network-mapping
-edit_uri: edit/mkdocs/docs/
+edit_uri: edit/main/docs/
 
 markdown_extensions:
 #开启 mermaid插件
@@ -120,6 +125,7 @@ markdown_extensions:
           case: lower
 
 extra:
+  locale: zh-CN
   # 页脚右侧图标
   social:
     - icon: fontawesome/brands/github
@@ -140,3 +146,6 @@ copyright: >
   Copyright &copy; 2026 Network Mapping Project.
   All rights reserved.
   <br>
+
+extra_javascript:
+  - assets/language.js

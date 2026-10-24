@@ -2,6 +2,16 @@
 
 [文档中心](README.md) · [部署与升级](DEPLOYMENT.md) · [扫描端更新日志](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/CHANGELOG.md)
 
+条目按专题和阶段保留，旧阶段限制不代表当前能力；以最新条目及对应使用文档为准。规划条目不表示功能已实现。
+
+
+## 未发布：中英切换与 MkDocs 多语言（2026-10-24）
+
+- 固定 `.github/frontend-ref` 到配套中英前端提交 `8a7b44ab65ccab89c209322214b4ce503b96408a`，镜像构建使用同一不可变界面版本；浏览器首选语言及手动 cookie 规则见使用说明。扫描/服务协议保持原样。
+- 新增中文/英文 MkDocs 配置、首批英文首页/部署/维护页、相对语言菜单、缺译回退及统一严格构建命令；修正英文文档根下的源码链接与编辑路径。
+- 补齐 Vue I18n 及当前主分支直接依赖的版本/许可证清单，保持三仓库依赖校验一致。
+- 更新[语言切换与多语言文档](LOCALIZATION.md)。尚未翻译的专题明确链接中文原文，服务端自由文本、历史证据及既有模板保留原语言。
+
 ## 未发布：同步前端镜像引用（2026-10-24）
 
 - 更新 `.github/frontend-ref` 到本批前端 PR 合并后的主分支提交 `6bf338a996d4546de9886fe1b5947e2b9e4ab30e`，打包服务自动识别、代理明文输入与统一请求头 select；保持构建、验证和发布使用同一不可变前端版本。
@@ -46,7 +56,19 @@
 - 补齐已有第三方依赖清单维护页的文档首页和 MkDocs 导航入口，修复文档严格构建的遗漏页面警告。
 - 追加[工业与物联网服务识别规划](INDUSTRIAL_SERVICE_DETECTION_PLAN.md)：Modbus TCP、EtherNet/IP、S7、OPC UA、BACnet/IP 及已有 MQTT/MQTTS 补强；区分 UDP/44818 发现与 UDP/2222 I/O、OPC UA TCP 与 UDP PubSub，补充 D/E/F 批次及证据/端点边界，尚未实现新协议。
 
-## 未发布（自 v0.1.29 以来）
+## 未发布：服务探测第一批（2026-10-22）
+
+- **HTTP/HTTPS 被动识别 Elasticsearch**：产品响应头及完整根 JSON，支持明确版本、OpenSearch 排除、冲突和截断状态。`service` 继续保留 http/https，不增加目标请求。
+- Web 规则修订 6，88 条规则覆盖 53 种技术；现有队列按新修订回填保留的历史证据。查询使用 `tech = elasticsearch`，外部 API 沿用 `web` 字段授权。
+- 新增[服务探测分批交付计划](SERVICE_DETECTION_ROADMAP.md)。本条记录第一批，当时尚未开放 UDP 任务；10 月 23 日的后续交付以本日志上方条目及[当前协议矩阵](SERVICE_PROTOCOLS.md)为准。对应 [#120](https://github.com/wshijiang/network-mapping/pull/120)。
+
+## 未发布：威胁情报与 LLM（2026-10-21 至 22）
+
+- 可信来源结构化 IOC 默认接纳，可逐来源要求人工审核；RSS/LLM 提议始终需人工审核。补充来源周期、有效期、资产自动标记和批量离线导入 CLI，保留原文证据及审核边界。见[威胁情报](THREAT_INTELLIGENCE.md)，对应 [#117](https://github.com/wshijiang/network-mapping/pull/117)。
+- 新增模型供应商管理、模型发现、全局与局部网络/请求参数继承及流式 IOC 提取和多轮在线调试，支持对话保留开关、历史加载/删除与 session 恢复。凭据和历史按既有加密及权限约定处理。见 [LLM 配置](LLM.md)，对应 [#119](https://github.com/wshijiang/network-mapping/pull/119)。
+- 上述两项位于下方固定截止提交之后，单独补记，不计入历史的 32 个提交。
+
+## 未发布（自 v0.1.29 至 2026-10-21 的固定汇总）
 
 截至 **2026-10-21（北京时间）**，以最新已发布 tag [v0.1.29](https://github.com/wshijiang/network-mapping/releases/tag/v0.1.29) 为基线，汇总主分支已合入的服务端变动，不包含尚未合入的开发分支或前端独立变动。
 
@@ -57,9 +79,7 @@
 | 变动范围 | 32 个提交（含合并提交）；[查看完整比较](https://github.com/wshijiang/network-mapping/compare/v0.1.29...919cecb2151ee5612c4cbf2d03d2e20d4c87e6e6) |
 
 ### 新增
-- **HTTP/HTTPS 被动识别 Elasticsearch**：产品响应头及完整根 JSON，支持明确版本、OpenSearch 排除、冲突和截断状态。service 继续保留 http/https，不增加目标请求。
-- Web 规则修订 6，88 条规则覆盖 53 种技术；现有队列按新修订回填保留的历史证据。查询使用 tech = elasticsearch，外部 API 沿用 web 字段授权。
-- 新增[服务探测分批交付计划](SERVICE_DETECTION_ROADMAP.md)，区分 UDP 库内核、后续任务/端点迁移、原生 Transport 和扩展协议；本批尚未开放 UDP 任务。
+
 - **统一通知渠道**：邮件、飞书和 Telegram 支持同级订阅与多渠道独立投递，覆盖健康告警、扫描器掉线/恢复、登录、周报和月报；支持启停、最低级别、连通性测试、投递历史及失败重试。通知使用持久化队列、租约和有限重试；停用通知不影响报告归档。见[通知渠道](NOTIFICATIONS.md)。
 - **分渠道通知模板**：新增飞书、Telegram 按事件管理的模板 API，支持纯文本/受限 HTML、草稿、发布、历史恢复、变量目录和在线预览。测试发送可以使用未保存模板，返回投递 ID 并查询状态；入队不等于发送成功。补充邮件模板通知状态的预览和测试。见[通知模板](NOTIFICATION_TEMPLATES.md)，相关 [#113](https://github.com/wshijiang/network-mapping/pull/113)、[#115](https://github.com/wshijiang/network-mapping/pull/115)。
 - **每渠道通知代理**：邮件、飞书和 Telegram 可独立选择系统默认、直连或自定义 HTTP/HTTPS/SOCKS5/SOCKS5H 代理，代理凭据加密存储；邮件支持代理隧道内的 SMTPS，连接失败不回退直连。见[通知代理](NOTIFICATIONS.md#每渠道投递代理)，相关 [#116](https://github.com/wshijiang/network-mapping/pull/116)。

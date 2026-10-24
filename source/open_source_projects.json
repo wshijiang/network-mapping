@@ -1,10 +1,10 @@
 {
-  "last_reviewed": "2026-10-22",
+  "last_reviewed": "2026-10-24",
   "projects": [
     {
       "name": "actix-files",
       "package": "actix-files",
-      "version": "0.6",
+      "version": "0.7",
       "ecosystem": "backend",
       "license": "MIT OR Apache-2.0",
       "usage": "静态文件与前端资源服务",
@@ -154,8 +154,8 @@
     {
       "name": "ipnet",
       "package": "ipnet",
-      "version": "2.12",
-      "ecosystem": "backend",
+      "version": "2.12 / 2",
+      "ecosystem": "shared-rust",
       "license": "MIT OR Apache-2.0",
       "usage": "IP 网段解析与地址范围处理",
       "homepage": "https://docs.rs/ipnet/",
@@ -524,7 +524,7 @@
     {
       "name": "hickory-resolver",
       "package": "hickory-resolver",
-      "version": "0.25",
+      "version": "0.26",
       "ecosystem": "scanner",
       "license": "MIT OR Apache-2.0",
       "usage": "扫描器 DNS 解析与系统解析配置",
@@ -564,7 +564,7 @@
     {
       "name": "sha2",
       "package": "sha2",
-      "version": "0.10",
+      "version": "0.11",
       "ecosystem": "scanner",
       "license": "MIT OR Apache-2.0",
       "usage": "扫描器 SHA-256 摘要计算",
@@ -810,6 +810,36 @@
       "usage": "ApexCharts 的 Vue 图表组件（采用 ApexCharts 自定义授权）",
       "homepage": "https://github.com/apexcharts/vue3-apexcharts",
       "repository": "https://github.com/apexcharts/vue3-apexcharts"
+    },
+    {
+      "package": "tokio-rustls",
+      "name": "tokio-rustls",
+      "license": "MIT OR Apache-2.0",
+      "usage": "Tokio 上的可信 TLS 探测连接",
+      "homepage": "https://github.com/rustls/tokio-rustls",
+      "repository": "https://github.com/rustls/tokio-rustls",
+      "version": "0.26",
+      "ecosystem": "scanner"
+    },
+    {
+      "package": "rustls-native-certs",
+      "name": "rustls-native-certs",
+      "license": "Apache-2.0 OR ISC OR MIT",
+      "usage": "读取系统可信 CA 证书",
+      "homepage": "https://github.com/rustls/rustls-native-certs",
+      "repository": "https://github.com/rustls/rustls-native-certs",
+      "version": "0.8",
+      "ecosystem": "scanner"
+    },
+    {
+      "package": "vue-i18n",
+      "name": "Vue I18n",
+      "license": "MIT",
+      "usage": "Vue 界面中英文翻译与格式化",
+      "homepage": "https://vue-i18n.intlify.dev/",
+      "repository": "https://github.com/intlify/vue-i18n",
+      "version": "11.2.8",
+      "ecosystem": "frontend"
     }
   ]
 }

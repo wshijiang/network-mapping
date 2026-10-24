@@ -107,6 +107,7 @@ cargo build --locked --release
 | 搜索、扫描模式与自动任务 | [功能指南](docs/FEATURES.md) |
 | API、存储、备份与排障 | [文档中心](docs/README.md) |
 | 可选登录人机验证 | [Turnstile 部署与排障](docs/HUMAN_VERIFICATION.md) |
+| 前端与文档多语言支持 | [语言切换与构建](docs/LOCALIZATION.md) |
 
 ## 参与贡献
 

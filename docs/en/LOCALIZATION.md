@@ -1,0 +1,48 @@
+# Language selection and documentation maintenance
+
+[Documentation](README.md) · [Source repository](https://github.com/wshijiang/network-mapping)
+
+## Console language
+
+The dashboard, sign-in, standalone search and asset details share English and Simplified Chinese controls. On the first visit, the browser's first preferred language selects the language: any `zh` variant uses Simplified Chinese, any `en` variant uses English, and all other or missing preferences use English. A secondary Chinese preference does not override a different primary language.
+
+A manual selection saves `network_mapping_locale=zh-CN` or `en` in a host-only cookie for one year with `Path=/` and `SameSite=Lax`; HTTPS also uses `Secure`. A valid cookie takes precedence on later visits. Automatic detection does not write a cookie. Invalid or malformed values are ignored. When cookies are blocked, the current page still switches and explains that the preference was not saved.
+
+Switching updates interface text without reloading the app or discarding drafts, filters or unsaved forms. Other open pages synchronize on focus/visibility, and through Cookie Store events when supported. Clearing the cookie restores browser detection.
+
+UI language does not change business time zone, date order, clock format, timestamps, scan targets, protocol identifiers or permissions. Evidence, product names, user input, LLM conversations and saved notification bodies keep their original content. Free-text server responses and historical diagnostics can remain in their original language; they are never sent to a translation service.
+
+## Documentation languages
+
+Chinese keeps the original URLs; English is under `en/`. The menu links to the same translated page when available, otherwise to the language home. The documentation home uses the browser/cookie preference. Selecting a documentation language explicitly saves the same cookie. Ordinary topic pages are not forced into another language.
+
+Only the home, deployment and language-maintenance pages are translated in this first documentation release. Untranslated topics are explicitly linked to the Chinese reference. Theme strings, search, navigation and edit links are configured independently for each language.
+
+## Build and preview
+
+From the `network-mapping` repository root, with Python 3.10 or newer:
+
+```sh
+python3 -m venv .venv-docs
+. .venv-docs/bin/activate
+python -m pip install -r mkdocs/requirements.txt
+python scripts/build-docs.py
+python -m http.server 8000 --bind 127.0.0.1 --directory mkdocs/site
+```
+
+The build runs strict checks for both languages. Chinese is built first, then English into `mkdocs/site/en/`. Serve the entire `mkdocs/site/` tree. Building Chinese alone cleans the output, so use the combined command before publishing. This command builds locally and does not deploy.
+
+Set each configuration's `site_url` to the real deployment base before publishing. The inherited sample domain does not mean this repository has been published there. Each component needs a separate deployment base. Relative language links support subpath deployments and local static previews.
+
+## Maintain translations
+
+Add English files at the same relative path under `docs/en/`, then update the English navigation and home. Preserve commands, configuration keys and version limitations. Change Chinese and corresponding English instructions together with `CHANGELOG.md`. Have deployment, recovery and permission instructions reviewed before publishing.
+
+Run:
+
+```sh
+python scripts/build-docs.py
+python -m unittest discover -s mkdocs -p 'test_*.py'
+```
+
+Check language links, missing-translation fallback, search, edit links, anchors and repository file links. The hook derives the repository root from its own location, not from the active language directory. Existing repository files outside the language root link to GitHub; missing/out-of-repository links are not silently rewritten.

@@ -1,0 +1,19 @@
+INHERIT: mkdocs.yml
+site_name: Network Mapping Server Documentation
+site_description: English setup and localization documentation
+site_url: https://blog.abdc.world/en/
+docs_dir: ../docs/en
+site_dir: site/en
+exclude_docs: ""
+theme:
+  language: en
+plugins:
+  - search:
+      lang: en
+nav:
+  - Documentation: README.md
+  - Deployment: DEPLOYMENT.md
+  - Languages and documentation: LOCALIZATION.md
+edit_uri: edit/main/docs/en/
+extra:
+  locale: en
