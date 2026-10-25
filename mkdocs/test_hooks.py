@@ -39,11 +39,19 @@ class DocumentationLanguageTests(unittest.TestCase):
 
     def test_language_metadata_supports_subpath_preview(self):
         html = hooks.on_post_page("<head></head><body></body>", self.page("README.md", ""), self.config(True))
-        self.assertIn('hreflang="zh-CN" href="../"', html)
+        # Material emits alternate tags once; the post-page hook only marks home.
+        self.assertNotIn('rel="alternate"', html)
         self.assertIn('name="network-mapping-docs-home" content="true"', html)
         self.assertNotIn('href="/en/', html)
         assets = hooks.REPO_ROOT / "docs/assets/language.js"
         self.assertEqual(assets.read_bytes(), (hooks.REPO_ROOT / "docs/en/assets/language.js").read_bytes())
+
+    def test_material_receives_language_root_links(self):
+        for english, expected in [(False, ["LOCALIZATION/", "en/LOCALIZATION/"]),
+                                  (True, ["../LOCALIZATION/", "LOCALIZATION/"])]:
+            config = self.config(english)
+            hooks.on_page_context({}, self.page(), config, None)
+            self.assertEqual([link["link"] for link in config["extra"]["alternate"]], expected)
 
 
 if __name__ == "__main__":

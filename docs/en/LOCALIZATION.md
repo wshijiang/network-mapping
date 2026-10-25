@@ -30,9 +30,15 @@ python scripts/build-docs.py
 python -m http.server 8000 --bind 127.0.0.1 --directory mkdocs/site
 ```
 
-The build runs strict checks for both languages. Chinese is built first, then English into `mkdocs/site/en/`. Serve the entire `mkdocs/site/` tree. Building Chinese alone cleans the output, so use the combined command before publishing. This command builds locally and does not deploy.
+The build runs strict checks for both languages. The default configuration builds Chinese first, then English with its own pages, CSS/JS, language script and search index under the actual output directory’s `en/`. Standard `python -m mkdocs build --strict -f mkdocs/mkdocs.yml` and `python -m mkdocs serve -f mkdocs/mkdocs.yml` use the same bilingual flow, including custom output and temporary preview directories. Clean rebuilds regenerate both languages; an English build failure fails the whole build. Serve the entire `mkdocs/site/` tree. These commands do not deploy.
 
-Set each configuration's `site_url` to the real deployment base before publishing. The inherited sample domain does not mean this repository has been published there. Each component needs a separate deployment base. Relative language links support subpath deployments and local static previews.
+Set the default configuration’s `site_url` to the real deployment base before publishing. The bilingual build derives the English base by appending `en/`; the English configuration’s own `site_url` is used only for standalone English builds. The inherited sample domain does not mean this repository has been published there. Each component needs a separate deployment base. The language menu and head metadata use the same relative URL resolution for subpath deployments and local previews.
+
+## English pages or assets return 404
+
+Previously, the default build and preview generated only Chinese while linking to `en/`; rebuilding Chinese also removed existing English output. Rebuild with the updated default command and publish the entire output, including `en/index.html`, `en/assets/` and `en/search/search_index.json`.
+
+Verify HTTP 200 responses for both home pages, `en/DEPLOYMENT/`, the referenced CSS/JS, the language script and English search index. Include the same deployment prefix in every URL when hosting under a subpath. `mkdocs/test_build.py` covers default strict builds, clean rebuilds, custom output, static hosting and bilingual MkDocs preview.
 
 ## Maintain translations
 

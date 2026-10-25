@@ -1,4 +1,3 @@
-import html
 import posixpath
 import re
 from pathlib import Path, PurePosixPath
@@ -43,10 +42,10 @@ def document_url(source):
     return quote(str(path.with_suffix("")), safe="/") + "/"
 
 
-def language_links(page, config):
+def language_links(page, config, *, relative_to_page=True):
     english = config["extra"].get("locale") == "en"
     source = page.file.src_uri
-    current = ("en/" if english else "") + page.url
+    current = ("en/" if english else "") + (page.url if relative_to_page else "")
     links = []
     for language, prefix, name in [("zh-CN", "", "简体中文"), ("en", "en/", "English")]:
         directory = REPO_ROOT / "docs" / prefix
@@ -58,13 +57,42 @@ def language_links(page, config):
 
 
 def on_page_context(context, page, config, nav):
-    config["extra"]["alternate"] = language_links(page, config)
+    # Material applies its `url` filter to both head metadata and menu links.
+    # Give it paths relative to the active language root, not to this page.
+    config["extra"]["alternate"] = language_links(page, config, relative_to_page=False)
     return context
 
 
 def on_post_page(output, page, config):
-    links = language_links(page, config)
-    tags = ''.join(f'<link rel="alternate" hreflang="{item["lang"]}" href="{html.escape(item["link"], quote=True)}">' for item in links)
     home = page.file.src_uri in ("README.md", "index.md")
-    tags += f'<meta name="network-mapping-docs-home" content="{str(home).lower()}">'
-    return output.replace("</head>", tags + "</head>", 1)
+    tag = f'<meta name="network-mapping-docs-home" content="{str(home).lower()}">'
+    return output.replace("</head>", tag + "</head>", 1)
+
+
+def on_post_build(config):
+    # Language links are present in every build, including `mkdocs serve` and
+    # `gh-deploy`. Build English after the root clean, in the actual output
+    # directory (which may be a temporary preview or a custom --site-dir).
+    if config["extra"].get("locale") == "en":
+        return
+
+    from mkdocs.commands.build import build
+    from mkdocs.config import load_config
+
+    english = load_config(
+        str(REPO_ROOT / "mkdocs/mkdocs.en.yml"),
+        site_dir=str(Path(config["site_dir"]) / "en"),
+        site_url=(config["site_url"] or "/").rstrip("/") + "/en/",
+        strict=config["strict"],
+    )
+    english.plugins.on_startup(command="build", dirty=False)
+    try:
+        build(english)
+    finally:
+        english.plugins.on_shutdown()
+
+
+def on_serve(server, config, builder):
+    if config["extra"].get("locale") != "en":
+        server.watch(str(REPO_ROOT / "mkdocs/mkdocs.en.yml"))
+    return server
