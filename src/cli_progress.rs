@@ -1,6 +1,7 @@
-use std::sync::Mutex;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -64,14 +65,15 @@ impl ProgressReporter for NoopProgressReporter {
 }
 
 enum ProgressCommand {
-    Update(ProgressUpdate),
+    Update,
     Finish(String),
     Fail(String),
     Stop,
 }
 
 pub struct CliProgressReporter {
-    sender: Sender<ProgressCommand>,
+    sender: SyncSender<ProgressCommand>,
+    latest: Arc<Mutex<Option<ProgressUpdate>>>,
     worker: Mutex<Option<JoinHandle<()>>>,
     closed: AtomicBool,
 }
@@ -79,23 +81,35 @@ pub struct CliProgressReporter {
 impl CliProgressReporter {
     pub fn new(task: impl Into<String>) -> Self {
         let task = task.into();
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let latest: Arc<Mutex<Option<ProgressUpdate>>> = Arc::new(Mutex::new(None));
+        let worker_latest = latest.clone();
         let worker = thread::spawn(move || {
             let started_at = Instant::now();
             let mut current: Option<ProgressUpdate> = None;
+            let mut rate = ProgressRate::default();
             let mut next_report_at = Instant::now() + REPORT_INTERVAL;
 
             loop {
                 let wait = next_report_at.saturating_duration_since(Instant::now());
                 match receiver.recv_timeout(wait) {
-                    Ok(ProgressCommand::Update(update)) => {
+                    Ok(ProgressCommand::Update) => {
+                        let Some(update) =
+                            worker_latest.lock().expect("progress slot poisoned").take()
+                        else {
+                            continue;
+                        };
+                        rate.observe(&update, started_at.elapsed());
                         let phase_changed = current
                             .as_ref()
                             .is_none_or(|previous| previous.phase != update.phase);
                         current = Some(update);
-                        if phase_changed {
+                        if phase_changed || Instant::now() >= next_report_at {
                             if let Some(update) = current.as_ref() {
-                                eprintln!("{}", format_update(&task, update, started_at.elapsed()));
+                                eprintln!(
+                                    "{}",
+                                    format_live_update(&task, update, started_at.elapsed(), &rate)
+                                );
                             }
                             next_report_at = Instant::now() + REPORT_INTERVAL;
                         }
@@ -110,7 +124,9 @@ impl CliProgressReporter {
                     Ok(ProgressCommand::Fail(reason)) => {
                         let context = current
                             .as_ref()
-                            .map(|update| format_update(&task, update, started_at.elapsed()))
+                            .map(|update| {
+                                format_live_update(&task, update, started_at.elapsed(), &rate)
+                            })
                             .unwrap_or_else(|| format!("[{task}] 尚未开始"));
                         eprintln!("{context}");
                         eprintln!(
@@ -122,7 +138,10 @@ impl CliProgressReporter {
                     Ok(ProgressCommand::Stop) | Err(RecvTimeoutError::Disconnected) => break,
                     Err(RecvTimeoutError::Timeout) => {
                         if let Some(update) = current.as_ref() {
-                            eprintln!("{}", format_update(&task, update, started_at.elapsed()));
+                            eprintln!(
+                                "{}",
+                                format_live_update(&task, update, started_at.elapsed(), &rate)
+                            );
                         }
                         next_report_at = Instant::now() + REPORT_INTERVAL;
                     }
@@ -131,6 +150,7 @@ impl CliProgressReporter {
         });
         Self {
             sender,
+            latest,
             worker: Mutex::new(Some(worker)),
             closed: AtomicBool::new(false),
         }
@@ -163,7 +183,8 @@ impl CliProgressReporter {
 impl ProgressReporter for CliProgressReporter {
     fn report(&self, update: ProgressUpdate) {
         if !self.closed.load(Ordering::Acquire) {
-            let _ = self.sender.send(ProgressCommand::Update(update));
+            *self.latest.lock().expect("progress slot poisoned") = Some(update);
+            let _ = self.sender.try_send(ProgressCommand::Update);
         }
     }
 }
@@ -184,7 +205,92 @@ impl Drop for CliProgressReporter {
     }
 }
 
+#[derive(Default)]
+struct ProgressRate {
+    phase: String,
+    samples: VecDeque<(Duration, u64)>,
+    changed_at: Duration,
+}
+impl ProgressRate {
+    fn observe(&mut self, update: &ProgressUpdate, now: Duration) {
+        let Some(count) = update.completed else {
+            self.samples.clear();
+            self.phase = update.phase.clone();
+            return;
+        };
+        if self.phase != update.phase || self.samples.back().is_some_and(|(_, n)| count < *n) {
+            self.samples.clear();
+            self.phase = update.phase.clone();
+        }
+        if self.samples.back().is_none_or(|(_, n)| *n != count) {
+            self.changed_at = now;
+        }
+        self.samples.push_back((now, count));
+        while self.samples.len() > 2
+            && self
+                .samples
+                .get(1)
+                .is_some_and(|(t, _)| now.saturating_sub(*t) > Duration::from_secs(30))
+        {
+            self.samples.pop_front();
+        }
+        // Bound memory even when callers report thousands of pages per second.
+        if self.samples.len() > 256 {
+            self.samples.remove(1);
+        }
+    }
+    fn rate(&self, now: Duration) -> Option<f64> {
+        if now.saturating_sub(self.changed_at) > REPORT_INTERVAL {
+            return None;
+        }
+        let (start, first) = self.samples.front()?;
+        let (_, last) = self.samples.back()?;
+        let elapsed = now.saturating_sub(*start).as_secs_f64();
+        (elapsed >= 1.0 && last > first).then(|| (last - first) as f64 / elapsed)
+    }
+}
+
+fn format_live_update(
+    task: &str,
+    update: &ProgressUpdate,
+    elapsed: Duration,
+    rate: &ProgressRate,
+) -> String {
+    let speed = rate.rate(elapsed);
+    let mut text = render_update(task, update, elapsed, speed);
+    if let (Some(rate), Some(done), Some(total)) = (speed, update.completed, update.total)
+        && rate > 0.0
+    {
+        text.push_str(&format!(
+            "，阶段剩余约 {}",
+            format_duration(Duration::from_secs_f64(
+                (total.saturating_sub(done) as f64 / rate).min(315360000.0)
+            ))
+        ));
+    }
+    text
+}
+
+#[cfg(test)]
 fn format_update(task: &str, update: &ProgressUpdate, elapsed: Duration) -> String {
+    render_update(
+        task,
+        update,
+        elapsed,
+        Some(if elapsed.is_zero() {
+            0.0
+        } else {
+            update.completed.unwrap_or(0) as f64 / elapsed.as_secs_f64()
+        }),
+    )
+}
+
+fn render_update(
+    task: &str,
+    update: &ProgressUpdate,
+    elapsed: Duration,
+    rate: Option<f64>,
+) -> String {
     let elapsed_text = format_duration(elapsed);
     let detail = update
         .detail
@@ -199,13 +305,12 @@ fn format_update(task: &str, update: &ProgressUpdate, elapsed: Duration) -> Stri
                 completed as f64 * 100.0 / total as f64
             };
             let unit = update.unit.as_deref().unwrap_or("项");
-            let rate = if elapsed.is_zero() {
-                0.0
-            } else {
-                completed as f64 / elapsed.as_secs_f64()
+            let speed = match rate {
+                Some(rate) => format!("速度 {rate:.1} {unit}/秒"),
+                None => "速度待采样或等待当前请求".into(),
             };
             format!(
-                "[{task}] {}：{completed}/{total} {unit} ({percentage:.1}%)，耗时 {elapsed_text}，速度 {rate:.1} {unit}/秒{detail}",
+                "[{task}] {}：{completed}/{total} {unit} ({percentage:.1}%)，耗时 {elapsed_text}，{speed}{detail}",
                 update.phase
             )
         }
@@ -299,5 +404,37 @@ mod tests {
             "最后成功 id=1",
         ));
         reporter.finish("1 项");
+    }
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::*;
+    #[test]
+    fn resumed_history_and_phase_changes_do_not_inflate_rate() {
+        let mut rate = ProgressRate::default();
+        rate.observe(
+            &ProgressUpdate::count("replay", 50000, Some(60000), "items", ""),
+            Duration::ZERO,
+        );
+        assert_eq!(rate.rate(Duration::from_secs(1)), None);
+        rate.observe(
+            &ProgressUpdate::count("replay", 50020, Some(60000), "items", ""),
+            Duration::from_secs(2),
+        );
+        assert_eq!(rate.rate(Duration::from_secs(2)), Some(10.0));
+        assert_eq!(rate.rate(Duration::from_secs(8)), None);
+        rate.observe(
+            &ProgressUpdate::count("tags", 2000, Some(3000), "items", ""),
+            Duration::from_secs(9),
+        );
+        assert_eq!(rate.rate(Duration::from_secs(10)), None);
+        for n in 2001..10000 {
+            rate.observe(
+                &ProgressUpdate::count("tags", n, None, "items", ""),
+                Duration::from_secs(10),
+            );
+        }
+        assert!(rate.samples.len() <= 256);
     }
 }

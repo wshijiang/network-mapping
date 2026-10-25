@@ -27,7 +27,7 @@ deadpool-postgres = { version = "0.14"}
 deadpool = "0.13"
 argon2 = "0.5"
 password-hash = "0.5"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "sync", "time", "net", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "sync", "time", "net", "io-util", "signal"] }
 uuid = { version = "1.18", features = ["v4", "v7", "serde"]}
 sysinfo = "0.39"
 chrono-tz = "0.10"

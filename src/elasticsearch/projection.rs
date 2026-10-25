@@ -16,7 +16,7 @@ struct ProjectionJob {
 
 pub(super) struct ProjectionPage {
     pub(super) cursor: Option<Value>,
-    endpoints: i64,
+    pub(super) endpoints: i64,
     pub(super) done: bool,
 }
 
@@ -392,7 +392,11 @@ async fn projection_update(
     Ok(())
 }
 
-fn validate_projection_bulk(result: &Value, index: &str, ids: &[String]) -> Result<(), String> {
+pub(super) fn validate_projection_bulk(
+    result: &Value,
+    index: &str,
+    ids: &[String],
+) -> Result<(), String> {
     let items = result
         .get("items")
         .and_then(Value::as_array)

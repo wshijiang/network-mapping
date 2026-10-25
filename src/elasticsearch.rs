@@ -136,7 +136,7 @@ impl SearchSort {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ScanBatchContext {
     pub(crate) task_id: String,
     pub(crate) execution_id: String,
@@ -192,6 +192,7 @@ struct ElasticsearchInner {
     client: reqwest::Client,
     runtime: RwLock<ElasticsearchRuntime>,
     monitor: RwLock<Option<MonitorHandle>>,
+    maintenance_run_id: RwLock<Option<String>>,
     bulk_semaphore: Semaphore,
     projection_notify: Notify,
     scan_indices_ready: AtomicBool,
@@ -429,6 +430,7 @@ impl ElasticsearchService {
         let bulk_max_concurrency = config.bulk_max_concurrency;
         Ok(Self {
             inner: Arc::new(ElasticsearchInner {
+                maintenance_run_id: RwLock::new(None),
                 config,
                 client: builder.build()?,
                 runtime: RwLock::new(ElasticsearchRuntime::default()),
@@ -706,7 +708,13 @@ impl ElasticsearchService {
             .request(method, self.endpoint(path))
             .header(
                 "x-opaque-id",
-                format!("network-mapping:{}", operation.name()),
+                self.inner
+                    .maintenance_run_id
+                    .read()
+                    .expect("maintenance identity lock poisoned")
+                    .as_ref()
+                    .map(|id| format!("network-mapping:transport-rebuild:{id}"))
+                    .unwrap_or_else(|| format!("network-mapping:{}", operation.name())),
             )
             .header("traceparent", traceparent);
         if let Some(api_key) = self.inner.config.api_key.as_deref() {

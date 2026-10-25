@@ -19,6 +19,7 @@ pub(super) struct FixtureState {
     pub(super) projection_bulk_sizes: Vec<usize>,
     pub(super) malformed_projection_bulk: bool,
     pub(super) projection_fail_after: Option<usize>,
+    pub(super) index_metadata: BTreeMap<String, Value>,
     server_version: Option<String>,
     dns_generation: usize,
 }
@@ -107,6 +108,9 @@ impl EsFixture {
                 } else {
                     fixture_response(&mut state, method, path, &body)
                 };
+                let missing = method == "GET"
+                    && path.contains("filter_path=*.settings.index.uuid")
+                    && response.as_object().is_some_and(|v| v.is_empty());
                 let response = if method == "HEAD" {
                     String::new()
                 } else {
@@ -116,7 +120,13 @@ impl EsFixture {
                 let _ = write!(
                     socket,
                     "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    if fail { "503 Unavailable" } else { "200 OK" },
+                    if fail {
+                        "503 Unavailable"
+                    } else if missing {
+                        "404 Not Found"
+                    } else {
+                        "200 OK"
+                    },
                     response.len(),
                     response
                 );
@@ -194,7 +204,34 @@ async fn request_diagnostics_distinguish_timeout_and_connection_failure_without_
     assert!(!error.contains("test-password"), "{error}");
 }
 
-fn fixture_response(state: &mut FixtureState, _method: &str, path: &str, body: &str) -> Value {
+fn fixture_response(state: &mut FixtureState, method: &str, path: &str, body: &str) -> Value {
+    if path.contains("filter_path=*.settings.index.uuid") {
+        let name = path.trim_start_matches('/').split('?').next().unwrap();
+        return state
+            .index_metadata
+            .get(name)
+            .map(|v| json!({name:v}))
+            .unwrap_or(json!({}));
+    }
+    if method == "PUT" && !path.contains("/_") && !body.is_empty() {
+        let definition: Value = serde_json::from_str(body).unwrap();
+        let name = path.trim_start_matches('/');
+        state.index_metadata.insert(name.into(),json!({"settings":{"index":{"uuid":format!("uuid-{name}")}},"mappings":definition["mappings"]}));
+        return json!({"acknowledged":true});
+    }
+    if path.contains("/_stats?") {
+        let prefix = path.trim_start_matches('/').split('*').next().unwrap();
+        let mut indices = serde_json::Map::new();
+        for (index, _) in state
+            .documents
+            .keys()
+            .filter(|(i, _)| i.starts_with(prefix))
+        {
+            let count = state.documents.keys().filter(|(i, _)| i == index).count() as i64;
+            indices.insert(index.clone(),json!({"uuid":format!("uuid-{index}"),"shards":{"0":[{"routing":{"primary":true},"seq_no":{"max_seq_no":count-1,"global_checkpoint":count-1}}]}}));
+        }
+        return json!({"indices":indices});
+    }
     if path.contains("/_refresh") {
         return state
             .refresh_responses
@@ -202,7 +239,7 @@ fn fixture_response(state: &mut FixtureState, _method: &str, path: &str, body: &
             .unwrap_or_else(|| json!({"_shards":{"total":1,"successful":1,"failed":0}}));
     }
     if path == "/" {
-        return json!({"version": {"number": state.server_version.as_deref().unwrap_or("9.5.3")}});
+        return json!({"cluster_uuid":"fixture-cluster","version": {"number": state.server_version.as_deref().unwrap_or("9.5.3")}});
     }
     if path.starts_with("/_data_stream/") {
         return json!({"data_streams": [{"indices": [{"index_name": format!(".ds-dns-{}", state.dns_generation)}]}]});
@@ -245,7 +282,16 @@ fn fixture_response(state: &mut FixtureState, _method: &str, path: &str, body: &
                 !backing_create && operation == "create" && state.documents.contains_key(&key);
             if !backing_create && !conflict {
                 let document = if operation == "update" {
-                    pair[1]["script"]["params"]["doc"].clone()
+                    if let Some(patch) = pair[1].get("doc") {
+                        let mut document = state.documents.get(&key).cloned().unwrap_or(json!({}));
+                        document
+                            .as_object_mut()
+                            .unwrap()
+                            .extend(patch.as_object().unwrap().clone());
+                        document
+                    } else {
+                        pair[1]["script"]["params"]["doc"].clone()
+                    }
                 } else {
                     pair[1].clone()
                 };
@@ -307,7 +353,7 @@ fn fixture_response(state: &mut FixtureState, _method: &str, path: &str, body: &
             .pointer("/query/term/execution_id")
             .and_then(Value::as_str);
         return json!({"count": state.documents.iter().filter(|((index, _), doc)| {
-            matches_index(index) && doc.get("execution_id").and_then(Value::as_str) == execution
+            matches_index(index) && execution.is_none_or(|id|doc.get("execution_id").and_then(Value::as_str) == Some(id))
         }).count(), "_shards": {"failed":0}});
     }
     if path.contains("_search") {
@@ -332,6 +378,55 @@ fn fixture_response(state: &mut FixtureState, _method: &str, path: &str, body: &
         }
         if request.pointer("/aggs/indices").is_some() {
             return json!({"aggregations": {"indices": {"buckets": []}}, "_shards": {"failed":0}});
+        }
+        if request.pointer("/aggs/batches").is_some() {
+            let mut counts = BTreeMap::new();
+            for ((index, _), doc) in &state.documents {
+                if matches_index(index)
+                    && doc["execution_id"] == request["query"]["term"]["execution_id"]
+                {
+                    *counts
+                        .entry((
+                            doc["upload_id"].as_str().unwrap().to_owned(),
+                            doc["batch_index"].as_i64().unwrap(),
+                        ))
+                        .or_insert(0u64) += 1;
+                }
+            }
+            let after = request.pointer("/aggs/batches/composite/after").map(|v| {
+                (
+                    v["upload"].as_str().unwrap().to_owned(),
+                    v["batch"].as_i64().unwrap(),
+                )
+            });
+            let buckets=counts.into_iter().filter(|(k,_)|after.as_ref().is_none_or(|a|k>a)).take(1000).map(|((upload,batch),count)|json!({"key":{"upload":upload,"batch":batch},"doc_count":count})).collect::<Vec<_>>();
+            return json!({"aggregations":{"batches":{"after_key":buckets.last().map(|b|b["key"].clone()),"buckets":buckets}},"_shards":{"failed":0}});
+        }
+        if request.pointer("/sort/0/observed_at").is_some()
+            || request.pointer("/sort/0/scope_type").is_some()
+        {
+            let raw = request.pointer("/sort/0/observed_at").is_some();
+            let mut hits=state.documents.iter().filter(|((index,_),doc)|matches_index(index) && request.pointer("/query/term/execution_id").is_none_or(|id|doc.get("execution_id")==Some(id)))
+              .map(|((index,id),doc)|json!({"_index":index,"_id":id,"_source":doc,"sort":if raw{json!([doc["observed_at"],doc["upload_id"],doc["batch_index"],doc["observation_key"]])}else{json!([doc["scope_type"],doc["scope_id"],doc["endpoint_key"]])}})).collect::<Vec<_>>();
+            let compare = |a: &Value, b: &Value| {
+                for (a, b) in a.as_array().unwrap().iter().zip(b.as_array().unwrap()) {
+                    let order = if a.is_number() {
+                        a.as_i64().cmp(&b.as_i64())
+                    } else {
+                        a.as_str().cmp(&b.as_str())
+                    };
+                    if order != std::cmp::Ordering::Equal {
+                        return order;
+                    }
+                }
+                std::cmp::Ordering::Equal
+            };
+            hits.sort_by(|a, b| compare(&a["sort"], &b["sort"]));
+            if let Some(after) = request.get("search_after") {
+                hits.retain(|h| compare(&h["sort"], after) == std::cmp::Ordering::Greater);
+            }
+            hits.truncate(request["size"].as_u64().unwrap() as usize);
+            return json!({"hits":{"hits":hits},"_shards":{"failed":0}});
         }
         if request.pointer("/sort/0/endpoint_key").is_some() {
             let execution = request

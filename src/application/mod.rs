@@ -192,11 +192,39 @@ pub async fn run(args: Clis) -> io::Result<()> {
     let elasticsearch_service = ElasticsearchService::new(elasticsearch_config)
         .map_err(|error| io::Error::other(format!("创建 Elasticsearch 客户端失败：{error}")))?;
     if args.rebuild_transport_endpoints {
-        let count = elasticsearch_service
-            .rebuild_transport_endpoints(&db_pool)
-            .await
-            .map_err(io::Error::other)?;
-        println!("端点投影重建完成：{count} 个执行；旧索引保留供回滚");
+        let progress = CliProgressReporter::new("端点投影重建");
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let work = elasticsearch_service
+            .rebuild_transport_endpoints_controlled(&db_pool, &progress, &stop);
+        tokio::pin!(work);
+        let interrupt = maintenance_interrupt();
+        tokio::pin!(interrupt);
+        let mut interrupted = false;
+        let mut deadline = None;
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_millis(250));
+        let result = loop {
+            tokio::select! {
+                result = &mut work => break result,
+                result = &mut interrupt, if !interrupted => {
+                    if let Err(error) = result { break Err(format!("无法监听中断信号：{error}")); }
+                    stop.store(true, std::sync::atomic::Ordering::Release);
+                    interrupted = true;
+                    deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+                    eprintln!("收到停止信号，等待当前页确认；再次运行同一命令将自动恢复");
+                }
+                _ = heartbeat.tick() => {
+                    if _storage_lease.is_closed() { break Err("存储运行锁连接丢失，已停止重建；恢复连接后重新运行".into()); }
+                    if deadline.is_some_and(|d|std::time::Instant::now() >= d) { break Err("等待当前页超时；已确认断点保留，重新运行自动恢复".into()); }
+                }
+            }
+        };
+        match result {
+            Ok(count) => progress.finish(format!("{count} 个执行；旧索引保留供回滚")),
+            Err(error) => {
+                progress.fail(&error);
+                return Err(io::Error::other(error));
+            }
+        }
         return Ok(());
     }
     if args.migrate_scan_data_to_elasticsearch {
@@ -895,4 +923,18 @@ pub async fn run(args: Clis) -> io::Result<()> {
         tracing::warn!(event="ReportRendererShutdownFailed",%error);
     }
     server_result
+}
+
+async fn maintenance_interrupt() -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result=tokio::signal::ctrl_c()=>result,
+            _=terminate.recv()=>Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }

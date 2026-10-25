@@ -89,7 +89,13 @@ network_mapping_server --config config.toml --rebuild-transport-endpoints
 network_mapping_server --config config.toml --rebuild-analytics-snapshots
 ```
 
-重建持有与服务互斥的存储锁，逐执行重放原始事实、保留源批次引用、重算端点计数、发布各权限范围、恢复 PG 当前标签并重新排队 OS/Web 补全；按执行保存游标，可重试。完整重放和刷新后，清除已发布执行的旧 outbox 游标/租约并标记完成，与运行标记切换在同一 PG 事务提交；纯漏洞观察不生成端点 Bulk。完成前不切换运行标记，旧索引不删除。仅切换到空索引会被启动检查拒绝。迁移期间不能同时清理事实保留期或变更 DNS/observation 存储位置。
+重建持有与服务互斥的存储锁。创建目标前先核对 PG 回执与 ES 事实的精确总量及各执行/上传/批次数量；不配套时立即失败，不创建目标、不改写计数、不推进断点。需要保留 ES 完整数据集时，应先找到并验证配套 PG 备份，不能把另一份较小 PG 的投影当作恢复结果。
+
+断点记录运行 ID、源集群/索引 UUID 与主分片序号、PG 回执指纹、目标 UUID，以及各执行重放/发布页和标签页游标。**中断后重新运行相同配置和命令即可自动恢复**，无需手动指定游标。Bulk 全部动作确认后才保存页断点；确认前中断的页会幂等重放。恢复时先等待同一运行遗留的 ES 写请求结束；源数据或目标身份改变会拒绝续跑。旧版仅含 `last_execution_id` 的断点无法验证，必须重新选择全新目标索引，不得直接沿用旧索引。已完成运行重复执行不再切换或重排 outbox。
+
+事实重放按页合并 Bulk，独立执行的并发数取 `scan_migration_concurrency`、`bulk_max_concurrency` 和 2 中的最小值；共享当前投影按执行 ID 顺序发布。`projection_page_size` 控制分页（事实页最多 1000 条），`bulk_batch_size` 与 `projection_bulk_max_bytes` 限制批量动作数及字节数。标签每页一次 PG 查询，仅对变化文档发 Bulk，不逐 IP 执行带刷新操作的 update-by-query。每个阶段完成后统一刷新。
+
+终端每 5 秒显示阶段、已确认量/总量、执行信息、速度和有足够采样时的阶段 ETA；续跑前的历史数量不计入本次速度。Ctrl-C/SIGTERM 会等待当前页确认（最多 60 秒），存储锁连接丢失则停止。完成全部重放、发布、标签同步及校验后，在同一 PG 事务中更新计数、处理投影 outbox、排队 OS/Web 补全并切换运行标记。失败期间保留旧运行配置和计数；旧索引不删除，纯漏洞观察不生成端点 Bulk。重建期间须停止扫描写入、事实保留期清理及 DNS/observation 位置变更。
 
 ### 刷新失败与超时排查
 
@@ -113,7 +119,7 @@ POST /_cluster/allocation/explain
 request_timeout_seconds = 180
 ```
 
-对应环境变量为 `NM__ELASTICSEARCH__REQUEST_TIMEOUT_SECONDS`，注意环境变量可覆盖文件值。Bulk 另受 `bulk_total_timeout_seconds`（默认 25 秒）约束；只增加 HTTP 超时不会增加 Bulk 总预算，也不会修复未分配主分片。失败的执行未保存完成断点，重跑会幂等重放该执行；已完成执行继续从原断点恢复。
+对应环境变量为 `NM__ELASTICSEARCH__REQUEST_TIMEOUT_SECONDS`，仅在 `--config-source env` 时使用；`--config-source file` 不会将环境变量合并覆盖文件。Bulk 另受 `bulk_total_timeout_seconds`（默认 25 秒）约束；只增加 HTTP 超时不会增加 Bulk 总预算，也不会修复未分配主分片。失败页不推进断点，重跑会幂等重放该页；已确认的页从持久化游标继续。
 
 若手动 GET 刷新约 1 分钟后返回零成功分片，而程序使用默认 30 秒请求期限，程序可能在 ES 等待分片期间提前超时。GET 与 POST 都受刷新语义约束；应先确认分片状态，不能仅改用 GET 或延长等待便认定迁移成功。
 
