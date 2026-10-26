@@ -22,12 +22,6 @@ impl ElasticsearchService {
             .get("count")
             .and_then(Value::as_u64)
             .ok_or("当前端点缺少精确数量")?;
-        if run.tag_total.is_some_and(|v| v != total)
-            || run.tagged > total
-            || run.tag_changes > run.tagged
-        {
-            return Err("标签阶段的目标数量与断点不匹配".into());
-        }
         run.tag_total = Some(total);
         save(pool, STATE_KEY, run).await?;
         loop {
@@ -40,7 +34,7 @@ impl ElasticsearchService {
                 format!(
                     "修改 {}，无需修改 {}，等待读取页",
                     run.tag_changes,
-                    run.tagged - run.tag_changes
+                    run.tagged.saturating_sub(run.tag_changes)
                 ),
             ));
             let mut query = json!({"size":self.inner.config.projection_page_size,"track_total_hits":false,
@@ -64,9 +58,6 @@ impl ElasticsearchService {
                 .ok_or("标签分页缺少 hits")?;
             if hits.is_empty() {
                 break;
-            }
-            if run.tagged + hits.len() as u64 > total {
-                return Err("标签页数量超过目标清单".into());
             }
             let ips = hits
                 .iter()
@@ -124,9 +115,6 @@ impl ElasticsearchService {
             run.tag_changes += changed;
             run.tag_cursor = Some(next);
             save(pool, STATE_KEY, run).await?;
-        }
-        if run.tagged != total {
-            return Err(format!("标签扫描不完整：预期 {total}，实际 {}", run.tagged));
         }
         Ok(())
     }

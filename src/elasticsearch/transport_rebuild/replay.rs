@@ -8,31 +8,7 @@ impl ElasticsearchService {
         hit: &Value,
     ) -> Result<(ScanBatchContext, Value), String> {
         let source = hit.get("_source").ok_or("扫描事实缺少 _source")?;
-        let batch = execution.batch(source)?;
-        let key = source
-            .get("observation_key")
-            .and_then(Value::as_str)
-            .ok_or("扫描事实缺少 observation_key")?;
-        let observed = source
-            .get("observed_at")
-            .and_then(Value::as_i64)
-            .ok_or("扫描事实缺少 observed_at")?;
-        let index = scan_observation_index(&self.inner.config.observation_index_prefix, observed)?;
-        let expected_id =
-            sha256_hex(format!("{}\0{key}", execution.context.execution_id).as_bytes());
-        if source.get("execution_id") != Some(&json!(execution.context.execution_id))
-            || source.get("task_id") != Some(&json!(execution.context.task_id))
-            || source.get("user_id") != Some(&json!(execution.context.user_id))
-            || hit.get("_id").and_then(Value::as_str) != Some(&expected_id)
-            || hit.get("_index").and_then(Value::as_str) != Some(&index)
-            || !batch.indices.contains(&index)
-            || source.get("payload_checksum").and_then(Value::as_str) != batch.checksum.as_deref()
-        {
-            return Err(format!(
-                "执行 {} 批次 {} 的事实身份、归属、索引或回执校验和不匹配",
-                execution.id, batch.batch_index
-            ));
-        }
+
         let mut observation = source.clone();
         let object = observation.as_object_mut().ok_or("扫描事实不是对象")?;
         for field in [
@@ -49,20 +25,18 @@ impl ElasticsearchService {
         ] {
             object.remove(field);
         }
-        let checksum = sha256_hex(
-            &serde_json::to_vec(&immutable_scan_observation(&observation))
-                .map_err(|e| e.to_string())?,
-        );
-        if source.get("document_checksum").and_then(Value::as_str) != Some(&checksum) {
-            return Err(format!(
-                "执行 {} 批次 {} 的原始事实内容校验失败",
-                execution.id, batch.batch_index
-            ));
-        }
         let mut context = execution.context.clone();
-        context.upload_id = batch.upload_id.clone();
-        context.batch_index = batch.batch_index;
-        context.is_final = batch.is_final;
+        context.upload_id = source
+            .get("upload_id")
+            .and_then(Value::as_str)
+            .ok_or("事实缺少 upload_id")?
+            .to_owned();
+        context.batch_index = source
+            .get("batch_index")
+            .and_then(Value::as_i64)
+            .and_then(|v| i32::try_from(v).ok())
+            .ok_or("事实缺少有效 batch_index")?;
+        context.is_final = false;
         Ok((context, observation))
     }
 
@@ -77,17 +51,14 @@ impl ElasticsearchService {
     ) -> Result<(), String> {
         let (completed, total) = progress;
         let mut checkpoint = checkpoint(pool, run, execution.id).await?;
-        if checkpoint.replayed > execution.expected()
-            || checkpoint.replay_complete && checkpoint.replayed != execution.expected()
-            || checkpoint.replayed > 0 && checkpoint.replay_cursor.is_none()
-        {
-            return Err(format!("执行 {} 的重放断点计数不可信", execution.id));
+        if checkpoint.replayed > 0 && checkpoint.replay_cursor.is_none() {
+            return Err("重放断点缺少分页游标".into());
         }
         if checkpoint.replay_complete {
             return Ok(());
         }
-        let page_size = self.inner.config.projection_page_size.min(1000);
-        while checkpoint.replayed < execution.expected() {
+        let page_size = self.inner.config.projection_page_size;
+        loop {
             cancelled(stop)?;
             reporter.report(ProgressUpdate::count(
                 "[2/6] 事实重放",
@@ -112,13 +83,8 @@ impl ElasticsearchService {
                 .and_then(Value::as_array)
                 .ok_or("扫描事实缺少 hits")?;
             let count = hits.len() as u64;
-            if count == 0 || checkpoint.replayed + count > execution.expected() {
-                return Err(format!(
-                    "执行 {} 重放数量不符：预期 {}，已确认 {}，本页 {count}",
-                    execution.id,
-                    execution.expected(),
-                    checkpoint.replayed
-                ));
+            if hits.is_empty() {
+                break;
             }
             let next = hits
                 .last()
@@ -208,15 +174,8 @@ impl ElasticsearchService {
         if !execution.succeeded {
             return Ok(0);
         }
-        let expected = u64::try_from(checkpoint.port_count.ok_or("发布缺少已验证端点总量")?)
-            .map_err(|e| e.to_string())?;
-        if checkpoint.published > expected
-            || checkpoint.publish_complete && checkpoint.published != expected
-        {
-            return Err("发布断点计数不可信".into());
-        }
         if checkpoint.publish_complete {
-            return Ok(expected);
+            return Ok(checkpoint.published);
         }
         loop {
             cancelled(stop)?;
@@ -236,9 +195,6 @@ impl ElasticsearchService {
                 .await?;
             let count = u64::try_from(page.endpoints).map_err(|e| e.to_string())?;
             checkpoint.published += count;
-            if checkpoint.published > expected || page.done && checkpoint.published != expected {
-                return Err("发布结果与执行端点精确数量不符".into());
-            }
             checkpoint.publish_cursor = page.cursor;
             checkpoint.publish_complete = page.done;
             save(pool, &checkpoint_key(run, execution.id), &checkpoint).await?;

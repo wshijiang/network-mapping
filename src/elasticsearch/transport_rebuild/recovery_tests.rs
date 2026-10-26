@@ -2,6 +2,13 @@ use super::*;
 use crate::elasticsearch::storage_tests::{EsFixture, isolated_pool_with_size, seed_execution};
 
 async fn setup(count: usize) -> (Pool, String, EsFixture, ElasticsearchService) {
+    setup_with_receipt_count(count, count as i32).await
+}
+
+async fn setup_with_receipt_count(
+    count: usize,
+    receipt_count: i32,
+) -> (Pool, String, EsFixture, ElasticsearchService) {
     let (pool, schema) = isolated_pool_with_size(3).await;
     seed_execution(&pool).await;
     let fixture = EsFixture::start();
@@ -35,7 +42,7 @@ async fn setup(count: usize) -> (Pool, String, EsFixture, ElasticsearchService) 
         .unwrap()
         .documents
         .retain(|(index, _), _| !index.contains("endpoints"));
-    pool.get().await.unwrap().execute("INSERT INTO scan_result_batch(execution_id,upload_id,batch_index,is_final,observation_count,storage_backend,payload_checksum,storage_references) VALUES(1,'upload',0,true,$1,'elasticsearch',$2,$3)",&[&(count as i32),&receipt.payload_checksum,&json!(receipt.indices)]).await.unwrap();
+    pool.get().await.unwrap().execute("INSERT INTO scan_result_batch(execution_id,upload_id,batch_index,is_final,observation_count,storage_backend,payload_checksum,storage_references) VALUES(1,'upload',0,true,$1,'elasticsearch',$2,$3)",&[&receipt_count,&receipt.payload_checksum,&json!(receipt.indices)]).await.unwrap();
     pool.get().await.unwrap().batch_execute("UPDATE scan_task_execution SET execution_status='succeeded',result_ip_count=77,result_port_count=88").await.unwrap();
     (pool, schema, fixture, service)
 }
@@ -50,16 +57,13 @@ async fn cleanup(pool: &Pool, schema: &str) {
 
 #[tokio::test]
 #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
-async fn mismatched_facts_fail_before_target_or_checkpoint_writes() {
+async fn fewer_es_facts_than_receipts_rebuilds_existing_facts() {
     let (pool, schema, fixture, service) = setup(3).await;
     fixture.state.lock().unwrap().documents.pop_first();
-    let error = service
-        .rebuild_transport_endpoints(&pool)
-        .await
-        .unwrap_err();
-    assert!(error.contains("数据不配套"), "{error}");
-    assert!(load(&pool, STATE_KEY).await.unwrap().is_none());
-    assert!(fixture.state.lock().unwrap().index_metadata.is_empty());
+    assert_eq!(service.rebuild_transport_endpoints(&pool).await.unwrap(), 1);
+    let run: Run = serde_json::from_value(load(&pool, STATE_KEY).await.unwrap().unwrap()).unwrap();
+    assert_eq!(run.source_counts.as_ref().unwrap().get(&1), Some(&2));
+    assert_eq!(checkpoint(&pool, &run, 1).await.unwrap().replayed, 2);
     let row = pool
         .get()
         .await
@@ -70,7 +74,7 @@ async fn mismatched_facts_fail_before_target_or_checkpoint_writes() {
         )
         .await
         .unwrap();
-    assert_eq!((row.get::<_, i64>(0), row.get::<_, i64>(1)), (77, 88));
+    assert_eq!((row.get::<_, i64>(0), row.get::<_, i64>(1)), (1, 2));
     cleanup(&pool, &schema).await;
 }
 
@@ -114,7 +118,7 @@ async fn interrupted_page_resumes_with_a_new_client_and_preserves_facts() {
             .iter()
             .filter(|(_, v)| v.pointer("/sort/0/observed_at").is_some())
             .collect::<Vec<_>>();
-        assert_eq!(pages.len(), 3);
+        assert_eq!(pages.len(), 4);
         assert!(pages[1].1.get("search_after").is_some());
         assert!(
             !state
@@ -128,7 +132,7 @@ async fn interrupted_page_resumes_with_a_new_client_and_preserves_facts() {
 
 #[tokio::test]
 #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
-async fn changed_target_uuid_or_source_checksum_blocks_resume() {
+async fn changed_target_uuid_blocks_resume_but_source_checksums_are_not_audited() {
     let (pool, schema, fixture, service) = setup(3).await;
     let stop = AtomicBool::new(false);
     service
@@ -162,15 +166,9 @@ async fn changed_target_uuid_or_source_checksum_blocks_resume() {
             value["service"] = json!("tampered");
         }
     }
-    assert!(
-        service
-            .rebuild_transport_endpoints(&pool)
-            .await
-            .unwrap_err()
-            .contains("内容校验失败")
-    );
+    assert_eq!(service.rebuild_transport_endpoints(&pool).await.unwrap(), 1);
     let run: Run = serde_json::from_value(load(&pool, STATE_KEY).await.unwrap().unwrap()).unwrap();
-    assert_eq!(checkpoint(&pool, &run, 1).await.unwrap().replayed, 2);
+    assert_eq!(checkpoint(&pool, &run, 1).await.unwrap().replayed, 3);
     cleanup(&pool, &schema).await;
 }
 
@@ -245,16 +243,23 @@ async fn live_transport_rebuild_resumes_and_preserves_raw_documents() {
         let observations=(0..5).map(|n|json!({"observation_key":format!("k{n:04}"),"kind":"service","ip_address":"192.0.2.1","port":1000+n/2,"protocol":if n%2==0{"tcp"}else{"udp"},"service":"http","observed_at":1000})).collect::<Vec<_>>();
         let receipt=writer.persist_scan_batch_prepared(&context,&observations,None).await?;
         service.refresh_rebuild_index(&source).await?;
-        pool.get().await.map_err(|e|e.to_string())?.execute("INSERT INTO scan_result_batch(execution_id,upload_id,batch_index,is_final,observation_count,storage_backend,payload_checksum,storage_references) VALUES(1,'upload',0,false,5,'elasticsearch',$1,$2)",&[&receipt.payload_checksum,&json!(receipt.indices)]).await.map_err(|e|e.to_string())?;
+        pool.get().await.map_err(|e|e.to_string())?.execute("INSERT INTO scan_result_batch(execution_id,upload_id,batch_index,is_final,observation_count,storage_backend,payload_checksum,storage_references) VALUES(1,'upload',0,false,984,'elasticsearch',$1,$2)",&[&receipt.payload_checksum,&json!(receipt.indices)]).await.map_err(|e|e.to_string())?;
         pool.get().await.map_err(|e|e.to_string())?.batch_execute("UPDATE scan_task_execution SET execution_status='succeeded'").await.map_err(|e|e.to_string())?;
         let source_identity=service.rebuild_source().await?;
+        let raw_before=service.send_json_request(ElasticsearchOperation::ScanQuery,Method::POST,&format!("/{source}/_search"),|r|r.json(&json!({"size":10,"sort":[{"observation_key":"asc"}]}))).await?;
         let stop=AtomicBool::new(false);
         let error=service.rebuild_transport_endpoints_controlled(&pool,&StopAfterPage(&stop),&stop).await.unwrap_err();
         if !error.contains("已中断"){return Err(error);}
         let resumed=ElasticsearchService::new(config.clone()).map_err(|e|e.to_string())?;
         if resumed.rebuild_transport_endpoints(&pool).await?!=1 {return Err("重建未完成".into());}
         if resumed.rebuild_transport_endpoints(&pool).await?!=0 {return Err("完成后的重跑不幂等".into());}
-        if source_identity!=service.rebuild_source().await? {return Err("原始事实索引被改写".into());}
+        if source_identity!=service.rebuild_source().await? {return Err("原始事实索引身份变化".into());}
+        let raw_after=service.send_json_request(ElasticsearchOperation::ScanQuery,Method::POST,&format!("/{source}/_search"),|r|r.json(&json!({"size":10,"sort":[{"observation_key":"asc"}]}))).await?;
+        if raw_before["hits"]!=raw_after["hits"] {return Err("原始事实被改写".into());}
+        for name in [&config.execution_endpoint_index,&config.current_endpoint_index] {
+            let settings=resumed.send_json_request(ElasticsearchOperation::IndexAdmin,Method::GET,&format!("/{name}/_settings"),|r|r).await?;
+            if settings[name]["settings"]["index"]["refresh_interval"]!="1s" {return Err("完成后没有恢复自动刷新".into());}
+        }
         let summary=resumed.execution_summary("execution",&[]).await?;
         if summary.port_count!=5 || summary.ip_count!=1 {return Err(format!("端点计数错误：{summary:?}"));}
         let current=resumed.send_json_request(ElasticsearchOperation::ScanQuery,Method::POST,&format!("/{}/_search",config.current_endpoint_index),|r|r.json(&json!({"size":20,"query":{"match_all":{}}}))).await?;
@@ -294,7 +299,7 @@ impl ProgressReporter for StopTags<'_> {
 }
 #[tokio::test]
 #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
-async fn tag_pages_resume_and_changed_assignments_restart_tag_scan() {
+async fn tag_pages_resume_without_a_full_data_audit() {
     let (pool, schema, fixture, service) = setup(5).await;
     pool.get().await.unwrap().batch_execute("INSERT INTO asset_tag(id,name,kind,category_id) SELECT 99,'fixture','info',id FROM asset_tag_category ORDER BY id LIMIT 1; INSERT INTO asset_ip_tag(ip_address,tag_id) VALUES('192.0.2.1',99)").await.unwrap();
     let stop = AtomicBool::new(false);
@@ -313,17 +318,11 @@ async fn tag_pages_resume_and_changed_assignments_restart_tag_scan() {
             .unwrap()
             .is_none()
     );
-    pool.get()
-        .await
-        .unwrap()
-        .batch_execute("DELETE FROM asset_ip_tag")
-        .await
-        .unwrap();
     assert_eq!(service.rebuild_transport_endpoints(&pool).await.unwrap(), 1);
     for ((index, _), doc) in &fixture.state.lock().unwrap().documents {
         if index == &service.inner.config.current_endpoint_index {
-            assert_eq!(doc["tags"], json!([]));
-            assert_eq!(doc["tag_ids"], json!([]));
+            assert_eq!(doc["tag_names"], json!(["fixture"]));
+            assert_eq!(doc["tag_ids"], json!([99]));
         }
     }
     cleanup(&pool, &schema).await;
@@ -331,7 +330,7 @@ async fn tag_pages_resume_and_changed_assignments_restart_tag_scan() {
 
 #[tokio::test]
 #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
-async fn equal_total_with_wrong_batch_still_fails_preflight() {
+async fn es_batch_metadata_does_not_require_a_matching_historical_receipt() {
     let (pool, schema, fixture, service) = setup(3).await;
     fixture
         .state
@@ -341,12 +340,204 @@ async fn equal_total_with_wrong_batch_still_fails_preflight() {
         .first_entry()
         .unwrap()
         .get_mut()["upload_id"] = json!("wrong-upload");
-    let error = service
-        .rebuild_transport_endpoints(&pool)
+    assert_eq!(service.rebuild_transport_endpoints(&pool).await.unwrap(), 1);
+    let run: Run = serde_json::from_value(load(&pool, STATE_KEY).await.unwrap().unwrap()).unwrap();
+    assert_eq!(checkpoint(&pool, &run, 1).await.unwrap().replayed, 3);
+    cleanup(&pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn es_counts_survive_resume_despite_larger_pg_and_dns_receipts() {
+    let (pool, schema, fixture, service) = setup_with_receipt_count(5, 984).await;
+    pool.get().await.unwrap().batch_execute("UPDATE scan_result_batch SET storage_references='[\"expired-index\"]'; INSERT INTO scan_result_batch(execution_id,upload_id,batch_index,is_final,observation_count,storage_backend,storage_references) VALUES(1,'dns-sidecar',0,false,979,'elasticsearch','[\"dns-observations\",\"dns-records\"]')").await.unwrap();
+    let raw = fixture.state.lock().unwrap().documents.clone();
+    let stop = AtomicBool::new(false);
+    assert!(
+        service
+            .rebuild_transport_endpoints_controlled(&pool, &StopAfterPage(&stop), &stop)
+            .await
+            .unwrap_err()
+            .contains("已中断")
+    );
+    let run: Run = serde_json::from_value(load(&pool, STATE_KEY).await.unwrap().unwrap()).unwrap();
+    assert_eq!(run.source_counts.as_ref().unwrap().get(&1), Some(&5));
+    assert_eq!(checkpoint(&pool, &run, 1).await.unwrap().replayed, 2);
+    let resumed = ElasticsearchService::new(service.inner.config.clone()).unwrap();
+    assert_eq!(resumed.rebuild_transport_endpoints(&pool).await.unwrap(), 1);
+    let cp = checkpoint(&pool, &run, 1).await.unwrap();
+    assert_eq!(cp.replayed, 5);
+    assert_eq!(cp.port_count, Some(5));
+    for (key, value) in raw {
+        assert_eq!(
+            fixture.state.lock().unwrap().documents.get(&key),
+            Some(&value)
+        );
+    }
+    cleanup(&pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn missing_or_smaller_pg_receipts_do_not_limit_es_replay() {
+    for missing in [false, true] {
+        let (pool, schema, _fixture, service) = setup_with_receipt_count(3, 1).await;
+        pool.get()
+            .await
+            .unwrap()
+            .batch_execute(if missing {
+                "DELETE FROM scan_result_batch"
+            } else {
+                "SELECT 1"
+            })
+            .await
+            .unwrap();
+        assert_eq!(service.rebuild_transport_endpoints(&pool).await.unwrap(), 1);
+        let run: Run =
+            serde_json::from_value(load(&pool, STATE_KEY).await.unwrap().unwrap()).unwrap();
+        assert_eq!(checkpoint(&pool, &run, 1).await.unwrap().replayed, 3);
+        cleanup(&pool, &schema).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn reconstruction_never_queries_receipt_or_batch_reconciliation() {
+    let (pool, schema, fixture, service) = setup_with_receipt_count(3, 982).await;
+    assert_eq!(service.rebuild_transport_endpoints(&pool).await.unwrap(), 1);
+    {
+        let state = fixture.state.lock().unwrap();
+        assert!(
+            !state
+                .query_bodies
+                .iter()
+                .any(|(_, q)| q.pointer("/aggs/batches").is_some())
+        );
+        assert!(
+            state
+                .query_bodies
+                .iter()
+                .filter(|(path, _)| path.contains("scan-observations") && path.contains("_count"))
+                .all(|(_, q)| q.pointer("/query/term/execution_id") == Some(&json!("execution")))
+        );
+    }
+    cleanup(&pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn previous_page_checkpoint_without_source_counts_still_resumes() {
+    let (pool, schema, _fixture, service) = setup(5).await;
+    let stop = AtomicBool::new(false);
+    service
+        .rebuild_transport_endpoints_controlled(&pool, &StopAfterPage(&stop), &stop)
         .await
         .unwrap_err();
-    assert!(error.contains("事实数量不匹配"), "{error}");
-    assert!(load(&pool, STATE_KEY).await.unwrap().is_none());
-    assert!(fixture.state.lock().unwrap().index_metadata.is_empty());
+    let mut value = load(&pool, STATE_KEY).await.unwrap().unwrap();
+    value.as_object_mut().unwrap().remove("source_counts");
+    save(&pool, STATE_KEY, &value).await.unwrap();
+    assert_eq!(service.rebuild_transport_endpoints(&pool).await.unwrap(), 1);
+    cleanup(&pool, &schema).await;
+}
+
+#[test]
+fn offline_cli_profile_uses_supported_throughput_limits() {
+    let normal = ElasticsearchConfig::default();
+    let fast = ElasticsearchService::transport_rebuild_config(normal.clone());
+    assert_eq!(
+        (normal.bulk_max_concurrency, normal.bulk_batch_size),
+        (2, 500)
+    );
+    assert_eq!(
+        (fast.bulk_max_concurrency, fast.scan_migration_concurrency),
+        (32, 32)
+    );
+    assert_eq!(
+        (fast.projection_page_size, fast.bulk_batch_size),
+        (2000, 2000)
+    );
+    assert_eq!(fast.projection_bulk_max_bytes, 16 * 1024 * 1024);
+    assert!(fast.scan_migration_page_size >= fast.scan_migration_concurrency);
+    assert!(ElasticsearchService::new(fast).is_ok());
+}
+
+#[tokio::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn full_size_pages_and_parallel_publication_preserve_execution_order() {
+    let (pool, schema, fixture, original) = setup(2001).await;
+    let service = ElasticsearchService::new(ElasticsearchService::transport_rebuild_config(
+        original.inner.config.clone(),
+    ))
+    .unwrap();
+    pool.get().await.unwrap().batch_execute("INSERT INTO scan_task_execution(id,execution_id,task_id,execution_status) VALUES(2,'execution-2',1,'succeeded')").await.unwrap();
+    {
+        let mut state = fixture.state.lock().unwrap();
+        let ((index, _), source) = state.documents.iter().next().unwrap();
+        let index = index.clone();
+        let mut source = source.clone();
+        source["execution_id"] = json!("execution-2");
+        source["service"] = json!("ssh");
+        let id = sha256_hex(
+            format!(
+                "execution-2\0{}",
+                source["observation_key"].as_str().unwrap()
+            )
+            .as_bytes(),
+        );
+        state.documents.insert((index, id), source);
+        state.requests.clear();
+    }
+    assert_eq!(service.rebuild_transport_endpoints(&pool).await.unwrap(), 2);
+    {
+        let state = fixture.state.lock().unwrap();
+        let pages = state
+            .query_bodies
+            .iter()
+            .filter(|(_, q)| q.pointer("/sort/0/observed_at").is_some())
+            .collect::<Vec<_>>();
+        assert!(pages.iter().all(|(_, q)| q["size"] == 2000));
+        // 2001 facts use two nonempty pages plus EOF; the second execution uses one plus EOF.
+        assert_eq!(pages.len(), 5);
+        let bulk_requests = state
+            .requests
+            .iter()
+            .filter(|p| p.contains("/_bulk"))
+            .count();
+        assert!(
+            bulk_requests < 30,
+            "unexpected per-document writes: {bulk_requests}"
+        );
+        assert_eq!(
+            state
+                .documents
+                .iter()
+                .filter(
+                    |((i, _), d)| i == &service.inner.config.current_endpoint_index
+                        && d["execution_id"] == "execution-2"
+                        && d["service"] == "ssh"
+                )
+                .count(),
+            2
+        );
+    }
+    cleanup(&pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn failure_restoring_automatic_refresh_keeps_cutover_resumable() {
+    let (pool, schema, fixture, service) = setup(3).await;
+    fixture.state.lock().unwrap().fail_path = Some("/_settings".into());
+    assert!(service.rebuild_transport_endpoints(&pool).await.is_err());
+    let run: Run = serde_json::from_value(load(&pool, STATE_KEY).await.unwrap().unwrap()).unwrap();
+    assert_eq!(run.phase, Phase::Cutover);
+    assert!(
+        load(&pool, "elasticsearch_runtime")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    fixture.state.lock().unwrap().fail_path = None;
+    assert_eq!(service.rebuild_transport_endpoints(&pool).await.unwrap(), 1);
     cleanup(&pool, &schema).await;
 }

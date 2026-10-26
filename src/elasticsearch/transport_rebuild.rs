@@ -8,6 +8,17 @@ mod tags;
 use io::Bulk;
 use state::*;
 impl ElasticsearchService {
+    /// Offline CLI profile: use the supported throughput limits without changing normal service defaults.
+    pub(crate) fn transport_rebuild_config(mut config: ElasticsearchConfig) -> ElasticsearchConfig {
+        config.bulk_batch_size = 2000;
+        config.projection_page_size = 2000;
+        config.projection_bulk_max_bytes = 16 * 1024 * 1024;
+        config.bulk_max_concurrency = 32;
+        config.scan_migration_concurrency = 32;
+        config.scan_migration_page_size = config.scan_migration_page_size.max(32);
+        config
+    }
+
     pub async fn rebuild_transport_endpoints(&self, pool: &Pool) -> Result<u64, String> {
         self.rebuild_transport_endpoints_with_progress(pool, &NoopProgressReporter)
             .await
@@ -26,6 +37,16 @@ impl ElasticsearchService {
         reporter: &dyn ProgressReporter,
         stop: &AtomicBool,
     ) -> Result<u64, String> {
+        reporter.report(ProgressUpdate::phase(format!(
+            "重建吞吐：并发 {}，分页 {}，Bulk {} 条 / {} MiB",
+            self.inner
+                .config
+                .bulk_max_concurrency
+                .min(self.inner.config.scan_migration_concurrency),
+            self.inner.config.projection_page_size,
+            self.inner.config.bulk_batch_size,
+            self.inner.config.projection_bulk_max_bytes / (1024 * 1024)
+        )));
         let result = runner::run(self, pool, reporter, stop).await;
         *self
             .inner

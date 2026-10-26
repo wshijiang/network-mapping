@@ -189,6 +189,11 @@ pub async fn run(args: Clis) -> io::Result<()> {
             .map_err(|error| io::Error::other(format!("管理命令失败：{error}")))?;
         return Ok(());
     }
+    let elasticsearch_config = if args.rebuild_transport_endpoints {
+        ElasticsearchService::transport_rebuild_config(elasticsearch_config)
+    } else {
+        elasticsearch_config
+    };
     let elasticsearch_service = ElasticsearchService::new(elasticsearch_config)
         .map_err(|error| io::Error::other(format!("创建 Elasticsearch 客户端失败：{error}")))?;
     if args.rebuild_transport_endpoints {

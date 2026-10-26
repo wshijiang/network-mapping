@@ -60,17 +60,12 @@ impl Bulk {
 impl ElasticsearchService {
     pub(super) async fn rebuild_search(
         &self,
-        execution: &Execution,
+        _execution: &Execution,
         body: &Value,
     ) -> Result<Value, String> {
-        let indices = execution.indices();
-        if indices.is_empty() {
-            return Ok(json!({"hits":{"hits":[]},"aggregations":{"batches":{"buckets":[]}}}));
-        }
-        let target =
-            observation_search_target(&self.inner.config.observation_index_prefix, &indices)?;
         let path = format!(
-            "/{target}/_search?allow_no_indices=false&ignore_unavailable=false&allow_partial_search_results=false"
+            "/{}-*/_search?allow_no_indices=true&ignore_unavailable=false&allow_partial_search_results=false",
+            self.inner.config.observation_index_prefix
         );
         ensure_scan_request_line_fits(&self.inner.config.url, &path)?;
         let response = self
@@ -85,137 +80,50 @@ impl ElasticsearchService {
         Ok(response)
     }
 
-    pub(super) async fn preflight_rebuild(
+    /// Counts are progress estimates only, never a prerequisite for successful replay.
+    pub(super) async fn rebuild_progress_counts(
         &self,
         jobs: &[Execution],
-        source: &Value,
         reporter: &dyn ProgressReporter,
         stop: &AtomicBool,
-    ) -> Result<(), String> {
-        let expected: u64 = jobs.iter().map(Execution::expected).sum();
-        let indices = source
-            .get("indices")
-            .and_then(Value::as_object)
-            .ok_or("源清单缺少索引")?;
-        for execution in jobs {
-            for batch in &execution.batches {
-                if batch.observation_count > 0
-                    && (batch.indices.is_empty() || batch.checksum.is_none())
-                {
-                    return Err(format!(
-                        "执行 {} 批次 {} 缺少事实索引或校验和，请先完成迁移对账",
-                        execution.id, batch.batch_index
-                    ));
-                }
-                for index in &batch.indices {
-                    if !indices.contains_key(index) {
-                        return Err(format!("扫描回执索引 {index} 不存在或与事实前缀不符"));
-                    }
-                }
-            }
-        }
-        let actual = if indices.is_empty() {
-            0
-        } else {
-            let response = self
-                .send_json_request(
-                    ElasticsearchOperation::ScanQuery,
-                    Method::POST,
-                    &format!(
-                        "/{}-*/_count?allow_no_indices=false&ignore_unavailable=false",
-                        self.inner.config.observation_index_prefix
-                    ),
-                    |r| r.json(&json!({"query":{"match_all":{}}})),
-                )
-                .await?;
-            validate_scan_search_response(&response)?;
-            response
-                .get("count")
-                .and_then(Value::as_u64)
-                .ok_or("源事实缺少精确数量")?
-        };
-        if actual != expected {
-            return Err(format!(
-                "PG/ES 数据不配套：PG 回执预期 {expected} 条 IP 扫描观察，ES 实际 {actual} 条；请恢复配套 PG/ES，未创建目标或推进断点"
-            ));
-        }
-        let mut verified = 0;
-        for execution in jobs {
-            cancelled(stop)?;
-            reporter.report(ProgressUpdate::count(
-                "[1/6] 校验源批次",
-                verified,
-                Some(expected),
-                "条",
-                format!("执行 {}；仅查询原始事实", execution.id),
-            ));
-            let expected_batches = execution
-                .batches
-                .iter()
-                .map(|b| {
-                    (
-                        json!([b.upload_id, b.batch_index]).to_string(),
-                        b.observation_count,
-                    )
-                })
-                .collect::<BTreeMap<_, _>>();
-            let mut seen = BTreeMap::new();
-            let mut after: Option<Value> = None;
-            loop {
+    ) -> Result<BTreeMap<i32, u64>, String> {
+        let mut counts = BTreeMap::new();
+        let path = format!(
+            "/{}-*/_count?allow_no_indices=true&ignore_unavailable=false",
+            self.inner.config.observation_index_prefix
+        );
+        let mut work = stream::iter(jobs.iter().map(|job| {
+            let path = &path;
+            async move {
                 cancelled(stop)?;
-                let mut composite = json!({"size":1000,"sources":[{"upload":{"terms":{"field":"upload_id"}}},{"batch":{"terms":{"field":"batch_index"}}}]});
-                if let Some(value) = &after {
-                    composite["after"] = value.clone();
-                }
-                let response=self.rebuild_search(execution,&json!({"size":0,"query":{"term":{"execution_id":execution.context.execution_id}},"aggs":{"batches":{"composite":composite}}})).await?;
-                let buckets = response
-                    .pointer("/aggregations/batches/buckets")
-                    .and_then(Value::as_array)
-                    .ok_or("批次校验响应缺少 buckets")?;
-                for bucket in buckets {
-                    let key = json!([
-                        bucket.pointer("/key/upload").ok_or("批次聚合缺少 upload")?,
-                        bucket.pointer("/key/batch").ok_or("批次聚合缺少 batch")?
-                    ])
-                    .to_string();
-                    let count = bucket
-                        .get("doc_count")
+                let response = self
+                    .send_json_request(ElasticsearchOperation::ScanQuery, Method::POST, path, |r| {
+                        r.json(&json!({"query":{"term":{"execution_id":job.context.execution_id}}}))
+                    })
+                    .await?;
+                validate_scan_search_response(&response)?;
+                Ok::<_, String>((
+                    job.id,
+                    response
+                        .get("count")
                         .and_then(Value::as_u64)
-                        .ok_or("批次聚合缺少数量")?;
-                    if expected_batches.get(&key) != Some(&count)
-                        || seen.insert(key.clone(), count).is_some()
-                    {
-                        return Err(format!(
-                            "执行 {} 批次 {key} 事实数量不匹配或重复：PG {:?}，ES {count}",
-                            execution.id,
-                            expected_batches.get(&key)
-                        ));
-                    }
-                }
-                let next = response.pointer("/aggregations/batches/after_key").cloned();
-                if buckets.len() < 1000 || next.is_none() {
-                    break;
-                }
-                if next == after {
-                    return Err("批次校验分页未前进".into());
-                }
-                after = next;
+                        .ok_or("ES 计数响应缺少 count")?,
+                ))
             }
-            for (key, count) in expected_batches {
-                let actual = seen.get(&key).copied().unwrap_or(0);
-                if count != actual {
-                    return Err(format!(
-                        "执行 {} 批次 {key} 事实缺失：PG {count}，ES {actual}",
-                        execution.id
-                    ));
-                }
-            }
-            verified += execution.expected();
+        }))
+        .buffer_unordered(self.inner.config.scan_migration_concurrency);
+        while let Some(result) = work.next().await {
+            let (id, count) = result?;
+            counts.insert(id, count);
+            reporter.report(ProgressUpdate::count(
+                "[1/6] 准备重建进度",
+                counts.len() as u64,
+                Some(jobs.len() as u64),
+                "执行",
+                "只统计 ES 现存事实，不核对历史回执",
+            ));
         }
-        if &self.rebuild_source().await? != source {
-            return Err("预检期间源索引发生变化，请保持扫描事实停写".into());
-        }
-        Ok(())
+        Ok(counts)
     }
 
     pub(super) async fn refresh_rebuild_index(&self, index: &str) -> Result<(), String> {

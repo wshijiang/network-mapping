@@ -280,6 +280,24 @@ impl ElasticsearchService {
         } else {
             cursor.cloned()
         };
+        // A page contains distinct endpoint keys and scopes. Its bulks can run
+        // concurrently offline; the caller still waits for the entire page before
+        // checkpointing or publishing the next execution.
+        let concurrency = if self
+            .inner
+            .maintenance_run_id
+            .read()
+            .expect("maintenance identity lock poisoned")
+            .is_some()
+        {
+            self.inner.config.bulk_max_concurrency
+        } else {
+            1
+        };
+        let mut pending = futures_util::stream::FuturesUnordered::new();
+        let send = |body: String, ids: Vec<String>| async move {
+            self.write_projection_bulk(context, &body, &ids).await
+        };
         let mut body = String::new();
         let mut ids = Vec::new();
         for hit in hits {
@@ -326,16 +344,22 @@ impl ElasticsearchService {
                     && (body.len() + action.len() > self.inner.config.projection_bulk_max_bytes
                         || ids.len() >= self.inner.config.bulk_batch_size)
                 {
-                    self.write_projection_bulk(context, &body, &ids).await?;
-                    body.clear();
-                    ids.clear();
+                    pending.push(send(std::mem::take(&mut body), std::mem::take(&mut ids)));
+                    if pending.len() >= concurrency
+                        && let Some(result) = pending.next().await
+                    {
+                        result?;
+                    }
                 }
                 body.push_str(&action);
                 ids.push(id);
             }
         }
         if !body.is_empty() {
-            self.write_projection_bulk(context, &body, &ids).await?;
+            pending.push(send(body, ids));
+        }
+        while let Some(result) = pending.next().await {
+            result?;
         }
         Ok(ProjectionPage {
             cursor: next,

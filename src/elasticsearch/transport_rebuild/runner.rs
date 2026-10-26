@@ -7,7 +7,7 @@ pub(super) async fn run(
     reporter: &dyn ProgressReporter,
     stop: &AtomicBool,
 ) -> Result<u64, String> {
-    reporter.report(ProgressUpdate::phase("[1/6] 检查重建身份与数据配套"));
+    reporter.report(ProgressUpdate::phase("[1/6] 检查重建身份与 ES 来源"));
     let target = service.rebuild_target();
     let previous = load(pool, "elasticsearch_runtime").await?;
     let saved = load(pool, STATE_KEY).await?;
@@ -77,23 +77,22 @@ pub(super) async fn run(
         }
         let jobs = executions(pool).await?;
         let source = service.rebuild_source().await?;
-        service
-            .preflight_rebuild(&jobs, &source, reporter, stop)
+        let source_counts = service
+            .rebuild_progress_counts(&jobs, reporter, stop)
             .await?;
         let run = Run {
             format_version: FORMAT_VERSION,
             run_id: Uuid::new_v4(),
             target: target.clone(),
             previous_runtime: previous.clone(),
-            receipts_hash: receipts_hash(&jobs)?,
             source,
+            source_counts: Some(source_counts),
             target_uuids: BTreeMap::new(),
             phase: Phase::Initializing,
             tag_cursor: None,
             tagged: 0,
             tag_changes: 0,
             tag_total: None,
-            tags_hash: tags_hash(pool).await?,
         };
         if let Some(saved) = saved {
             save(
@@ -119,26 +118,28 @@ pub(super) async fn run(
         service.prepare_rebuild_targets(pool, &mut run).await?;
         return Ok(0);
     }
-    let jobs = executions(pool).await?;
-    if previous != run.previous_runtime
-        || receipts_hash(&jobs)? != run.receipts_hash
-        || service.rebuild_source().await? != run.source
-    {
-        return Err("PG 回执、运行配置或 ES 源身份已变化，拒绝沿用旧断点".into());
-    }
-    service.prepare_rebuild_targets(pool, &mut run).await?;
-    let current_tags = tags_hash(pool).await?;
-    if current_tags != run.tags_hash {
-        run.tags_hash = current_tags;
-        run.tag_cursor = None;
-        run.tagged = 0;
-        run.tag_changes = 0;
-        run.tag_total = None;
-        if matches!(run.phase, Phase::Tags | Phase::RefreshTags | Phase::Cutover) {
-            run.phase = Phase::Tags;
-        }
+    let mut jobs = executions(pool).await?;
+    if run.source_counts.is_none() {
+        run.source_counts = Some(
+            service
+                .rebuild_progress_counts(&jobs, reporter, stop)
+                .await?,
+        );
         save(pool, STATE_KEY, &run).await?;
     }
+    for job in &mut jobs {
+        job.source_count = run
+            .source_counts
+            .as_ref()
+            .and_then(|counts| counts.get(&job.id))
+            .copied();
+    }
+    if previous != run.previous_runtime
+        || source_identity(&service.rebuild_source().await?) != source_identity(&run.source)
+    {
+        return Err("运行配置或源索引身份变化，无法沿用该索引的断点".into());
+    }
+    service.prepare_rebuild_targets(pool, &mut run).await?;
     loop {
         cancelled(stop)?;
         match run.phase {
@@ -156,7 +157,7 @@ pub(super) async fn run(
                     .config
                     .scan_migration_concurrency
                     .min(service.inner.config.bulk_max_concurrency)
-                    .clamp(1, 2);
+                    .max(1);
                 let mut work = stream::iter(jobs.iter().map(|job| {
                     service.replay_rebuild_execution(
                         pool,
@@ -175,20 +176,26 @@ pub(super) async fn run(
                 run.phase = Phase::RefreshExecution;
             }
             Phase::RefreshExecution => {
-                reporter.report(ProgressUpdate::phase("[2/6] 刷新并核对执行端点"));
+                reporter.report(ProgressUpdate::phase("[2/6] 刷新并统计执行端点"));
                 service
                     .refresh_rebuild_index(&service.inner.config.execution_endpoint_index)
                     .await?;
-                for job in &jobs {
+                let run_ref = &run;
+                let mut work = stream::iter(jobs.iter().map(|job| async move {
                     cancelled(stop)?;
                     let summary = service
                         .execution_summary(&job.context.execution_id, &[])
                         .await?;
-                    let mut cp = checkpoint(pool, &run, job.id).await?;
+                    let mut cp = checkpoint(pool, run_ref, job.id).await?;
                     cp.ip_count = Some(summary.ip_count);
                     cp.port_count = Some(summary.port_count);
-                    save(pool, &checkpoint_key(&run, job.id), &cp).await?;
+                    save(pool, &checkpoint_key(run_ref, job.id), &cp).await
+                }))
+                .buffer_unordered(service.inner.config.scan_migration_concurrency);
+                while let Some(result) = work.next().await {
+                    result?;
                 }
+                drop(work);
                 run.phase = Phase::Publishing;
             }
             Phase::Publishing => {
@@ -222,23 +229,16 @@ pub(super) async fn run(
                 run.phase = Phase::RefreshTags;
             }
             Phase::RefreshTags => {
-                reporter.report(ProgressUpdate::phase("[5/6] 刷新标签并验证源身份"));
+                reporter.report(ProgressUpdate::phase("[5/6] 刷新标签"));
                 service
                     .refresh_rebuild_index(&service.inner.config.current_endpoint_index)
                     .await?;
                 run.phase = Phase::Cutover;
             }
             Phase::Cutover => {
-                reporter.report(ProgressUpdate::phase("[6/6] 校验并原子切换"));
-                if service.rebuild_source().await? != run.source
-                    || receipts_hash(&executions(pool).await?)? != run.receipts_hash
-                {
-                    return Err("重建期间事实或 PG 回执发生变化，拒绝切换".into());
-                }
-                if tags_hash(pool).await? != run.tags_hash {
-                    return Err("标签在重建期间变化，请重新运行以同步最新标签".into());
-                }
+                reporter.report(ProgressUpdate::phase("[6/6] 原子切换索引"));
                 service.prepare_rebuild_targets(pool, &mut run).await?;
+                service.restore_rebuild_refresh().await?;
                 cutover(service, pool, &mut run, &jobs).await?;
                 return Ok(jobs.len() as u64);
             }
