@@ -37,6 +37,11 @@ pub(super) enum Phase {
 pub(super) struct Run {
     pub format_version: u32,
     pub run_id: Uuid,
+    // Only deserializing an older checkpoint defaults to new-index; CLI has no default.
+    #[serde(default)]
+    pub mode: TransportRebuildMode,
+    #[serde(default)]
+    pub original_target_uuids: BTreeMap<String, String>,
     pub target: Value,
     pub previous_runtime: Option<Value>,
     pub source: Value,
@@ -232,7 +237,45 @@ impl ElasticsearchService {
             &self.inner.config.execution_endpoint_index,
             &self.inner.config.current_endpoint_index,
         ] {
-            let metadata = match self.rebuild_index(name).await? {
+            let mut existing = self.rebuild_index(name).await?;
+            if run.mode == TransportRebuildMode::InPlace
+                && run.phase == Phase::Initializing
+                && !run.target_uuids.contains_key(name)
+                && let Some(metadata) = existing.as_ref()
+                && metadata.pointer("/mappings/_meta/rebuild_run_id") != Some(&json!(run.run_id))
+            {
+                let original = run
+                    .original_target_uuids
+                    .get(name)
+                    .ok_or("原地重建目标并非启动时记录的索引，拒绝删除")?;
+                if metadata
+                    .pointer("/settings/index/uuid")
+                    .and_then(Value::as_str)
+                    != Some(original)
+                {
+                    return Err(format!(
+                        "原地重建目标 {name} 已被替换，拒绝删除不同 UUID 的索引"
+                    ));
+                }
+                let response = self
+                    .send_request(
+                        ElasticsearchOperation::IndexAdmin,
+                        Method::DELETE,
+                        &format!("/{name}"),
+                        |r| r,
+                    )
+                    .await?;
+                if response.status() != StatusCode::NOT_FOUND {
+                    let result = response_json(response).await?;
+                    if result.get("acknowledged") != Some(&json!(true)) {
+                        return Err(format!(
+                            "原地重建删除 {name} 尚未确认，重新运行将恢复初始化"
+                        ));
+                    }
+                }
+                existing = None;
+            }
+            let metadata = match existing {
                 Some(value) => value,
                 None if run.phase == Phase::Initializing
                     && !run.target_uuids.contains_key(name) =>

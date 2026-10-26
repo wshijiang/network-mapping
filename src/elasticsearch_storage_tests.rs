@@ -10,6 +10,8 @@ pub(super) struct FixtureState {
     pub(super) query_bodies: Vec<(String, Value)>,
     pub(super) documents: BTreeMap<(String, String), Value>,
     pub(super) fail_path: Option<String>,
+    pub(super) fail_request: Option<String>,
+    index_generations: BTreeMap<String, usize>,
     pub(super) max_request_line_bytes: Option<usize>,
     pub(super) count_responses: std::collections::VecDeque<Value>,
     pub(super) search_responses: std::collections::VecDeque<Value>,
@@ -85,10 +87,11 @@ impl EsFixture {
                     let mut state = thread_state.lock().unwrap();
                     state.requests.push(format!("{method} {path}"));
                     (
-                        state
-                            .fail_path
-                            .as_ref()
-                            .is_some_and(|needle| path.contains(needle))
+                        state.fail_request.as_deref() == Some(&format!("{method} {path}"))
+                            || state
+                                .fail_path
+                                .as_ref()
+                                .is_some_and(|needle| path.contains(needle))
                             || state
                                 .max_request_line_bytes
                                 .is_some_and(|max| first.len() > max),
@@ -213,10 +216,26 @@ fn fixture_response(state: &mut FixtureState, method: &str, path: &str, body: &s
             .map(|v| json!({name:v}))
             .unwrap_or(json!({}));
     }
+    if method == "DELETE" && !path.contains("/_") {
+        let name = path.trim_start_matches('/');
+        state.index_metadata.remove(name);
+        state.documents.retain(|(index, _), _| index != name);
+        return json!({"acknowledged":true});
+    }
     if method == "PUT" && !path.contains("/_") && !body.is_empty() {
         let definition: Value = serde_json::from_str(body).unwrap();
         let name = path.trim_start_matches('/');
-        state.index_metadata.insert(name.into(),json!({"settings":{"index":{"uuid":format!("uuid-{name}")}},"mappings":definition["mappings"]}));
+        let generation = state.index_generations.entry(name.into()).or_default();
+        *generation += 1;
+        let uuid = if *generation == 1 {
+            format!("uuid-{name}")
+        } else {
+            format!("uuid-{name}-{generation}")
+        };
+        state.index_metadata.insert(
+            name.into(),
+            json!({"settings":{"index":{"uuid":uuid}},"mappings":definition["mappings"]}),
+        );
         return json!({"acknowledged":true});
     }
     if path.contains("/_stats?") {

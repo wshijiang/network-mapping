@@ -614,8 +614,8 @@ impl SelfChecking for ElasticsearchConfig {
         if !(1..=2_000).contains(&self.bulk_batch_size) {
             return Err("elasticsearch.bulk_batch_size 必须在 1 到 2000 之间".into());
         }
-        if !(1..=32).contains(&self.scan_migration_concurrency) {
-            return Err("elasticsearch.scan_migration_concurrency 必须在 1 到 32 之间".into());
+        if !(1..=50).contains(&self.scan_migration_concurrency) {
+            return Err("elasticsearch.scan_migration_concurrency 必须在 1 到 50 之间".into());
         }
         if !(1..=10_000).contains(&self.scan_migration_page_size) {
             return Err("elasticsearch.scan_migration_page_size 必须在 1 到 10000 之间".into());
@@ -634,10 +634,10 @@ impl SelfChecking for ElasticsearchConfig {
         if !(1..=300).contains(&self.bulk_total_timeout_seconds) {
             return Err("elasticsearch.bulk_total_timeout_seconds 必须在 1 到 300 之间".into());
         }
-        if !(1..=32).contains(&self.bulk_max_concurrency) {
-            return Err("elasticsearch.bulk_max_concurrency 必须在 1 到 32 之间".into());
+        if !(1..=50).contains(&self.bulk_max_concurrency) {
+            return Err("elasticsearch.bulk_max_concurrency 必须在 1 到 50 之间".into());
         }
-        if !(1..=2000).contains(&self.projection_page_size)
+        if !(1..=10_000).contains(&self.projection_page_size)
             || !(64 * 1024..=16 * 1024 * 1024).contains(&self.projection_bulk_max_bytes)
             || !(1..=32).contains(&self.projection_pages_per_tick)
             || !(10..=3600).contains(&self.projection_lease_seconds)
@@ -2434,9 +2434,40 @@ pub struct Clis {
     #[arg(long)]
     pub rebuild_analytics_snapshots: bool,
 
-    /// 停服后，从不可变 ES 扫描事实重建带 TCP/UDP 维度的新端点投影
-    #[arg(long, conflicts_with_all=["migrate_scan_data_to_elasticsearch","rebuild_analytics_snapshots","reset_admin_password"])]
+    /// 停服后重建端点投影；必须显式选择 --rebuild-transport-mode
+    #[arg(long, requires="rebuild_transport_mode", conflicts_with_all=["migrate_scan_data_to_elasticsearch","rebuild_analytics_snapshots","reset_admin_password"])]
     pub rebuild_transport_endpoints: bool,
+
+    /// new-index：迁移到全新配置索引并保留旧索引；in-place：清空并重建当前配置的 execution/current 索引
+    #[arg(long, value_enum, requires = "rebuild_transport_endpoints")]
+    pub rebuild_transport_mode: Option<TransportRebuildMode>,
+
+    /// 重建并发数，默认 32，范围 1 到 50
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=50), requires = "rebuild_transport_endpoints")]
+    pub rebuild_transport_concurrency: Option<u8>,
+
+    /// 重建分页大小，默认 2000，范围 1 到 10000
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=10_000), requires = "rebuild_transport_endpoints")]
+    pub rebuild_transport_page_size: Option<u16>,
+}
+
+impl Clis {
+    pub fn transport_rebuild_tuning(&self) -> (usize, usize) {
+        (
+            usize::from(self.rebuild_transport_concurrency.unwrap_or(32)),
+            usize::from(self.rebuild_transport_page_size.unwrap_or(2000)),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportRebuildMode {
+    /// 迁移到新的索引名称，保留旧投影
+    #[default]
+    NewIndex,
+    /// 删除并按原名称重建配置中的两个端点索引；不保留旧投影
+    InPlace,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -2810,5 +2841,121 @@ mod human_verification_config_tests {
                 .to_string()
                 .contains("secret_key")
         );
+    }
+}
+
+#[cfg(test)]
+mod transport_rebuild_cli_tests {
+    use super::*;
+
+    #[test]
+    fn transport_rebuild_requires_an_explicit_mode() {
+        let error =
+            Clis::try_parse_from(["networkm", "--rebuild-transport-endpoints"]).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(error.to_string().contains("--rebuild-transport-mode"));
+        assert!(
+            Clis::try_parse_from(["networkm"])
+                .unwrap()
+                .rebuild_transport_mode
+                .is_none()
+        );
+        for (value, mode) in [
+            ("new-index", TransportRebuildMode::NewIndex),
+            ("in-place", TransportRebuildMode::InPlace),
+        ] {
+            let args = Clis::try_parse_from([
+                "networkm",
+                "--rebuild-transport-endpoints",
+                "--rebuild-transport-mode",
+                value,
+            ])
+            .unwrap();
+            assert_eq!(args.rebuild_transport_mode, Some(mode));
+            assert!(Clis::try_parse_from(["networkm", "--rebuild-transport-mode", value]).is_err());
+        }
+    }
+
+    #[test]
+    fn transport_rebuild_rejects_invalid_multiple_and_conflicting_modes() {
+        for args in [
+            vec![
+                "networkm",
+                "--rebuild-transport-endpoints",
+                "--rebuild-transport-mode",
+                "auto",
+            ],
+            vec![
+                "networkm",
+                "--rebuild-transport-endpoints",
+                "--rebuild-transport-mode",
+                "new-index",
+                "--rebuild-transport-mode",
+                "in-place",
+            ],
+            vec![
+                "networkm",
+                "--rebuild-transport-endpoints",
+                "--rebuild-transport-mode",
+                "in-place",
+                "--migrate-scan-data-to-elasticsearch",
+            ],
+        ] {
+            assert!(Clis::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn transport_rebuild_tuning_defaults_and_bounds() {
+        let base = [
+            "networkm",
+            "--rebuild-transport-endpoints",
+            "--rebuild-transport-mode",
+            "new-index",
+        ];
+        assert_eq!(
+            Clis::try_parse_from(base)
+                .unwrap()
+                .transport_rebuild_tuning(),
+            (32, 2000)
+        );
+        for (concurrency, page_size, expected) in
+            [("1", "1", (1, 1)), ("50", "10000", (50, 10_000))]
+        {
+            let args = Clis::try_parse_from([
+                "networkm",
+                "--rebuild-transport-endpoints",
+                "--rebuild-transport-mode",
+                "in-place",
+                "--rebuild-transport-concurrency",
+                concurrency,
+                "--rebuild-transport-page-size",
+                page_size,
+            ])
+            .unwrap();
+            assert_eq!(args.transport_rebuild_tuning(), expected);
+        }
+        for (flag, invalid) in [
+            ("--rebuild-transport-concurrency", "0"),
+            ("--rebuild-transport-concurrency", "51"),
+            ("--rebuild-transport-page-size", "0"),
+            ("--rebuild-transport-page-size", "10001"),
+        ] {
+            assert!(
+                Clis::try_parse_from([
+                    "networkm",
+                    "--rebuild-transport-endpoints",
+                    "--rebuild-transport-mode",
+                    "new-index",
+                    flag,
+                    invalid,
+                ])
+                .is_err()
+            );
+            assert!(Clis::try_parse_from(["networkm", flag, "1"]).is_err());
+        }
     }
 }

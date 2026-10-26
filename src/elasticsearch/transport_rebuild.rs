@@ -1,5 +1,6 @@
 //! Offline replay with durable page checkpoints and atomic runtime cutover.
 use super::*;
+use crate::config::TransportRebuildMode;
 mod io;
 mod replay;
 mod runner;
@@ -9,31 +10,41 @@ use io::Bulk;
 use state::*;
 impl ElasticsearchService {
     /// Offline CLI profile: use the supported throughput limits without changing normal service defaults.
-    pub(crate) fn transport_rebuild_config(mut config: ElasticsearchConfig) -> ElasticsearchConfig {
+    pub(crate) fn transport_rebuild_config(
+        mut config: ElasticsearchConfig,
+        concurrency: usize,
+        page_size: usize,
+    ) -> ElasticsearchConfig {
         config.bulk_batch_size = 2000;
-        config.projection_page_size = 2000;
+        config.projection_page_size = page_size;
         config.projection_bulk_max_bytes = 16 * 1024 * 1024;
-        config.bulk_max_concurrency = 32;
-        config.scan_migration_concurrency = 32;
-        config.scan_migration_page_size = config.scan_migration_page_size.max(32);
+        config.bulk_max_concurrency = concurrency;
+        config.scan_migration_concurrency = concurrency;
+        config.scan_migration_page_size = config.scan_migration_page_size.max(concurrency);
         config
     }
 
-    pub async fn rebuild_transport_endpoints(&self, pool: &Pool) -> Result<u64, String> {
-        self.rebuild_transport_endpoints_with_progress(pool, &NoopProgressReporter)
+    pub async fn rebuild_transport_endpoints(
+        &self,
+        pool: &Pool,
+        mode: TransportRebuildMode,
+    ) -> Result<u64, String> {
+        self.rebuild_transport_endpoints_with_progress(pool, mode, &NoopProgressReporter)
             .await
     }
     pub async fn rebuild_transport_endpoints_with_progress(
         &self,
         pool: &Pool,
+        mode: TransportRebuildMode,
         reporter: &dyn ProgressReporter,
     ) -> Result<u64, String> {
-        self.rebuild_transport_endpoints_controlled(pool, reporter, &AtomicBool::new(false))
+        self.rebuild_transport_endpoints_controlled(pool, mode, reporter, &AtomicBool::new(false))
             .await
     }
     pub(crate) async fn rebuild_transport_endpoints_controlled(
         &self,
         pool: &Pool,
+        mode: TransportRebuildMode,
         reporter: &dyn ProgressReporter,
         stop: &AtomicBool,
     ) -> Result<u64, String> {
@@ -47,7 +58,7 @@ impl ElasticsearchService {
             self.inner.config.bulk_batch_size,
             self.inner.config.projection_bulk_max_bytes / (1024 * 1024)
         )));
-        let result = runner::run(self, pool, reporter, stop).await;
+        let result = runner::run(self, pool, mode, reporter, stop).await;
         *self
             .inner
             .maintenance_run_id
@@ -122,7 +133,7 @@ mod tests {
             .refresh_responses
             .push_back(json!({"_shards":{"total":1,"successful":0,"failed":0}}));
         let error = service
-            .rebuild_transport_endpoints(&pool)
+            .rebuild_transport_endpoints(&pool, TransportRebuildMode::NewIndex)
             .await
             .unwrap_err();
         assert!(error.contains("successful=0"), "{error}");
@@ -141,8 +152,20 @@ mod tests {
         assert!(!published);
         drop(connection);
         // Restore shard availability and rerun without deleting facts or state.
-        assert_eq!(service.rebuild_transport_endpoints(&pool).await.unwrap(), 1);
-        assert_eq!(service.rebuild_transport_endpoints(&pool).await.unwrap(), 0);
+        assert_eq!(
+            service
+                .rebuild_transport_endpoints(&pool, TransportRebuildMode::NewIndex)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            service
+                .rebuild_transport_endpoints(&pool, TransportRebuildMode::NewIndex)
+                .await
+                .unwrap(),
+            0
+        );
         assert!(
             fixture
                 .state

@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicU64;
 pub(super) async fn run(
     service: &ElasticsearchService,
     pool: &Pool,
+    mode: TransportRebuildMode,
     reporter: &dyn ProgressReporter,
     stop: &AtomicBool,
 ) -> Result<u64, String> {
@@ -11,9 +12,21 @@ pub(super) async fn run(
     let target = service.rebuild_target();
     let previous = load(pool, "elasticsearch_runtime").await?;
     let saved = load(pool, STATE_KEY).await?;
-    let mut run = if let Some(saved) = saved.as_ref().filter(|s| s.get("target") == Some(&target)) {
+    reporter.report(ProgressUpdate::phase(match mode {
+        TransportRebuildMode::NewIndex => "模式：迁移到新索引（保留旧索引）",
+        TransportRebuildMode::InPlace => "模式：原地重建（清空当前配置的 execution/current 索引）",
+    }));
+    let mut run = if let Some(saved) = saved.as_ref().filter(|s| {
+        s.get("target") == Some(&target)
+            && (mode == TransportRebuildMode::NewIndex
+                || (s.get("format_version").is_some()
+                    && s.get("phase") != Some(&json!("complete"))))
+    }) {
         let run: Run = serde_json::from_value(saved.clone())
             .map_err(|e| format!("旧格式或损坏的重建断点无法安全恢复，请使用新的目标索引：{e}"))?;
+        if run.mode != mode {
+            return Err("重建模式与未完成断点不一致，请使用原模式续跑".into());
+        }
         if run.format_version != FORMAT_VERSION {
             return Err("不支持此重建断点版本".into());
         }
@@ -24,19 +37,21 @@ pub(super) async fn run(
         }) {
             return Err("存在另一组目标的未完成重建，请使用原配置恢复".into());
         }
-        for old in [
-            previous.as_ref(),
-            load(pool, "transport_endpoints_previous_runtime")
-                .await?
-                .as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            for name in ["execution_endpoint_index", "current_endpoint_index"] {
-                for candidate in target.as_object().ok_or("重建目标无效")?.values() {
-                    if old.get(name) == Some(candidate) {
-                        return Err("重建必须使用新索引名，保留当前及回滚目标".into());
+        if mode == TransportRebuildMode::NewIndex {
+            for old in [
+                previous.as_ref(),
+                load(pool, "transport_endpoints_previous_runtime")
+                    .await?
+                    .as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                for name in ["execution_endpoint_index", "current_endpoint_index"] {
+                    for candidate in target.as_object().ok_or("重建目标无效")?.values() {
+                        if old.get(name) == Some(candidate) {
+                            return Err("重建必须使用新索引名，保留当前及回滚目标".into());
+                        }
                     }
                 }
             }
@@ -56,6 +71,7 @@ pub(super) async fn run(
                 }
             }
         }
+        let mut original_target_uuids = BTreeMap::new();
         for value in target.as_object().ok_or("重建目标无效")?.values() {
             let name = value.as_str().ok_or("目标名称无效")?;
             if name.starts_with(&format!(
@@ -67,22 +83,31 @@ pub(super) async fn run(
                 return Err("重建目标不能占用扫描事实或 DNS 索引命名空间".into());
             }
 
-            if service
-                .rebuild_index(value.as_str().ok_or("目标名称无效")?)
-                .await?
-                .is_some()
-            {
-                return Err("重建目标已存在且不属于可信断点，请使用新索引名".into());
+            if let Some(metadata) = service.rebuild_index(name).await? {
+                if mode == TransportRebuildMode::NewIndex {
+                    return Err(
+                        "迁移目标已存在，请使用全新索引名；原地重建需显式选择 in-place".into(),
+                    );
+                }
+                let uuid = metadata
+                    .pointer("/settings/index/uuid")
+                    .and_then(Value::as_str)
+                    .ok_or("原地重建目标缺少 UUID")?;
+                original_target_uuids.insert(name.to_owned(), uuid.to_owned());
             }
         }
+
         let jobs = executions(pool).await?;
         let source = service.rebuild_source().await?;
         let source_counts = service
             .rebuild_progress_counts(&jobs, reporter, stop)
             .await?;
+        cancelled(stop)?;
         let run = Run {
             format_version: FORMAT_VERSION,
             run_id: Uuid::new_v4(),
+            mode,
+            original_target_uuids,
             target: target.clone(),
             previous_runtime: previous.clone(),
             source,
@@ -115,6 +140,7 @@ pub(super) async fn run(
         if previous != Some(service.rebuild_runtime()) {
             return Err("已完成重建的运行配置已变化，拒绝重复切换".into());
         }
+        cancelled(stop)?;
         service.prepare_rebuild_targets(pool, &mut run).await?;
         return Ok(0);
     }
@@ -139,6 +165,7 @@ pub(super) async fn run(
     {
         return Err("运行配置或源索引身份变化，无法沿用该索引的断点".into());
     }
+    cancelled(stop)?;
     service.prepare_rebuild_targets(pool, &mut run).await?;
     loop {
         cancelled(stop)?;
@@ -237,6 +264,7 @@ pub(super) async fn run(
             }
             Phase::Cutover => {
                 reporter.report(ProgressUpdate::phase("[6/6] 原子切换索引"));
+                cancelled(stop)?;
                 service.prepare_rebuild_targets(pool, &mut run).await?;
                 service.restore_rebuild_refresh().await?;
                 cutover(service, pool, &mut run, &jobs).await?;
@@ -290,7 +318,9 @@ async fn cutover(
         }
         tx.execute("INSERT INTO scan_projection_outbox(execution_id,phase,cursor,processed_at,processed_endpoints) VALUES($1,'refreshing',NULL,clock_timestamp(),$2) ON CONFLICT(execution_id) DO UPDATE SET phase='refreshing',cursor=NULL,processed_at=clock_timestamp(),processed_endpoints=EXCLUDED.processed_endpoints,claim_token=NULL,lease_expires_at=NULL,attempts=0,last_error=NULL,updated_at=clock_timestamp()",&[&id,&ports]).await.map_err(|e|e.to_string())?;
     }
-    if let Some(previous) = &run.previous_runtime {
+    if run.mode == TransportRebuildMode::NewIndex
+        && let Some(previous) = &run.previous_runtime
+    {
         tx.execute("INSERT INTO scan_storage_state(state_key,state_value) VALUES('transport_endpoints_previous_runtime',$1) ON CONFLICT DO NOTHING",&[previous]).await.map_err(|e|e.to_string())?;
     }
     tx.execute("INSERT INTO scan_storage_state(state_key,state_value) VALUES('elasticsearch_runtime',$1) ON CONFLICT(state_key) DO UPDATE SET state_value=EXCLUDED.state_value,updated_at=clock_timestamp()",&[&service.rebuild_runtime()]).await.map_err(|e|e.to_string())?;

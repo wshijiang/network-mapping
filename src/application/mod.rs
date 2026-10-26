@@ -189,18 +189,38 @@ pub async fn run(args: Clis) -> io::Result<()> {
             .map_err(|error| io::Error::other(format!("管理命令失败：{error}")))?;
         return Ok(());
     }
+    let (rebuild_concurrency, rebuild_page_size) = args.transport_rebuild_tuning();
     let elasticsearch_config = if args.rebuild_transport_endpoints {
-        ElasticsearchService::transport_rebuild_config(elasticsearch_config)
+        ElasticsearchService::transport_rebuild_config(
+            elasticsearch_config,
+            rebuild_concurrency,
+            rebuild_page_size,
+        )
     } else {
         elasticsearch_config
     };
     let elasticsearch_service = ElasticsearchService::new(elasticsearch_config)
         .map_err(|error| io::Error::other(format!("创建 Elasticsearch 客户端失败：{error}")))?;
     if args.rebuild_transport_endpoints {
+        let mode = args.rebuild_transport_mode.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "必须指定 --rebuild-transport-mode new-index 或 in-place",
+            )
+        })?;
+        eprintln!(
+            "[端点投影重建] 参数：模式 {}，并发 {}，分页 {}",
+            match mode {
+                crate::config::TransportRebuildMode::NewIndex => "new-index",
+                crate::config::TransportRebuildMode::InPlace => "in-place",
+            },
+            rebuild_concurrency,
+            rebuild_page_size
+        );
         let progress = CliProgressReporter::new("端点投影重建");
         let stop = std::sync::atomic::AtomicBool::new(false);
         let work = elasticsearch_service
-            .rebuild_transport_endpoints_controlled(&db_pool, &progress, &stop);
+            .rebuild_transport_endpoints_controlled(&db_pool, mode, &progress, &stop);
         tokio::pin!(work);
         let interrupt = maintenance_interrupt();
         tokio::pin!(interrupt);
@@ -224,7 +244,14 @@ pub async fn run(args: Clis) -> io::Result<()> {
             }
         };
         match result {
-            Ok(count) => progress.finish(format!("{count} 个执行；旧索引保留供回滚")),
+            Ok(count) => progress.finish(format!(
+                "{count} 个执行；{}",
+                match mode {
+                    crate::config::TransportRebuildMode::NewIndex => "已迁移到新索引，旧索引保留",
+                    crate::config::TransportRebuildMode::InPlace =>
+                        "已在配置的索引名称上完成原地重建",
+                }
+            )),
             Err(error) => {
                 progress.fail(&error);
                 return Err(io::Error::other(error));
