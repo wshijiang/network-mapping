@@ -42,6 +42,9 @@ pub(super) struct Run {
     pub mode: TransportRebuildMode,
     #[serde(default)]
     pub original_target_uuids: BTreeMap<String, String>,
+    /// UUIDs of read-only clones of the old projections. Persisted before either old target is removed.
+    #[serde(default)]
+    pub backup_uuids: BTreeMap<String, String>,
     pub target: Value,
     pub previous_runtime: Option<Value>,
     pub source: Value,
@@ -141,6 +144,143 @@ pub(super) fn cancelled(stop: &AtomicBool) -> Result<(), String> {
 }
 
 impl ElasticsearchService {
+    pub(super) fn rebuild_backup_name(&self, run_id: Uuid, target: &str) -> String {
+        let role = if target == self.inner.config.execution_endpoint_index {
+            "execution"
+        } else {
+            "current"
+        };
+        format!("transport-rebuild-backup-{}-{role}", run_id.simple())
+    }
+
+    async fn wait_for_rebuild_backup(&self, backup: &str) -> Result<(), String> {
+        let health = self
+            .send_json_request(
+                ElasticsearchOperation::IndexAdmin,
+                Method::GET,
+                &format!("/_cluster/health/{backup}?wait_for_status=yellow&timeout=60s"),
+                |r| r.timeout(Duration::from_secs(75)),
+            )
+            .await?;
+        if health.get("timed_out") == Some(&json!(true))
+            || !matches!(
+                health.get("status").and_then(Value::as_str),
+                Some("yellow" | "green")
+            )
+        {
+            return Err(format!(
+                "备份索引 {backup} 的主分片尚未可用；旧投影不会删除"
+            ));
+        }
+        Ok(())
+    }
+
+    async fn block_rebuild_index_writes(
+        &self,
+        name: &str,
+        require_shard_ack: bool,
+    ) -> Result<(), String> {
+        let blocked = self
+            .send_json_request(
+                ElasticsearchOperation::IndexAdmin,
+                Method::PUT,
+                &format!("/{name}/_block/write"),
+                |r| r,
+            )
+            .await?;
+        if blocked.get("acknowledged") != Some(&json!(true))
+            || (require_shard_ack && blocked.get("shards_acknowledged") != Some(&json!(true)))
+        {
+            return Err(format!("索引 {name} 写入冻结未获确认，拒绝删除旧投影"));
+        }
+        Ok(())
+    }
+
+    async fn ensure_rebuild_backups(&self, pool: &Pool, run: &mut Run) -> Result<(), String> {
+        for name in [
+            &self.inner.config.execution_endpoint_index,
+            &self.inner.config.current_endpoint_index,
+        ] {
+            let Some(original_uuid) = run.original_target_uuids.get(name) else {
+                continue;
+            };
+            let backup = self.rebuild_backup_name(run.run_id, name);
+            if backup.starts_with(&format!("{}-", self.inner.config.observation_index_prefix))
+                || backup == self.inner.config.dns_record_index
+                || backup == self.inner.config.dns_observation_data_stream
+            {
+                return Err("备份索引名称与扫描事实或 DNS 命名空间冲突，旧投影未删除".into());
+            }
+            if let Some(saved_uuid) = run.backup_uuids.get(name) {
+                let metadata = self
+                    .rebuild_index(&backup)
+                    .await?
+                    .ok_or_else(|| format!("备份索引 {backup} 已丢失，拒绝继续重建"))?;
+                if metadata
+                    .pointer("/settings/index/uuid")
+                    .and_then(Value::as_str)
+                    != Some(saved_uuid)
+                {
+                    return Err(format!("备份索引 {backup} 身份已变化，拒绝继续重建"));
+                }
+                self.wait_for_rebuild_backup(&backup).await?;
+                self.block_rebuild_index_writes(&backup, false).await?;
+                continue;
+            }
+            let original = self
+                .rebuild_index(name)
+                .await?
+                .ok_or_else(|| format!("旧投影 {name} 已消失且没有可信备份，拒绝继续重建"))?;
+            if original
+                .pointer("/settings/index/uuid")
+                .and_then(Value::as_str)
+                != Some(original_uuid)
+            {
+                return Err(format!("旧投影 {name} 身份已变化，拒绝为其他索引建立备份"));
+            }
+            if self.rebuild_index(&backup).await?.is_none() {
+                let health = self
+                    .send_json_request(
+                        ElasticsearchOperation::IndexAdmin,
+                        Method::GET,
+                        &format!("/_cluster/health/{name}?timeout=5s"),
+                        |r| r.timeout(Duration::from_secs(10)),
+                    )
+                    .await?;
+                if health.get("timed_out") == Some(&json!(true))
+                    || health.get("status").and_then(Value::as_str) != Some("green")
+                {
+                    return Err(format!(
+                        "旧投影 {name} 不是 green，无法安全克隆；旧投影未删除"
+                    ));
+                }
+                self.block_rebuild_index_writes(name, true).await?;
+                self.send_json_request(
+                    ElasticsearchOperation::IndexAdmin,
+                    Method::POST,
+                    &format!("/{name}/_clone/{backup}"),
+                    |r| r.json(&json!({"settings":{"index.number_of_replicas":0}})),
+                )
+                .await
+                .map_err(|error| format!("备份旧投影 {name} 失败；旧投影未删除：{error}"))?;
+            }
+            self.wait_for_rebuild_backup(&backup).await?;
+            self.block_rebuild_index_writes(&backup, false).await?;
+            let metadata = self
+                .rebuild_index(&backup)
+                .await?
+                .ok_or_else(|| format!("备份索引 {backup} 未建立，旧投影不会删除"))?;
+            let uuid = metadata
+                .pointer("/settings/index/uuid")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("备份索引 {backup} 缺少 UUID，旧投影不会删除"))?;
+            run.backup_uuids.insert(name.clone(), uuid.to_owned());
+            save(pool, STATE_KEY, run).await?;
+            eprintln!("[端点投影重建] 已保留旧投影备份：{name} -> {backup}");
+        }
+        Ok(())
+    }
+
     pub(super) fn rebuild_target(&self) -> Value {
         json!({"execution_endpoint_index":self.inner.config.execution_endpoint_index,
                "current_endpoint_index":self.inner.config.current_endpoint_index})
@@ -233,6 +373,9 @@ impl ElasticsearchService {
         pool: &Pool,
         run: &mut Run,
     ) -> Result<(), String> {
+        if run.mode == TransportRebuildMode::InPlace {
+            self.ensure_rebuild_backups(pool, run).await?;
+        }
         for name in [
             &self.inner.config.execution_endpoint_index,
             &self.inner.config.current_endpoint_index,

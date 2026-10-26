@@ -316,12 +316,33 @@ async fn live_transport_rebuild_resumes_and_preserves_raw_documents() {
         if before.pointer("/settings/index/uuid")==after.pointer("/settings/index/uuid") {return Err("原地模式没有重建索引".into());}
         let count=restarted.send_json_request(ElasticsearchOperation::ScanQuery,Method::POST,&format!("/{}/_count",config.current_endpoint_index),|r|r.json(&json!({"query":{"match_all":{}}}))).await?;
         if count["count"]!=10 {return Err("原地重建未清除旧投影".into());}
+        let completed:Run=serde_json::from_value(load(&pool,STATE_KEY).await?.ok_or("缺少重建断点")?).map_err(|e|e.to_string())?;
+        let backup=restarted.rebuild_backup_name(completed.run_id,&config.current_endpoint_index);
+        let old_count=restarted.send_json_request(ElasticsearchOperation::ScanQuery,Method::POST,&format!("/{backup}/_count"),|r|r.json(&json!({"query":{"match_all":{}}}))).await?;
+        if old_count["count"]!=11 {return Err("原地重建未保留旧投影备份".into());}
         let raw_after=restarted.send_json_request(ElasticsearchOperation::ScanQuery,Method::POST,&format!("/{source}/_search"),|r|r.json(&json!({"size":10,"sort":[{"observation_key":"asc"}]}))).await?;
         if raw_before["hits"]!=raw_after["hits"] {return Err("原地重建改写了原始事实".into());}
 
         Ok::<_,String>(())
     }.await;
     // Explicit names only: never delete a wildcard or any configured business index.
+    if let Some(saved) = load(&pool, STATE_KEY).await.unwrap()
+        && let Ok(run) = serde_json::from_value::<Run>(saved)
+    {
+        for name in run.original_target_uuids.keys() {
+            let backup = service.rebuild_backup_name(run.run_id, name);
+            let response = service
+                .send_request(
+                    ElasticsearchOperation::IndexAdmin,
+                    Method::DELETE,
+                    &format!("/{backup}"),
+                    |r| r,
+                )
+                .await
+                .unwrap();
+            assert!(response.status().is_success() || response.status() == StatusCode::NOT_FOUND);
+        }
+    }
     for index in [
         &source,
         &staging,
@@ -762,6 +783,7 @@ async fn in_place_rebuild_replaces_only_configured_projections_and_resumes_witho
     );
     assert_eq!(checkpoint(&pool, &run, 1).await.unwrap().replayed, 2);
     assert_eq!(run.original_target_uuids.len(), 2);
+    assert_eq!(run.backup_uuids.len(), 2);
     let deletes = fixture
         .state
         .lock()
@@ -771,6 +793,26 @@ async fn in_place_rebuild_replaces_only_configured_projections_and_resumes_witho
         .filter(|p| p.starts_with("DELETE "))
         .count();
     assert_eq!(deletes, 2);
+    {
+        let state = fixture.state.lock().unwrap();
+        let first_delete = state
+            .requests
+            .iter()
+            .position(|request| request.starts_with("DELETE "))
+            .unwrap();
+        assert_eq!(
+            state.requests[..first_delete]
+                .iter()
+                .filter(|request| request.contains("/_clone/"))
+                .count(),
+            2
+        );
+        for name in run.original_target_uuids.keys() {
+            let backup = service.rebuild_backup_name(run.run_id, name);
+            assert!(state.index_metadata.contains_key(&backup));
+            assert!(state.documents.contains_key(&(backup, "obsolete".into())));
+        }
+    }
     assert_eq!(
         service
             .rebuild_transport_endpoints(&pool, TransportRebuildMode::InPlace)
@@ -788,7 +830,11 @@ async fn in_place_rebuild_replaces_only_configured_projections_and_resumes_witho
                 .count(),
             deletes
         );
-        assert!(!state.documents.keys().any(|(_, id)| id == "obsolete"));
+        assert!(!state.documents.keys().any(|(index, id)| {
+            (index == &service.inner.config.execution_endpoint_index
+                || index == &service.inner.config.current_endpoint_index)
+                && id == "obsolete"
+        }));
         for (key, value) in raw {
             assert_eq!(state.documents.get(&key), Some(&value));
         }
@@ -809,6 +855,50 @@ async fn in_place_rebuild_replaces_only_configured_projections_and_resumes_witho
     );
     let next: Run = serde_json::from_value(load(&pool, STATE_KEY).await.unwrap().unwrap()).unwrap();
     assert_ne!(next.run_id, run.run_id);
+    cleanup(&pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn backup_failure_leaves_both_existing_projections_intact() {
+    let (pool, schema, fixture, service) = setup(3).await;
+    seed_old_targets(&pool, &service, &fixture).await;
+    fixture.state.lock().unwrap().fail_path = Some(format!(
+        "/{}/_clone/",
+        service.inner.config.current_endpoint_index
+    ));
+    let error = service
+        .rebuild_transport_endpoints(&pool, TransportRebuildMode::InPlace)
+        .await
+        .unwrap_err();
+    assert!(error.contains("备份旧投影"), "{error}");
+    let run: Run = serde_json::from_value(load(&pool, STATE_KEY).await.unwrap().unwrap()).unwrap();
+    assert_eq!(run.backup_uuids.len(), 1);
+    {
+        let state = fixture.state.lock().unwrap();
+        assert!(
+            !state
+                .requests
+                .iter()
+                .any(|request| request.starts_with("DELETE "))
+        );
+        for name in run.original_target_uuids.keys() {
+            assert!(state.index_metadata.contains_key(name));
+            assert!(
+                state
+                    .documents
+                    .contains_key(&(name.clone(), "obsolete".into()))
+            );
+        }
+    }
+    fixture.state.lock().unwrap().fail_path = None;
+    assert_eq!(
+        service
+            .rebuild_transport_endpoints(&pool, TransportRebuildMode::InPlace)
+            .await
+            .unwrap(),
+        1
+    );
     cleanup(&pool, &schema).await;
 }
 

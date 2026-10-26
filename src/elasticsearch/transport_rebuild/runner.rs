@@ -108,6 +108,7 @@ pub(super) async fn run(
             run_id: Uuid::new_v4(),
             mode,
             original_target_uuids,
+            backup_uuids: BTreeMap::new(),
             target: target.clone(),
             previous_runtime: previous.clone(),
             source,

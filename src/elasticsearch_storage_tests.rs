@@ -208,6 +208,9 @@ async fn request_diagnostics_distinguish_timeout_and_connection_failure_without_
 }
 
 fn fixture_response(state: &mut FixtureState, method: &str, path: &str, body: &str) -> Value {
+    if method == "GET" && path.starts_with("/_cluster/health/") {
+        return json!({"status":"green","timed_out":false});
+    }
     if path.contains("filter_path=*.settings.index.uuid") {
         let name = path.trim_start_matches('/').split('?').next().unwrap();
         return state
@@ -215,6 +218,23 @@ fn fixture_response(state: &mut FixtureState, method: &str, path: &str, body: &s
             .get(name)
             .map(|v| json!({name:v}))
             .unwrap_or(json!({}));
+    }
+    if method == "PUT" && path.ends_with("/_block/write") {
+        return json!({"acknowledged":true,"shards_acknowledged":true});
+    }
+    if method == "POST" && path.contains("/_clone/") {
+        let (source, backup) = path.trim_start_matches('/').split_once("/_clone/").unwrap();
+        let mut metadata = state.index_metadata.get(source).unwrap().clone();
+        metadata["settings"]["index"]["uuid"] = json!(format!("uuid-{backup}"));
+        state.index_metadata.insert(backup.into(), metadata);
+        let documents = state
+            .documents
+            .iter()
+            .filter(|((index, _), _)| index == source)
+            .map(|((_, id), value)| ((backup.to_owned(), id.clone()), value.clone()))
+            .collect::<Vec<_>>();
+        state.documents.extend(documents);
+        return json!({"acknowledged":true,"shards_acknowledged":true});
     }
     if method == "DELETE" && !path.contains("/_") {
         let name = path.trim_start_matches('/');
