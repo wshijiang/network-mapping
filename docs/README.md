@@ -7,6 +7,10 @@
 可信 IOC、来源周期、本地/远程接入及固定 AI 审核规则见[威胁情报与自动标记](THREAT_INTELLIGENCE.md)。
 模型供应商、全局配置、session 与在线调试见 [LLM 配置](LLM.md)。
 
+## 本次待发布版本
+
+服务端 **0.1.30**；配套服务端 **0.1.30**、扫描器 **0.1.21**、控制台 **0.1.24**。变更见[更新日志](CHANGELOG.md)，迁移、IPC 3 与发布次序见[配套发布指南](https://github.com/wshijiang/network-mapping/blob/main/docs/RELEASING.md)。release PR 待审，不表示制品已发布。
+
 ## 版本更新
 
 | 文档 | 内容 |

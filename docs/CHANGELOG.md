@@ -1,128 +1,45 @@
 # 服务端更新日志
 
-[文档中心](README.md) · [部署与升级](DEPLOYMENT.md) · [扫描端更新日志](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/CHANGELOG.md)
+[文档中心](README.md) · [配套发布与升级](https://github.com/wshijiang/network-mapping/blob/main/docs/RELEASING.md)
 
-条目按专题和阶段保留，旧阶段限制不代表当前能力；以最新条目及对应使用文档为准。规划条目不表示功能已实现。
+## v0.1.30（待发布）
 
+发布准备日期：**2026-10-26（北京时间）**。release PR 待审；本地 tag 尚未推送，不表示已发布制品。本节按最终实现汇总原“未发布”阶段记录。
 
-## 未发布：英文文档与资源 404 修复（2026-10-25）
-
-- 默认 MkDocs 构建、预览和部署入口在清理输出后自动构建英文页面、主题资源、语言脚本和搜索索引；统一脚本复用同一入口，兼容自定义输出目录。
-- 统一语言菜单与头部语言链接的路径解析，消除重复语言元数据及子路径下的错误跳转；英文 canonical 基址随根站点推导。
-- 增加默认构建、清理重建、页面资源及双语 HTTP 预览回归，更新中英部署和排障说明。
-
-## 未发布：多语言 review 修复（2026-10-24）
-
-- 固定镜像前端引用到修复后的 `f9690d064cf463becbcef526ee2fe9eb5eed0628`，包含统计聚合行下钻及明细 CSV 兼容性修复。
-- 文档语言菜单通过白名单 URL 参数保留显式选择，修复 cookie 被禁用或静默拒绝时首页及缺译回退被浏览器偏好覆盖；支持刷新、新标签页和复制链接，并新增脚本回归检查。
-
-## 未发布：中英切换与 MkDocs 多语言（2026-10-24）
-
-- 固定 `.github/frontend-ref` 到配套中英前端提交 `8a7b44ab65ccab89c209322214b4ce503b96408a`，镜像构建使用同一不可变界面版本；浏览器首选语言及手动 cookie 规则见使用说明。扫描/服务协议保持原样。
-- 新增中文/英文 MkDocs 配置、首批英文首页/部署/维护页、相对语言菜单、缺译回退及统一严格构建命令；修正英文文档根下的源码链接与编辑路径。
-- 补齐 Vue I18n 及当前主分支直接依赖的版本/许可证清单，保持三仓库依赖校验一致。
-- 更新[语言切换与多语言文档](LOCALIZATION.md)。尚未翻译的专题明确链接中文原文，服务端自由文本、历史证据及既有模板保留原语言。
-
-## 未发布：同步前端镜像引用（2026-10-24）
-
-- 更新 `.github/frontend-ref` 到本批前端 PR 合并后的主分支提交 `6bf338a996d4546de9886fe1b5947e2b9e4ab30e`，打包服务自动识别、代理明文输入与统一请求头 select；保持构建、验证和发布使用同一不可变前端版本。
-
-## 未发布：actix-files 0.7 升级适配（2026-10-24）
-
-- 修复 actix-files 0.7 移除 NamedFile::open_async 后，前端资源和扫描器日志下载无法编译的问题；在 Actix 阻塞池中执行文件打开及元数据读取，保留原 HTTP 状态、下载鉴权和响应头。
-- 与当前主分支同步，保留协议迁移与自动服务识别修复；升级依赖不绕过文件访问或摘要校验。诊断下载在独立 PostgreSQL 数据库验证管理员/归属/内容，并加入 CI。
-
-## 未发布：全部服务自动识别（2026-10-23）
-
-- TCP 服务任务默认自动识别，TLS/SNI/CA、DoH 路径及工业参数无需选择协议即可配置；保留旧 API 定向列表的兼容性。
-- 修复数据库 scan_task_profile_check 遗漏 UDP 两种任务类型导致真实创建返回 500；启动初始化同步更新约束。
-- UDP 主动/被动任务省略协议列表时自动采用全部已支持协议，将集合写入计划；预览、创建、节点预算及恢复共用规范化集合，避免能力或预算不足的节点被选中。
-- 同步默认行为、端口映射、识别预算和 daisyUI 页面说明，并增加自动参数/UDP 计划及实际 PostgreSQL 预览与创建一致性回归。
-
-## 未发布：PR review 与 CI 核验修复（2026-10-23）
-
-- 修复迁移/发布将 `_refresh` 的 `total>0, successful=0, failed=0` 当作成功的问题；刷新缺少计数或没有成功分片时停止，传输端点重建不推进失败执行的断点和运行标记。补充失败后恢复重跑测试。
-- Elasticsearch 请求错误保留超时/连接类别、请求路径、耗时与底层错误链，去除 URL 凭据及查询参数；重建增加逐执行/分页/断点日志，文档说明分片状态与单请求超时排查。
-- 核实 PR #127 的两项迁移意见：纯漏洞观察不再发送空端点 Bulk 请求；完整重建并刷新后，与运行标记切换在同一事务内完成已发布任务的 outbox，清除旧排序游标及残留租约，恢复 OS/Web 后续处理。
-- 扩展混合服务/漏洞重建、旧游标与 enrichment 就绪回归；不可变原始事实保持原样。
-- 同步 Docker 的 `.env.example` 和 `config.example.toml` 中 execution/current 默认索引名，修复 amd64/arm64 制品契约检查失败。
-
-## 未发布：加密 DNS、工业与 UDP 服务识别（2026-10-23）
-
-- 服务任务和预览增加加密 DNS、工业协议选项、公开 CA 与协议参数；能力、领取/重领/恢复和路由同时校验协议与节点探测预算。
-- plan v2 提供独立 UDP 主动/被动 profiles，显式目标、端口及接收窗口；TCP 仍为 v1，不隐式扩大扫描范围。
-- 端点 ID、分页、历史、OS/Web 补全增加 TCP/UDP/unknown 维度；默认执行/当前投影升级 v2/v3。新增停服 `--rebuild-transport-endpoints`，从不可变事实重建、按执行恢复、保留旧投影并重新排队补全；既有部署必须迁移。
-- DoH 保留 HTTP/TLS 搜索证据，TLS 验证失败不确认为服务。详见[服务协议识别与部署](SERVICE_PROTOCOLS.md)的完整协议表、限制、升级和回滚步骤。
-
-## 未发布：DNS TCP / VNC 任务能力（2026-10-23）
-
-- IP/CIDR 服务识别、漏洞扫描任务及分配预览支持 `required_services=["dns","vnc"]`（可选择其一）；列表持久化于已有 scan_plan，并将服务阶段设为必需。含义是选择探测协议，不保证目标一定存在该服务。
-- 心跳保留有界的 `service_protocols` 能力声明；指定/全部节点选择、智能分配、普通领取、重领及任务恢复均过滤能力不足的节点。旧节点仍可执行未设置新要求的旧任务。
-- 无新增数据库列或端点身份变更，DNS UDP 未开放；已有服务观察、权限、查询、历史及 CSV 使用原服务字段。服务端需先于配套扫描器/前端部署，见[扫描流水线](SCAN_PIPELINE.md)。
-
-## 未发布：服务识别扩展规划（2026-10-23）
-
-- 补充 [DNS、DoH、DoT 与 VNC 服务识别扩展计划](DNS_DOH_DOT_VNC_PLAN.md)，明确协议确认、原生适配器、DoH/HTTPS 证据共存、节点能力、UDP 端点迁移、daisyUI 展示和分批验收。
-- 本条仅记录规划文档；不表示新协议已接入任务、完成迁移或通过真实服务验收。
-- 补齐已有第三方依赖清单维护页的文档首页和 MkDocs 导航入口，修复文档严格构建的遗漏页面警告。
-- 追加[工业与物联网服务识别规划](INDUSTRIAL_SERVICE_DETECTION_PLAN.md)：Modbus TCP、EtherNet/IP、S7、OPC UA、BACnet/IP 及已有 MQTT/MQTTS 补强；区分 UDP/44818 发现与 UDP/2222 I/O、OPC UA TCP 与 UDP PubSub，补充 D/E/F 批次及证据/端点边界，尚未实现新协议。
-
-## 未发布：服务探测第一批（2026-10-22）
-
-- **HTTP/HTTPS 被动识别 Elasticsearch**：产品响应头及完整根 JSON，支持明确版本、OpenSearch 排除、冲突和截断状态。`service` 继续保留 http/https，不增加目标请求。
-- Web 规则修订 6，88 条规则覆盖 53 种技术；现有队列按新修订回填保留的历史证据。查询使用 `tech = elasticsearch`，外部 API 沿用 `web` 字段授权。
-- 新增[服务探测分批交付计划](SERVICE_DETECTION_ROADMAP.md)。本条记录第一批，当时尚未开放 UDP 任务；10 月 23 日的后续交付以本日志上方条目及[当前协议矩阵](SERVICE_PROTOCOLS.md)为准。对应 [#120](https://github.com/wshijiang/network-mapping/pull/120)。
-
-## 未发布：威胁情报与 LLM（2026-10-21 至 22）
-
-- 可信来源结构化 IOC 默认接纳，可逐来源要求人工审核；RSS/LLM 提议始终需人工审核。补充来源周期、有效期、资产自动标记和批量离线导入 CLI，保留原文证据及审核边界。见[威胁情报](THREAT_INTELLIGENCE.md)，对应 [#117](https://github.com/wshijiang/network-mapping/pull/117)。
-- 新增模型供应商管理、模型发现、全局与局部网络/请求参数继承及流式 IOC 提取和多轮在线调试，支持对话保留开关、历史加载/删除与 session 恢复。凭据和历史按既有加密及权限约定处理。见 [LLM 配置](LLM.md)，对应 [#119](https://github.com/wshijiang/network-mapping/pull/119)。
-- 上述两项位于下方固定截止提交之后，单独补记，不计入历史的 32 个提交。
-
-## 未发布（自 v0.1.29 至 2026-10-21 的固定汇总）
-
-截至 **2026-10-21（北京时间）**，以最新已发布 tag [v0.1.29](https://github.com/wshijiang/network-mapping/releases/tag/v0.1.29) 为基线，汇总主分支已合入的服务端变动，不包含尚未合入的开发分支或前端独立变动。
-
-| 比较项 | 固定版本 |
+| 核对项 | 固定范围 |
 | --- | --- |
-| 上次发布 | `v0.1.29`，2026-10-15 发布，提交 `d5f2da809e9ebecbf80ea7b3debe849ec9a824c1` |
-| 本次截止 | `main` 的 `919cecb2151ee5612c4cbf2d03d2e20d4c87e6e6` |
-| 变动范围 | 32 个提交（含合并提交）；[查看完整比较](https://github.com/wshijiang/network-mapping/compare/v0.1.29...919cecb2151ee5612c4cbf2d03d2e20d4c87e6e6) |
+| 上次发布 | `v0.1.29` · `d5f2da809e9ebecbf80ea7b3debe849ec9a824c1` |
+| 本次代码基线 | `817960e756daaeb95b7fd44422bb0acc3aa54d9d`（`main`） |
+| 变动范围 | 47 个提交（含合并提交）；[完整比较](https://github.com/wshijiang/network-mapping/compare/v0.1.29...817960e756daaeb95b7fd44422bb0acc3aa54d9d) |
 
-### 新增
+本次另含版本、发布说明及文档整理；服务端同时固定配套控制台发布提交。
 
-- **统一通知渠道**：邮件、飞书和 Telegram 支持同级订阅与多渠道独立投递，覆盖健康告警、扫描器掉线/恢复、登录、周报和月报；支持启停、最低级别、连通性测试、投递历史及失败重试。通知使用持久化队列、租约和有限重试；停用通知不影响报告归档。见[通知渠道](NOTIFICATIONS.md)。
-- **分渠道通知模板**：新增飞书、Telegram 按事件管理的模板 API，支持纯文本/受限 HTML、草稿、发布、历史恢复、变量目录和在线预览。测试发送可以使用未保存模板，返回投递 ID 并查询状态；入队不等于发送成功。补充邮件模板通知状态的预览和测试。见[通知模板](NOTIFICATION_TEMPLATES.md)，相关 [#113](https://github.com/wshijiang/network-mapping/pull/113)、[#115](https://github.com/wshijiang/network-mapping/pull/115)。
-- **每渠道通知代理**：邮件、飞书和 Telegram 可独立选择系统默认、直连或自定义 HTTP/HTTPS/SOCKS5/SOCKS5H 代理，代理凭据加密存储；邮件支持代理隧道内的 SMTPS，连接失败不回退直连。见[通知代理](NOTIFICATIONS.md#每渠道投递代理)，相关 [#116](https://github.com/wshijiang/network-mapping/pull/116)。
-- **可选登录人机验证**：密码登录前支持 Cloudflare Turnstile，默认关闭；提供公开配置接口和管理员配置 API，设置持久化、Secret 加密，支持版本冲突检查和多实例读取权威配置。启用后须校验单次证明的成功状态、hostname 和 `action=login`，外部验证失败或超时会停止本次登录。见[登录人机验证](HUMAN_VERIFICATION.md)。
-- **操作系统识别**：复用扫描器已有服务握手证据，异步推断端点系统线索并生成资产摘要，提供证据、置信度、冲突和过期标识；支持 `os.*` / `service.os.*` 搜索及经审批的外部 API `os` 摘要，不增加目标请求。见[操作系统识别](OS_DETECTION.md)。
-- **Web 技术识别**：基于已有 HTTP/HTTPS 响应识别 52 种技术（86 条内置规则），提供组件、版本、证据、冲突与完整性状态；支持 `tech`、`web.status`、端点关联搜索及经审批的外部 API `web` 摘要。识别由服务端执行，不下载额外资源、不运行网页脚本；结果代表 IP 端点视角。见[Web 识别](WEB_DETECTION.md)和[技术目录](WEB_TECHNOLOGY_CATALOG.md)，相关 [#112](https://github.com/wshijiang/network-mapping/pull/112)。
-- **证书透明度域名发现**：通过 crt.sh 查询种子域和后代，可补充证书完整 DNS SAN 及同证书关系；后台作业支持配额、缓存、租约恢复和部分结果标记，证据按用户隔离。选中具体域名后复用现有 `dns_records` 任务进行 DNS 验证，证书关系不作为资产归属或存活证明。见[域名发现](DOMAIN_DISCOVERY.md)，相关 [#116](https://github.com/wshijiang/network-mapping/pull/116)。
+### 新增与调整
 
-### 行为变更与修复
+- **服务自动识别**：TCP 默认识别全部已实现服务；加入 DNS TCP、DoH/DoT、VNC、Modbus TCP、EtherNet/IP、经典 S7comm、OPC UA，以及原生 MQTT/MQTTS。新增独立 UDP 主动和被动任务，预览、创建、调度、重领及恢复共同核对节点协议能力和探测预算。完整范围与限制见[服务协议矩阵](SERVICE_PROTOCOLS.md)。
+- **传输端点与可恢复迁移**：端点身份包含 TCP/UDP/unknown，默认执行/当前投影升级至 v2/v3。重建在写入前核对 PG 回执与 ES 事实的精确数量；按页持久化游标，验证源/目标身份，支持同命令恢复、进度/速度/ETA 和有界停止。全部阶段确认后才事务性切换运行标记、计数、outbox 和 OS/Web 补全队列；失败保留旧状态和索引。见[存储迁移与回滚](SERVICE_PROTOCOLS.md#存储升级与回滚)。
+- **操作系统与 Web 识别**：复用已有握手及 HTTP 证据，不增加目标请求；支持证据、置信度、冲突、不完整/过期标记、搜索及经审批的外部 API 摘要。Web 目录包含 Elasticsearch REST 识别（规则修订 6，88 条规则、53 种技术）；不包含 Elasticsearch 原生 Transport。见[系统识别](OS_DETECTION.md)、[Web 技术目录](WEB_TECHNOLOGY_CATALOG.md)。
+- **统一通知**：邮件、飞书、Telegram 独立订阅、持久化投递、有限重试与历史；按渠道模板支持草稿、发布、恢复、预览及测试。每渠道可独立配置系统/直连/自定义代理，敏感值加密，代理失败不回退直连。见[通知渠道](NOTIFICATIONS.md)、[通知模板](NOTIFICATION_TEMPLATES.md)。
+- **登录与域名策略**：可选 Cloudflare Turnstile，默认关闭，管理员配置持久化；域名按标签边界匹配后代。DNS 排除策略覆盖手工、搜索生成及 OpenAPI 任务；证书透明度发现提供候选域名、SAN 和同证书关系，再显式选择 DNS 验证，不作为资产归属证明。见[登录保护](HUMAN_VERIFICATION.md)、[DNS 排除策略](SEARCH_TARGET_GENERATION.md)、[域名发现](DOMAIN_DISCOVERY.md)。
+- **可信情报与固定人工审核**：结构化 IOC、MITRE、RSS 文章、离线文件及数据库来源接入，支持断点导入、过期证据、手工文章和批量 CLI；AI 提取生成原文定位的待审提议，不能自动绕过人工审核。见[威胁情报](THREAT_INTELLIGENCE.md)。
+- **LLM 供应商与在线调试**：供应商/模型管理、Chat Completions 与 Responses、全局/局部代理及头/session/流式设置；支持思考展示、实际用量、缓存命中、多轮调试、可选加密历史与重放。默认不留存对话；未发送草稿在浏览器按用户保留七天。见[LLM 配置与迁移](LLM.md)。
+- **部署与语言**：支持仅回环监听的可选 HTTP、host 数据库示例及状态码式 `/healthz` 存储就绪探针；固定配套前端提交。界面支持浏览器偏好和 cookie 中英切换；三个文档站默认严格构建同时生成中英文页面、资源与搜索索引，尚未翻译的专题明确回退。见[部署](DEPLOYMENT.md)、[多语言](LOCALIZATION.md)。
 
-- **DNS 改用共享域名排除策略**：`dns_follow_up.excluded_domains` 统一作用于手工、搜索生成及 OpenAPI DNS 任务，与解析后 IP 扫描开关独立。精确项只排除该域名，`*.example.com` 排除各级子域、不含根域；混合批次命中排除项会整批拒绝，已运行任务在后续心跳接收取消指令。旧域名白名单迁移会关闭域名搜索生成，需管理员检查后重新启用。见[域名排除与升级](SEARCH_TARGET_GENERATION.md#域名排除与升级)。
-- **Turnstile 域名匹配**：允许配置域及其各级子域，按域名标签边界匹配，修复合法子域登录失败；旧允许域的适用范围随升级扩展至其后代，需要收窄时配置具体登录域。登录保护管理操作同时纳入监控。见[登录保护配置](HUMAN_VERIFICATION.md#部署与启用)。
-- **通知可靠性与兼容**：修复过期通知清理、共享冷却、维护中途暂停领取、旧扫描器邮件与自动报告队列迁移、历史掉线回执保留。缺少可导入 SMTP 时保留旧队列，之后配置首个有效邮件渠道可接管，不重复发送已成功收件人。见[通知升级说明](NOTIFICATIONS.md)。
-- **识别证据保留与回填**：系统识别保留各个冲突家族及旧证据，避免无必要的强制刷新；Web 识别支持旧端点证据回填，拒绝歧义 HTTP 响应，避免将不确定证据附到错误端点。历史回填不能恢复此前未采集或已丢失的内容。相关 [#114](https://github.com/wshijiang/network-mapping/pull/114)。
-- **本机 HTTP 与 Docker 部署**：新增 `tls.enabled=false`，只允许回环 IP 监听，默认仍启用 TLS；提供 Linux host 网络和宿主机数据库部署示例，健康检查自动匹配 HTTP(S)、地址及端口，并保留证书校验。标准 bridge 端口映射不能用于访问容器内回环 HTTP 监听。见[Docker 部署](DOCKER.md)和[配置参考](DOCKER_CONFIGURATION.md)。
-- **存储就绪探针**：新增无需登录的 `GET/HEAD /healthz`，根据后台缓存的 PostgreSQL 与 Elasticsearch 就绪状态返回 200 或 503，响应不暴露依赖详情；Docker 健康检查及可选覆盖配置改用该探针。
-- **版本检查**：CSP 放行 GitHub 版本检查所需连接，修复控制台版本检查被服务端策略拦截。
+### 修复与维护
 
-### 部署、文档与依赖
+- 拒绝零成功分片或缺计数的刷新；纯漏洞观察不发送空端点 Bulk，重建完成后清除旧 outbox 游标/租约。ES 诊断保留耗时及连接/超时类别并去除 URL 凭据；修复 UDP profile 数据库约束及 Docker 默认索引契约。
+- 修复旧通知队列接管、过期清理、共享冷却和维护暂停；保留历史投递回执，避免重复发送已成功收件人。修复旧 OS/Web 证据回填及歧义响应归属。
+- 适配 actix-files 0.7 的阻塞文件打开，保留资源/日志下载鉴权、状态码与响应头；更新 actix-web、uuid、serde_json、ipnet、rustls 和构建 Actions。直接依赖及许可证以[第三方清单](OPEN_SOURCE_CATALOG.md)为准。
+- 修复默认文档构建只生成中文导致英文资源 404、子路径语言跳转及 cookie 不可用时显式语言选择丢失；补齐中英文部署和维护入口。
 
-- 完善原生安装、systemd、Docker 配置来源、环境变量与升级指南；新增 MkDocs 文档站、按任务分组的导航及仓库源码链接转换钩子。见[文档维护](DOCUMENTATION.md)。
-- 更新锁文件中的 `rustls` 至 0.23.45，增加识别、证书解析和通知代理所需依赖；MkDocs Material 更新至 9.7.7。
-- 更新发布工作流的 `actions/upload-artifact` 至 v7，新增系统识别工作流，Dependabot 目标分支切换为 `main`。
+### 升级与兼容
 
-### 升级与兼容注意
+1. **先备份再迁移**：停止全部旧后端、扫描写入和事实清理，保留 PG/ES 配套备份、`server.encrypt_key`、扫描器 pepper 和身份状态。既有部署不能直接切到空索引；按[端点迁移](SERVICE_PROTOCOLS.md#存储升级与回滚)配置全新 execution/current 索引，依次运行 `--rebuild-transport-endpoints` 和 `--rebuild-analytics-snapshots`，成功后再启动服务。observation/DNS 索引位置保持不变。
+2. 重建中断后以相同配置和命令恢复；旧式仅含 `last_execution_id` 的断点须换用全新目标索引。PG/ES 数据集不匹配或源/目标身份变化时应修复备份/配置，不能跳过校验。回滚须恢复配套旧程序、配置及迁移前 PG 运行标记。
+3. 配套升级 Scanner **0.1.21**（Agent、Worker、完整 IPC **3** 模块包）和控制台 **0.1.24**；先排空旧 generation 的任务/检查点，不通过删除状态库绕过检查。TCP plan v1、结果上传协议 3 保持兼容；新 UDP 任务要求 plan v2。
+4. 通知迁移后只运行新版 worker；旧域名白名单迁移会关闭域名搜索生成，管理员核对排除策略后再启用。开启 Turnstile 前部署新版登录页；新增外部 API `os`/`web` 权限仍需单独审批。
+5. 旧 AI 配置与密钥按 [LLM 迁移说明](LLM.md#迁移并发与部署)核对；保留加密主密钥。历史丢失的握手正文或字段无法通过回填恢复，需要重新执行相应任务。
 
-1. **备份并安排服务端切换**：保留 PostgreSQL、Elasticsearch 数据及原有 `server.encrypt_key`。通知队列迁移前先停止所有旧后端实例，迁移后只运行新版，避免旧 worker 与新队列并行投递。
-2. **启动自动执行幂等数据库迁移**：包括通知、模板、代理、OS/Web 派生队列、DNS 排除策略与域名发现。服务端还会补充 ES 识别字段映射并在后台回填历史成功执行；扫描完成不代表派生识别已完成。迁移入口见 [数据库初始化实现](../src/db/mod.rs)。
-3. **核对运行策略**：旧 `authorized_domains` 不会转换为排除项；升级会关闭域名搜索生成。先配置排除范围，再决定是否重启该功能；OpenAPI 应用自身授权范围继续生效。
-4. **部署配套控制台后启用登录保护**：已有登录请求在保护关闭时继续兼容；开启后，旧客户端缺少证明不能登录。已存数据库配置不会被启动文件或环境变量覆盖。新增 `os`、`web` 外部 API 字段须单独审批，已有应用不会自动取得权限。
-5. **按需升级扫描器**：服务端识别可处理现有上传协议；新扫描器能改善超大握手系统字段的保留并传递 HTTP 正文截断标识。已丢失证据需重新执行服务识别任务，不能依靠回填补全。
-6. **准备新功能出站访问**：启用 Turnstile、crt.sh 发现或通知渠道时，分别核对服务端对应 HTTPS/SMTPS 出站连通性；域名发现还需在线且支持 `dns_records` 的扫描器。保留 TLS 校验。
-7. **回退前停用不兼容能力**：尤其是新增邮件/Telegram 渠道、自定义通知代理及域名自动生成，并按专题恢复配套配置和前端。保留新增表、列和加密主密钥；不能假设旧 worker 能理解新渠道或遵守代理配置。
+本日志描述已合入实现及升级影响，不表示真实设备、外部通知/AI 服务或生产 ES 迁移已经验收。具体本地检查结果见 release PR；默认忽略的集成测试单独列出。
 
-本节记录代码变动与升级影响，不代表真实通知服务、Cloudflare、crt.sh 或扫描目标已经完成部署联调。
+此前发布见 [GitHub Releases](https://github.com/wshijiang/network-mapping/releases)；本节不重复计入 `v0.1.29` 已交付的功能。

@@ -1,5 +1,5 @@
 {
-  "last_reviewed": "2026-10-24",
+  "last_reviewed": "2026-10-26",
   "projects": [
     {
       "name": "actix-files",
@@ -704,7 +704,7 @@
     {
       "name": "DOMPurify",
       "package": "dompurify",
-      "version": "^3.4.16",
+      "version": "^3.4.17",
       "ecosystem": "frontend",
       "license": "(MPL-2.0 OR Apache-2.0)",
       "usage": "前端 HTML 预览安全清洗",
@@ -734,7 +734,7 @@
     {
       "name": "Vite",
       "package": "vite",
-      "version": "^7.3.6",
+      "version": "^7.3.7",
       "ecosystem": "frontend",
       "license": "MIT",
       "usage": "前端开发与生产构建",
