@@ -9,6 +9,10 @@ pub(super) struct FixtureState {
     pub(super) requests: Vec<String>,
     pub(super) query_bodies: Vec<(String, Value)>,
     pub(super) documents: BTreeMap<(String, String), Value>,
+    #[allow(clippy::type_complexity)]
+    pub(super) pits: BTreeMap<String, Vec<((String, String), Value)>>,
+    pub(super) pit_counter: usize,
+    pub(super) pit_not_found: bool,
     pub(super) fail_path: Option<String>,
     pub(super) fail_request: Option<String>,
     index_generations: BTreeMap<String, usize>,
@@ -44,95 +48,12 @@ impl EsFixture {
         let thread_stop = stop.clone();
         let thread = std::thread::spawn(move || {
             while !thread_stop.load(Ordering::Relaxed) {
-                let Ok((mut socket, _)) = listener.accept() else {
+                let Ok((socket, _)) = listener.accept() else {
                     std::thread::sleep(Duration::from_millis(5));
                     continue;
                 };
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut data = Vec::new();
-                let mut buffer = [0; 8192];
-                let (header_end, length) = loop {
-                    let count = socket.read(&mut buffer).unwrap();
-                    assert!(count > 0);
-                    data.extend_from_slice(&buffer[..count]);
-                    if let Some(position) = data.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-                        let headers = String::from_utf8_lossy(&data[..position]);
-                        let length = headers
-                            .lines()
-                            .find_map(|line| {
-                                line.to_lowercase()
-                                    .strip_prefix("content-length:")?
-                                    .trim()
-                                    .parse::<usize>()
-                                    .ok()
-                            })
-                            .unwrap_or(0);
-                        break (position + 4, length);
-                    }
-                };
-                while data.len() < header_end + length {
-                    let count = socket.read(&mut buffer).unwrap();
-                    assert!(count > 0);
-                    data.extend_from_slice(&buffer[..count]);
-                }
-                let header = String::from_utf8_lossy(&data[..header_end]);
-                let first = header.lines().next().unwrap();
-                let mut parts = first.split_whitespace();
-                let method = parts.next().unwrap();
-                let path = parts.next().unwrap();
-                let body = String::from_utf8_lossy(&data[header_end..header_end + length]);
-                let (fail, delay_ms) = {
-                    let mut state = thread_state.lock().unwrap();
-                    state.requests.push(format!("{method} {path}"));
-                    (
-                        state.fail_request.as_deref() == Some(&format!("{method} {path}"))
-                            || state
-                                .fail_path
-                                .as_ref()
-                                .is_some_and(|needle| path.contains(needle))
-                            || state
-                                .max_request_line_bytes
-                                .is_some_and(|max| first.len() > max),
-                        state
-                            .delay_path
-                            .as_ref()
-                            .filter(|needle| path.contains(*needle))
-                            .map_or(0, |_| state.delay_ms),
-                    )
-                };
-                if delay_ms > 0 {
-                    std::thread::sleep(Duration::from_millis(delay_ms));
-                }
-                let mut state = thread_state.lock().unwrap();
-                let response = if fail {
-                    json!({"error": "fixture failure"})
-                } else {
-                    fixture_response(&mut state, method, path, &body)
-                };
-                let missing = method == "GET"
-                    && path.contains("filter_path=*.settings.index.uuid")
-                    && response.as_object().is_some_and(|v| v.is_empty());
-                let response = if method == "HEAD" {
-                    String::new()
-                } else {
-                    response.to_string()
-                };
-                // Timeout tests can close the client before this delayed reply.
-                let _ = write!(
-                    socket,
-                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    if fail {
-                        "503 Unavailable"
-                    } else if missing {
-                        "404 Not Found"
-                    } else {
-                        "200 OK"
-                    },
-                    response.len(),
-                    response
-                );
+                let state = thread_state.clone();
+                std::thread::spawn(move || handle_fixture_connection(socket, state));
             }
         });
         Self {
@@ -207,9 +128,135 @@ async fn request_diagnostics_distinguish_timeout_and_connection_failure_without_
     assert!(!error.contains("test-password"), "{error}");
 }
 
+fn handle_fixture_connection(
+    mut socket: std::net::TcpStream,
+    thread_state: Arc<Mutex<FixtureState>>,
+) {
+    if socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .is_err()
+    {
+        return;
+    }
+    let mut data = Vec::new();
+    let mut buffer = [0; 8192];
+    let header = loop {
+        let count = match socket.read(&mut buffer) {
+            Ok(0) | Err(_) => return,
+            Ok(count) => count,
+        };
+        data.extend_from_slice(&buffer[..count]);
+        if let Some(position) = data.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&data[..position]);
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_lowercase()
+                        .strip_prefix("content-length:")?
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                })
+                .unwrap_or(0);
+            break Some((position + 4, length));
+        }
+    };
+    let Some((header_end, length)) = header else {
+        return;
+    };
+    while data.len() < header_end + length {
+        let count = match socket.read(&mut buffer) {
+            Ok(0) | Err(_) => return,
+            Ok(count) => count,
+        };
+        data.extend_from_slice(&buffer[..count]);
+    }
+    if data.len() < header_end + length {
+        return;
+    }
+    let header = String::from_utf8_lossy(&data[..header_end]);
+    let first = header.lines().next().unwrap();
+    let mut parts = first.split_whitespace();
+    let method = parts.next().unwrap();
+    let path = parts.next().unwrap();
+    let body = String::from_utf8_lossy(&data[header_end..header_end + length]);
+    let (fail, delay_ms) = {
+        let mut state = thread_state.lock().unwrap();
+        state.requests.push(format!("{method} {path}"));
+        (
+            state.fail_request.as_deref() == Some(&format!("{method} {path}"))
+                || state
+                    .fail_path
+                    .as_ref()
+                    .is_some_and(|needle| path.contains(needle))
+                || state
+                    .max_request_line_bytes
+                    .is_some_and(|max| first.len() > max),
+            state
+                .delay_path
+                .as_ref()
+                .filter(|needle| path.contains(*needle))
+                .map_or(0, |_| state.delay_ms),
+        )
+    };
+    if delay_ms > 0 {
+        std::thread::sleep(Duration::from_millis(delay_ms));
+    }
+    let mut state = thread_state.lock().unwrap();
+    let response = if fail {
+        json!({"error": "fixture failure"})
+    } else {
+        fixture_response(&mut state, method, path, &body)
+    };
+    let missing = method == "GET"
+        && path.contains("filter_path=*.settings.index.uuid")
+        && response.as_object().is_some_and(|v| v.is_empty());
+    let pit_not_found = state.pit_not_found;
+    state.pit_not_found = false;
+    let response = if method == "HEAD" {
+        String::new()
+    } else {
+        response.to_string()
+    };
+    // Timeout tests can close the client before this delayed reply.
+    let _ = write!(
+        socket,
+        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        if fail {
+            "503 Unavailable"
+        } else if missing || pit_not_found {
+            "404 Not Found"
+        } else {
+            "200 OK"
+        },
+        response.len(),
+        response
+    );
+}
+
 fn fixture_response(state: &mut FixtureState, method: &str, path: &str, body: &str) -> Value {
     if method == "GET" && path.starts_with("/_cluster/health/") {
         return json!({"status":"green","timed_out":false});
+    }
+    if method == "POST" && path.contains("/_pit") {
+        let index = path.trim_start_matches('/').split('/').next().unwrap();
+        state.pit_counter += 1;
+        let id = format!("pit-{}", state.pit_counter);
+        let documents = state
+            .documents
+            .iter()
+            .filter(|((index_name, _), _)| index_name == index)
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        state.pits.insert(id.clone(), documents);
+        return json!({"id": id});
+    }
+    if method == "DELETE" && path.contains("/_pit") {
+        let request: Value = serde_json::from_str(body).unwrap_or_default();
+        if let Some(id) = request["id"].as_str() {
+            state.pits.remove(id);
+        }
+        return json!({"succeeded": true, "num_freed": 0});
     }
     if path.contains("filter_path=*.settings.index.uuid") {
         let name = path.trim_start_matches('/').split('?').next().unwrap();
@@ -401,6 +448,33 @@ fn fixture_response(state: &mut FixtureState, method: &str, path: &str, body: &s
         if let Some(response) = state.search_responses.pop_front() {
             return response;
         }
+        if let Some(pit_id) = request.pointer("/pit/id").and_then(Value::as_str) {
+            let Some(documents) = state.pits.get(pit_id) else {
+                state.pit_not_found = true;
+                return json!({"error": {"type": "search_context_missing_exception",
+                    "reason": "No search context found"}});
+            };
+            let after = request
+                .get("search_after")
+                .and_then(Value::as_array)
+                .and_then(|after| after.first())
+                .and_then(Value::as_i64);
+            let size = request["size"].as_u64().unwrap_or(10) as usize;
+            let hits = documents
+                .iter()
+                .enumerate()
+                .filter(|(position, _)| after.is_none_or(|after| *position as i64 > after))
+                .take(size)
+                .map(|(position, ((index, id), document))| {
+                    json!({"_index": index, "_id": id, "_source": document, "sort": [position]})
+                })
+                .collect::<Vec<_>>();
+            return json!({
+                "pit_id": pit_id,
+                "hits": {"total": {"value": documents.len(), "relation": "eq"}, "hits": hits},
+                "_shards": {"failed": 0}
+            });
+        }
         if path.contains("network-mapping-dns-observations/_search")
             && request.pointer("/query/bool/filter").is_some()
         {
@@ -417,6 +491,35 @@ fn fixture_response(state: &mut FixtureState, method: &str, path: &str, body: &s
         }
         if request.pointer("/aggs/indices").is_some() {
             return json!({"aggregations": {"indices": {"buckets": []}}, "_shards": {"failed":0}});
+        }
+        if request.pointer("/aggs/executions/composite").is_some() {
+            let mut counts = BTreeMap::new();
+            for ((index, _), doc) in &state.documents {
+                if matches_index(index)
+                    && let Some(execution_id) = doc.get("execution_id").and_then(Value::as_str)
+                {
+                    *counts.entry(execution_id.to_owned()).or_insert(0u64) += 1;
+                }
+            }
+            let after = request
+                .pointer("/aggs/executions/composite/after/execution_id")
+                .and_then(Value::as_str);
+            let size = request
+                .pointer("/aggs/executions/composite/size")
+                .and_then(Value::as_u64)
+                .unwrap_or(10_000) as usize;
+            let buckets = counts
+                .into_iter()
+                .filter(|(id, _)| after.is_none_or(|after| id.as_str() > after))
+                .take(size)
+                .map(|(id, count)| json!({"key": {"execution_id": id}, "doc_count": count}))
+                .collect::<Vec<_>>();
+            let after_key = buckets.last().map(|bucket| bucket["key"].clone());
+            return json!({
+                "timed_out": false,
+                "aggregations": {"executions": {"buckets": buckets, "after_key": after_key}},
+                "_shards": {"failed": 0}
+            });
         }
         if request.pointer("/aggs/batches").is_some() {
             let mut counts = BTreeMap::new();
@@ -2027,7 +2130,7 @@ async fn execution_summary_only_counts_total_on_first_composite_page() {
     let service = fixture.service();
     {
         let mut state = fixture.state.lock().unwrap();
-        for number in 0..1001 {
+        for number in 0..10_001 {
             state.documents.insert(
                 (service.inner.config.execution_endpoint_index.clone(), number.to_string()),
                 json!({"execution_id":"execution", "ip":format!("192.0.{}.{}", number / 256, number % 256), "port":443}),
@@ -2041,7 +2144,7 @@ async fn execution_summary_only_counts_total_on_first_composite_page() {
             summary.port_count,
             summary.observation_count
         ),
-        (1001, 1001, 0)
+        (10_001, 10_001, 0)
     );
     let state = fixture.state.lock().unwrap();
     let queries = state

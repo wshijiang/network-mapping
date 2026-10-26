@@ -20,6 +20,15 @@ pub(super) struct ProjectionPage {
     pub(super) done: bool,
 }
 
+/// One search page, kept separate from its writes so the offline rebuild can
+/// overlap the next page's search with the current page's bulk requests.
+pub(super) struct FetchedProjectionPage {
+    pub(super) hits: Vec<Value>,
+    pub(super) cursor: Option<Value>,
+    pub(super) done: bool,
+    pub(super) search_ms: u64,
+}
+
 impl ElasticsearchService {
     pub(crate) fn notify_projection_worker(&self) {
         self.inner.projection_notify.notify_one();
@@ -242,12 +251,12 @@ impl ElasticsearchService {
         validate_scan_refresh_response(&response)
     }
 
-    pub(super) async fn promote_execution_page(
+    pub(super) async fn fetch_projection_page(
         &self,
         context: &ScanBatchContext,
         cursor: Option<&Value>,
-        api_client_id: Option<i32>,
-    ) -> Result<ProjectionPage, String> {
+    ) -> Result<FetchedProjectionPage, String> {
+        let started = Instant::now();
         let page_size = self.inner.config.projection_page_size;
         let mut query = json!({"size": page_size, "track_total_hits": false,
             "query": {"term": {"execution_id": context.execution_id}},
@@ -259,7 +268,10 @@ impl ElasticsearchService {
             .send_json_request(
                 ElasticsearchOperation::ProjectionSearch,
                 Method::POST,
-                &format!("/{}/_search", self.inner.config.execution_endpoint_index),
+                &format!(
+                    "/{}/_search?filter_path=timed_out,_shards.failed,hits.hits",
+                    self.inner.config.execution_endpoint_index
+                ),
                 |r| r.json(&query),
             )
             .await?;
@@ -280,6 +292,23 @@ impl ElasticsearchService {
         } else {
             cursor.cloned()
         };
+        Ok(FetchedProjectionPage {
+            done: hits.len() < page_size,
+            hits: hits.clone(),
+            cursor: next,
+            search_ms: started.elapsed().as_millis() as u64,
+        })
+    }
+
+    /// Write one already-fetched page. Pages within an execution cover distinct
+    /// endpoint keys, so callers may keep several pages in flight while still
+    /// advancing the persisted cursor in page order.
+    pub(super) async fn write_projection_page(
+        &self,
+        context: &ScanBatchContext,
+        hits: &[Value],
+        api_client_id: Option<i32>,
+    ) -> Result<u64, String> {
         // A page contains distinct endpoint keys and scopes. Its bulks can run
         // concurrently offline; the caller still waits for the entire page before
         // checkpointing or publishing the next execution.
@@ -361,10 +390,23 @@ impl ElasticsearchService {
         while let Some(result) = pending.next().await {
             result?;
         }
+        Ok(hits.len() as u64)
+    }
+
+    pub(super) async fn promote_execution_page(
+        &self,
+        context: &ScanBatchContext,
+        cursor: Option<&Value>,
+        api_client_id: Option<i32>,
+    ) -> Result<ProjectionPage, String> {
+        let page = self.fetch_projection_page(context, cursor).await?;
+        let endpoints = self
+            .write_projection_page(context, &page.hits, api_client_id)
+            .await?;
         Ok(ProjectionPage {
-            cursor: next,
-            endpoints: hits.len() as i64,
-            done: hits.len() < page_size,
+            cursor: page.cursor,
+            endpoints: endpoints as i64,
+            done: page.done,
         })
     }
 

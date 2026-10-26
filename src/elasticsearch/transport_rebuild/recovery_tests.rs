@@ -68,7 +68,9 @@ async fn fewer_es_facts_than_receipts_rebuilds_existing_facts() {
         1
     );
     let run: Run = serde_json::from_value(load(&pool, STATE_KEY).await.unwrap().unwrap()).unwrap();
-    assert_eq!(run.source_counts.as_ref().unwrap().get(&1), Some(&2));
+    // Source counts are recomputed on resume instead of being rewritten into
+    // every persisted run state.
+    assert!(run.source_counts.is_none());
     assert_eq!(checkpoint(&pool, &run, 1).await.unwrap().replayed, 2);
     let row = pool
         .get()
@@ -416,6 +418,55 @@ async fn tag_pages_resume_without_a_full_data_audit() {
 
 #[tokio::test]
 #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn expired_tag_pit_restarts_the_tag_scan_without_losing_the_rebuild() {
+    let (pool, schema, fixture, service) = setup(5).await;
+    pool.get()
+        .await
+        .unwrap()
+        .batch_execute("INSERT INTO asset_tag(id,name,kind,category_id) SELECT 99,'fixture','info',id FROM asset_tag_category ORDER BY id LIMIT 1; INSERT INTO asset_ip_tag(ip_address,tag_id) VALUES('192.0.2.1',99)")
+        .await
+        .unwrap();
+    let stop = AtomicBool::new(false);
+    let error = service
+        .rebuild_transport_endpoints_controlled(
+            &pool,
+            TransportRebuildMode::NewIndex,
+            &StopTags(&stop),
+            &stop,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("已中断"), "{error}");
+    let run: Run = serde_json::from_value(load(&pool, STATE_KEY).await.unwrap().unwrap()).unwrap();
+    assert_eq!(run.phase, Phase::Tags);
+    assert!(run.tag_pit_id.is_some());
+    // Simulate ES expiring the point-in-time context during a long pause.
+    fixture.state.lock().unwrap().pits.clear();
+    assert_eq!(
+        service
+            .rebuild_transport_endpoints(&pool, TransportRebuildMode::NewIndex)
+            .await
+            .unwrap(),
+        1
+    );
+    let run: Run = serde_json::from_value(load(&pool, STATE_KEY).await.unwrap().unwrap()).unwrap();
+    assert!(run.tag_complete);
+    assert!(run.tag_pit_id.is_none());
+    assert!(
+        fixture
+            .state
+            .lock()
+            .unwrap()
+            .documents
+            .iter()
+            .filter(|((index, _), _)| index == &service.inner.config.current_endpoint_index)
+            .all(|(_, doc)| doc["tag_ids"] == json!([99]))
+    );
+    cleanup(&pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
 async fn es_batch_metadata_does_not_require_a_matching_historical_receipt() {
     let (pool, schema, fixture, service) = setup(3).await;
     fixture
@@ -458,7 +509,7 @@ async fn es_counts_survive_resume_despite_larger_pg_and_dns_receipts() {
             .contains("已中断")
     );
     let run: Run = serde_json::from_value(load(&pool, STATE_KEY).await.unwrap().unwrap()).unwrap();
-    assert_eq!(run.source_counts.as_ref().unwrap().get(&1), Some(&5));
+    assert!(run.source_counts.is_none());
     assert_eq!(checkpoint(&pool, &run, 1).await.unwrap().replayed, 2);
     let resumed = ElasticsearchService::new(service.inner.config.clone()).unwrap();
     assert_eq!(
@@ -790,7 +841,7 @@ async fn in_place_rebuild_replaces_only_configured_projections_and_resumes_witho
         .unwrap()
         .requests
         .iter()
-        .filter(|p| p.starts_with("DELETE "))
+        .filter(|p| p.starts_with("DELETE ") && !p.contains("/_pit"))
         .count();
     assert_eq!(deletes, 2);
     {
@@ -826,7 +877,7 @@ async fn in_place_rebuild_replaces_only_configured_projections_and_resumes_witho
             state
                 .requests
                 .iter()
-                .filter(|p| p.starts_with("DELETE "))
+                .filter(|p| p.starts_with("DELETE ") && !p.contains("/_pit"))
                 .count(),
             deletes
         );
@@ -945,7 +996,7 @@ async fn in_place_initialization_recovers_after_delete_before_create() {
             .unwrap()
             .requests
             .iter()
-            .filter(|p| p.starts_with("DELETE "))
+            .filter(|p| p.starts_with("DELETE ") && !p.contains("/_pit"))
             .count(),
         2
     );
@@ -970,7 +1021,7 @@ async fn in_place_initialization_recovers_after_delete_before_create() {
             .unwrap()
             .requests
             .iter()
-            .filter(|p| p.starts_with("DELETE "))
+            .filter(|p| p.starts_with("DELETE ") && !p.contains("/_pit"))
             .count(),
         2
     );

@@ -81,40 +81,72 @@ impl ElasticsearchService {
     }
 
     /// Counts are progress estimates only, never a prerequisite for successful replay.
+    ///
+    /// One composite aggregation returns many execution buckets at once. The
+    /// previous implementation issued one `_count` request per execution, which
+    /// dominated startup on installations with many small scans.
     pub(super) async fn rebuild_progress_counts(
         &self,
         jobs: &[Execution],
         reporter: &dyn ProgressReporter,
         stop: &AtomicBool,
     ) -> Result<BTreeMap<i32, u64>, String> {
+        let execution_ids = jobs
+            .iter()
+            .map(|job| (job.context.execution_id.clone(), job.id))
+            .collect::<BTreeMap<_, _>>();
         let mut counts = BTreeMap::new();
         let path = format!(
-            "/{}-*/_count?allow_no_indices=true&ignore_unavailable=false",
+            "/{}-*/_search?allow_no_indices=true&ignore_unavailable=false&allow_partial_search_results=false",
             self.inner.config.observation_index_prefix
         );
-        let mut work = stream::iter(jobs.iter().map(|job| {
-            let path = &path;
-            async move {
-                cancelled(stop)?;
-                let response = self
-                    .send_json_request(ElasticsearchOperation::ScanQuery, Method::POST, path, |r| {
-                        r.json(&json!({"query":{"term":{"execution_id":job.context.execution_id}}}))
-                    })
-                    .await?;
-                validate_scan_search_response(&response)?;
-                Ok::<_, String>((
-                    job.id,
-                    response
-                        .get("count")
-                        .and_then(Value::as_u64)
-                        .ok_or("ES 计数响应缺少 count")?,
-                ))
+        let page_size = 10_000;
+        let mut after = None;
+        loop {
+            cancelled(stop)?;
+            let mut body = json!({
+                "size": 0,
+                "track_total_hits": false,
+                "aggs": {"executions": {"composite": {
+                    "size": page_size,
+                    "sources": [{"execution_id": {"terms": {"field": "execution_id"}}}]
+                }}}
+            });
+            if let Some(after) = after.take() {
+                body["aggs"]["executions"]["composite"]["after"] = after;
             }
-        }))
-        .buffer_unordered(self.inner.config.scan_migration_concurrency);
-        while let Some(result) = work.next().await {
-            let (id, count) = result?;
-            counts.insert(id, count);
+            let response = self
+                .send_json_request(
+                    ElasticsearchOperation::ScanQuery,
+                    Method::POST,
+                    &path,
+                    |r| r.json(&body),
+                )
+                .await?;
+            validate_scan_search_response(&response)?;
+            let buckets = response
+                .pointer("/aggregations/executions/buckets")
+                .and_then(Value::as_array)
+                .ok_or("ES 执行计数聚合缺少 buckets")?;
+            if buckets.is_empty() {
+                break;
+            }
+            for bucket in buckets {
+                let execution_id = bucket
+                    .pointer("/key/execution_id")
+                    .and_then(Value::as_str)
+                    .ok_or("ES 执行计数聚合缺少 execution_id")?;
+                let count = bucket
+                    .get("doc_count")
+                    .and_then(Value::as_u64)
+                    .ok_or("ES 执行计数聚合缺少 doc_count")?;
+                if let Some(id) = execution_ids.get(execution_id) {
+                    *counts.entry(*id).or_insert(0) += count;
+                }
+            }
+            after = response
+                .pointer("/aggregations/executions/after_key")
+                .cloned();
             reporter.report(ProgressUpdate::count(
                 "[1/6] 准备重建进度",
                 counts.len() as u64,
@@ -122,17 +154,27 @@ impl ElasticsearchService {
                 "执行",
                 "只统计 ES 现存事实，不核对历史回执",
             ));
+            if after.is_none() {
+                break;
+            }
+        }
+        // Executions without surviving ES facts still participate in phase
+        // totals and must resume with a known zero count.
+        for job in jobs {
+            counts.entry(job.id).or_insert(0);
         }
         Ok(counts)
     }
 
     pub(super) async fn refresh_rebuild_index(&self, index: &str) -> Result<(), String> {
+        // A full refresh of a freshly built index can exceed the normal request
+        // timeout; maintenance requests get a dedicated budget.
         let response = self
             .send_json_request(
                 ElasticsearchOperation::IndexAdmin,
                 Method::POST,
                 &format!("/{index}/_refresh"),
-                |r| r,
+                |r| r.timeout(Duration::from_secs(300)),
             )
             .await?;
         validate_scan_refresh_response(&response)

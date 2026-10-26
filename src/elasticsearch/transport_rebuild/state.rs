@@ -48,15 +48,20 @@ pub(super) struct Run {
     pub target: Value,
     pub previous_runtime: Option<Value>,
     pub source: Value,
-    // Absent in previous page-checkpoint runs, which used receipt counts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Recomputed on resume. Persisting this map made every tag page rewrite a
+    // payload proportional to the number of executions.
+    #[serde(skip)]
     pub source_counts: Option<BTreeMap<i32, u64>>,
     pub target_uuids: BTreeMap<String, String>,
     pub phase: Phase,
     pub tag_cursor: Option<Value>,
+    #[serde(default)]
+    pub tag_pit_id: Option<String>,
     pub tagged: u64,
     pub tag_changes: u64,
     pub tag_total: Option<u64>,
+    #[serde(default)]
+    pub tag_complete: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -95,6 +100,7 @@ pub(super) async fn save<T: Serialize>(pool: &Pool, key: &str, value: &T) -> Res
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn checkpoint(pool: &Pool, run: &Run, id: i32) -> Result<Checkpoint, String> {
     load(pool, &checkpoint_key(run, id))
         .await?
@@ -102,6 +108,40 @@ pub(super) async fn checkpoint(pool: &Pool, run: &Run, id: i32) -> Result<Checkp
         .transpose()
         .map(|v| v.unwrap_or_default())
         .map_err(|e| format!("执行 {id} 重建断点损坏：{e}"))
+}
+
+/// Load every execution checkpoint for a run with one round trip.
+///
+/// Phase totals and cutover previously issued one `checkpoint()` call per
+/// execution, each acquiring a pool connection. That made startup and resume
+/// O(executions) database round trips.
+pub(super) async fn checkpoints(
+    pool: &Pool,
+    run: &Run,
+) -> Result<BTreeMap<i32, Checkpoint>, String> {
+    let prefix = format!("transport_rebuild:{}:", run.run_id);
+    let connection = pool.get().await.map_err(|e| e.to_string())?;
+    let rows = connection
+        .query(
+            "SELECT state_key,state_value FROM scan_storage_state \
+             WHERE left(state_key,length($1))=$1",
+            &[&prefix],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    rows.into_iter()
+        .map(|row| {
+            let key: String = row.get(0);
+            let id = key
+                .strip_prefix(&prefix)
+                .and_then(|suffix| suffix.parse::<i32>().ok())
+                .ok_or_else(|| format!("重建断点键无效：{key}"))?;
+            let value: Value = row.get(1);
+            serde_json::from_value(value)
+                .map(|checkpoint| (id, checkpoint))
+                .map_err(|e| format!("执行 {id} 重建断点损坏：{e}"))
+        })
+        .collect()
 }
 
 pub(super) async fn executions(pool: &Pool) -> Result<Vec<Execution>, String> {

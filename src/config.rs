@@ -2446,7 +2446,7 @@ pub struct Clis {
     #[arg(long, value_parser = clap::value_parser!(u8).range(1..=50), requires = "rebuild_transport_endpoints")]
     pub rebuild_transport_concurrency: Option<u8>,
 
-    /// 重建分页大小，默认 2000，范围 1 到 10000
+    /// 重建分页大小，默认 10000，范围 1 到 10000
     #[arg(long, value_parser = clap::value_parser!(u16).range(1..=10_000), requires = "rebuild_transport_endpoints")]
     pub rebuild_transport_page_size: Option<u16>,
 }
@@ -2455,7 +2455,7 @@ impl Clis {
     pub fn transport_rebuild_tuning(&self) -> (usize, usize) {
         (
             usize::from(self.rebuild_transport_concurrency.unwrap_or(32)),
-            usize::from(self.rebuild_transport_page_size.unwrap_or(2000)),
+            usize::from(self.rebuild_transport_page_size.unwrap_or(10_000)),
         )
     }
 }
@@ -2920,7 +2920,7 @@ mod transport_rebuild_cli_tests {
             Clis::try_parse_from(base)
                 .unwrap()
                 .transport_rebuild_tuning(),
-            (32, 2000)
+            (32, 10_000)
         );
         for (concurrency, page_size, expected) in
             [("1", "1", (1, 1)), ("50", "10000", (50, 10_000))]

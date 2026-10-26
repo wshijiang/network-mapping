@@ -40,17 +40,18 @@ impl ElasticsearchService {
         Ok((context, observation))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn replay_rebuild_execution(
         &self,
         pool: &Pool,
         run: &Run,
         execution: &Execution,
+        mut checkpoint: Checkpoint,
         progress: (&AtomicU64, u64),
         reporter: &dyn ProgressReporter,
         stop: &AtomicBool,
     ) -> Result<(), String> {
         let (completed, total) = progress;
-        let mut checkpoint = checkpoint(pool, run, execution.id).await?;
         if checkpoint.replayed > 0 && checkpoint.replay_cursor.is_none() {
             return Err("重放断点缺少分页游标".into());
         }
@@ -157,17 +158,18 @@ impl ElasticsearchService {
         save(pool, &checkpoint_key(run, execution.id), &checkpoint).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn publish_rebuild_execution(
         &self,
         pool: &Pool,
         run: &Run,
         execution: &Execution,
+        mut checkpoint: Checkpoint,
         progress: (u64, u64),
         reporter: &dyn ProgressReporter,
         stop: &AtomicBool,
     ) -> Result<u64, String> {
         let (base, total) = progress;
-        let mut checkpoint = checkpoint(pool, run, execution.id).await?;
         if !checkpoint.replay_complete {
             return Err(format!("执行 {} 的事实尚未验证完成", execution.id));
         }
@@ -177,30 +179,65 @@ impl ElasticsearchService {
         if checkpoint.publish_complete {
             return Ok(checkpoint.published);
         }
+        // Keep several page writes in flight while the next page's search
+        // advances the cursor. Pages of one execution cover distinct endpoint
+        // keys, so this preserves the existing cross-execution ordering while
+        // overlapping searches with bulk requests.
+        let pipeline_depth = self.inner.config.bulk_max_concurrency.clamp(1, 4);
+        let mut pending = futures_util::stream::FuturesOrdered::new();
+        let mut cursor = checkpoint.publish_cursor.clone();
+        let mut fetched_done = false;
+        let mut published = checkpoint.published;
         loop {
-            cancelled(stop)?;
+            if !fetched_done && !stop.load(Ordering::Acquire) {
+                let page = self
+                    .fetch_projection_page(&execution.context, cursor.as_ref())
+                    .await?;
+                cursor = page.cursor.clone();
+                fetched_done = page.done;
+                let done = page.done;
+                let page_cursor = page.cursor.clone();
+                let search_ms = page.search_ms;
+                let hits = page.hits;
+                pending.push_back(async move {
+                    let write_started = Instant::now();
+                    let endpoints = self
+                        .write_projection_page(&execution.context, &hits, execution.api_client_id)
+                        .await?;
+                    let write_ms = write_started.elapsed().as_millis() as u64;
+                    Ok::<_, String>((endpoints, done, page_cursor, search_ms, write_ms))
+                });
+                if pending.len() < pipeline_depth && !fetched_done {
+                    continue;
+                }
+            }
+            let Some(result) = pending.next().await else {
+                break;
+            };
+            let (count, done, page_cursor, search_ms, write_ms) = result?;
+            published += count;
+            checkpoint.published = published;
+            checkpoint.publish_cursor = page_cursor;
+            checkpoint.publish_complete = done && pending.is_empty() && fetched_done;
+            save(pool, &checkpoint_key(run, execution.id), &checkpoint).await?;
             reporter.report(ProgressUpdate::count(
                 "[3/6] 端点发布",
-                base + checkpoint.published,
+                base + published,
                 Some(total),
                 "端点",
                 format!("执行 {}，等待发布页确认", execution.id),
             ));
-            let page = self
-                .promote_execution_page(
-                    &execution.context,
-                    checkpoint.publish_cursor.as_ref(),
-                    execution.api_client_id,
-                )
-                .await?;
-            let count = u64::try_from(page.endpoints).map_err(|e| e.to_string())?;
-            checkpoint.published += count;
-            checkpoint.publish_cursor = page.cursor;
-            checkpoint.publish_complete = page.done;
-            save(pool, &checkpoint_key(run, execution.id), &checkpoint).await?;
-            if page.done {
-                return Ok(checkpoint.published);
+            info!(event = "TransportRebuildPagePublished",
+                execution_id = %execution.context.execution_id,
+                endpoints = count,
+                search_ms,
+                write_ms,
+                "重建端点发布页完成");
+            if checkpoint.publish_complete {
+                return Ok(published);
             }
         }
+        cancelled(stop)?;
+        Ok(published)
     }
 }

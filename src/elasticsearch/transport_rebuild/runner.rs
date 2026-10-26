@@ -116,9 +116,11 @@ pub(super) async fn run(
             target_uuids: BTreeMap::new(),
             phase: Phase::Initializing,
             tag_cursor: None,
+            tag_pit_id: None,
             tagged: 0,
             tag_changes: 0,
             tag_total: None,
+            tag_complete: false,
         };
         if let Some(saved) = saved {
             save(
@@ -174,10 +176,15 @@ pub(super) async fn run(
             Phase::Initializing => run.phase = Phase::Replaying,
             Phase::Replaying => {
                 let total = jobs.iter().map(Execution::expected).sum();
-                let mut base = 0;
-                for job in &jobs {
-                    base += checkpoint(pool, &run, job.id).await?.replayed;
-                }
+                let checkpoints = checkpoints(pool, &run).await?;
+                let base = jobs
+                    .iter()
+                    .map(|job| {
+                        checkpoints
+                            .get(&job.id)
+                            .map_or(0, |checkpoint| checkpoint.replayed)
+                    })
+                    .sum();
                 let completed = AtomicU64::new(base);
                 // Only execution-local writes run concurrently. Shared current projections remain ordered.
                 let concurrency = service
@@ -191,6 +198,7 @@ pub(super) async fn run(
                         pool,
                         &run,
                         job,
+                        checkpoints.get(&job.id).cloned().unwrap_or_default(),
                         (&completed, total),
                         reporter,
                         stop,
@@ -209,15 +217,18 @@ pub(super) async fn run(
                     .refresh_rebuild_index(&service.inner.config.execution_endpoint_index)
                     .await?;
                 let run_ref = &run;
-                let mut work = stream::iter(jobs.iter().map(|job| async move {
-                    cancelled(stop)?;
-                    let summary = service
-                        .execution_summary(&job.context.execution_id, &[])
-                        .await?;
-                    let mut cp = checkpoint(pool, run_ref, job.id).await?;
-                    cp.ip_count = Some(summary.ip_count);
-                    cp.port_count = Some(summary.port_count);
-                    save(pool, &checkpoint_key(run_ref, job.id), &cp).await
+                let checkpoints = checkpoints(pool, &run).await?;
+                let mut work = stream::iter(jobs.iter().map(|job| {
+                    let mut cp = checkpoints.get(&job.id).cloned().unwrap_or_default();
+                    async move {
+                        cancelled(stop)?;
+                        let summary = service
+                            .execution_summary(&job.context.execution_id, &[])
+                            .await?;
+                        cp.ip_count = Some(summary.ip_count);
+                        cp.port_count = Some(summary.port_count);
+                        save(pool, &checkpoint_key(run_ref, job.id), &cp).await
+                    }
                 }))
                 .buffer_unordered(service.inner.config.scan_migration_concurrency);
                 while let Some(result) = work.next().await {
@@ -227,20 +238,27 @@ pub(super) async fn run(
                 run.phase = Phase::Publishing;
             }
             Phase::Publishing => {
+                let checkpoints = checkpoints(pool, &run).await?;
                 let mut total = 0;
                 for job in jobs.iter().filter(|j| j.succeeded) {
-                    total += u64::try_from(
-                        checkpoint(pool, &run, job.id)
-                            .await?
-                            .port_count
-                            .ok_or("缺少发布总量")?,
-                    )
-                    .map_err(|e| e.to_string())?;
+                    let checkpoint = checkpoints
+                        .get(&job.id)
+                        .ok_or_else(|| format!("执行 {} 缺少发布断点", job.id))?;
+                    total += u64::try_from(checkpoint.port_count.ok_or("缺少发布总量")?)
+                        .map_err(|e| e.to_string())?;
                 }
                 let mut base = 0;
                 for job in &jobs {
                     base += service
-                        .publish_rebuild_execution(pool, &run, job, (base, total), reporter, stop)
+                        .publish_rebuild_execution(
+                            pool,
+                            &run,
+                            job,
+                            checkpoints.get(&job.id).cloned().unwrap_or_default(),
+                            (base, total),
+                            reporter,
+                            stop,
+                        )
                         .await?;
                 }
                 run.phase = Phase::RefreshCurrent;
@@ -268,7 +286,8 @@ pub(super) async fn run(
                 cancelled(stop)?;
                 service.prepare_rebuild_targets(pool, &mut run).await?;
                 service.restore_rebuild_refresh().await?;
-                cutover(service, pool, &mut run, &jobs).await?;
+                let checkpoints = checkpoints(pool, &run).await?;
+                cutover(service, pool, &mut run, &jobs, &checkpoints, reporter).await?;
                 return Ok(jobs.len() as u64);
             }
             Phase::Complete => return Ok(0),
@@ -282,10 +301,14 @@ async fn cutover(
     pool: &Pool,
     run: &mut Run,
     jobs: &[Execution],
+    checkpoints: &BTreeMap<i32, Checkpoint>,
+    reporter: &dyn ProgressReporter,
 ) -> Result<(), String> {
     let mut summaries = Vec::new();
     for job in jobs.iter().filter(|j| j.succeeded) {
-        let cp = checkpoint(pool, run, job.id).await?;
+        let cp = checkpoints
+            .get(&job.id)
+            .ok_or_else(|| format!("执行 {} 缺少切换断点", job.id))?;
         if !cp.replay_complete || !cp.publish_complete {
             return Err("重建执行尚未完成，拒绝切换".into());
         }
@@ -295,16 +318,28 @@ async fn cutover(
             cp.port_count.ok_or("缺少端点数量")?,
         ));
     }
+    reporter.report(ProgressUpdate::phase(format!(
+        "[6/6] 原子切换索引（{} 个执行）",
+        summaries.len()
+    )));
     let mut connection = pool.get().await.map_err(|e| e.to_string())?;
     let tx = connection.transaction().await.map_err(|e| e.to_string())?;
     let current=tx.query_opt("SELECT state_value FROM scan_storage_state WHERE state_key='elasticsearch_runtime' FOR UPDATE",&[]).await.map_err(|e|e.to_string())?.map(|r|r.get::<_,Value>(0));
     if current != run.previous_runtime {
         return Err("切换前运行配置变化".into());
     }
-    for (id, ips, ports) in summaries {
+    if !summaries.is_empty() {
+        let ids = summaries.iter().map(|(id, _, _)| *id).collect::<Vec<_>>();
+        let ips = summaries.iter().map(|(_, ips, _)| *ips).collect::<Vec<_>>();
+        let ports = summaries
+            .iter()
+            .map(|(_, _, ports)| *ports)
+            .collect::<Vec<_>>();
         tx.execute(
-            "UPDATE scan_task_execution SET result_ip_count=$2,result_port_count=$3 WHERE id=$1",
-            &[&id, &ips, &ports],
+            "UPDATE scan_task_execution AS e SET result_ip_count=s.ips,result_port_count=s.ports \
+             FROM unnest($1::int[],$2::bigint[],$3::bigint[]) AS s(id,ips,ports) \
+             WHERE e.id=s.id",
+            &[&ids, &ips, &ports],
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -315,9 +350,30 @@ async fn cutover(
                 crate::web_detection::RULESET_REVISION,
             ),
         ] {
-            tx.execute(&format!("INSERT INTO {table}(execution_id,ruleset_revision) VALUES($1,$2) ON CONFLICT(execution_id,ruleset_revision) DO UPDATE SET processed_at=NULL,cursor=NULL,claim_token=NULL,lease_expires_at=NULL,attempts=0,available_at=NOW()"),&[&id,&revision]).await.map_err(|e|e.to_string())?;
+            tx.execute(
+                &format!(
+                    "INSERT INTO {table}(execution_id,ruleset_revision) \
+                     SELECT id,$2 FROM unnest($1::int[]) AS t(id) \
+                     ON CONFLICT(execution_id,ruleset_revision) DO UPDATE SET \
+                     processed_at=NULL,cursor=NULL,claim_token=NULL,lease_expires_at=NULL,\
+                     attempts=0,available_at=NOW()"
+                ),
+                &[&ids, &revision],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
         }
-        tx.execute("INSERT INTO scan_projection_outbox(execution_id,phase,cursor,processed_at,processed_endpoints) VALUES($1,'refreshing',NULL,clock_timestamp(),$2) ON CONFLICT(execution_id) DO UPDATE SET phase='refreshing',cursor=NULL,processed_at=clock_timestamp(),processed_endpoints=EXCLUDED.processed_endpoints,claim_token=NULL,lease_expires_at=NULL,attempts=0,last_error=NULL,updated_at=clock_timestamp()",&[&id,&ports]).await.map_err(|e|e.to_string())?;
+        tx.execute(
+            "INSERT INTO scan_projection_outbox(execution_id,phase,cursor,processed_at,processed_endpoints) \
+             SELECT id,'refreshing',NULL,clock_timestamp(),ports \
+             FROM unnest($1::int[],$2::bigint[]) AS t(id,ports) \
+             ON CONFLICT(execution_id) DO UPDATE SET phase='refreshing',cursor=NULL,\
+             processed_at=clock_timestamp(),processed_endpoints=EXCLUDED.processed_endpoints,\
+             claim_token=NULL,lease_expires_at=NULL,attempts=0,last_error=NULL,updated_at=clock_timestamp()",
+            &[&ids, &ports],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
     }
     if run.mode == TransportRebuildMode::NewIndex
         && let Some(previous) = &run.previous_runtime
