@@ -44,7 +44,7 @@ python -m pip install -r mkdocs/requirements.txt
 python -m mkdocs serve -f mkdocs/mkdocs.yml
 ```
 
-打开终端显示的本地地址。文档和导航修改后自动刷新；预览默认仅监听本机。
+打开终端显示的本地地址。中英页面均可预览，文档和导航修改后自动刷新；预览默认仅监听本机。
 
 ## 构建检查
 
@@ -61,4 +61,4 @@ python -m mkdocs build --strict -f mkdocs/mkdocs.yml
 
 ## 多语言与构建
 
-当前语言规则、英文首批覆盖与完整中英构建命令见[语言切换与多语言文档](LOCALIZATION.md)。使用 `python scripts/build-docs.py` 依次严格构建中文和英文；只构建中文会清理英文产物。
+当前语言规则、英文首批覆盖与完整中英构建命令见[语言切换与多语言文档](LOCALIZATION.md)。默认 `mkdocs build`、`mkdocs serve` 与 `python scripts/build-docs.py` 均通过同一构建钩子生成中文及 `en/` 英文页面和资源；发布整个输出目录。

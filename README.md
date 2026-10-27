@@ -6,6 +6,10 @@
 
 [快速开始](#快速开始) · [部署指南](docs/DEPLOYMENT.md) · [功能指南](docs/FEATURES.md) · [文档中心](docs/README.md)
 
+## 版本与升级
+
+本次准备 **服务端 0.1.30**，配套服务端 **0.1.30**、扫描器 **0.1.21**、控制台 **0.1.24**。release PR 待审，tag 尚未推送；更新内容见[CHANGELOG](docs/CHANGELOG.md)，升级顺序与合并后 tag 核对见[配套发布指南](https://github.com/wshijiang/network-mapping/blob/main/docs/RELEASING.md)。既有部署须先完成传输端点迁移，模块套件使用 IPC **3**。
+
 ## 核心能力
 
 | 领域 | 能力 |
@@ -77,7 +81,7 @@ Docker 默认使用 bridge 网络和 TLS。连接宿主机数据库可使用内�
 
 - **启动配置**：连接、证书、密钥和本机路径来自 `config.toml`。
 - **运行策略**：数据库已发布值为准；对应 TOML 段仅在记录缺失时初始化。保存接口为 `POST /api/config/runtime/{namespace}`。
-- **首次扫描**：确认授权范围和节点能力，再选择“全部”“仅端口”“服务识别”或“仅 DNS”。
+- **首次扫描**：确认授权范围和节点能力，再选择 TCP 的“全部”“仅端口”“服务识别”、独立“仅 DNS”或 UDP 主动/被动任务；UDP 需明确端口与配套新节点。
 
 首次初始化会沿用 TOML 的扫描启用状态；多实例配置同步存在限制。完整说明见[运行时配置](docs/RUNTIME_CONFIGURATION.md)和[功能指南](docs/FEATURES.md)。
 

@@ -41,6 +41,7 @@ plugins:
 nav:
   - 文档首页: README.md
   - 更新日志: CHANGELOG.md
+  - 配套发布与升级: RELEASING.md
   - 入门部署:
       - 部署选型与原生安装: DEPLOYMENT.md
       - Docker 部署: DOCKER.md

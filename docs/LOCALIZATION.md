@@ -29,16 +29,22 @@ python -m pip install -r mkdocs/requirements.txt
 python scripts/build-docs.py
 ```
 
-统一命令对中英两套配置严格构建，先生成中文，再生成 `mkdocs/site/en/`，整体产物位于 `mkdocs/site/`。单独构建中文会清理输出，因此发布两种语言必须使用统一命令。静态站点应托管整个输出目录。只构建，不自动发布。
+统一命令对中英两套配置严格构建，整体产物位于 `mkdocs/site/`。默认配置的构建钩子先生成中文，再在实际输出目录下生成 `en/`，包含英文页面、主题 CSS/JS、语言脚本和搜索索引。普通 `python -m mkdocs build --strict -f mkdocs/mkdocs.yml` 与 `mkdocs serve` 也使用同一双语流程；自定义 `--site-dir` 和预览临时目录同样适用。重新构建会清理旧产物并重建两种语言，英文失败会使整体构建失败。静态站点应托管整个输出目录。只构建，不自动发布。
 
 ```sh
 # 预览完整中英产物，打开 http://127.0.0.1:8000
 python -m http.server 8000 --bind 127.0.0.1 --directory mkdocs/site
-# 只编辑中文时可使用 MkDocs 自动刷新
+# 中英页面均可使用 MkDocs 自动刷新
 python -m mkdocs serve -f mkdocs/mkdocs.yml
 ```
 
-`mkdocs/mkdocs.yml` 与 `mkdocs/mkdocs.en.yml` 的 `site_url` 是站点 canonical 基址，发布前改成此仓库实际托管地址，并确保三个组件不会覆盖同一部署目录。默认值沿用原站点示例，不表示已发布到该域名。语言菜单采用相对链接，支持子路径和本地静态预览。
+`mkdocs/mkdocs.yml` 的 `site_url` 是站点 canonical 基址，发布前改成此仓库实际托管地址，并确保三个组件不会覆盖同一部署目录。默认双语构建会从根站点基址推导英文的 `en/` 基址；仅直接使用 `mkdocs/mkdocs.en.yml` 独立构建英文时，才使用该配置的 `site_url`。默认值沿用原站点示例，不表示已发布到该域名。语言菜单与页面头部的语言链接采用相同的相对路径解析，支持子路径和本地静态预览。
+
+## 英文页面或资源返回 404
+
+旧的默认构建和预览只生成中文，但语言菜单仍指向 `en/`；单独重建中文还会清理之前生成的英文目录。当前默认入口已统一生成两种语言。部署时重新完整构建，并发布整个 `mkdocs/site/`，保留 `en/index.html`、`en/assets/` 和 `en/search/search_index.json`。只更新 HTML 或仅发布中文目录无法恢复缺失的英文资源。
+
+验收中文首页、`en/`、`en/DEPLOYMENT/`、语言脚本、页面引用的主题 CSS/JS 和英文搜索索引均返回 200；挂在子路径时，把同一个站点前缀加在这些路径前。确认中英菜单、缺译回退和头部语言链接均留在该前缀内。自动检查见 `mkdocs/test_build.py`，覆盖默认严格构建、清理重建、自定义输出、静态托管与 MkDocs 双语预览。
 
 ## 添加译文与检查
 

@@ -13,9 +13,8 @@ def main():
     parser.add_argument("--site-dir", type=Path, default=ROOT / "mkdocs/site")
     args = parser.parse_args()
     output = args.site_dir.resolve()
-    # The Chinese build cleans its output, so it must always run first.
-    for config, destination in [("mkdocs.yml", output), ("mkdocs.en.yml", output / "en")]:
-        subprocess.run([sys.executable, "-m", "mkdocs", "build", "--strict", "-f", str(ROOT / "mkdocs" / config), "--site-dir", str(destination)], cwd=ROOT, check=True)
+    # The default configuration's hook builds English after cleaning the root.
+    subprocess.run([sys.executable, "-m", "mkdocs", "build", "--strict", "-f", str(ROOT / "mkdocs/mkdocs.yml"), "--site-dir", str(output)], cwd=ROOT, check=True)
 
 
 if __name__ == "__main__":

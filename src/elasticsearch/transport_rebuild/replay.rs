@@ -1,5 +1,28 @@
 use super::*;
+use futures_util::stream::FuturesOrdered;
+use std::collections::VecDeque;
+use std::future::Future;
 use std::sync::atomic::AtomicU64;
+
+// FuturesOrdered only drives writes when polled. Keep polling it while the
+// search is pending, buffering results in page order for checkpoint persistence.
+async fn fetch_while_writing<F, W>(
+    fetch: F,
+    pending: &mut FuturesOrdered<W>,
+    ready: &mut VecDeque<W::Output>,
+) -> F::Output
+where
+    F: Future,
+    W: Future,
+{
+    futures_util::pin_mut!(fetch);
+    loop {
+        tokio::select! {
+            page = &mut fetch => return page,
+            Some(result) = pending.next(), if !pending.is_empty() => ready.push_back(result),
+        }
+    }
+}
 
 impl ElasticsearchService {
     fn rebuild_observation(
@@ -184,15 +207,22 @@ impl ElasticsearchService {
         // keys, so this preserves the existing cross-execution ordering while
         // overlapping searches with bulk requests.
         let pipeline_depth = self.inner.config.bulk_max_concurrency.clamp(1, 4);
-        let mut pending = futures_util::stream::FuturesOrdered::new();
+        let mut pending = FuturesOrdered::new();
+        let mut ready = VecDeque::new();
         let mut cursor = checkpoint.publish_cursor.clone();
         let mut fetched_done = false;
         let mut published = checkpoint.published;
         loop {
-            if !fetched_done && !stop.load(Ordering::Acquire) {
-                let page = self
-                    .fetch_projection_page(&execution.context, cursor.as_ref())
-                    .await?;
+            if !fetched_done
+                && !stop.load(Ordering::Acquire)
+                && pending.len() + ready.len() < pipeline_depth
+            {
+                let page = fetch_while_writing(
+                    self.fetch_projection_page(&execution.context, cursor.as_ref()),
+                    &mut pending,
+                    &mut ready,
+                )
+                .await?;
                 cursor = page.cursor.clone();
                 fetched_done = page.done;
                 let done = page.done;
@@ -207,18 +237,23 @@ impl ElasticsearchService {
                     let write_ms = write_started.elapsed().as_millis() as u64;
                     Ok::<_, String>((endpoints, done, page_cursor, search_ms, write_ms))
                 });
-                if pending.len() < pipeline_depth && !fetched_done {
+                if pending.len() + ready.len() < pipeline_depth && !fetched_done {
                     continue;
                 }
             }
-            let Some(result) = pending.next().await else {
+            let result = match ready.pop_front() {
+                Some(result) => Some(result),
+                None => pending.next().await,
+            };
+            let Some(result) = result else {
                 break;
             };
             let (count, done, page_cursor, search_ms, write_ms) = result?;
             published += count;
             checkpoint.published = published;
             checkpoint.publish_cursor = page_cursor;
-            checkpoint.publish_complete = done && pending.is_empty() && fetched_done;
+            checkpoint.publish_complete =
+                done && ready.is_empty() && pending.is_empty() && fetched_done;
             save(pool, &checkpoint_key(run, execution.id), &checkpoint).await?;
             reporter.report(ProgressUpdate::count(
                 "[3/6] 端点发布",
@@ -239,5 +274,72 @@ impl ElasticsearchService {
         }
         cancelled(stop)?;
         Ok(published)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn pending_writes_progress_during_search_and_keep_page_order() {
+        let second_written = Notify::new();
+        let all_written = Notify::new();
+        let mut pending = FuturesOrdered::new();
+        for page in 0..2 {
+            let second_written = &second_written;
+            let all_written = &all_written;
+            pending.push_back(async move {
+                if page == 0 {
+                    // The later write finishes first, including a second poll.
+                    second_written.notified().await;
+                    tokio::task::yield_now().await;
+                    all_written.notify_one();
+                    Ok(page)
+                } else {
+                    tokio::task::yield_now().await;
+                    second_written.notify_one();
+                    Err("second page failed")
+                }
+            });
+        }
+        let mut ready = VecDeque::new();
+        // Searching cannot finish unless queued writes are actively polled.
+        let fetch = async {
+            all_written.notified().await;
+            "next page"
+        };
+        let page = tokio::time::timeout(
+            Duration::from_secs(1),
+            fetch_while_writing(fetch, &mut pending, &mut ready),
+        )
+        .await
+        .expect("pending writes stalled while searching");
+        assert_eq!(page, "next page");
+        while let Some(result) = pending.next().await {
+            ready.push_back(result);
+        }
+        assert_eq!(
+            ready.into_iter().collect::<Vec<_>>(),
+            [Ok(0), Err("second page failed")]
+        );
+    }
+
+    #[tokio::test]
+    async fn searching_with_an_empty_write_queue_does_not_stall() {
+        let mut pending = FuturesOrdered::<std::future::Ready<()>>::new();
+        let mut ready = VecDeque::new();
+        let page = fetch_while_writing(
+            async {
+                tokio::task::yield_now().await;
+                1
+            },
+            &mut pending,
+            &mut ready,
+        )
+        .await;
+        assert_eq!(page, 1);
+        assert!(ready.is_empty());
     }
 }

@@ -8,6 +8,10 @@ This is the English entry point for the server component. The first translated p
 - [Change log (Chinese)](https://github.com/wshijiang/network-mapping/blob/main/docs/CHANGELOG.md)
 - [Source repository](https://github.com/wshijiang/network-mapping)
 
+## Release preparation
+
+This component is preparing **0.1.30**, paired with server **0.1.30**, scanner **0.1.21**, and web console **0.1.24**. Release PRs remain open for review; version tags are local only. Existing installations must complete the transport endpoint migration before enabling new UDP tasks. Upgrade the Agent, Worker and complete module bundle together to IPC **3**, retaining node identity and pending results. See the [release and upgrade procedure (Chinese)](https://github.com/wshijiang/network-mapping/blob/main/docs/RELEASING.md) and the change log above for scope, rollback and tag checks after merging.
+
 ## Related components
 
 - [Server documentation](https://github.com/wshijiang/network-mapping/blob/main/docs/README.md)

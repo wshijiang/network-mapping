@@ -12,6 +12,8 @@ pub(super) struct FixtureState {
     #[allow(clippy::type_complexity)]
     pub(super) pits: BTreeMap<String, Vec<((String, String), Value)>>,
     pub(super) pit_counter: usize,
+    pub(super) rotate_pit_ids: bool,
+    pub(super) closed_pit_ids: Vec<String>,
     pub(super) pit_not_found: bool,
     pub(super) fail_path: Option<String>,
     pub(super) fail_request: Option<String>,
@@ -254,6 +256,7 @@ fn fixture_response(state: &mut FixtureState, method: &str, path: &str, body: &s
     if method == "DELETE" && path.contains("/_pit") {
         let request: Value = serde_json::from_str(body).unwrap_or_default();
         if let Some(id) = request["id"].as_str() {
+            state.closed_pit_ids.push(id.to_owned());
             state.pits.remove(id);
         }
         return json!({"succeeded": true, "num_freed": 0});
@@ -469,9 +472,19 @@ fn fixture_response(state: &mut FixtureState, method: &str, path: &str, body: &s
                     json!({"_index": index, "_id": id, "_source": document, "sort": [position]})
                 })
                 .collect::<Vec<_>>();
+            let total = documents.len();
+            let response_pit_id = if state.rotate_pit_ids {
+                let documents = state.pits.remove(pit_id).unwrap();
+                state.pit_counter += 1;
+                let id = format!("pit-{}", state.pit_counter);
+                state.pits.insert(id.clone(), documents);
+                id
+            } else {
+                pit_id.to_owned()
+            };
             return json!({
-                "pit_id": pit_id,
-                "hits": {"total": {"value": documents.len(), "relation": "eq"}, "hits": hits},
+                "pit_id": response_pit_id,
+                "hits": {"total": {"value": total, "relation": "eq"}, "hits": hits},
                 "_shards": {"failed": 0}
             });
         }

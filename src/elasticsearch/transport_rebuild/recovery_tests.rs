@@ -378,6 +378,7 @@ impl ProgressReporter for StopTags<'_> {
 #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
 async fn tag_pages_resume_without_a_full_data_audit() {
     let (pool, schema, fixture, service) = setup(5).await;
+    fixture.state.lock().unwrap().rotate_pit_ids = true;
     pool.get().await.unwrap().batch_execute("INSERT INTO asset_tag(id,name,kind,category_id) SELECT 99,'fixture','info',id FROM asset_tag_category ORDER BY id LIMIT 1; INSERT INTO asset_ip_tag(ip_address,tag_id) VALUES('192.0.2.1',99)").await.unwrap();
     let stop = AtomicBool::new(false);
     let error = service
@@ -394,6 +395,8 @@ async fn tag_pages_resume_without_a_full_data_audit() {
     assert_eq!(run.phase, Phase::Tags);
     assert!(run.tagged > 0 && run.tagged < run.tag_total.unwrap());
     assert!(run.tag_cursor.is_some());
+    let latest_pit = format!("pit-{}", fixture.state.lock().unwrap().pit_counter);
+    assert_eq!(run.tag_pit_id.as_deref(), Some(latest_pit.as_str()));
     assert!(
         load(&pool, "elasticsearch_runtime")
             .await
@@ -413,7 +416,44 @@ async fn tag_pages_resume_without_a_full_data_audit() {
             assert_eq!(doc["tag_ids"], json!([99]));
         }
     }
+    assert!(fixture.state.lock().unwrap().pits.is_empty());
     cleanup(&pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn tag_pages_use_and_close_the_latest_rotated_pit() {
+    // Exercise both a short final page and a full final page followed by EOF.
+    for count in [3, 4] {
+        let (pool, schema, fixture, original) = setup(count).await;
+        let service = ElasticsearchService::new(ElasticsearchConfig {
+            projection_page_size: 3,
+            ..original.inner.config.clone()
+        })
+        .unwrap();
+        fixture.state.lock().unwrap().rotate_pit_ids = true;
+        service
+            .rebuild_transport_endpoints(&pool, TransportRebuildMode::NewIndex)
+            .await
+            .unwrap();
+        {
+            let state = fixture.state.lock().unwrap();
+            let ids = state
+                .query_bodies
+                .iter()
+                .filter_map(|(_, query)| query.pointer("/pit/id").and_then(Value::as_str))
+                .collect::<Vec<_>>();
+            assert_eq!(ids, ["pit-1", "pit-2", "pit-3"]);
+            assert_eq!(state.closed_pit_ids, ["pit-4"]);
+            assert!(state.pits.is_empty());
+        }
+        let run: Run =
+            serde_json::from_value(load(&pool, STATE_KEY).await.unwrap().unwrap()).unwrap();
+        assert!(run.tag_complete);
+        assert!(run.tag_pit_id.is_none());
+        assert_eq!(run.tagged, count as u64 * 2);
+        cleanup(&pool, &schema).await;
+    }
 }
 
 #[tokio::test]

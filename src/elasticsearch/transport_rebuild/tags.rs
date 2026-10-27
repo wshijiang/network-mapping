@@ -39,11 +39,12 @@ impl ElasticsearchService {
                 }
             };
             match self
-                .scan_rebuild_tags(pool, run, &index, &pit_id, reporter, stop)
+                .scan_rebuild_tags(pool, run, &index, reporter, stop)
                 .await
             {
                 Ok(()) => {
-                    self.close_tag_pit(&pit_id).await;
+                    self.close_tag_pit(run.tag_pit_id.as_deref().unwrap_or(&pit_id))
+                        .await;
                     run.tag_pit_id = None;
                     run.tag_complete = true;
                     save(pool, STATE_KEY, run).await?;
@@ -52,7 +53,8 @@ impl ElasticsearchService {
                 Err(error) if tag_pit_missing(&error) => {
                     warn!(event = "TransportRebuildTagPitExpired", error_message = %error,
                         "标签扫描 PIT 已失效，重新开始扫描");
-                    self.close_tag_pit(&pit_id).await;
+                    self.close_tag_pit(run.tag_pit_id.as_deref().unwrap_or(&pit_id))
+                        .await;
                     reset_tag_scan(run);
                     save(pool, STATE_KEY, run).await?;
                 }
@@ -66,7 +68,6 @@ impl ElasticsearchService {
         pool: &Pool,
         run: &mut Run,
         index: &str,
-        pit_id: &str,
         reporter: &dyn ProgressReporter,
         stop: &AtomicBool,
     ) -> Result<(), String> {
@@ -90,7 +91,11 @@ impl ElasticsearchService {
                 ),
             ));
             let page = self
-                .fetch_tag_page(pit_id, run.tag_cursor.as_ref(), page_size)
+                .fetch_tag_page(
+                    run.tag_pit_id.as_deref().ok_or("标签扫描缺少 PIT ID")?,
+                    run.tag_cursor.as_ref(),
+                    page_size,
+                )
                 .await?;
             let FetchedTagPage {
                 hits,
