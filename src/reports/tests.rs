@@ -102,6 +102,8 @@ async fn deferred_legacy_reports_wait_for_transfer_while_manual_mail_still_runs(
             webhook_url: String::new(),
             bot_token: String::new(),
             signing_secret: String::new(),
+            feishu_app_secret: String::new(),
+            clear_feishu_app_secret: false,
             clear_signing_secret: false,
             settings: crate::notification::ChannelSettings {
                 smtp_host: "smtp.example.com".into(),
@@ -475,6 +477,68 @@ async fn subscribe_report_notifications(pool: &Pool) {
     let token =
         crate::notification::encrypt("123456:abcdefghijklmnopqrstuvwxyz_ABC-123", &key).unwrap();
     pool.get().await.unwrap().execute("INSERT INTO notification_channel(id,provider,name,enabled,event_types,minimum_severity,webhook_ciphertext,secret_ciphertext,settings) VALUES($1,'telegram','报告群',TRUE,ARRAY['report.weekly','report.monthly'],'warning',''::BYTEA,$2,'{\"chat_id\":\"-1001234567890\"}')", &[&Uuid::new_v4(),&token]).await.unwrap();
+}
+
+#[actix_web::test]
+#[ignore = "requires disposable REPORT_TEST_DATABASE_URL"]
+async fn manual_report_sends_only_to_selected_bot_channels_without_mail_recipients() {
+    use actix_web::{App, HttpMessage, dev::Service, test, web};
+    let (pool, schema) = isolated_pool().await;
+    let id = Uuid::new_v4();
+    let channel = Uuid::new_v4();
+    let c = pool.get().await.unwrap();
+    c.execute("INSERT INTO report_run(id,period_type,period_start,period_end,source,status,task_snapshot,payload) VALUES($1,'weekly',NOW()-INTERVAL '10 days',NOW()-INTERVAL '3 days','manual','ready','{}','{}')", &[&id]).await.unwrap();
+    c.execute("INSERT INTO notification_channel(id,provider,name,enabled,event_types,minimum_severity,webhook_ciphertext,settings) VALUES($1,'telegram','Manual',TRUE,ARRAY['user.login'],'critical',''::BYTEA,'{}')", &[&channel]).await.unwrap();
+    drop(c);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(crate::admin::UserBaseI {
+                    id: 1,
+                    username: "admin".into(),
+                    role: 1,
+                    email: None,
+                    limit_login: false,
+                    enable_2fa: false,
+                });
+                srv.call(req)
+            })
+            .service(crate::handlers::reports::send)
+            .service(crate::handlers::reports::deliveries),
+    )
+    .await;
+    let uri = format!("/api/reports/{id}/deliveries");
+    let send = || {
+        test::TestRequest::post()
+            .uri(&uri)
+            .set_json(json!({"channel_ids":[channel]}))
+            .to_request()
+    };
+    assert_eq!(test::call_service(&app, send()).await.status(), 202);
+    assert_eq!(test::call_service(&app, send()).await.status(), 202);
+    let invalid = test::TestRequest::post()
+        .uri(&uri)
+        .set_json(json!({"channel_ids":[channel, Uuid::new_v4()]}))
+        .to_request();
+    assert_eq!(test::call_service(&app, invalid).await.status(), 400);
+    let c = pool.get().await.unwrap();
+    let n: i64 = c.query_one("SELECT COUNT(*) FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE e.context->>'report_id'=$1 AND e.context->>'manual_report'='true'", &[&id.to_string()]).await.unwrap().get(0);
+    assert_eq!(n, 2);
+    let n: i64 = c
+        .query_one(
+            "SELECT COUNT(*) FROM report_delivery WHERE report_id=$1",
+            &[&id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 0);
+    drop(c);
+    let response = test::call_service(&app, test::TestRequest::get().uri(&uri).to_request()).await;
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["data"].as_array().unwrap().len(), 2);
+    cleanup(&pool, schema).await;
 }
 
 #[actix_web::test]

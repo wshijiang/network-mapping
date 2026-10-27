@@ -27,6 +27,8 @@ fn input() -> ChannelInput {
         minimum_severity: "warning".into(),
         webhook_url: URL.into(),
         signing_secret: "test-signing-secret".into(),
+        feishu_app_secret: String::new(),
+        clear_feishu_app_secret: false,
         clear_signing_secret: false,
         bot_token: String::new(),
         smtp_password: String::new(),
@@ -975,6 +977,116 @@ async fn cleanup(pool: Pool, schema: String) {
         .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn feishu_image_credentials_are_encrypted_preserved_and_cleared() {
+    let (pool, schema) = database().await;
+    let audit = AuditContext::cli("notification-test");
+    let mut create = input();
+    create.settings.feishu_app_id = "cli_example".into();
+    create.feishu_app_secret = "app-secret-private".into();
+    let channel = save(&pool, &key(), None, create, &user(1), &audit)
+        .await
+        .unwrap();
+    assert!(channel.feishu_app_secret_configured);
+    assert!(
+        !serde_json::to_string(&channel)
+            .unwrap()
+            .contains("app-secret-private")
+    );
+    let c = pool.get().await.unwrap();
+    let ciphertext: Vec<u8> = c
+        .query_one(
+            "SELECT feishu_app_secret_ciphertext FROM notification_channel WHERE id=$1",
+            &[&channel.id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(decrypt(&ciphertext, &key()).unwrap(), "app-secret-private");
+    drop(c);
+    let mut edit = input();
+    edit.webhook_url.clear();
+    edit.signing_secret.clear();
+    edit.settings.feishu_app_id = "cli_example".into();
+    edit.expected_revision = Some(1);
+    let updated = save(&pool, &key(), Some(channel.id), edit, &user(1), &audit)
+        .await
+        .unwrap();
+    assert!(updated.feishu_app_secret_configured);
+    let mut clear = input();
+    clear.webhook_url.clear();
+    clear.signing_secret.clear();
+    clear.clear_feishu_app_secret = true;
+    clear.expected_revision = Some(2);
+    let cleared = save(&pool, &key(), Some(channel.id), clear, &user(1), &audit)
+        .await
+        .unwrap();
+    assert!(!cleared.feishu_app_secret_configured);
+    cleanup(pool, schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn manually_selected_report_can_be_claimed_and_retried_without_subscription() {
+    let (pool, schema) = database().await;
+    let audit = AuditContext::cli("notification-test");
+    let mut input = provider_input("telegram");
+    input.event_types = vec!["user.login".into()];
+    input.minimum_severity = "critical".into();
+    let channel = save(&pool, &key(), None, input, &user(1), &audit)
+        .await
+        .unwrap();
+    let c = pool.get().await.unwrap();
+    let event = Uuid::new_v4();
+    let delivery = Uuid::new_v4();
+    c.execute("INSERT INTO notification_event(id,dedup_key,event_type,severity,title,body,context) VALUES($1,$2,'report.weekly','warning','report','report',$3)", &[&event,&event.to_string(),&json!({"manual_report":true,"report_id":Uuid::new_v4()})]).await.unwrap();
+    c.execute("INSERT INTO notification_delivery(id,event_id,channel_id,destination_revision) VALUES($1,$2,$3,1)", &[&delivery,&event,&channel.id]).await.unwrap();
+    drop(c);
+    let worker::ClaimOutcome::Ready(claimed) = worker::claim(&pool).await.unwrap() else {
+        panic!("manual delivery was not claimed")
+    };
+    worker::complete(
+        &pool,
+        delivery,
+        claimed.token,
+        claimed.attempts,
+        Outcome::failure("provider_rejected", false),
+    )
+    .await
+    .unwrap();
+    retry(&pool, delivery, &user(1), &audit).await.unwrap();
+    let c = pool.get().await.unwrap();
+    let status: String = c
+        .query_one(
+            "SELECT status FROM notification_delivery WHERE id=$1",
+            &[&delivery],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(status, "pending");
+    drop(c);
+    cleanup(pool, schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn report_chart_uses_archived_data_without_mail_image_configuration() {
+    let (pool, schema) = database().await;
+    let report = Uuid::new_v4();
+    let payload =
+        json!({"trend":[{"day":"2026-10-01","succeeded":2,"failed":1,"partial":0,"cancelled":0}]});
+    let c = pool.get().await.unwrap();
+    c.execute("INSERT INTO report_run(id,period_type,period_start,period_end,source,status,task_snapshot,payload) VALUES($1,'weekly',NOW()-INTERVAL '10 days',NOW()-INTERVAL '3 days','manual','ready','{}',$2)", &[&report,&payload]).await.unwrap();
+    drop(c);
+    let image = worker::report_image(&pool, &json!({"report_id":report}))
+        .await
+        .unwrap();
+    assert!(image.starts_with(b"\x89PNG\r\n\x1a\n"));
+    cleanup(pool, schema).await;
 }
 
 #[tokio::test]

@@ -368,9 +368,12 @@ pub(crate) async fn deliveries(
     }
     let result = async { let client = pool.get().await.map_err(|e| e.to_string())?;
         let rows = client.query("SELECT * FROM report_delivery WHERE report_id = $1 ORDER BY created_at DESC, recipient_user_id;", &[&*id]).await.map_err(|e| e.to_string())?;
-        let items: Vec<Value> = rows.iter().map(|r| json!({"id": r.get::<_, Uuid>("id"), "recipient": r.get::<_, String>("recipient"), "status": r.get::<_, String>("status"),
+        let mut items: Vec<Value> = rows.iter().map(|r| json!({"id": r.get::<_, Uuid>("id"), "recipient": r.get::<_, String>("recipient"), "status": r.get::<_, String>("status"),
             "attempts": r.get::<_, i32>("attempts"), "dispatch_seq": r.get::<_, i32>("dispatch_seq"), "created_at": r.get::<_, chrono::DateTime<Utc>>("created_at"),
             "sent_at": r.get::<_, Option<chrono::DateTime<Utc>>>("sent_at"), "last_error": r.get::<_, Option<String>>("last_error")})).collect();
+        let notifications = client.query("SELECT d.id,c.name,c.provider,d.status,d.attempts,d.created_at,d.finished_at,d.last_error FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id JOIN notification_channel c ON c.id=d.channel_id WHERE e.context->>'report_id'=$1 AND c.provider IN ('feishu','telegram') ORDER BY d.created_at DESC LIMIT 200", &[&id.to_string()]).await.map_err(|e| e.to_string())?;
+        items.extend(notifications.iter().map(|r| json!({"id":r.get::<_,Uuid>("id"),"recipient":format!("{} · {}",r.get::<_,String>("provider"),r.get::<_,String>("name")),"status":r.get::<_,String>("status"),"attempts":r.get::<_,i32>("attempts"),"dispatch_seq":0,"created_at":r.get::<_,chrono::DateTime<Utc>>("created_at"),"sent_at":r.get::<_,Option<chrono::DateTime<Utc>>>("finished_at"),"last_error":r.get::<_,Option<String>>("last_error")})));
+        items.sort_by(|a,b| b["created_at"].as_str().cmp(&a["created_at"].as_str()));
         Ok::<_, String>(items) }.await;
     match result {
         Ok(items) => HttpResponse::Ok().json(json!({"success": true, "data": items})),
@@ -380,7 +383,10 @@ pub(crate) async fn deliveries(
 
 #[derive(Deserialize)]
 pub(crate) struct SendRequest {
+    #[serde(default)]
     recipient_ids: Vec<i32>,
+    #[serde(default)]
+    channel_ids: Vec<Uuid>,
 }
 #[post("/api/reports/{id}/deliveries")]
 pub(crate) async fn send(
@@ -393,24 +399,42 @@ pub(crate) async fn send(
     if !admin(&req, &pool, &user, "report.delivery.send") {
         return denied();
     }
-    if body.recipient_ids.is_empty() || body.recipient_ids.len() > 100 {
-        return bad("请选择 1 至 100 位管理员收件人");
+    if (body.recipient_ids.is_empty() && body.channel_ids.is_empty())
+        || body.recipient_ids.len() > 100
+        || body.channel_ids.len() > 32
+    {
+        return bad("请选择收件人或通知渠道");
     }
     let result = async {
         let mut client = pool.get().await.map_err(|e| e.to_string())?; let tx = client.transaction().await.map_err(|e| e.to_string())?;
-        let row = tx.query_opt("SELECT status, rendered_mail FROM report_run WHERE id = $1 FOR UPDATE;", &[&*id]).await.map_err(|e| e.to_string())?;
+        let row = tx.query_opt("SELECT status, rendered_mail,period_type FROM report_run WHERE id = $1 FOR UPDATE;", &[&*id]).await.map_err(|e| e.to_string())?;
         let Some(row) = row else { return Ok::<_, String>(missing()); };
         if row.get::<_, String>("status") != "ready" { return Ok(conflict("报告尚未生成完成")); }
-        if row.get::<_, Option<Value>>("rendered_mail").is_none() { return Ok(conflict("当前报告没有可发送的邮件内容，请检查模板后创建修订版")); }
-        if tx.query_opt("SELECT report_id FROM report_mail_asset WHERE report_id = $1 AND revoked_at IS NOT NULL", &[&*id]).await.map_err(|e| e.to_string())?.is_some() { return Ok(conflict("报告趋势图片已撤销，请生成修订版后发送")); }
+        if !body.recipient_ids.is_empty() && row.get::<_, Option<Value>>("rendered_mail").is_none() { return Ok(conflict("当前报告没有可发送的邮件内容，请检查模板后创建修订版")); }
+        if !body.recipient_ids.is_empty() && tx.query_opt("SELECT report_id FROM report_mail_asset WHERE report_id = $1 AND revoked_at IS NOT NULL", &[&*id]).await.map_err(|e| e.to_string())?.is_some() { return Ok(conflict("报告趋势图片已撤销，请生成修订版后发送")); }
         let mut selected = body.recipient_ids.clone(); selected.sort_unstable(); selected.dedup();
-        if storage::recipients(&tx, &selected).await?.len() != selected.len() { return Ok(bad("收件人必须是有有效邮箱的启用中管理员")); }
+        if !selected.is_empty() && storage::recipients(&tx, &selected).await?.len() != selected.len() { return Ok(bad("收件人必须是有有效邮箱的启用中管理员")); }
         let active: bool = tx.query_one("SELECT EXISTS (SELECT 1 FROM report_delivery WHERE report_id = $1 AND status IN ('pending','sending')) AS active;", &[&*id]).await.map_err(|e| e.to_string())?.get("active");
-        if active { return Ok(conflict("已有待投递邮件，请等待投递完成后再重发")); }
-        let count = storage::enqueue_delivery(&tx, *id, &selected, false, true).await?;
-        audit::write(&tx, &AuditContext::from_request(&req), &AuditEvent::user("data_access", "report.delivery.send", "success", &user).resource("report", id.to_string())).await.map_err(|e| e.to_string())?;
+        if active && !selected.is_empty() { return Ok(conflict("已有待投递邮件，请等待投递完成后再重发")); }
+        let count = if selected.is_empty() { 0 } else { storage::enqueue_delivery(&tx, *id, &selected, false, true).await? };
+        let mut channels = body.channel_ids.clone(); channels.sort_unstable(); channels.dedup();
+        if !channels.is_empty() {
+            let destinations = tx.query("SELECT id,destination_revision FROM notification_channel WHERE id=ANY($1) AND enabled AND deleted_at IS NULL AND provider IN ('feishu','telegram') FOR SHARE", &[&channels]).await.map_err(|e|e.to_string())?;
+            if destinations.len() != channels.len() { return Ok(bad("通知渠道不存在、已停用或类型无效")); }
+            let event_id = Uuid::now_v7();
+            let event_type = format!("report.{}", row.get::<_,String>("period_type"));
+            let context = json!({"report_id":*id,"manual_report":true});
+            tx.execute("INSERT INTO notification_event(id,dedup_key,event_type,severity,title,body,context) VALUES($1,$2,$3,'warning','手动发送报告','请登录平台查看报告',$4)", &[&event_id,&format!("report-manual:{event_id}"),&event_type,&context]).await.map_err(|e|e.to_string())?;
+            for destination in destinations {
+                let cid: Uuid = destination.get("id"); let revision: i64 = destination.get("destination_revision");
+                tx.execute("INSERT INTO notification_delivery(id,event_id,channel_id,destination_revision) VALUES($1,$2,$3,$4)", &[&Uuid::now_v7(),&event_id,&cid,&revision]).await.map_err(|e|e.to_string())?;
+            }
+        }
+        let mut audit_event = AuditEvent::user("data_access", "report.delivery.send", "success", &user).resource("report", id.to_string());
+        audit_event.metadata = json!({"recipient_ids": selected, "channel_ids": channels});
+        audit::write(&tx, &AuditContext::from_request(&req), &audit_event).await.map_err(|e| e.to_string())?;
         tx.commit().await.map_err(|e| e.to_string())?;
-        Ok(HttpResponse::Accepted().json(json!({"success": true, "data": {"recipients": count}})))
+        Ok(HttpResponse::Accepted().json(json!({"success": true, "data": {"recipients": count,"channels":channels.len()}})))
     }.await;
     match result {
         Ok(response) => response,

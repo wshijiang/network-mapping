@@ -21,6 +21,7 @@ ALTER TABLE notification_channel DROP CONSTRAINT IF EXISTS notification_channel_
 ALTER TABLE notification_channel ADD CONSTRAINT notification_channel_provider_check
     CHECK (provider IN ('email', 'feishu', 'telegram'));
 ALTER TABLE notification_channel ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE notification_channel ADD COLUMN IF NOT EXISTS feishu_app_secret_ciphertext BYTEA;
 ALTER TABLE notification_channel ADD COLUMN IF NOT EXISTS legacy_email BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_legacy_email ON notification_channel(legacy_email) WHERE legacy_email;
 

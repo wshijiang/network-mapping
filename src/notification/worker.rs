@@ -101,6 +101,7 @@ pub(super) struct Claimed {
     pub(super) attempts: i32,
     url: Vec<u8>,
     secret: Option<Vec<u8>>,
+    feishu_app_secret: Option<Vec<u8>>,
     provider: String,
     proxy_mode: ProxyMode,
     proxy_ciphertext: Option<Vec<u8>>,
@@ -135,8 +136,12 @@ pub(super) async fn claim(pool: &Pool) -> Result<ClaimOutcome> {
     let kind: String = row.get("event_type");
     let severity: String = row.get("severity");
     let attempts: i32 = row.get("attempts");
-    let subscribed = channel.get::<_, Vec<String>>("event_types").contains(&kind)
-        && (severity == "critical" || channel.get::<_, String>("minimum_severity") == "warning");
+    let manual_report =
+        kind.starts_with("report.") && row.get::<_, Value>("context")["manual_report"] == true;
+    let subscribed = manual_report
+        || channel.get::<_, Vec<String>>("event_types").contains(&kind)
+            && (severity == "critical"
+                || channel.get::<_, String>("minimum_severity") == "warning");
     let mut permitted = row.get::<_, i64>("destination_revision")
         == channel.get::<_, i64>("destination_revision")
         && (kind == "notification.test" || subscribed);
@@ -188,6 +193,7 @@ pub(super) async fn claim(pool: &Pool) -> Result<ClaimOutcome> {
         attempts: attempts + 1,
         url: channel.get("webhook_ciphertext"),
         secret: channel.get("secret_ciphertext"),
+        feishu_app_secret: channel.get("feishu_app_secret_ciphertext"),
         provider: channel.get("provider"),
         proxy_mode: channel
             .get::<_, String>("proxy_mode")
@@ -252,8 +258,53 @@ pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client
                     .await
                     {
                         Err(outcome) => outcome,
-                        Ok(payload) => {
+                        Ok(mut payload) => {
+                            let wants_image = claimed.context["report_id"].is_string()
+                                && ((claimed.provider == "telegram"
+                                    && payload.get("rich_message").is_some())
+                                    || (claimed.provider == "feishu"
+                                        && claimed.feishu_app_secret.is_some()));
+                            let image = if wants_image {
+                                match report_image(pool, &claimed.context).await {
+                                    Ok(image) => Some(image),
+                                    Err(outcome) => return Ok(outcome),
+                                }
+                            } else {
+                                None
+                            };
                             if claimed.provider == "feishu" {
+                                if let Some(image) = image {
+                                    let app_secret = match claimed
+                                        .feishu_app_secret
+                                        .as_deref()
+                                        .map(|v| decrypt(v, key))
+                                        .transpose()
+                                    {
+                                        Ok(Some(secret)) => secret,
+                                        _ => {
+                                            return Ok(Outcome::failure(
+                                                "secret_unavailable",
+                                                false,
+                                            ));
+                                        }
+                                    };
+                                    let image_key = match feishu::upload_report_image(
+                                        &delivery_client,
+                                        &claimed.settings.feishu_app_id,
+                                        &app_secret,
+                                        image,
+                                    )
+                                    .await
+                                    {
+                                        Ok(image_key) => image_key,
+                                        Err(outcome) => return Ok(outcome),
+                                    };
+                                    payload = match feishu::attach_report_image(payload, &image_key)
+                                    {
+                                        Ok(payload) => payload,
+                                        Err(outcome) => return Ok(outcome),
+                                    };
+                                }
                                 match decrypt(&claimed.url, key) {
                                     Ok(url) => {
                                         feishu::send_payload(
@@ -267,6 +318,16 @@ pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client
                                     Err(_) => Outcome::failure("secret_unavailable", false),
                                 }
                             } else {
+                                if let Some(image) = image {
+                                    return Ok(telegram::send_report_image(
+                                        &delivery_client,
+                                        secret.as_deref().unwrap_or_default(),
+                                        &claimed.settings.chat_id,
+                                        payload,
+                                        image,
+                                    )
+                                    .await);
+                                }
                                 telegram::send_payload(
                                     &delivery_client,
                                     secret.as_deref().unwrap_or_default(),
@@ -307,6 +368,35 @@ pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client
     };
     complete(pool, claimed.id, claimed.token, claimed.attempts, outcome).await?;
     Ok(true)
+}
+
+pub(super) async fn report_image(
+    pool: &Pool,
+    context: &Value,
+) -> std::result::Result<Vec<u8>, Outcome> {
+    let id = context["report_id"]
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or_else(|| Outcome::failure("invalid_payload", false))?;
+    let conn = pool
+        .get()
+        .await
+        .map_err(|_| Outcome::failure("notification_source_unavailable", true))?;
+    let row = conn
+        .query_opt(
+            "SELECT payload FROM report_run WHERE id=$1 AND status='ready'",
+            &[&id],
+        )
+        .await
+        .map_err(|_| Outcome::failure("notification_source_unavailable", true))?
+        .ok_or_else(|| Outcome::failure("report_unavailable", false))?;
+    let payload: Option<Value> = row.get("payload");
+    drop(conn);
+    let trend = serde_json::from_value(payload.unwrap_or(Value::Null)["trend"].clone())
+        .map_err(|_| Outcome::failure("report_image_invalid", false))?;
+    crate::reports::chart::render_async_checked(trend)
+        .await
+        .map_err(|error| Outcome::failure("report_image_invalid", error.is_retryable()))
 }
 
 pub(super) async fn email_recipients(pool: &Pool, claimed: &Claimed) -> Result<Vec<String>> {

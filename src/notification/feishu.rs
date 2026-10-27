@@ -70,6 +70,118 @@ pub async fn send(
     .await
 }
 
+/// Uploads a report chart using a tenant application. No response text or
+/// credential is exposed to callers or logs.
+pub(super) async fn upload_report_image(
+    client: &reqwest::Client,
+    app_id: &str,
+    app_secret: &str,
+    image: Vec<u8>,
+) -> Result<String, Outcome> {
+    upload_report_image_to(
+        client,
+        app_id,
+        app_secret,
+        image,
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+        "https://open.feishu.cn/open-apis/im/v1/images",
+    )
+    .await
+}
+
+async fn upload_report_image_to(
+    client: &reqwest::Client,
+    app_id: &str,
+    app_secret: &str,
+    image: Vec<u8>,
+    auth_url: &str,
+    image_url: &str,
+) -> Result<String, Outcome> {
+    let response = client
+        .post(auth_url)
+        .json(&json!({"app_id":app_id,"app_secret":app_secret}))
+        .send()
+        .await
+        .map_err(|_| Outcome::failure("feishu_auth_unavailable", true))?;
+    let token_response = read_api_response(response, "feishu_auth_failed").await?;
+    let token = token_response["tenant_access_token"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Outcome::failure("feishu_auth_failed", false))?;
+    let part = reqwest::multipart::Part::bytes(image)
+        .file_name("trend.png")
+        .mime_str("image/png")
+        .map_err(|_| Outcome::failure("invalid_payload", false))?;
+    let form = reqwest::multipart::Form::new()
+        .text("image_type", "message")
+        .part("image", part);
+    let response = client
+        .post(image_url)
+        .bearer_auth(token)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|_| Outcome::failure("feishu_image_upload_failed", true))?;
+    let result = read_api_response(response, "feishu_image_upload_failed").await?;
+    result["data"]["image_key"]
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 512)
+        .map(str::to_owned)
+        .ok_or_else(|| Outcome::failure("feishu_image_upload_failed", false))
+}
+
+async fn read_api_response(
+    mut response: reqwest::Response,
+    reason: &'static str,
+) -> Result<Value, Outcome> {
+    let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get("Retry-After")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0)
+        .clamp(0, 86400);
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| Outcome::failure(reason, true))?
+    {
+        if body.len() + chunk.len() > 16 * 1024 {
+            return Err(Outcome::failure(reason, false));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let value = serde_json::from_slice::<Value>(&body).ok();
+    let mut outcome = classify(status, value.as_ref());
+    if !outcome.sent {
+        outcome.reason = reason;
+        outcome.retry_after = retry_after;
+        return Err(outcome);
+    }
+    value.ok_or_else(|| Outcome::failure(reason, true))
+}
+
+pub(super) fn attach_report_image(mut payload: Value, image_key: &str) -> Result<Value, Outcome> {
+    if payload["msg_type"] == "interactive" {
+        let elements = payload["card"]["body"]["elements"]
+            .as_array_mut()
+            .ok_or_else(|| Outcome::failure("invalid_payload", false))?;
+        elements.insert(1.min(elements.len()), json!({"tag":"img","img_key":image_key,"alt":{"tag":"plain_text","content":"每日任务趋势"}}));
+        Ok(payload)
+    } else if payload["msg_type"] == "text" {
+        let text = payload["content"]["text"]
+            .as_str()
+            .ok_or_else(|| Outcome::failure("invalid_payload", false))?;
+        Ok(
+            json!({"msg_type":"post","content":{"post":{"zh_cn":{"title":"Network Mapping 报告","content":[[{"tag":"text","text":text}],[{"tag":"img","image_key":image_key}]]}}}}),
+        )
+    } else {
+        Err(Outcome::failure("invalid_payload", false))
+    }
+}
+
 pub(super) async fn send_payload(
     client: &reqwest::Client,
     url: &str,
@@ -176,6 +288,60 @@ pub fn client() -> Result<reqwest::Client, reqwest::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[actix_web::test]
+    async fn report_upload_authenticates_uploads_and_embeds_returned_key() {
+        use actix_web::{App, HttpRequest, HttpResponse, HttpServer, web};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = HttpServer::new(|| {
+            App::new()
+                .route(
+                    "/auth",
+                    web::post().to(|body: web::Json<Value>| async move {
+                        assert_eq!(body["app_id"], "app-id");
+                        assert_eq!(body["app_secret"], "app-secret");
+                        HttpResponse::Ok().json(json!({"code":0,"tenant_access_token":"token"}))
+                    }),
+                )
+                .route(
+                    "/images",
+                    web::post().to(|req: HttpRequest, body: web::Bytes| async move {
+                        assert_eq!(req.headers().get("Authorization").unwrap(), "Bearer token");
+                        let body = String::from_utf8_lossy(&body);
+                        assert!(body.contains("name=\"image_type\"") && body.contains("message"));
+                        assert!(body.contains("name=\"image\"") && body.contains("trend.png"));
+                        HttpResponse::Ok().json(json!({"code":0,"data":{"image_key":"img_test"}}))
+                    }),
+                )
+        })
+        .listen(listener)
+        .unwrap()
+        .run();
+        let handle = server.handle();
+        actix_web::rt::spawn(server);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let key = upload_report_image_to(
+            &client,
+            "app-id",
+            "app-secret",
+            b"png".to_vec(),
+            &format!("http://{address}/auth"),
+            &format!("http://{address}/images"),
+        )
+        .await
+        .unwrap();
+        let card = attach_report_image(json!({"msg_type":"interactive","card":{"body":{"elements":[{"tag":"markdown","content":"report"}]}}}), &key).unwrap();
+        assert_eq!(card["card"]["body"]["elements"][1]["img_key"], "img_test");
+        let post =
+            attach_report_image(json!({"msg_type":"text","content":{"text":"report"}}), &key)
+                .unwrap();
+        assert_eq!(
+            post["content"]["post"]["zh_cn"]["content"][1][0]["image_key"],
+            "img_test"
+        );
+        handle.stop(true).await;
+    }
     #[test]
     fn destinations_are_fixed_to_the_feishu_bot_endpoint() {
         let good =

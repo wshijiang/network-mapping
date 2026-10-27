@@ -47,7 +47,9 @@
 
 1. 在飞书群添加「自定义机器人」，复制 Webhook；建议启用签名校验并复制签名密钥。
 2. 选择「飞书」，填写名称、Webhook、可选签名密钥及事件订阅，保存并启用。
-3. 若开启关键词校验，允许固定前缀 **Network Mapping**；若开启 IP 白名单，允许服务实际出口 IP。
+3. 如需报告趋势图，创建飞书自建应用，开启机器人能力并授予图片上传所需权限，填写应用 ID 和应用密钥。应用密钥加密保存、不回显，留空保留；更换应用 ID 时须同时输入新密钥。未配置应用凭据时报告只发送文字。
+4. 系统先使用应用凭据获取 tenant access token，再上传报告 PNG 获得 image_key，通过自定义机器人 Webhook 将图片加入消息卡片或富文本。上传应用与目标机器人组合须在实际租户验证；无效凭据、权限或网络错误会记录投递失败。渠道测试使用示例文本，不测试报告图片链路。
+5. 若开启关键词校验，允许固定前缀 **Network Mapping**；若开启 IP 白名单，允许服务实际出口 IP。
 
 仅支持 `https://open.feishu.cn/open-apis/bot/v2/hook/<机器人 UUID>`，不接受任意 Webhook、Lark 国际版域名、查询参数、片段、用户凭据、其他端口和重定向。服务需要允许访问 `open.feishu.cn:443`，无须公开回调入口。
 
@@ -64,9 +66,9 @@
 3. 选择「Telegram」，填写 Token 和 Chat ID。支持非零数字 ID（包括负数群 ID）或公开频道 `@名称`。
 4. 选择与邮件、飞书相同的事件类型，保存启用并测试。Token 保存后不回显，编辑留空保留。
 
-后端只调用固定的 `https://api.telegram.org/bot<Token>/sendMessage`，不接受自定义服务地址、代理 API 端点或重定向。部署环境需允许 `api.telegram.org:443`。消息由当前事件的已发布 Telegram 模板渲染，支持纯文本或 HTML，始终关闭链接预览；未发布自定义模板时使用参考邮件的事件默认模板。请求同时验证 HTTP 状态、`ok` 和消息 ID；限流遵守 `parameters.retry_after`，群权限/目标错误直接记录失败。机器人摘要保留稳定事件 ID，事件摘要会预先截短；完整模板渲染结果仍超限时记录模板错误，不发送损坏内容。
+后端仅调用固定 `api.telegram.org` 的 `sendMessage` 或 `sendRichMessage`，不接受自定义服务地址或重定向。部署环境需允许 `api.telegram.org:443`。消息由当前事件的已发布 Telegram 模板渲染；可选择普通文本、普通 HTML 或富消息。周报/月报默认使用富消息并上传趋势图，选择普通消息格式则仅发送文本。请求同时验证 HTTP 状态、`ok` 和消息 ID；限流遵守 `parameters.retry_after`，群权限/目标错误直接记录失败。
 
-协议参考：[Telegram Bot API sendMessage](https://core.telegram.org/bots/api#sendmessage)。
+协议参考：[Telegram Bot API sendRichMessage](https://core.telegram.org/bots/api#sendrichmessage)。
 
 ## 启停、编辑与投递记录
 
@@ -115,7 +117,7 @@
 
 共用字段为 `provider,name,enabled,event_types,minimum_severity,expected_revision`。`provider` 支持 `email/feishu/telegram`，旧飞书客户端未传时默认 feishu。
 
-- 飞书：`webhook_url,signing_secret,clear_signing_secret`。
+- 飞书：`webhook_url,signing_secret,clear_signing_secret,feishu_app_secret,clear_feishu_app_secret`，`settings.feishu_app_id`；应用密钥仅写入，响应通过 `feishu_app_secret_configured` 表示是否配置。
 - Telegram：`bot_token,settings.chat_id`。
 - 邮件：`smtp_password,settings.smtp_host,settings.smtp_port,settings.smtp_sender,settings.recipients`。
 

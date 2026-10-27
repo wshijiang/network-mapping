@@ -95,6 +95,10 @@ pub struct ChannelInput {
     #[serde(default)]
     pub signing_secret: String,
     #[serde(default)]
+    pub feishu_app_secret: String,
+    #[serde(default)]
+    pub clear_feishu_app_secret: bool,
+    #[serde(default)]
     pub clear_signing_secret: bool,
     #[serde(default)]
     pub bot_token: String,
@@ -132,6 +136,8 @@ pub struct ChannelSettings {
     pub recipients: Vec<String>,
     #[serde(default)]
     pub chat_id: String,
+    #[serde(default)]
+    pub feishu_app_id: String,
 }
 
 impl ChannelInput {
@@ -171,6 +177,10 @@ impl ChannelInput {
                 }
                 if self.signing_secret.len() > 512
                     || (self.clear_signing_secret && !self.signing_secret.is_empty())
+                    || self.feishu_app_secret.len() > 512
+                    || (self.clear_feishu_app_secret && !self.feishu_app_secret.is_empty())
+                    || self.settings.feishu_app_id.len() > 128
+                    || self.settings.feishu_app_id.chars().any(char::is_whitespace)
                 {
                     return Err(Error::bad("签名密钥设置无效"));
                 }
@@ -224,6 +234,7 @@ pub struct Channel {
     pub webhook_configured: bool,
     pub signing_secret_configured: bool,
     pub credential_configured: bool,
+    pub feishu_app_secret_configured: bool,
     pub proxy_mode: ProxyMode,
     pub proxy_configured: bool,
     pub proxy_endpoint: String,
@@ -243,6 +254,7 @@ fn channel(row: &Row) -> Channel {
         signing_secret_configured: row.get::<_, String>("provider") == "feishu"
             && row.get("secret_configured"),
         credential_configured: row.get("secret_configured"),
+        feishu_app_secret_configured: row.get("feishu_app_secret_configured"),
         proxy_mode: row
             .get::<_, String>("proxy_mode")
             .parse()
@@ -254,7 +266,7 @@ fn channel(row: &Row) -> Channel {
         updated_at: row.get("updated_at"),
     }
 }
-const CHANNEL_COLUMNS: &str = "id, provider, settings, proxy_mode, proxy_endpoint, proxy_ciphertext IS NOT NULL AS proxy_configured, name, enabled, event_types, minimum_severity, secret_ciphertext IS NOT NULL AS secret_configured, revision, updated_at";
+const CHANNEL_COLUMNS: &str = "id, provider, settings, proxy_mode, proxy_endpoint, proxy_ciphertext IS NOT NULL AS proxy_configured, name, enabled, event_types, minimum_severity, secret_ciphertext IS NOT NULL AS secret_configured, feishu_app_secret_ciphertext IS NOT NULL AS feishu_app_secret_configured, revision, updated_at";
 
 pub fn encrypt(value: &str, encoded_key: &str) -> Result<Vec<u8>> {
     let key = openssl::base64::decode_block(encoded_key).map_err(|_| Error::internal())?;
@@ -323,7 +335,7 @@ pub async fn save(
         Some(encrypt(credential, key)?)
     };
     if let Some(id) = id {
-        let row = tx.query_opt("SELECT revision,provider,settings,proxy_mode,proxy_ciphertext,proxy_endpoint,secret_ciphertext IS NOT NULL AS secret_configured FROM notification_channel WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", &[&id]).await?.ok_or_else(Error::missing)?;
+        let row = tx.query_opt("SELECT revision,provider,settings,proxy_mode,proxy_ciphertext,proxy_endpoint,secret_ciphertext IS NOT NULL AS secret_configured,feishu_app_secret_ciphertext IS NOT NULL AS app_secret_configured FROM notification_channel WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", &[&id]).await?.ok_or_else(Error::missing)?;
         if Some(row.get::<_, i64>("revision")) != input.expected_revision {
             return Err(Error::conflict());
         }
@@ -357,6 +369,20 @@ pub async fn save(
         // Compare their meaning so renames/subscription edits retain offline receipts.
         let previous_settings: ChannelSettings =
             serde_json::from_value(row.get("settings")).map_err(|_| Error::internal())?;
+        if input.provider == "feishu" {
+            let configured = (!input.feishu_app_secret.is_empty()
+                || row.get::<_, bool>("app_secret_configured"))
+                && !input.clear_feishu_app_secret;
+            if configured == input.settings.feishu_app_id.is_empty()
+                || (previous_settings.feishu_app_id != input.settings.feishu_app_id
+                    && configured
+                    && input.feishu_app_secret.is_empty())
+            {
+                return Err(Error::bad(
+                    "飞书应用 ID 与密钥须同时配置，变更应用 ID 时须重新填写密钥",
+                ));
+            }
+        }
         let destination_changed = url.is_some()
             || (input.provider != "feishu" && previous_settings != input.settings)
             || (input.provider == "telegram" && secret.is_some());
@@ -364,6 +390,11 @@ pub async fn save(
         // An edit cancels queued work. In-flight requests may already have left the process.
         tx.execute("UPDATE notification_delivery SET status='cancelled',last_error='channel_changed',finished_at=NOW(),claim_token=NULL,lease_until=NULL WHERE channel_id=$1 AND status IN ('pending','sending')", &[&id]).await?;
     } else {
+        if input.provider == "feishu"
+            && (input.settings.feishu_app_id.is_empty() != input.feishu_app_secret.is_empty())
+        {
+            return Err(Error::bad("飞书应用 ID 与密钥须同时配置"));
+        }
         let count: i64 = tx
             .query_one(
                 "SELECT COUNT(*) FROM notification_channel WHERE deleted_at IS NULL",
@@ -382,6 +413,14 @@ pub async fn save(
         let (proxy_mode, proxy_ciphertext, proxy_endpoint) =
             proxy_update(&input, ProxyMode::System, None, String::new(), key)?;
         tx.execute("INSERT INTO notification_channel(id,provider,name,enabled,event_types,minimum_severity,webhook_ciphertext,secret_ciphertext,settings,proxy_mode,proxy_ciphertext,proxy_endpoint) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)", &[&target,&input.provider,&input.name.trim(),&input.enabled,&input.event_types,&input.minimum_severity,&url,&secret,&settings,&proxy_mode.as_str(),&proxy_ciphertext,&proxy_endpoint]).await?;
+    }
+    if input.provider == "feishu" {
+        let app_secret = if input.feishu_app_secret.is_empty() {
+            None
+        } else {
+            Some(encrypt(&input.feishu_app_secret, key)?)
+        };
+        tx.execute("UPDATE notification_channel SET feishu_app_secret_ciphertext=CASE WHEN $2 THEN NULL ELSE COALESCE($3,feishu_app_secret_ciphertext) END WHERE id=$1", &[&target,&input.clear_feishu_app_secret,&app_secret]).await?;
     }
     if input.provider == "email" {
         // Deferred legacy work is handed off atomically with the first usable Web email setup.
@@ -411,7 +450,7 @@ pub async fn remove(
     let tx = conn.transaction().await?;
     tx.query_one("SELECT pg_advisory_xact_lock(728104, 1)", &[])
         .await?;
-    let changed = tx.execute("UPDATE notification_channel SET enabled=FALSE,deleted_at=NOW(),revision=revision+1,webhook_ciphertext=''::BYTEA,secret_ciphertext=NULL,proxy_mode='system',proxy_ciphertext=NULL,proxy_endpoint='' WHERE id=$1 AND revision=$2 AND deleted_at IS NULL", &[&id,&revision]).await?;
+    let changed = tx.execute("UPDATE notification_channel SET enabled=FALSE,deleted_at=NOW(),revision=revision+1,webhook_ciphertext=''::BYTEA,secret_ciphertext=NULL,feishu_app_secret_ciphertext=NULL,proxy_mode='system',proxy_ciphertext=NULL,proxy_endpoint='' WHERE id=$1 AND revision=$2 AND deleted_at IS NULL", &[&id,&revision]).await?;
     if changed != 1 {
         return Err(Error::conflict());
     }
@@ -590,7 +629,7 @@ pub async fn deliveries(pool: &Pool, query: DeliveryQuery) -> Result<Value> {
 pub async fn retry(pool: &Pool, id: Uuid, user: &UserBaseI, context: &AuditContext) -> Result<()> {
     let mut conn = pool.get().await?;
     let tx = conn.transaction().await?;
-    let changed = tx.execute("UPDATE notification_delivery d SET status='pending',attempts=0,available_at=NOW(),finished_at=NULL,last_error=NULL FROM notification_channel c,notification_event e WHERE d.id=$1 AND d.channel_id=c.id AND d.event_id=e.id AND d.status='failed' AND c.enabled AND c.deleted_at IS NULL AND c.destination_revision=d.destination_revision AND (e.event_type='notification.test' OR (e.event_type=ANY(c.event_types) AND (e.severity='critical' OR c.minimum_severity='warning'))) AND (e.event_type<>'scanner.offline' OR EXISTS(SELECT 1 FROM scanner_outage o JOIN scanner_info s ON s.scanner_id=o.scanner_id WHERE o.id=e.outage_id AND o.recovered_at IS NULL AND s.deleted_at IS NULL AND s.is_enable))", &[&id]).await?;
+    let changed = tx.execute("UPDATE notification_delivery d SET status='pending',attempts=0,available_at=NOW(),finished_at=NULL,last_error=NULL FROM notification_channel c,notification_event e WHERE d.id=$1 AND d.channel_id=c.id AND d.event_id=e.id AND d.status='failed' AND c.enabled AND c.deleted_at IS NULL AND c.destination_revision=d.destination_revision AND (e.event_type='notification.test' OR (e.event_type LIKE 'report.%' AND e.context->>'manual_report'='true') OR (e.event_type=ANY(c.event_types) AND (e.severity='critical' OR c.minimum_severity='warning'))) AND (e.event_type<>'scanner.offline' OR EXISTS(SELECT 1 FROM scanner_outage o JOIN scanner_info s ON s.scanner_id=o.scanner_id WHERE o.id=e.outage_id AND o.recovered_at IS NULL AND s.deleted_at IS NULL AND s.is_enable))", &[&id]).await?;
     if changed != 1 {
         return Err(Error::conflict());
     }

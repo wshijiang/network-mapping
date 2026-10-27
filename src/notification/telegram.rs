@@ -94,8 +94,74 @@ pub(super) async fn send_payload(
     .await
 }
 
+pub(super) async fn send_report_image(
+    client: &reqwest::Client,
+    token: &str,
+    chat_id: &str,
+    payload: Value,
+    image: Vec<u8>,
+) -> Outcome {
+    if !validate_token(token) || !validate_chat_id(chat_id) {
+        return Outcome::failure("invalid_destination", false);
+    }
+    send_report_image_to(
+        client,
+        &format!("https://api.telegram.org/bot{token}/sendRichMessage"),
+        chat_id,
+        payload,
+        image,
+    )
+    .await
+}
+
+async fn send_report_image_to(
+    client: &reqwest::Client,
+    url: &str,
+    chat_id: &str,
+    mut payload: Value,
+    image: Vec<u8>,
+) -> Outcome {
+    let Some(html) = payload["rich_message"]["html"].as_str() else {
+        return Outcome::failure("invalid_payload", false);
+    };
+    let position = html
+        .find("<b>与上一周期比较</b>")
+        .or_else(|| html.rfind("<br/>事件 ID："))
+        .unwrap_or(html.len());
+    let html = format!(
+        "{}<img src=\"tg://photo?id=trend\"/>{}",
+        &html[..position],
+        &html[position..]
+    );
+    payload["rich_message"]["html"] = json!(html);
+    payload["rich_message"]["media"] =
+        json!([{"id":"trend","media":{"type":"photo","media":"attach://trend"}}]);
+    let Ok(rich) = serde_json::to_string(&payload["rich_message"]) else {
+        return Outcome::failure("invalid_payload", false);
+    };
+    if rich.len() > 20 * 1024 {
+        return Outcome::failure("payload_too_large", false);
+    }
+    let Ok(part) = reqwest::multipart::Part::bytes(image)
+        .file_name("trend.png")
+        .mime_str("image/png")
+    else {
+        return Outcome::failure("invalid_payload", false);
+    };
+    let form = reqwest::multipart::Form::new()
+        .text("chat_id", chat_id.to_owned())
+        .text("rich_message", rich)
+        .part("trend", part);
+    let response = client.post(url).multipart(form).send().await;
+    read_response(response).await
+}
+
 async fn transmit(client: &reqwest::Client, url: &str, payload: Value) -> Outcome {
-    let Ok(mut response) = client.post(url).json(&payload).send().await else {
+    read_response(client.post(url).json(&payload).send().await).await
+}
+
+async fn read_response(response: Result<reqwest::Response, reqwest::Error>) -> Outcome {
+    let Ok(mut response) = response else {
         return Outcome::failure("network_or_tls_error", true);
     };
     let status = response.status().as_u16();
@@ -116,6 +182,50 @@ async fn transmit(client: &reqwest::Client, url: &str, payload: Value) -> Outcom
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[actix_web::test]
+    async fn rich_report_upload_references_attached_image() {
+        use actix_web::{App, HttpResponse, HttpServer, web};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = HttpServer::new(|| {
+            App::new().route(
+                "/rich",
+                web::post().to(|body: web::Bytes| async move {
+                    let body = String::from_utf8_lossy(&body);
+                    assert!(body.contains("name=\"chat_id\"") && body.contains("-100123"));
+                    assert!(
+                        body.contains("tg://photo?id=trend") && body.contains("attach://trend")
+                    );
+                    assert!(
+                        body.find("tg://photo?id=trend").unwrap()
+                            < body.find("与上一周期比较").unwrap()
+                    );
+                    assert!(body.contains("name=\"trend\"") && body.contains("trend.png"));
+                    HttpResponse::Ok().json(json!({"ok":true,"result":{"message_id":42}}))
+                }),
+            )
+        })
+        .listen(listener)
+        .unwrap()
+        .run();
+        let handle = server.handle();
+        actix_web::rt::spawn(server);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let payload =
+            json!({"rich_message":{"html":"<b>报告</b><br/><b>与上一周期比较</b><br/>事件 ID：1"}});
+        assert!(
+            send_report_image_to(
+                &client,
+                &format!("http://{address}/rich"),
+                "-100123",
+                payload,
+                b"png".to_vec()
+            )
+            .await
+            .sent
+        );
+        handle.stop(true).await;
+    }
     #[test]
     fn credentials_cannot_change_the_bot_api_destination() {
         assert!(validate_token("123456:abcdefghijklmnopqrstuvwxyz_ABC-123"));

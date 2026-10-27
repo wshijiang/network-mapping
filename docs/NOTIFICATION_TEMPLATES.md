@@ -21,9 +21,9 @@
 | --- | --- | --- |
 | 邮件 | HTML + 备用纯文本 | CSS 内联及允许的样式属性；不加载远程样式表，最终以邮件客户端为准 |
 | 飞书 | text / interactive 消息卡片 | `b/strong` 粗体、`i/em` 斜体、`s/strike/del` 删除线、`a` 超链接转换为卡片 Markdown；`u/ins` 下划线兼容显示为普通文本，预览与发送一致 |
-| Telegram | text / HTML parse_mode | `b/strong` 粗体、`i/em` 斜体、`u/ins` 下划线、`s/strike/del` 删除线、`a` 超链接，另支持 `code`、`pre`、`blockquote`、`tg-spoiler`；本编辑器要求 code/pre/blockquote 单独使用，不能与其他标签嵌套 |
+| Telegram | text / HTML parse_mode / sendRichMessage | `b/strong` 粗体、`i/em` 斜体、`u/ins` 下划线、`s/strike/del` 删除线、`a` 超链接，另支持 `code`、`pre`、`blockquote`、`tg-spoiler`；本编辑器要求 code/pre/blockquote 单独使用，不能与其他标签嵌套 |
 
-HTML 换行直接输入换行符，不使用 `<br>`、`<p>` 或 `<div>`。链接仅支持带引号的 `href`，且地址必须为不含账号密码的 HTTP/HTTPS URL。HTML 实体支持 `amp/lt/gt/quot/apos` 和有效数字实体。富文本不支持 CSS、任意 HTML 属性、图片、自定义卡片 JSON 或 Telegram 新版 `sendRichMessage`。除上述飞书下划线标签兼容处理外，遇到不支持的格式会拒绝保存/发布。
+HTML 换行直接输入换行符，不使用 `<br>`、`<p>` 或 `<div>`。链接仅支持带引号的 `href`，且地址必须为不含账号密码的 HTTP/HTTPS URL。HTML 实体支持 `amp/lt/gt/quot/apos` 和有效数字实体。模板编辑器不支持 CSS、任意 HTML 属性、图片或自定义卡片 JSON。除上述飞书下划线标签兼容处理外，遇到不支持的格式会拒绝保存/发布。
 
 飞书卡片使用纯文本标题、Markdown 正文、分隔线和事件 ID。健康告警和 Scanner 掉线使用橙色标题，严重级别使用红色，Scanner 恢复使用绿色，其他普通通知使用蓝色。现有 HTML 模板自动适配卡片，无需重新发布或重建渠道；纯文本模板继续发送 `text` 消息。变量和正文中的 Markdown 特殊字符按字面转义，链接目标单独编码，换行转换为卡片支持的换行。
 
@@ -78,7 +78,7 @@ HTML 换行直接输入换行符，不使用 `<br>`、`<p>` 或 `<div>`。链接
 ## 限制与排障
 
 - 标题模板最多 500 字符，渲染后标题为 1–200 字符且不能换行；正文模板最多 12 KiB，HTTP JSON 请求总大小仍受 16 KiB 限制。
-- Telegram 渲染后的可见消息（含标题与事件 ID）不能超过 4096 UTF-16 单位；消息 JSON 限制为 19 KiB。飞书消息 JSON 预留签名空间，模板渲染阶段限制为 19 KiB，最终请求不得超过 20 KiB。
+- Telegram 普通消息渲染后的可见消息（含标题与事件 ID）不能超过 4096 UTF-16 单位；富消息和普通消息均受本系统 19 KiB 编码限制。飞书消息 JSON 预留签名空间，模板渲染阶段限制为 19 KiB，最终请求不得超过 20 KiB。
 - 示例数据校验通过不保证任意真实数据都不超长。真实事件渲染失败/超限时，投递记录显示 `notification_template_invalid`，不会发送损坏的富文本。修改发布后可手动重试仍符合条件的失败投递。
 - 保存、发布和恢复携带 `expectedRevision`。并发冲突返回 409，保留本地编辑；重新加载前自行保存需要保留的文本。切换渠道、事件或离开页面时提示未保存修改。
 
@@ -106,4 +106,4 @@ API 仅管理员可用，写请求受既有 CSRF 校验保护。模板变更与�
 协议参考：[飞书卡片 Markdown](https://open.feishu.cn/document/feishu-cards/card-json-v2-components/content-components/rich-text)、[飞书自定义机器人](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)、[Telegram HTML](https://core.telegram.org/bots/api#html-style)。
 ## Telegram 富消息
 
-Telegram 模板可以选择“富消息（sendRichMessage）”；服务器使用受限 HTML 模板生成富消息。新默认的周报和月报模板采用该格式，已发布模板继续使用原有格式。此格式目前仅支持编辑器现有的文本标签，不支持在模板中直接插入图片。
+Telegram 模板可以选择“富消息（sendRichMessage）”；服务器使用受限 HTML 模板生成富消息。未发布自定义模板的周报和月报默认采用该格式，已发布模板继续使用原有格式。模板不能自行插入图片；实际报告投递时系统从归档趋势数据生成 PNG 并作为媒体块加入富消息。模板预览和示例测试不上传真实报告图片。选择普通消息格式时仅发送文本。

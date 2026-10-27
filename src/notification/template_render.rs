@@ -368,6 +368,39 @@ fn fragment(input: &str, provider: &str) -> Result<(String, String, String)> {
     Ok((html, plain, markdown))
 }
 
+fn rich_line_breaks(html: &str) -> String {
+    let mut output = String::with_capacity(html.len());
+    let mut pre = false;
+    let mut rest = html;
+    while let Some(start) = rest.find('<') {
+        let (text, tags) = rest.split_at(start);
+        output.push_str(&if pre {
+            text.to_owned()
+        } else {
+            text.replace('\n', "<br/>")
+        });
+        let Some(end) = tags.find('>') else {
+            output.push_str(tags);
+            return output;
+        };
+        let tag = &tags[..=end];
+        if tag == "<pre>" {
+            pre = true;
+        }
+        if tag == "</pre>" {
+            pre = false;
+        }
+        output.push_str(tag);
+        rest = &tags[end + 1..];
+    }
+    output.push_str(&if pre {
+        rest.to_owned()
+    } else {
+        rest.replace('\n', "<br/>")
+    });
+    output
+}
+
 pub fn render(provider: &str, source: &Source, c: &Context) -> Result<Rendered> {
     if !matches!(provider, "feishu" | "telegram")
         || !(matches!(source.format.as_str(), "text" | "html")
@@ -437,7 +470,7 @@ pub fn render(provider: &str, source: &Source, c: &Context) -> Result<Rendered> 
             return Err(Error::bad("Telegram 消息不能超过 4096 UTF-16 单位"));
         }
         if source.format == "rich_html" {
-            json!({"rich_message":{"html":html_body}})
+            json!({"rich_message":{"html":rich_line_breaks(&html_body)}})
         } else if source.format == "html" {
             json!({"text":html_body,"parse_mode":"HTML","link_preview_options":{"is_disabled":true}})
         } else {
