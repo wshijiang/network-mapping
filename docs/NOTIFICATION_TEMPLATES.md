@@ -104,3 +104,6 @@ API 仅管理员可用，写请求受既有 CSRF 校验保护。模板变更与�
 验证命令：`cargo test --locked notification::`；使用可丢弃 PostgreSQL 并设置 `NOTIFICATION_TEST_DATABASE_URL` 后运行 `cargo test --locked notification:: -- --ignored`。前端运行 `pnpm test:notifications` 和 `pnpm build`。
 
 协议参考：[飞书卡片 Markdown](https://open.feishu.cn/document/feishu-cards/card-json-v2-components/content-components/rich-text)、[飞书自定义机器人](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)、[Telegram HTML](https://core.telegram.org/bots/api#html-style)。
+## Telegram 富消息
+
+Telegram 模板可以选择“富消息（sendRichMessage）”；服务器使用受限 HTML 模板生成富消息。新默认的周报和月报模板采用该格式，已发布模板继续使用原有格式。此格式目前仅支持编辑器现有的文本标签，不支持在模板中直接插入图片。

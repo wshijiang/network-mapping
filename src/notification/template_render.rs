@@ -370,7 +370,8 @@ fn fragment(input: &str, provider: &str) -> Result<(String, String, String)> {
 
 pub fn render(provider: &str, source: &Source, c: &Context) -> Result<Rendered> {
     if !matches!(provider, "feishu" | "telegram")
-        || !matches!(source.format.as_str(), "text" | "html")
+        || !(matches!(source.format.as_str(), "text" | "html")
+            || (provider == "telegram" && source.format == "rich_html"))
     {
         return Err(Error::bad("不支持的渠道或模板格式"));
     }
@@ -382,7 +383,7 @@ pub fn render(provider: &str, source: &Source, c: &Context) -> Result<Rendered> 
         return Err(Error::bad("标题须为 1–500 字符，正文须为 1–12 KiB"));
     }
     let mut tera = Tera::default();
-    let body_name = if source.format == "html" {
+    let body_name = if source.format != "text" {
         "body.html"
     } else {
         "body.txt"
@@ -411,7 +412,7 @@ pub fn render(provider: &str, source: &Source, c: &Context) -> Result<Rendered> 
             .and_then(Value::as_str)
             .unwrap_or_default()
     );
-    let (html, plain, markdown) = if source.format == "html" {
+    let (html, plain, markdown) = if source.format != "text" {
         fragment(&body, provider)?
     } else {
         (escape(&body), body.clone(), String::new())
@@ -426,16 +427,18 @@ pub fn render(provider: &str, source: &Source, c: &Context) -> Result<Rendered> 
             escape(&subject),
             escape(footer.trim_start())
         )
-    } else if source.format == "html" {
+    } else if source.format != "text" {
         format!("<b>{}</b>\n{html}{}", escape(&subject), escape(&footer))
     } else {
         escape(&text_body)
     };
     let payload = if provider == "telegram" {
-        if text_body.encode_utf16().count() > 4096 {
+        if source.format != "rich_html" && text_body.encode_utf16().count() > 4096 {
             return Err(Error::bad("Telegram 消息不能超过 4096 UTF-16 单位"));
         }
-        if source.format == "html" {
+        if source.format == "rich_html" {
+            json!({"rich_message":{"html":html_body}})
+        } else if source.format == "html" {
             json!({"text":html_body,"parse_mode":"HTML","link_preview_options":{"is_disabled":true}})
         } else {
             json!({"text":text_body,"link_preview_options":{"is_disabled":true}})
@@ -488,6 +491,24 @@ pub fn render(provider: &str, source: &Source, c: &Context) -> Result<Rendered> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn telegram_rich_html_uses_rich_message_payload() {
+        let source = Source {
+            format: "rich_html".into(),
+            title_template: "标题".into(),
+            body_template: "<b>内容</b>".into(),
+        };
+        let rendered = render("telegram", &source, &sample_context("user.login")).unwrap();
+        assert!(
+            rendered.payload["rich_message"]["html"]
+                .as_str()
+                .unwrap()
+                .contains("<b>内容</b>")
+        );
+        assert!(rendered.payload.get("text").is_none());
+        assert!(render("feishu", &source, &sample_context("user.login")).is_err());
+    }
     #[test]
     fn event_defaults_and_parameter_catalog_match_mail_for_every_provider() {
         for event in crate::notification::EVENT_TYPES {

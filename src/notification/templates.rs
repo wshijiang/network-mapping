@@ -35,6 +35,14 @@ fn validate_key(provider: &str, event: &str) -> Result<()> {
     Ok(())
 }
 
+fn default_for(provider: &str, event: &str) -> Source {
+    let mut source = event_default_source(event);
+    if provider == "telegram" && event.starts_with("report.") {
+        source.format = "rich_html".into();
+    }
+    source
+}
+
 pub async fn detail(pool: &Pool, provider: &str, event: &str) -> Result<Value> {
     validate_key(provider, event)?;
     let mut c = pool.get().await?;
@@ -61,14 +69,14 @@ pub async fn detail(pool: &Pool, provider: &str, event: &str) -> Result<Value> {
         });
     let source = selected
         .map(|r| r.get::<_, Value>("source"))
-        .unwrap_or_else(|| json!(event_default_source(event)));
+        .unwrap_or_else(|| json!(default_for(provider, event)));
     let status = selected
         .map(|r| r.get::<_, String>("status"))
         .unwrap_or_else(|| "default".into());
     let versions: Vec<_> = rows.iter().map(|r| json!({"version":r.get::<_,i32>("version"),"status":r.get::<_,String>("status"),"createdAt":r.get::<_,chrono::DateTime<chrono::Utc>>("created_at"),"publishedAt":r.get::<_,Option<chrono::DateTime<chrono::Utc>>>("published_at")})).collect();
     tx.commit().await?;
     Ok(
-        json!({"provider":provider,"eventType":event,"revision":revision,"activeVersion":active,"status":status,"source":source,"defaultSource":event_default_source(event),"variables":super::template_context::variables(event),"versions":versions}),
+        json!({"provider":provider,"eventType":event,"revision":revision,"activeVersion":active,"status":status,"source":source,"defaultSource":default_for(provider, event),"variables":super::template_context::variables(event),"versions":versions}),
     )
 }
 
@@ -81,7 +89,7 @@ pub async fn published(pool: &Pool, provider: &str, event: &str) -> Result<Sourc
     let c = pool.get().await?;
     let row = c.query_opt("SELECT v.source FROM notification_template t JOIN notification_template_version v ON v.provider=t.provider AND v.event_type=t.event_type AND v.version=t.active_version WHERE t.provider=$1 AND t.event_type=$2 AND v.status='published'", &[&provider,&event]).await?;
     row.map(|r| serde_json::from_value(r.get(0)).map_err(|_| Error::bad("已发布通知模板无效")))
-        .unwrap_or_else(|| Ok(event_default_source(event)))
+        .unwrap_or_else(|| Ok(default_for(provider, event)))
 }
 
 /// Resolve the same event fields used by mail, while retaining old bot summary variables.

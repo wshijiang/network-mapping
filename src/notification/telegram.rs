@@ -81,9 +81,14 @@ pub(super) async fn send_payload(
         return Outcome::failure("payload_too_large", false);
     }
     payload["chat_id"] = json!(chat_id);
+    let method = if payload.get("rich_message").is_some() {
+        "sendRichMessage"
+    } else {
+        "sendMessage"
+    };
     transmit(
         client,
-        &format!("https://api.telegram.org/bot{token}/sendMessage"),
+        &format!("https://api.telegram.org/bot{token}/{method}"),
         payload,
     )
     .await

@@ -2,6 +2,10 @@
 
 [文档中心](README.md) · [配套发布与升级](https://github.com/wshijiang/network-mapping/blob/main/docs/RELEASING.md)
 
+## 未发布
+
+- Telegram 通知模板增加富消息格式，通过 `sendRichMessage` 发送；未自定义的报告模板默认使用该格式。
+
 ## v0.1.30（2026-10-27 重新发布）
 
 **2026-10-26 的同版本发布已撤回，2026-10-27 修复后重新发布**。请以本次 tag 指向的提交、BUILD-INFO 和 SHA-256 校验文件为准，不复用已撤回制品或旧 Actions 构建附件。本节按最终实现汇总此前阶段记录。
