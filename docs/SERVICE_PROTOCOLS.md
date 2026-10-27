@@ -150,4 +150,4 @@ request_timeout_seconds = 180
 
 历史执行记录（2026-10-23）：扫描端全目标测试 217 项常规与 6 项 Worker 进程测试通过；另有 4 项被动接收定向回归通过。前端 152 项工具/组件测试通过，服务端常规测试、PostgreSQL 调度和投影测试的结果随 PR 记录。默认忽略的集成测试不计入常规通过数量。
 
-2026-10-27，修复基线 `5cb0bc82eecec854388cdca1189bb60e1536fc02` 的 [Service evidence inference CI](https://github.com/wshijiang/network-mapping/actions/runs/40498195862) 已通过：使用 PostgreSQL 和真实 Elasticsearch **9.5.4** 验证端点重建恢复、投影、服务证据及不可变事实；测试创建独立合成资源，不操作生产索引。生产迁移仍须事先备份并按实际配置验收；真实设备网络、浏览器视觉与线上部署不在该 CI 验证范围内。
+2026-10-27，修复基线 `5cb0bc82eecec854388cdca1189bb60e1536fc02` 的 [Service evidence inference CI](https://github.com/wshijiang/network-mapping/actions/runs/40498195862) 已通过：使用 PostgreSQL 和真实 Elasticsearch **9.5.4** 验证基础端点重建、投影、服务证据及不可变事实；[重新发布 PR](https://github.com/wshijiang/network-mapping/pull/136) 将 `transport_rebuild::tests` 与 `transport_rebuild::recovery_tests` 都纳入该工作流，覆盖模式选择、原地备份、PIT 恢复及真实 ES 重建。测试创建独立合成资源，不操作生产索引。生产迁移仍须事先备份并按实际配置验收；真实设备网络、浏览器视觉与线上部署不在该 CI 验证范围内。
