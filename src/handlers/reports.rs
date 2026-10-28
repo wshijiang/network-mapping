@@ -293,6 +293,17 @@ pub(crate) async fn schedules(
                 })
             };
             data["notifications"] = json!({"weekly":subscribed("report.weekly"),"monthly":subscribed("report.monthly")});
+            data["bot_channels"] = json!(
+                channels
+                    .iter()
+                    .filter(|channel| matches!(channel.provider.as_str(), "feishu" | "telegram"))
+                    .map(|channel| json!({
+                        "id":channel.id, "name":channel.name, "provider":channel.provider,
+                        "enabled":channel.enabled, "minimum_severity":channel.minimum_severity,
+                        "revision":channel.revision, "event_types":channel.event_types,
+                    }))
+                    .collect::<Vec<_>>()
+            );
             HttpResponse::Ok().json(json!({"success": true, "data": data}))
         }
         Err(e) => internal(e),
@@ -300,12 +311,20 @@ pub(crate) async fn schedules(
 }
 
 #[derive(Deserialize)]
+pub(crate) struct ScheduleChannel {
+    id: Uuid,
+    revision: i64,
+    selected: bool,
+}
+#[derive(Deserialize)]
 pub(crate) struct ScheduleRequest {
     enabled: bool,
     send_hour: i16,
     send_minute: i16,
     recipient_ids: Vec<i32>,
     expected_revision: i64,
+    #[serde(default)]
+    bot_channels: Option<Vec<ScheduleChannel>>,
 }
 #[put("/api/report-schedules/{kind}")]
 pub(crate) async fn save_schedule(
@@ -323,6 +342,16 @@ pub(crate) async fn save_schedule(
         || !(0..=59).contains(&body.send_minute)
         || body.recipient_ids.len() > 100
         || body.recipient_ids.iter().any(|id| *id <= 0)
+        || body.bot_channels.as_ref().is_some_and(|channels| {
+            channels.len() > 32
+                || channels.iter().any(|c| c.revision < 1)
+                || channels
+                    .iter()
+                    .map(|c| c.id)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    != channels.len()
+        })
     {
         return bad("发送时间或收件人列表无效");
     }
@@ -339,13 +368,34 @@ pub(crate) async fn save_schedule(
             if valid.is_empty() || (!selected.is_empty() && valid.len() != selected.len()) { return Ok::<_, String>(Some(bad("收件人必须是有有效邮箱的启用中管理员"))); }
         }
         let key = kind.as_str();
+        // Match report creation's lock order: schedule before notification channels.
         let count = tx.execute("UPDATE report_schedule SET enabled = $2, send_hour = $3, send_minute = $4, recipient_ids = $5, \
             enabled_at = CASE WHEN $2 AND NOT enabled THEN NOW() ELSE enabled_at END, \
             last_period_end = CASE WHEN $2 AND NOT enabled THEN NULL ELSE last_period_end END, revision = revision + 1, updated_at = NOW() \
             WHERE period_type = $1 AND revision = $6;", &[&key, &body.enabled, &body.send_hour, &body.send_minute, &selected, &body.expected_revision]).await.map_err(|e| e.to_string())?;
         if count == 0 { return Ok(Some(conflict("计划已被其他管理员更新，请重新加载"))); }
+        let topic = format!("report.{key}");
+        let mut changes = Vec::new();
+        if let Some(channels) = &body.bot_channels {
+            let mut ordered: Vec<_> = channels.iter().collect();
+            ordered.sort_by_key(|channel| channel.id);
+            for requested in ordered {
+                let row = tx.query_opt("SELECT revision,enabled,minimum_severity,event_types FROM notification_channel WHERE id=$1 AND deleted_at IS NULL AND provider IN ('feishu','telegram') FOR UPDATE", &[&requested.id]).await.map_err(|e|e.to_string())?;
+                let Some(row) = row else { return Ok(Some(conflict("通知渠道已变化，请刷新后重试"))); };
+                if row.get::<_,i64>("revision") != requested.revision || !row.get::<_,bool>("enabled") || row.get::<_,String>("minimum_severity") != "warning" { return Ok(Some(conflict("通知渠道已变化或不可用于报告，请刷新后重试"))); }
+                let mut events: Vec<String> = row.get("event_types");
+                let subscribed = events.contains(&topic);
+                if subscribed == requested.selected { continue; }
+                if requested.selected { events.push(topic.clone()); } else { events.retain(|event| event != &topic); }
+                tx.execute("UPDATE notification_channel SET event_types=$2,revision=revision+1,updated_at=NOW() WHERE id=$1", &[&requested.id,&events]).await.map_err(|e|e.to_string())?;
+                if !requested.selected {
+                    tx.execute("UPDATE notification_delivery d SET status='cancelled',last_error='channel_changed',finished_at=NOW(),claim_token=NULL,lease_until=NULL FROM notification_event e WHERE d.event_id=e.id AND d.channel_id=$1 AND e.event_type=$2 AND e.context->>'manual_report' IS DISTINCT FROM 'true' AND d.status IN ('pending','sending')", &[&requested.id,&topic]).await.map_err(|e|e.to_string())?;
+                }
+                changes.push(json!({"channel_id":requested.id,"selected":requested.selected}));
+            }
+        }
         let mut event = AuditEvent::user("configuration", "report.schedule.update", "success", &user).resource("report_schedule", key);
-        event.changes = Some(json!({"enabled": body.enabled, "send_hour": body.send_hour, "send_minute": body.send_minute, "recipient_ids": selected}));
+        event.changes = Some(json!({"enabled": body.enabled, "send_hour": body.send_hour, "send_minute": body.send_minute, "recipient_ids": selected, "bot_channels":changes}));
         audit::write(&tx, &AuditContext::from_request(&req), &event).await.map_err(|e| e.to_string())?;
         tx.commit().await.map_err(|e| e.to_string())?; Ok(None)
     }.await;

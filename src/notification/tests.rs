@@ -859,6 +859,11 @@ fn credentials_are_authenticated_encrypted_and_short_ciphertext_is_rejected() {
 fn channels_validate_subscriptions_and_versioned_edits() {
     let mut v = input();
     assert!(v.validate(true).is_ok());
+    v.event_types.clear();
+    assert!(v.validate(true).is_err());
+    v.expected_revision = Some(1);
+    assert!(v.validate(false).is_ok());
+    v = input();
     v.event_types.push("login.success".into());
     assert!(v.validate(true).is_err());
     v = input();

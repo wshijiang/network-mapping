@@ -152,7 +152,7 @@ impl ChannelInput {
         if self.name.trim().is_empty() || self.name.trim().chars().count() > 80 {
             return Err(Error::bad("渠道名称须为 1 至 80 个字符"));
         }
-        if self.event_types.is_empty()
+        if (creating && self.event_types.is_empty())
             || self.event_types.len() > EVENT_TYPES.len()
             || self
                 .event_types
