@@ -138,7 +138,10 @@ async fn get_runtime_config_h(
         STATISTICS_CACHE_NAMESPACE => {
             let client = match pool.get().await { Ok(c)=>c, Err(_)=>return HttpResponse::ServiceUnavailable().finish() };
             match client.query_one("SELECT document,revision FROM runtime_configuration WHERE namespace=$1", &[&STATISTICS_CACHE_NAMESPACE]).await {
-                Ok(row)=>HttpResponse::Ok().json(json!({"success":true,"data":{"namespace":STATISTICS_CACHE_NAMESPACE,"revision":row.get::<_,i64>("revision"),"document":row.get::<_,serde_json::Value>("document")}})),
+                Ok(row)=>match parse_statistics_cache(row.get("document")) {
+                    Ok(document) => HttpResponse::Ok().json(json!({"success":true,"data":{"namespace":STATISTICS_CACHE_NAMESPACE,"revision":row.get::<_,i64>("revision"),"document":document}})),
+                    Err(_) => HttpResponse::ServiceUnavailable().finish(),
+                },
                 Err(_)=>HttpResponse::ServiceUnavailable().finish()
             }
         }

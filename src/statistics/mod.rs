@@ -15,6 +15,7 @@ pub const NAMESPACE: &str = "statistics_cache";
 pub const CONCURRENCY: usize = 2;
 pub const QUEUE: usize = 8;
 pub const QUERY_SECONDS: u64 = 15;
+pub const DEFAULT_MAX_GROUPS: usize = 20_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -26,6 +27,7 @@ pub struct CacheConfig {
     pub max_entries: usize,
     pub max_size_mib: usize,
     pub max_entry_kib: usize,
+    pub max_groups: usize,
 }
 impl Default for CacheConfig {
     fn default() -> Self {
@@ -37,6 +39,7 @@ impl Default for CacheConfig {
             max_entries: 256,
             max_size_mib: 32,
             max_entry_kib: 2048,
+            max_groups: DEFAULT_MAX_GROUPS,
         }
     }
 }
@@ -48,6 +51,7 @@ impl CacheConfig {
             || !(16..=4096).contains(&self.max_entries)
             || !(8..=256).contains(&self.max_size_mib)
             || !(256..=8192).contains(&self.max_entry_kib)
+            || !(1..=65_536).contains(&self.max_groups)
             || self.max_entry_kib > self.max_size_mib * 1024
         {
             return Err("缓存配置超出允许范围，且单条容量不能超过总容量".into());
@@ -277,6 +281,9 @@ impl StatisticsService {
             .map_err(|e| e.to_string())?;
         self.apply(parse_config(row.get("document"))?, row.get("revision"));
         Ok(())
+    }
+    pub fn max_groups(&self) -> usize {
+        self.lock().config.max_groups
     }
     pub fn status(&self) -> Value {
         let mut s = self.lock();
@@ -565,6 +572,15 @@ mod tests {
     #[test]
     fn validates_cache_ranges_and_types() {
         assert!(parse_config(json!({"enabled":false})).is_ok());
+        assert_eq!(parse_config(json!({})).unwrap().max_groups, 20_000);
+        assert_eq!(
+            parse_config(json!({"max_groups": 65536}))
+                .unwrap()
+                .max_groups,
+            65_536
+        );
+        assert!(parse_config(json!({"max_groups": 0})).is_err());
+        assert!(parse_config(json!({"max_groups": 65537})).is_err());
         assert!(parse_config(json!({"max_entries":0})).is_err());
         assert!(parse_config(json!({"max_entry_kib":9000})).is_err());
         assert!(parse_config(json!({"enabled":"false"})).is_err());

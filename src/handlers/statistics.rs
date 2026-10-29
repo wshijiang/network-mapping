@@ -19,7 +19,6 @@ use crate::{
     runtime_config::RuntimeConfig,
 };
 
-const MAX_GROUPS: usize = 10_000;
 const MAX_ES_BUCKETS: usize = 50_000;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -84,7 +83,7 @@ pub(crate) async fn cache_status(
     };
     let rows=match client.query("SELECT status, updated_at FROM statistics_instance WHERE updated_at>NOW()-INTERVAL '2 minutes' ORDER BY instance_id", &[]).await {Ok(r)=>r,Err(_)=>return failure("实例状态读取失败")};
     HttpResponse::Ok().json(json!({"success":true,"data":{"current":service.status(),"instances":rows.iter().map(|r|json!({"status":r.get::<_,Value>("status"),"updated_at":r.get::<_,DateTime<Utc>>("updated_at")})).collect::<Vec<_>>(),
-        "limits":{"realtime_ttl_seconds":[5,300],"history_ttl_seconds":[5,300],"snapshot_ttl_seconds":[10,900],"max_entries":[16,4096],"max_size_mib":[8,256],"max_entry_kib":[256,8192]}}}))
+        "limits":{"realtime_ttl_seconds":[5,300],"history_ttl_seconds":[5,300],"snapshot_ttl_seconds":[10,900],"max_entries":[16,4096],"max_size_mib":[8,256],"max_entry_kib":[256,8192],"max_groups":[1,65536]}}}))
 }
 
 #[derive(Deserialize)]
@@ -224,6 +223,7 @@ pub(crate) async fn query(
             Some(&body.group_by),
         );
     }
+    let max_groups = service.max_groups();
     let settings = config.get().await;
     let is_scan = matches!(body.data_type.as_str(), "discovery" | "port" | "service");
     let snapshot = is_scan && settings.value.mode.reads_snapshot();
@@ -236,7 +236,7 @@ pub(crate) async fn query(
     };
     let key=json!({"user":user.id,"role":user.role,"type":body.data_type,"group":body.group_by,"metrics":body.metrics,
         "comparison":body.comparison,"start":filters.start_at,"end":filters.end_at,"timezone":filters.timezone,
-        "scanner":filters.scanner_id,"source":filters.task_source,"mode":mode,"mode_revision":settings.revision,"version":2}).to_string();
+        "scanner":filters.scanner_id,"source":filters.task_source,"mode":mode,"mode_revision":settings.revision,"max_groups":max_groups,"version":2}).to_string();
     let data_type = body.data_type.clone();
     let group_by = body.group_by.clone();
     let start_at = filters.start_at;
@@ -248,10 +248,10 @@ pub(crate) async fn query(
         let mut cluster_slot=crate::statistics::ClusterSlot::acquire(&pool).await?;
         let output=async {
         let mut buckets=0;
-        let mut value=compute(&body,&filters,cluster_slot.client()?,&elasticsearch,&user,snapshot,deadline,&mut buckets).await?;
+        let mut value=compute(&body,&filters,cluster_slot.client()?,&elasticsearch,&user,snapshot,deadline,&mut buckets,max_groups).await?;
         if body.comparison.is_some() {
             let previous=previous_filters(&filters)?;
-            let other=compute(&body,&previous,cluster_slot.client()?,&elasticsearch,&user,snapshot,deadline,&mut buckets).await?;
+            let other=compute(&body,&previous,cluster_slot.client()?,&elasticsearch,&user,snapshot,deadline,&mut buckets,max_groups).await?;
             value["comparison"]=json!({"period":"previous","data":other["data"],"meta":other["meta"],"basis":"retained_data",
                 "note":"基于保留数据的前一等长日历周期；历史完整性未确认，差异不代表资产新增。"});
         }
@@ -350,6 +350,7 @@ async fn compute(
     snapshot: bool,
     deadline: Instant,
     buckets: &mut usize,
+    max_groups: usize,
 ) -> Result<Value, Failure> {
     remaining(deadline)?;
     let generated_at = Utc::now();
@@ -364,6 +365,7 @@ async fn compute(
             &body.group_by,
             deadline,
             buckets,
+            max_groups,
         )
         .await
     } else {
@@ -393,7 +395,7 @@ async fn compute(
         let milliseconds = remaining(deadline)?.as_millis().clamp(1,8000);
         tx.batch_execute(&format!("SET LOCAL statement_timeout = '{milliseconds}ms'")).await.map_err(|_|Failure::timeout())?;
         let result = if is_scan {
-            scan_snapshot(&tx, filters, user, &body.data_type, &body.group_by).await
+            scan_snapshot(&tx, filters, user, &body.data_type, &body.group_by, max_groups).await
         } else {
             operations(
                 &tx,
@@ -402,6 +404,7 @@ async fn compute(
                 &body.data_type,
                 &body.group_by,
                 percentiles,
+                max_groups,
             )
             .await
         };
@@ -416,7 +419,7 @@ async fn compute(
     let (mut rows, summary) = output.map_err(|error| match error.as_str() {
         "too_large" => Failure(
             "statistics_budget_exceeded",
-            "统计量超过在线预算，请缩小范围、增加筛选或使用就绪快照",
+            "统计量超过在线预算，请缩小范围或增加筛选",
         ),
         "timeout" => Failure::timeout(),
         "legacy_timezone" => Failure("statistics_failed", "旧快照无法换算时区，请联系管理员重建"),
@@ -489,9 +492,11 @@ async fn operations<C: GenericClient + Sync>(
     kind: &str,
     group: &str,
     percentiles: bool,
+    max_groups: usize,
 ) -> Result<(Vec<Value>, Value), String> {
     let owner = (user.role != 1).then_some(user.id);
     let scope = "($3::INT IS NULL OR t.user_id = $3) AND ($4::TEXT IS NULL OR EXISTS(SELECT 1 FROM scan_task_execution se WHERE se.task_id = t.id AND se.assigned_scanner_id = $4)) AND ($5::TEXT IS NULL OR t.task_source = $5)";
+    let row_limit = max_groups + 2; // one total row and one overflow sentinel
     let sql = if kind == "tasks" {
         let label = if group == "task_source" {
             "task_source".to_owned()
@@ -504,7 +509,7 @@ async fn operations<C: GenericClient + Sync>(
         ) SELECT {label} AS label, GROUPING({label}) AS is_total,
             jsonb_build_object('created',COUNT(*) FILTER(WHERE status='created'), 'succeeded',COUNT(*) FILTER(WHERE status='succeeded'),
             'failed',COUNT(*) FILTER(WHERE status='failed'),'partial',COUNT(*) FILTER(WHERE status='partial'),'cancelled',COUNT(*) FILTER(WHERE status='cancelled')) AS metrics
-          FROM events WHERE $6::TEXT IS NOT NULL GROUP BY GROUPING SETS (({label}),()) ORDER BY label LIMIT 10001")
+          FROM events WHERE $6::TEXT IS NOT NULL GROUP BY GROUPING SETS (({label}),()) ORDER BY is_total DESC, label LIMIT {row_limit}")
     } else {
         let label = match group {
             "scanner" => "COALESCE(s.name, e.assigned_scanner_id, '未分配') || ' [' || COALESCE(e.assigned_scanner_id, 'unassigned') || ']'".to_owned(),
@@ -523,7 +528,7 @@ async fn operations<C: GenericClient + Sync>(
           FROM scan_task_execution e JOIN scan_task t ON t.id=e.task_id LEFT JOIN scanner_info s ON s.scanner_id=e.assigned_scanner_id
           WHERE ($3::INT IS NULL OR t.user_id=$3) AND ($4::TEXT IS NULL OR e.assigned_scanner_id=$4) AND ($5::TEXT IS NULL OR t.task_source=$5) AND $6::TEXT IS NOT NULL
           AND e.task_end_time >= $1 AND e.task_end_time < $2 AND e.execution_status IN ('succeeded','failed','partial','cancelled')
-          GROUP BY GROUPING SETS (({label}),()) ORDER BY label LIMIT 10001")
+          GROUP BY GROUPING SETS (({label}),()) ORDER BY is_total DESC, label LIMIT {row_limit}")
     };
     let result = client
         .query(
@@ -539,14 +544,14 @@ async fn operations<C: GenericClient + Sync>(
         )
         .await
         .map_err(|e| e.to_string())?;
-    if result.len() > MAX_GROUPS {
+    if result.len().saturating_sub(1) > max_groups {
         return Err(budget_exceeded(
             kind,
             group,
             "retained_history",
             "groups",
-            result.len(),
-            MAX_GROUPS,
+            result.len().saturating_sub(1),
+            max_groups,
             f,
         ));
     }
@@ -575,19 +580,21 @@ async fn scan_snapshot<C: GenericClient + Sync>(
     user: &UserBaseI,
     kind: &str,
     group: &str,
+    max_groups: usize,
 ) -> Result<(Vec<Value>, Value), String> {
     let owner = (user.role != 1).then_some(user.id);
     let scope = "($3::INT IS NULL OR owner_id=$3) AND ($4::TEXT IS NULL OR scanner_id=$4) AND ($5::TEXT IS NULL OR task_source=$5)";
     if kind != "discovery" {
-        let rows = client.query(&format!("SELECT label, SUM(endpoint_count)::BIGINT AS count FROM analytics_distribution_30m WHERE {scope} AND bucket_start >= $1 AND bucket_start < $2 AND dimension=$6 GROUP BY label ORDER BY count DESC,label LIMIT 10001"), &[&f.start_at,&f.end_at,&owner,&f.scanner_id,&f.task_source,&kind]).await.map_err(|e|e.to_string())?;
-        if rows.len() > MAX_GROUPS {
+        let row_limit = max_groups + 1;
+        let rows = client.query(&format!("SELECT label, SUM(endpoint_count)::BIGINT AS count FROM analytics_distribution_30m WHERE {scope} AND bucket_start >= $1 AND bucket_start < $2 AND dimension=$6 GROUP BY label ORDER BY count DESC,label LIMIT {row_limit}"), &[&f.start_at,&f.end_at,&owner,&f.scanner_id,&f.task_source,&kind]).await.map_err(|e|e.to_string())?;
+        if rows.len() > max_groups {
             return Err(budget_exceeded(
                 kind,
                 group,
                 "snapshot",
                 "groups",
                 rows.len(),
-                MAX_GROUPS,
+                max_groups,
                 f,
             ));
         }
@@ -620,15 +627,16 @@ async fn scan_snapshot<C: GenericClient + Sync>(
             group,
         ),
     };
-    let result = client.query(&format!("SELECT {label} AS label, GROUPING({label}) AS is_total, COUNT(DISTINCT ip_address)::BIGINT AS count FROM analytics_discovery_fact WHERE {scope} AND {range} AND $6::TEXT IS NOT NULL GROUP BY GROUPING SETS (({label}),()) ORDER BY label LIMIT 10001"),params).await.map_err(|e|e.to_string())?;
-    if result.len() > MAX_GROUPS {
+    let row_limit = max_groups + 2;
+    let result = client.query(&format!("SELECT {label} AS label, GROUPING({label}) AS is_total, COUNT(DISTINCT ip_address)::BIGINT AS count FROM analytics_discovery_fact WHERE {scope} AND {range} AND $6::TEXT IS NOT NULL GROUP BY GROUPING SETS (({label}),()) ORDER BY is_total DESC, label LIMIT {row_limit}"),params).await.map_err(|e|e.to_string())?;
+    if result.len().saturating_sub(1) > max_groups {
         return Err(budget_exceeded(
             kind,
             group,
             "snapshot",
             "groups",
-            result.len(),
-            MAX_GROUPS,
+            result.len().saturating_sub(1),
+            max_groups,
             f,
         ));
     }
@@ -654,6 +662,7 @@ fn distribution(items: Vec<(String, i64)>) -> (Vec<Value>, Value) {
     (items.into_iter().map(|(label,count)|json!({"label":label,"count":count,"percentage":if total>0 {(count as f64/total as f64*1000.0).round()/10.0} else {0.0}})).collect(),json!({"count":total,"categories":categories}))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn scan_realtime(
     es: &ElasticsearchService,
     f: &AnalysisFilters,
@@ -662,6 +671,7 @@ async fn scan_realtime(
     group: &str,
     deadline: Instant,
     processed: &mut usize,
+    max_groups: usize,
 ) -> Result<(Vec<Value>, Value), String> {
     let mut filters = analysis_es_filters(f, user);
     let sources = if kind == "discovery" {
@@ -758,14 +768,14 @@ async fn scan_realtime(
             }
             *counts.entry(label).or_default() += 1;
         }
-        if counts.len() > MAX_GROUPS {
+        if counts.len() > max_groups {
             return Err(budget_exceeded(
                 kind,
                 group,
                 "realtime",
                 "groups",
                 counts.len(),
-                MAX_GROUPS,
+                max_groups,
                 f,
             ));
         }
@@ -1037,21 +1047,21 @@ mod tests {
             scanner_id: None,
             task_source: None,
         };
-        let (rows, summary) = operations(&client, &f, &user, "tasks", "day", true)
+        let (rows, summary) = operations(&client, &f, &user, "tasks", "day", true, 20_000)
             .await
             .expect("tasks");
         assert_eq!(summary["created"], 2);
         assert_eq!(summary["completed"], 2);
         assert_eq!(summary["success_rate"], 50.0);
         assert_eq!(rows.len(), 2);
-        let (rows, summary) = operations(&client, &f, &user, "scanners", "scanner", true)
+        let (rows, summary) = operations(&client, &f, &user, "scanners", "scanner", true, 20_000)
             .await
             .expect("scanners");
         assert_eq!(rows.len(), 2, "same scanner names remain separate");
         assert_eq!(summary["completed"], 3);
         assert_eq!(summary["avg_duration_ms"], 2000.0);
         assert_eq!(summary["p95_ms"], 2900.0);
-        let (rows, summary) = scan_snapshot(&client, &f, &user, "discovery", "day")
+        let (rows, summary) = scan_snapshot(&client, &f, &user, "discovery", "day", 20_000)
             .await
             .expect("IP");
         assert_eq!(summary["unique_ips"], 1);
@@ -1061,52 +1071,106 @@ mod tests {
                 .sum::<i64>(),
             2
         );
-        let (rows, summary) = scan_snapshot(&client, &f, &user, "port", "port")
+        let (rows, summary) = scan_snapshot(&client, &f, &user, "port", "port", 20_000)
             .await
             .expect("ports");
         assert_eq!(summary["count"], 5);
         assert_eq!(rows.len(), 1);
+        assert_eq!(
+            scan_snapshot(&client, &f, &user, "port", "port", 1)
+                .await
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+        assert_eq!(
+            scan_snapshot(&client, &f, &user, "discovery", "day", 2)
+                .await
+                .unwrap()
+                .0
+                .len(),
+            2
+        );
+        assert_eq!(
+            scan_snapshot(&client, &f, &user, "discovery", "day", 1)
+                .await
+                .unwrap_err(),
+            "too_large"
+        );
+        assert_eq!(
+            operations(&client, &f, &user, "tasks", "day", false, 2)
+                .await
+                .unwrap()
+                .0
+                .len(),
+            2
+        );
+        assert_eq!(
+            operations(&client, &f, &user, "tasks", "day", false, 1)
+                .await
+                .unwrap_err(),
+            "too_large"
+        );
+        let admin_for_budget = UserBaseI {
+            role: 1,
+            ..user.clone()
+        };
+        assert_eq!(
+            scan_snapshot(&client, &f, &admin_for_budget, "port", "port", 1)
+                .await
+                .unwrap_err(),
+            "too_large"
+        );
+        assert_eq!(
+            scan_snapshot(&client, &f, &admin_for_budget, "port", "port", 2)
+                .await
+                .unwrap()
+                .0
+                .len(),
+            2
+        );
         for group in ["week", "month", "task_source"] {
-            operations(&client, &f, &user, "tasks", group, true)
+            operations(&client, &f, &user, "tasks", group, true, 20_000)
                 .await
                 .expect("task groups");
-            operations(&client, &f, &user, "scanners", group, true)
+            operations(&client, &f, &user, "scanners", group, true, 20_000)
                 .await
                 .expect("scanner groups");
-            scan_snapshot(&client, &f, &user, "discovery", group)
+            scan_snapshot(&client, &f, &user, "discovery", group, 20_000)
                 .await
                 .expect("discovery groups");
         }
-        scan_snapshot(&client, &f, &user, "discovery", "scanner")
+        scan_snapshot(&client, &f, &user, "discovery", "scanner", 20_000)
             .await
             .expect("scanner IP");
         f.scanner_id = Some("b".into());
         f.task_source = Some("manual".into());
-        let (_, summary) = operations(&client, &f, &user, "tasks", "day", true)
+        let (_, summary) = operations(&client, &f, &user, "tasks", "day", true, 20_000)
             .await
             .expect("filter tasks");
         assert_eq!(
             summary["created"], 1,
             "EXISTS does not duplicate multi-scanner tasks"
         );
-        let (_, summary) = operations(&client, &f, &user, "scanners", "day", true)
+        let (_, summary) = operations(&client, &f, &user, "scanners", "day", true, 20_000)
             .await
             .expect("filter scanner");
         assert_eq!(summary["completed"], 1);
-        let (_, summary) = scan_snapshot(&client, &f, &user, "port", "port")
+        let (_, summary) = scan_snapshot(&client, &f, &user, "port", "port", 20_000)
             .await
             .expect("filter ports");
         assert_eq!(summary["count"], 3);
         let admin = UserBaseI { role: 1, ..user };
         f.scanner_id = None;
         f.task_source = None;
-        let (_, summary) = operations(&client, &f, &admin, "tasks", "task_source", true)
+        let (_, summary) = operations(&client, &f, &admin, "tasks", "task_source", true, 20_000)
             .await
             .expect("admin");
         assert_eq!(summary["failed"], 1);
         client.batch_execute("INSERT INTO analytics_discovery_fact VALUES ('2026-09-02',NULL,9,'c','manual','192.0.2.9')").await.expect("legacy");
         assert_eq!(
-            scan_snapshot(&client, &f, &admin, "discovery", "day")
+            scan_snapshot(&client, &f, &admin, "discovery", "day", 20_000)
                 .await
                 .expect_err("legacy rejected"),
             "legacy_timezone"
@@ -1118,6 +1182,7 @@ mod tests {
             &UserBaseI { role: 2, ..admin },
             "discovery",
             "day",
+            20_000,
         )
         .await
         .expect("scoped legacy");

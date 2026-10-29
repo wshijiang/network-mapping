@@ -205,7 +205,7 @@ fn normalize_error_body(
         match code {
             "statistics_budget_exceeded" => Some((
                 "statistics_budget_exceeded",
-                "统计量超过在线预算，请缩小范围、增加筛选或使用就绪快照",
+                "统计量超过在线预算，请缩小范围或增加筛选",
             )),
             "statistics_timeout" => Some(("statistics_timeout", "统计查询超时，请缩小时间范围")),
             "statistics_snapshot_pending" => Some((
