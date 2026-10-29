@@ -154,7 +154,7 @@ pub(super) async fn send_application(
     client: &reqwest::Client,
     app_id: &str,
     app_secret: &str,
-    chat_id: &str,
+    target: (super::FeishuTargetType, &str),
     payload: Value,
     image: Option<Vec<u8>>,
     delivery_id: uuid::Uuid,
@@ -163,13 +163,13 @@ pub(super) async fn send_application(
         client,
         app_id,
         app_secret,
-        chat_id,
+        target,
         payload,
         image,
         delivery_id,
         "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
         "https://open.feishu.cn/open-apis/im/v1/images",
-        "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
+        "https://open.feishu.cn/open-apis/im/v1/messages",
     )
     .await
 }
@@ -179,7 +179,7 @@ async fn send_application_to(
     client: &reqwest::Client,
     app_id: &str,
     app_secret: &str,
-    chat_id: &str,
+    target: (super::FeishuTargetType, &str),
     mut payload: Value,
     image: Option<Vec<u8>>,
     delivery_id: uuid::Uuid,
@@ -217,12 +217,17 @@ async fn send_application_to(
     let Ok(content) = serde_json::to_string(content) else {
         return Outcome::failure("invalid_payload", false);
     };
-    let body = json!({"receive_id":chat_id,"msg_type":kind,"content":content,"uuid":delivery_id.to_string()});
+    let receive_id_type = match target.0 {
+        super::FeishuTargetType::Group => "chat_id",
+        super::FeishuTargetType::User => "open_id",
+    };
+    let body = json!({"receive_id":target.1,"msg_type":kind,"content":content,"uuid":delivery_id.to_string()});
     if !serde_json::to_vec(&body).is_ok_and(|bytes| bytes.len() <= 20 * 1024) {
         return Outcome::failure("payload_too_large", false);
     }
     let response = match client
         .post(message_url)
+        .query(&[("receive_id_type", receive_id_type)])
         .bearer_auth(token)
         .json(&body)
         .send()
@@ -404,7 +409,7 @@ mod tests {
     use super::*;
 
     #[actix_web::test]
-    async fn application_bot_authenticates_uploads_and_sends_card_to_chat() {
+    async fn application_bot_authenticates_uploads_and_sends_card_to_group_and_user() {
         use actix_web::{App, HttpRequest, HttpResponse, HttpServer, web};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -428,15 +433,32 @@ mod tests {
                 .route(
                     "/messages",
                     web::post().to(|req: HttpRequest, body: web::Json<Value>| async move {
-                        assert_eq!(req.query_string(), "receive_id_type=chat_id");
+                        match req.query_string() {
+                            "receive_id_type=chat_id" => {
+                                assert_eq!(body["receive_id"], "oc_target")
+                            }
+                            "receive_id_type=open_id" => {
+                                assert_eq!(body["receive_id"], "ou_target")
+                            }
+                            _ => panic!("unexpected recipient type"),
+                        }
                         assert_eq!(req.headers().get("Authorization").unwrap(), "Bearer token");
-                        assert_eq!(body["receive_id"], "oc_target");
-                        assert_eq!(body["msg_type"], "interactive");
                         assert!(uuid::Uuid::parse_str(body["uuid"].as_str().unwrap()).is_ok());
-                        let card: Value =
+                        let content: Value =
                             serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
-                        assert_eq!(card["body"]["elements"][1]["img_key"], "img_test");
+                        if body["msg_type"] == "interactive" {
+                            assert_eq!(content["body"]["elements"][1]["img_key"], "img_test");
+                        } else {
+                            assert_eq!(body["msg_type"], "text");
+                            assert_eq!(content["text"], "hello");
+                        }
                         HttpResponse::Ok().json(json!({"code":0,"data":{"message_id":"om_test"}}))
+                    }),
+                )
+                .route(
+                    "/rejected",
+                    web::post().to(|| async {
+                        HttpResponse::Ok().json(json!({"code":230027,"msg":"permission denied"}))
                     }),
                 )
         })
@@ -446,11 +468,48 @@ mod tests {
         let handle = server.handle();
         actix_web::rt::spawn(server);
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        let outcome = send_application_to(&client, "app-id", "app-secret", "oc_target",
-            json!({"msg_type":"interactive","card":{"body":{"elements":[{"tag":"markdown","content":"report"}]}}}),
-            Some(b"png".to_vec()), uuid::Uuid::new_v4(), &format!("http://{address}/auth"),
-            &format!("http://{address}/images"), &format!("http://{address}/messages?receive_id_type=chat_id")).await;
+        for target in [
+            (super::super::FeishuTargetType::Group, "oc_target"),
+            (super::super::FeishuTargetType::User, "ou_target"),
+        ] {
+            let outcome = send_application_to(&client, "app-id", "app-secret", target,
+                json!({"msg_type":"interactive","card":{"body":{"elements":[{"tag":"markdown","content":"report"}]}}}),
+                Some(b"png".to_vec()), uuid::Uuid::new_v4(), &format!("http://{address}/auth"),
+                &format!("http://{address}/images"), &format!("http://{address}/messages")).await;
+            assert!(outcome.sent);
+        }
+        let target = (super::super::FeishuTargetType::User, "ou_target");
+        let text = json!({"msg_type":"text","content":{"text":"hello"}});
+        let outcome = send_application_to(
+            &client,
+            "app-id",
+            "app-secret",
+            target,
+            text.clone(),
+            None,
+            uuid::Uuid::new_v4(),
+            &format!("http://{address}/auth"),
+            &format!("http://{address}/images"),
+            &format!("http://{address}/messages"),
+        )
+        .await;
         assert!(outcome.sent);
+        let outcome = send_application_to(
+            &client,
+            "app-id",
+            "app-secret",
+            target,
+            text,
+            None,
+            uuid::Uuid::new_v4(),
+            &format!("http://{address}/auth"),
+            &format!("http://{address}/images"),
+            &format!("http://{address}/rejected"),
+        )
+        .await;
+        assert!(!outcome.sent);
+        assert!(!outcome.retryable);
+        assert_eq!(outcome.code, Some(230027));
         handle.stop(true).await;
     }
 

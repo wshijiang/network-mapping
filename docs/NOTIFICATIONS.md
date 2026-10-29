@@ -51,8 +51,8 @@
 | --- | --- | --- |
 | 创建位置 | 在目标飞书群的群机器人设置中添加 | 在飞书开放平台创建企业自建应用，添加机器人能力 |
 | 发送方式 | 向该群机器人的 Webhook 发送消息 | 应用凭据换取 token，以应用身份向指定群发送消息 |
-| 目标 | Webhook 绑定创建它的群，不用填写群 ID | 填写目标群的 `chat_id`；本平台当前只支持群聊 |
-| 必填参数 | 渠道名称、Webhook、通知事件；按需配置签名密钥 | 渠道名称、App ID、App Secret、群聊 ID、通知事件 |
+| 目标 | Webhook 绑定创建它的群，不用填写群 ID | 选择群聊（`chat_id`）或个人聊天（`open_id`），每个渠道配置一个目标 |
+| 必填参数 | 渠道名称、Webhook、通知事件；按需配置签名密钥 | 渠道名称、App ID、App Secret、目标 ID、通知事件 |
 | 报告趋势图 | 需额外配置自建应用的 App ID 和 App Secret 用于上传图片；否则只发送文字 | 使用同一应用的 App ID 和 App Secret 上传图片并发送 |
 | 权限和发布 | Webhook 文本发送不需要应用 API 权限；图片上传应用需相应权限 | 应用需启用机器人能力、授权所需 API 权限并发布生效，机器人需加入目标群 |
 
@@ -78,9 +78,10 @@
 
 1. 登录[飞书开放平台开发者后台](https://open.feishu.cn/app)，创建企业自建应用，在「添加应用能力」中启用机器人。应用类型、可用范围及企业审批按所在租户的要求配置。
 2. 在应用的「权限管理」中申请下表的权限；创建并发布应用版本，完成企业管理员审核或授权，使机器人能力、权限和可用范围实际生效。修改权限后也要按飞书提示发布版本。
-3. 在应用的凭证与基础信息页面获取 **App ID** 和 **App Secret**；在目标群添加该应用机器人。目标群须允许机器人发送消息。
-4. 获取目标群的 **群聊 ID（chat_id）**，通常以 `oc_` 开头。飞书客户端 7.60 及以上可在群聊右上角进入群设置查看群 ID；其他方法和适用条件见[群 ID 说明](https://open.feishu.cn/document/server-docs/group/chat/chat-id-description)。群名、Webhook 和用户 ID 都不是群聊 ID。
-5. 在本平台「设置 → 通知渠道」选择「飞书 → 应用机器人」，填写渠道名称、App ID、App Secret、群聊 ID，选择事件和最低级别，保存并启用。该方式不填写 Webhook 或自定义机器人签名密钥。应用密钥加密保存、不回显；编辑留空保留，更换 App ID 时须重新填写 App Secret。
+3. 在应用的凭证与基础信息页面获取 **App ID** 和 **App Secret**。
+4. 群聊目标：在目标群添加该应用机器人，获取 **群聊 ID（chat_id）**，通常以 `oc_` 开头。飞书客户端 7.60 及以上可在群聊右上角进入群设置查看群 ID；其他方法见[群 ID 说明](https://open.feishu.cn/document/server-docs/group/chat/chat-id-description)。目标群须允许机器人发送消息。
+5. 个人聊天目标：获取当前应用对应的用户 **Open ID**（通常以 `ou_` 开头），接收人须在应用可用范围内。同一用户在不同应用中的 Open ID 不同，不能直接复用其他应用的 Open ID。管理员可参考飞书[通过手机号或邮箱获取用户 ID](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/contact-v3/user/batch_get_id) 接口获取，需按接口要求申请权限；本平台不会自动查询通讯录。
+6. 在本平台「设置 → 通知渠道」选择「飞书 → 应用机器人」，通过「接收对象」选择群聊或个人聊天，填写渠道名称、App ID、App Secret 和对应 ID，选择事件和最低级别，保存并启用。该方式不填写 Webhook 或自定义机器人签名密钥。应用密钥加密保存、不回显；编辑留空保留，更换 App ID 时须重新填写 App Secret；个人目标还须填写新应用对应的 Open ID。
 
 #### 发送报告图片所需权限
 
@@ -89,18 +90,20 @@
 | 权限名称 | 权限标识 | 用途 |
 | --- | --- | --- |
 | 以应用的身份发消息 | `im:message:send_as_bot` | 以应用机器人身份发送通知和报告卡片 |
-| 获取与发送单聊、群组消息 | `im:message` | 飞书发送卡片文档列出的消息权限；本平台当前仅向配置的群聊发送 |
+| 获取与发送单聊、群组消息 | `im:message` | 飞书发送卡片文档列出的消息权限，支持向配置的群聊或个人发送 |
 | 获取与上传图片或文件资源 | `im:resource` | 上传报告趋势图，取得发送时需要的 `image_key` |
 
 权限的申请与实际生效状态以飞书后台和当前接口文档为准。若租户的权限界面或接口要求变化，请核对[发送消息](https://open.feishu.cn/document/server-docs/im-v1/message/create)、[上传图片](https://open.feishu.cn/document/server-docs/im-v1/image/create)及[配置应用权限](https://open.feishu.cn/document/home/message-development-tutorial/turn-on-app-permissions)。本功能不需要为了发送通知而订阅接收消息事件，或额外开启读取群聊历史等权限。
 
-系统使用 App ID 和 App Secret 获取 `tenant_access_token`，将报告趋势图作为消息图片上传飞书得到 `image_key`，再把图加入报告卡片或富文本消息并发送给群。图片上传或消息发送失败会记录失败，不会静默降级为纯文本。
+系统使用 App ID 和 App Secret 获取 `tenant_access_token`，将报告趋势图作为消息图片上传飞书得到 `image_key`，再把图加入报告卡片或富文本消息并发送给配置的目标。图片上传或消息发送失败会记录失败，不会静默降级为纯文本。
 
 #### 验证与排障
 
-1. 在通知渠道点击「测试发送」，然后在投递记录确认状态为成功，并检查目标群是否收到消息。测试入队不等于送达；该测试**不验证图片上传**。
-2. 在报告中心打开已生成的报告，通过「发送报告」选择该飞书渠道，确认投递成功并在飞书群中看到趋势图。自动周报、月报还需要订阅对应的报告事件，最低级别须允许 warning。
-3. 认证失败时核对 App ID 和 App Secret 是否属于同一应用，以及应用是否已发布；发送失败时核对消息权限、应用可用范围、机器人是否在群中和群 ID；图片上传失败时核对 `im:resource` 是否授权并生效。还须检查服务端到 `open.feishu.cn:443` 的网络和渠道代理设置。
+1. 在通知渠道点击「测试发送」，然后在投递记录确认状态为成功，并检查目标群或个人聊天是否收到消息。测试入队不等于送达；该测试**不验证图片上传**。
+2. 在报告中心打开已生成的报告，通过「发送报告」选择该飞书渠道，确认投递成功并看到趋势图。自动周报、月报还需要订阅对应的报告事件，最低级别须允许 warning。
+3. 认证失败时核对 App ID 和 App Secret 是否属于同一应用，以及应用是否已发布；发送失败时核对消息权限、应用可用范围及目标 ID，群聊还需核对机器人是否已入群，个人目标需核对 Open ID 是否对应当前应用；图片上传失败时核对 `im:resource` 是否授权并生效。还须检查服务端到 `open.feishu.cn:443` 的网络和渠道代理设置。
+
+每个渠道只对应一个群聊或个人目标。更改目标并保存时，旧配置下未完成投递会被取消，已发出的消息无法撤回；需要多个目标时可创建多个渠道。历史应用机器人渠道默认是群聊；旧版前端无法安全编辑个人聊天渠道，须使用配套新版前端。
 
 自定义机器人附加应用凭据的图片链路同样需要验证实际租户中的图片可见性；仅测试 Webhook 文本成功不能证明图片能显示。两种方式发送到飞书的图片无法通过邮件图片撤销功能收回。
 
@@ -162,7 +165,7 @@
 
 共用字段为 `provider,name,enabled,event_types,minimum_severity,expected_revision`。`provider` 支持 `email/feishu/telegram`，旧飞书客户端未传时默认 feishu。
 
-- 飞书：`settings.feishu_bot_type` 为 `webhook` 或 `app`，历史缺省为自定义机器人。自定义机器人使用 `webhook_url,signing_secret,clear_signing_secret`，可选 `settings.feishu_app_id,feishu_app_secret,clear_feishu_app_secret` 以发送报告图片；应用机器人必须填写 `settings.feishu_app_id,settings.feishu_chat_id,feishu_app_secret`，编辑留空保留密钥。应用密钥仅写入，响应通过 `feishu_app_secret_configured` 表示是否配置。
+- 飞书：`settings.feishu_bot_type` 为 `webhook` 或 `app`，历史缺省为自定义机器人。自定义机器人使用 `webhook_url,signing_secret,clear_signing_secret`，可选 `settings.feishu_app_id,feishu_app_secret,clear_feishu_app_secret` 以发送报告图片。应用机器人填写 `settings.feishu_app_id,feishu_app_secret` 和目标：`settings.feishu_target_type` 为 `group` 时填写 `settings.feishu_chat_id`，为 `user` 时填写 `settings.feishu_open_id`；历史应用渠道缺省为群聊。编辑已有个人渠道时必须明确提供目标类型，避免旧客户端覆盖目标。应用密钥仅写入，响应通过 `feishu_app_secret_configured` 表示是否配置。
 - Telegram：`bot_token,settings.chat_id`。
 - 邮件：`smtp_password,settings.smtp_host,settings.smtp_port,settings.smtp_sender,settings.recipients`。
 
@@ -171,6 +174,8 @@
 升级时先停止所有旧后端实例，再启动新版后端；迁移完成后只运行新版，避免旧 worker 继续发送已转移的队列或误领新增类型。启动自动执行幂等迁移，`init.sql` 与升级脚本一致。保留 `server.encrypt_key`，否则无法解密历史凭据。回滚前先停用新增的邮件和 Telegram 渠道，再回退前后端；仅支持飞书的旧版本不能处理新 provider。新增表保留即可。SMTP 一次性导入后，以统一页面订阅为准，不从旧偏好重复恢复渠道。
 
 飞书应用机器人需要新前后端配套，先升级全部后端再升级前端。回退到不支持应用机器人的后端前，删除应用机器人渠道并处理其未完成投递；旧版无法解析新增的渠道配置。群聊自定义机器人的原有配置继续使用。
+
+个人聊天渠道也要求先升级全部后端再升级前端；回退到不支持个人目标的后端前，删除个人聊天渠道并处理其未完成投递，避免旧 worker 无法解析个人渠道配置。
 
 投递一直 pending 时检查计划时间、维护状态、notification-worker 和数据库。`no_recipients` 检查个人/管理员邮箱或指定收件人；`secret_unavailable` 检查服务主密钥；`provider_rejected` 检查机器人目标、权限、签名及访问限制；SMTP 失败检查域名、端口和授权密钥。服务商限流、网络/TLS 和临时故障按有限次数重试，不关闭 TLS 验证。
 

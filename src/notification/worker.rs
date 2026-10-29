@@ -292,7 +292,10 @@ pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client
                                         &delivery_client,
                                         &claimed.settings.feishu_app_id,
                                         &app_secret,
-                                        &claimed.settings.feishu_chat_id,
+                                        (
+                                            claimed.settings.feishu_target(),
+                                            claimed.settings.feishu_target_id(),
+                                        ),
                                         payload,
                                         image,
                                         claimed.id,
