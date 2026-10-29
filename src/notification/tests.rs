@@ -939,6 +939,10 @@ async fn notification_mutations_use_the_existing_csrf_middleware() {
 }
 
 async fn database() -> (Pool, String) {
+    database_with_max_size(8).await
+}
+
+async fn database_with_max_size(max_size: usize) -> (Pool, String) {
     let mut config: tokio_postgres::Config = std::env::var("NOTIFICATION_TEST_DATABASE_URL")
         .expect("NOTIFICATION_TEST_DATABASE_URL must point to a disposable database")
         .parse()
@@ -946,7 +950,7 @@ async fn database() -> (Pool, String) {
     let schema = format!("notification_{}", Uuid::new_v4().simple());
     config.options(format!("-c search_path={schema} -c timezone=UTC"));
     let pool = Pool::builder(Manager::new(config, NoTls))
-        .max_size(8)
+        .max_size(max_size)
         .build()
         .unwrap();
     let c = pool.get().await.unwrap();
@@ -974,6 +978,72 @@ async fn database() -> (Pool, String) {
         .unwrap();
     drop(c);
     (pool, schema)
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn feishu_binding_reply_releases_single_database_connection() {
+    let (pool, schema) = database_with_max_size(1).await;
+    let audit = AuditContext::cli("notification-test");
+    let mut create = input();
+    create.webhook_url.clear();
+    create.signing_secret.clear();
+    create.settings.feishu_bot_type = "app".into();
+    create.settings.feishu_app_id = "cli_test".into();
+    create.settings.feishu_target_type = Some(FeishuTargetType::User);
+    create.settings.feishu_open_id = "ou_test".into();
+    create.feishu_app_secret = "app-secret".into();
+    let channel = save(&pool, &key(), None, create, &user(1), &audit)
+        .await
+        .unwrap();
+    let id = Uuid::new_v4();
+    let c = pool.get().await.unwrap();
+    c.execute("INSERT INTO feishu_binding_reply(id,app_id,channel_id,target_open_id) VALUES($1,'cli_test',$2,'ou_test')", &[&id,&channel.id]).await.unwrap();
+    // Force a deterministic local send failure without contacting Feishu.
+    c.execute(
+        "UPDATE notification_channel SET feishu_app_secret_ciphertext=NULL WHERE id=$1",
+        &[&channel.id],
+    )
+    .await
+    .unwrap();
+    drop(c);
+    let mut config: tokio_postgres::Config = std::env::var("NOTIFICATION_TEST_DATABASE_URL")
+        .unwrap()
+        .parse()
+        .unwrap();
+    config.options(format!("-c search_path={schema} -c timezone=UTC"));
+    let observer = Pool::builder(Manager::new(config, NoTls))
+        .max_size(1)
+        .build()
+        .unwrap();
+    let worker = tokio::spawn(feishu_ws::run_replies(pool.clone(), key()));
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let c = observer.get().await.unwrap();
+            let status: String = c
+                .query_one(
+                    "SELECT status FROM feishu_binding_reply WHERE id=$1",
+                    &[&id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            if status == "failed" {
+                break;
+            }
+            drop(c);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    worker.abort();
+    let _ = worker.await;
+    drop(observer);
+    assert!(
+        result.is_ok(),
+        "reply remained stuck in sending with a single-connection pool"
+    );
+    cleanup(pool, schema).await;
 }
 async fn cleanup(pool: Pool, schema: String) {
     pool.get()

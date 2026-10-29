@@ -129,7 +129,7 @@ pub(crate) async fn run(pool: Pool, key: String, mut shutdown: watch::Receiver<b
 
 /// Replies use their own durable outbox; a send failure never rolls back a
 /// completed binding. An updated channel cannot send a stale confirmation.
-async fn run_replies(pool: Pool, key: String) {
+pub(super) async fn run_replies(pool: Pool, key: String) {
     let mut tick = tokio::time::interval(Duration::from_secs(2));
     let mut cleanup = 0_u32;
     loop {
@@ -169,6 +169,9 @@ async fn run_replies(pool: Pool, key: String) {
         let claim = Uuid::new_v4();
         let attempts = row.get::<_, i32>("attempts") + 1;
         if tx.execute("UPDATE feishu_binding_reply SET status='sending',attempts=$2,claim_token=$3,lease_until=NOW()+INTERVAL '60 seconds' WHERE id=$1", &[&id,&attempts,&claim]).await.is_err() || tx.commit().await.is_err() { continue; }
+        // Release the claim connection before the network request and final
+        // status update; the pool can be configured with just one connection.
+        drop(client);
         let secret: Option<Vec<u8>> = row.get("feishu_app_secret_ciphertext");
         let proxy: Option<Vec<u8>> = row.get("proxy_ciphertext");
         let mode = row.get::<_, String>("proxy_mode").parse::<ProxyMode>();

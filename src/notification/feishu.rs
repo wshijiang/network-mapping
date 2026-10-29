@@ -3,6 +3,11 @@ use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 use serde_json::{Value, json};
 use std::time::Duration;
 
+const MAX_API_RESPONSE_BYTES: usize = 16 * 1024;
+// The message API can return the sent content, which itself may be up to
+// 20 KiB after JSON encoding, plus response metadata and escaping.
+const MAX_MESSAGE_RESPONSE_BYTES: usize = 64 * 1024;
+
 pub fn validate_url(value: &str) -> Result<reqwest::Url, &'static str> {
     let url = reqwest::Url::parse(value).map_err(|_| "飞书 Webhook 地址无效")?;
     let hook = url.path().strip_prefix("/open-apis/bot/v2/hook/");
@@ -113,7 +118,8 @@ async fn authenticate(
         .send()
         .await
         .map_err(|_| Outcome::failure("feishu_auth_unavailable", true))?;
-    let token_response = read_api_response(response, "feishu_auth_failed").await?;
+    let token_response =
+        read_api_response(response, "feishu_auth_failed", MAX_API_RESPONSE_BYTES).await?;
     token_response["tenant_access_token"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -141,7 +147,12 @@ async fn upload_image_with_token(
         .send()
         .await
         .map_err(|_| Outcome::failure("feishu_image_upload_failed", true))?;
-    let result = read_api_response(response, "feishu_image_upload_failed").await?;
+    let result = read_api_response(
+        response,
+        "feishu_image_upload_failed",
+        MAX_API_RESPONSE_BYTES,
+    )
+    .await?;
     result["data"]["image_key"]
         .as_str()
         .filter(|s| !s.is_empty() && s.len() <= 512)
@@ -236,7 +247,7 @@ async fn send_application_to(
         Ok(response) => response,
         Err(_) => return Outcome::failure("network_or_tls_error", true),
     };
-    match read_api_response(response, "feishu_send_failed").await {
+    match read_api_response(response, "feishu_send_failed", MAX_MESSAGE_RESPONSE_BYTES).await {
         Ok(_) => Outcome {
             sent: true,
             retryable: false,
@@ -252,6 +263,7 @@ async fn send_application_to(
 async fn read_api_response(
     mut response: reqwest::Response,
     reason: &'static str,
+    max_bytes: usize,
 ) -> Result<Value, Outcome> {
     let status = response.status().as_u16();
     let retry_after = response
@@ -267,7 +279,7 @@ async fn read_api_response(
         .await
         .map_err(|_| Outcome::failure(reason, true))?
     {
-        if body.len() + chunk.len() > 16 * 1024 {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
             return Err(Outcome::failure(reason, false));
         }
         body.extend_from_slice(&chunk);
@@ -510,6 +522,47 @@ mod tests {
         assert!(!outcome.sent);
         assert!(!outcome.retryable);
         assert_eq!(outcome.code, Some(230027));
+        handle.stop(true).await;
+    }
+
+    #[actix_web::test]
+    async fn application_message_response_accepts_echoed_content_and_remains_bounded() {
+        use actix_web::{App, HttpResponse, HttpServer, web};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = HttpServer::new(|| {
+            App::new()
+                .route("/auth", web::post().to(|| async { HttpResponse::Ok().json(json!({"code":0,"tenant_access_token":"token"})) }))
+                .route("/messages", web::post().to(|body: web::Json<Value>| async move {
+                    let response = json!({"code":0,"data":{"message_id":"om_test","body":{"content":body["content"]}}});
+                    assert!(serde_json::to_vec(&response).unwrap().len() > 16 * 1024);
+                    HttpResponse::Ok().json(response)
+                }))
+                .route("/oversized", web::post().to(|| async { HttpResponse::Ok().json(json!({"code":0,"data":{"body":{"content":"x".repeat(65 * 1024)}}})) }))
+        }).listen(listener).unwrap().run();
+        let handle = server.handle();
+        actix_web::rt::spawn(server);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let payload = json!({"msg_type":"text","content":{"text":"x".repeat(18 * 1024)}});
+        for (path, sent) in [("messages", true), ("oversized", false)] {
+            let outcome = send_application_to(
+                &client,
+                "app-id",
+                "app-secret",
+                (super::super::FeishuTargetType::User, "ou_test"),
+                payload.clone(),
+                None,
+                uuid::Uuid::new_v4(),
+                &format!("http://{address}/auth"),
+                &format!("http://{address}/images"),
+                &format!("http://{address}/{path}"),
+            )
+            .await;
+            assert_eq!(outcome.sent, sent, "{path}: {outcome:?}");
+            if !sent {
+                assert!(!outcome.retryable);
+            }
+        }
         handle.stop(true).await;
     }
 
