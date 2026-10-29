@@ -3,6 +3,8 @@ mod email;
 mod outcome;
 pub use outcome::Outcome;
 pub mod feishu;
+mod feishu_binding;
+mod feishu_ws;
 mod routes;
 pub mod telegram;
 mod template_context;
@@ -25,6 +27,7 @@ use crate::{
     admin::UserBaseI,
     audit::{AuditContext, AuditEvent},
 };
+pub(crate) use feishu_ws::run as run_feishu_binding;
 pub use routes::configure;
 pub use worker::run;
 
@@ -182,6 +185,7 @@ impl ChannelSettings {
             && self.feishu_target() == FeishuTargetType::User
             && previous.feishu_target() == FeishuTargetType::User
             && previous.feishu_app_id != self.feishu_app_id
+            && !previous.feishu_open_id.is_empty()
             && previous.feishu_open_id == self.feishu_open_id
         {
             return Err(Error::bad("更换飞书应用时须填写新应用对应的用户 Open ID"));
@@ -235,11 +239,14 @@ impl ChannelInput {
                     return Err(Error::bad("飞书机器人类型无效"));
                 }
                 if self.settings.feishu_application() {
+                    let pending_user = self.settings.feishu_target() == FeishuTargetType::User
+                        && self.settings.feishu_open_id.is_empty()
+                        && !self.enabled;
                     if !self.webhook_url.is_empty()
                         || !self.signing_secret.is_empty()
                         || self.clear_signing_secret
                         || self.settings.feishu_app_id.is_empty()
-                        || self.settings.feishu_target_id().is_empty()
+                        || (self.settings.feishu_target_id().is_empty() && !pending_user)
                         || self.settings.feishu_target_id().len() > 128
                         || self
                             .settings
@@ -247,6 +254,7 @@ impl ChannelInput {
                             .chars()
                             .any(|c| c.is_whitespace() || c.is_control())
                         || (self.settings.feishu_target() == FeishuTargetType::User
+                            && !pending_user
                             && (!self.settings.feishu_open_id.starts_with("ou_")
                                 || self.settings.feishu_open_id.len() <= 3))
                         || (self.settings.feishu_target() == FeishuTargetType::User
@@ -500,6 +508,7 @@ pub async fn save(
         tx.execute("UPDATE notification_channel SET name=$2,enabled=$3,event_types=$4,minimum_severity=$5,webhook_ciphertext=COALESCE($6,webhook_ciphertext),secret_ciphertext=CASE WHEN $8 THEN NULL ELSE COALESCE($7,secret_ciphertext) END,settings=$9,revision=revision+1,destination_revision=destination_revision+CASE WHEN $10 THEN 1 ELSE 0 END,proxy_mode=$11,proxy_ciphertext=$12,proxy_endpoint=$13,updated_at=NOW() WHERE id=$1", &[&id,&input.name.trim(),&input.enabled,&input.event_types,&input.minimum_severity,&url,&secret,&clear,&settings,&destination_changed,&proxy_mode.as_str(),&proxy_ciphertext,&proxy_endpoint]).await?;
         // An edit cancels queued work. In-flight requests may already have left the process.
         tx.execute("UPDATE notification_delivery SET status='cancelled',last_error='channel_changed',finished_at=NOW(),claim_token=NULL,lease_until=NULL WHERE channel_id=$1 AND status IN ('pending','sending')", &[&id]).await?;
+        tx.execute("UPDATE feishu_binding_request SET status='cancelled',completed_at=NOW() WHERE channel_id=$1 AND status='pending'", &[&id]).await?;
     } else {
         if input.provider == "feishu"
             && (input.settings.feishu_app_id.is_empty() != input.feishu_app_secret.is_empty())
@@ -577,6 +586,7 @@ pub async fn remove(
         sync_email_transport(&tx).await?;
     }
     tx.execute("UPDATE notification_delivery SET status='cancelled',last_error='channel_deleted',finished_at=NOW(),claim_token=NULL,lease_until=NULL WHERE channel_id=$1 AND status IN ('pending','sending')", &[&id]).await?;
+    tx.execute("UPDATE feishu_binding_request SET status='cancelled',completed_at=NOW() WHERE channel_id=$1 AND status='pending'", &[&id]).await?;
     audit(&tx, user, context, "notification.channel_delete", id).await?;
     tx.commit().await?;
     Ok(())

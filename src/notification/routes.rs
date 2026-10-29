@@ -78,6 +78,98 @@ async fn update(
 struct Revision {
     expected_revision: i64,
 }
+
+#[post("/channels/{id}/feishu-binding")]
+async fn issue_feishu_binding(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    config: web::Data<ServerConfig>,
+    user: UserBaseI,
+    id: web::Path<Uuid>,
+    revision: web::Json<Revision>,
+) -> HttpResponse {
+    if let Err(response) = admin(&user) {
+        return response;
+    }
+    let response = respond(
+        super::feishu_binding::issue(
+            &pool,
+            &config.encrypt_key,
+            id.into_inner(),
+            revision.expected_revision,
+            &user,
+            &AuditContext::from_request(&req),
+        )
+        .await,
+    );
+    let mut response = response;
+    response.headers_mut().insert(
+        actix_web::http::header::CACHE_CONTROL,
+        actix_web::http::header::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+#[get("/channels/{id}/feishu-binding")]
+async fn feishu_binding_status(
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    id: web::Path<Uuid>,
+) -> HttpResponse {
+    if let Err(response) = admin(&user) {
+        return response;
+    }
+    let mut response = respond(super::feishu_binding::status(&pool, id.into_inner()).await);
+    response.headers_mut().insert(
+        actix_web::http::header::CACHE_CONTROL,
+        actix_web::http::header::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+#[delete("/channels/{id}/feishu-binding")]
+async fn cancel_feishu_binding(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    id: web::Path<Uuid>,
+) -> HttpResponse {
+    if let Err(response) = admin(&user) {
+        return response;
+    }
+    respond(
+        super::feishu_binding::cancel(
+            &pool,
+            id.into_inner(),
+            &user,
+            &AuditContext::from_request(&req),
+        )
+        .await,
+    )
+}
+
+#[delete("/channels/{id}/feishu-binding/recipient")]
+async fn remove_feishu_binding_recipient(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    id: web::Path<Uuid>,
+    revision: web::Json<Revision>,
+) -> HttpResponse {
+    if let Err(response) = admin(&user) {
+        return response;
+    }
+    respond(
+        super::feishu_binding::unbind(
+            &pool,
+            id.into_inner(),
+            revision.expected_revision,
+            &user,
+            &AuditContext::from_request(&req),
+        )
+        .await,
+    )
+}
 #[delete("/channels/{id}")]
 async fn destroy(
     req: HttpRequest,
@@ -184,6 +276,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(templates::configure)
             .service(create)
             .service(update)
+            .service(issue_feishu_binding)
+            .service(feishu_binding_status)
+            .service(cancel_feishu_binding)
+            .service(remove_feishu_binding_recipient)
             .service(destroy)
             .service(test)
             .service(history)

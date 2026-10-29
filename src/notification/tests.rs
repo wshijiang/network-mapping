@@ -1086,6 +1086,158 @@ fn feishu_target_compatibility_fences_legacy_updates_and_recipient_changes() {
 
 #[tokio::test]
 #[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn feishu_binding_consumes_code_once_and_fences_stale_workers() {
+    let (pool, schema) = database().await;
+    let audit = AuditContext::cli("notification-test");
+    let mut create = input();
+    create.webhook_url.clear();
+    create.signing_secret.clear();
+    create.settings.feishu_bot_type = "app".into();
+    create.settings.feishu_app_id = "cli_test".into();
+    create.settings.feishu_chat_id = "oc_original".into();
+    create.feishu_app_secret = "app-secret".into();
+    let channel = save(&pool, &key(), None, create, &user(1), &audit)
+        .await
+        .unwrap();
+    let binding = feishu_binding::issue(
+        &pool,
+        &key(),
+        channel.id,
+        channel.revision,
+        &user(1),
+        &audit,
+    )
+    .await
+    .unwrap();
+    let c = pool.get().await.unwrap();
+    let digest: Vec<u8> = c
+        .query_one(
+            "SELECT code_digest FROM feishu_binding_request WHERE channel_id=$1",
+            &[&channel.id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_ne!(digest, binding.code.as_bytes());
+    let owner = Uuid::new_v4();
+    c.execute("INSERT INTO feishu_binding_connection(app_id,owner,generation,lease_until) VALUES('cli_test',$1,1,NOW()+INTERVAL '1 minute')", &[&owner]).await.unwrap();
+    drop(c);
+    assert!(
+        feishu_binding::consume(
+            &pool,
+            &key(),
+            "cli_test",
+            (Uuid::new_v4(), 1),
+            "event-1",
+            "ou_first",
+            &binding.code
+        )
+        .await
+        .is_err()
+    );
+    let app = feishu_ws::AppConfig {
+        app_id: "cli_test".into(),
+        secret: "app-secret".into(),
+        proxy_mode: crate::outbound_proxy::ProxyMode::Direct,
+        proxy_url: String::new(),
+    };
+    let mut event = serde_json::json!({"header":{"event_type":"im.message.receive_v1","app_id":"cli_test","event_id":"event-1","tenant_key":"tenant"},"event":{"sender":{"sender_type":"user","tenant_key":"tenant","sender_id":{"open_id":"ou_first"}},"message":{"chat_type":"group","message_type":"text","content":serde_json::json!({"text":format!("/bind {}",binding.code)}).to_string()}}});
+    feishu_ws::handle_event(
+        &pool,
+        &key(),
+        &app,
+        owner,
+        1,
+        &serde_json::to_vec(&event).unwrap(),
+    )
+    .await
+    .unwrap();
+    let c = pool.get().await.unwrap();
+    let status: String = c
+        .query_one(
+            "SELECT status FROM feishu_binding_request WHERE channel_id=$1",
+            &[&channel.id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(status, "pending");
+    drop(c);
+    event["event"]["message"]["chat_type"] = "p2p".into();
+    feishu_ws::handle_event(
+        &pool,
+        &key(),
+        &app,
+        owner,
+        1,
+        &serde_json::to_vec(&event).unwrap(),
+    )
+    .await
+    .unwrap();
+    feishu_binding::consume(
+        &pool,
+        &key(),
+        "cli_test",
+        (owner, 1),
+        "event-1",
+        "ou_other",
+        &binding.code,
+    )
+    .await
+    .unwrap();
+    feishu_binding::consume(
+        &pool,
+        &key(),
+        "cli_test",
+        (owner, 1),
+        "event-2",
+        "ou_other",
+        &binding.code,
+    )
+    .await
+    .unwrap();
+    let c = pool.get().await.unwrap();
+    let row = c.query_one("SELECT c.settings,c.revision,c.destination_revision,b.status FROM notification_channel c JOIN feishu_binding_request b ON b.channel_id=c.id WHERE c.id=$1", &[&channel.id]).await.unwrap();
+    let settings: Value = row.get(0);
+    assert_eq!(settings["feishu_target_type"], "user");
+    assert_eq!(settings["feishu_open_id"], "ou_first");
+    assert_eq!(row.get::<_, i64>(1), 2);
+    assert_eq!(row.get::<_, i64>(2), 2);
+    assert_eq!(row.get::<_, String>(3), "bound");
+    let replies: i64 = c
+        .query_one(
+            "SELECT COUNT(*) FROM feishu_binding_reply WHERE channel_id=$1",
+            &[&channel.id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(replies, 1);
+    drop(c);
+    assert!(
+        feishu_binding::unbind(&pool, channel.id, 1, &user(1), &audit)
+            .await
+            .is_err()
+    );
+    feishu_binding::unbind(&pool, channel.id, 2, &user(1), &audit)
+        .await
+        .unwrap();
+    let c = pool.get().await.unwrap();
+    let row = c.query_one("SELECT enabled,settings,revision,destination_revision FROM notification_channel WHERE id=$1", &[&channel.id]).await.unwrap();
+    assert!(!row.get::<_, bool>(0));
+    assert!(row.get::<_, Value>(1).get("feishu_open_id").is_none());
+    assert_eq!(row.get::<_, i64>(2), 3);
+    assert_eq!(row.get::<_, i64>(3), 3);
+    drop(c);
+    assert_eq!(
+        feishu_binding::status(&pool, channel.id).await.unwrap()["binding_status"],
+        "unbound"
+    );
+    cleanup(pool, schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
 async fn feishu_user_target_edits_cancel_old_work_and_reject_legacy_updates() {
     let (pool, schema) = database().await;
     let audit = AuditContext::cli("notification-test");

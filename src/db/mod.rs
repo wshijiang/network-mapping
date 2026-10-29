@@ -259,6 +259,11 @@ pub async fn init_database_table(
         .await?;
     transaction
         .batch_execute(include_str!(
+            "../../source/database/migrate_feishu_binding.sql"
+        ))
+        .await?;
+    transaction
+        .batch_execute(include_str!(
             "../../source/database/migrate_os_detection.sql"
         ))
         .await?;

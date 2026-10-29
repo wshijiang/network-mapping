@@ -152,6 +152,71 @@ impl ProxyConfig {
     }
 }
 type Stream = Box<dyn AsyncTokioStream>;
+
+/// Establish a TCP tunnel for a TLS WebSocket using the same system/custom
+/// proxy matching rules as HTTP delivery. Never fall back after proxy errors.
+pub(crate) async fn websocket_tunnel(
+    proxy: &ProxyConfig,
+    host: &str,
+    port: u16,
+) -> Result<Stream, ProxyError> {
+    let selected = if proxy.mode == ProxyMode::System {
+        let target: http::Uri = format!("https://{host}:{port}")
+            .parse()
+            .map_err(|_| ProxyError::permanent("invalid_destination"))?;
+        if let Some(intercept) =
+            hyper_util::client::proxy::matcher::Matcher::from_system().intercept(&target)
+        {
+            let mut url = reqwest::Url::parse(&intercept.uri().to_string())
+                .map_err(|_| ProxyError::permanent("proxy_invalid"))?;
+            if let Some((user, password)) = intercept.raw_auth() {
+                url.set_username(user)
+                    .map_err(|_| ProxyError::permanent("proxy_invalid"))?;
+                url.set_password(Some(password))
+                    .map_err(|_| ProxyError::permanent("proxy_invalid"))?;
+            } else if let Some(value) = intercept.basic_auth() {
+                let basic = value
+                    .to_str()
+                    .ok()
+                    .and_then(|v| v.strip_prefix("Basic "))
+                    .ok_or_else(|| ProxyError::permanent("proxy_invalid"))?;
+                let decoded = openssl::base64::decode_block(basic)
+                    .map_err(|_| ProxyError::permanent("proxy_invalid"))?;
+                let auth = std::str::from_utf8(&decoded)
+                    .map_err(|_| ProxyError::permanent("proxy_invalid"))?;
+                let (user, password) = auth
+                    .split_once(':')
+                    .ok_or_else(|| ProxyError::permanent("proxy_invalid"))?;
+                url.set_username(user)
+                    .map_err(|_| ProxyError::permanent("proxy_invalid"))?;
+                url.set_password(Some(password))
+                    .map_err(|_| ProxyError::permanent("proxy_invalid"))?;
+            }
+            ProxyConfig {
+                mode: ProxyMode::Custom,
+                url: url.to_string(),
+            }
+        } else {
+            ProxyConfig {
+                mode: ProxyMode::Direct,
+                url: String::new(),
+            }
+        }
+    } else {
+        proxy.clone()
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        match selected.mode {
+            ProxyMode::Direct => {
+                Ok(Box::new(TcpStream::connect((host, port)).await.map_err(network)?) as Stream)
+            }
+            ProxyMode::Custom => tunnel(&selected, host, port, &tls_connector()?).await,
+            ProxyMode::System => Err(ProxyError::permanent("proxy_invalid")),
+        }
+    })
+    .await
+    .map_err(|_| ProxyError::transient("proxy_connection_failed"))?
+}
 #[derive(Debug)]
 struct VerifiedTls(tokio_native_tls::TlsStream<Stream>);
 impl tokio::io::AsyncRead for VerifiedTls {

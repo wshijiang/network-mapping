@@ -442,6 +442,14 @@ pub async fn run(args: Clis) -> io::Result<()> {
         ),
     );
     background.spawn_draining(
+        "feishu-binding",
+        crate::notification::run_feishu_binding(
+            db_pool.clone(),
+            ser_con.encrypt_key.clone(),
+            background.subscribe(),
+        ),
+    );
+    background.spawn_draining(
         "report-worker",
         crate::reports::run_worker(
             db_pool.clone(),
