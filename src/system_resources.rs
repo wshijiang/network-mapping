@@ -345,13 +345,18 @@ impl Default for DbTableSizeInfo {
 }
 
 impl SystemResource {
-    pub async fn new(sys: Systems, pool: &deadpool_postgres::Pool, db_name: &str) -> Self {
+    pub async fn new(
+        sys: Systems,
+        pool: &deadpool_postgres::Pool,
+        db_name: &str,
+        sql_file_path: &str,
+    ) -> Self {
         Self {
             server_run_time: get_server_uptime() as i64,
             cpu: SystemCPU::new(sys.sys.clone()),
             ram: SystemRAM::new(sys.sys.clone()),
             disk: SystemDisk::new(sys.disk.clone()),
-            db_postgresql: DbResource::new(pool, "source/database/", db_name).await,
+            db_postgresql: DbResource::new(pool, sql_file_path, db_name).await,
             network: SystemNetwork::new(sys.network.clone()),
             create_at: None,
         }
@@ -504,6 +509,7 @@ pub async fn benchmark(
     sys: web::Data<Systems>,
     pool: web::Data<&deadpool_postgres::Pool>,
     db_name: String,
+    sql_file_path: &str,
 ) {
     let total_start = Instant::now();
     let pool = pool.get_ref();
@@ -525,7 +531,7 @@ pub async fn benchmark(
 
     // DB
     let start = Instant::now();
-    let db = DbResource::new(pool, "source/database/", &db_name).await;
+    let db = DbResource::new(pool, sql_file_path, &db_name).await;
     let db_elapsed = start.elapsed();
 
     //Network
@@ -553,6 +559,7 @@ pub async fn benchmark(
 pub async fn insert_system_status(
     pool: &deadpool_postgres::Pool,
     db_name: String,
+    sql_file_path: &str,
     sys: Systems,
     elasticsearch: &ElasticsearchService,
     cache: &system_resource_cache::SystemResourceCache,
@@ -561,7 +568,7 @@ pub async fn insert_system_status(
     // 实时数据的发布。连接池自身还有更短的 wait timeout 作为第一层保护。
     let mut s = match tokio::time::timeout(
         Duration::from_secs(3),
-        SystemResource::new(sys.clone(), pool, &db_name),
+        SystemResource::new(sys.clone(), pool, &db_name, sql_file_path),
     )
     .await
     {
@@ -608,7 +615,7 @@ pub async fn insert_system_status(
         };
     let mut client = pool.get().await?;
     let transaction = client.transaction().await?;
-    let sql = get_sql_from_file("source/database/", "insert_system_status.sql").await?;
+    let sql = get_sql_from_file(sql_file_path, "insert_system_status.sql").await?;
     let statement = transaction.prepare(&sql).await?;
     let server_run_time = s.server_run_time;
     let cpu = serde_json::to_value(&s.cpu).unwrap();

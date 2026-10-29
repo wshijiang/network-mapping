@@ -52,7 +52,13 @@ async fn benchmark_route(
     pool: web::Data<&deadpool_postgres::Pool>,
     db_config: web::Data<DatabaseConfig>,
 ) -> impl Responder {
-    benchmark(sys, pool, db_config.db_name.clone()).await;
+    benchmark(
+        sys,
+        pool,
+        db_config.db_name.clone(),
+        &db_config.sql_file_path,
+    )
+    .await;
     "Benchmark finished, check server logs."
 }
 

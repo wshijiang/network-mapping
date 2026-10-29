@@ -183,7 +183,7 @@ pool_recycle_timeout_ms = 3000                      # 复用连接健康检查�
 tls = false # true or false
 
 init_database_file = "source/database/init.sql"          #用于初始化数据库表的sql文件位置
-sql_file_path = "source/database/"                       #用于指定sql文件目录，通常为相对路径
+sql_file_path = "source/database/"                       #SQL 文件目录；相对路径优先基于配置文件目录
 
 # 下面表示的是数据库中密码加密所需要的参数
 # 使用下面的默认值可以做到 1 秒校验和加密，保持原样就好

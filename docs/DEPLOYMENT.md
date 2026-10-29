@@ -144,10 +144,12 @@ sudo install -o root -g network-mapping -m 0640 config.toml /etc/network-mapping
 | `frontend.directory`、`maxmind.directory` | 配置文件所在目录 |
 | `elasticsearch.ca_certificate_file`、`scanner_diagnostics.directory` | 配置文件所在目录 |
 | backup 的可配置本机路径 | 配置文件所在目录，详见[备份指南](PGBACKREST_BACKUP.md) |
-| `database.init_database_file`、`database.sql_file_path` | 进程工作目录 |
+| `database.init_database_file`、`database.sql_file_path` | 优先配置文件所在目录；该位置不存在而工作目录中存在时使用工作目录（兼容旧配置） |
 | `templates.templates_directory`、`log.directory` | 进程工作目录 |
 
 使用绝对路径可以避免换启动目录后找不到文件。`--config` 只指定配置文件，不会自动切换工作目录。
+
+数据库 SQL 的两个路径分别解析：当配置文件目录和工作目录下都存在对应路径时，优先使用配置文件目录。将配置文件与 SQL 分开部署时，建议使用绝对路径；原本依赖工作目录的相对路径在配置文件目录下出现同名文件或目录后可能指向新位置。环境变量模式以启动时工作目录作为相对路径基准，容器内置默认值为绝对路径。
 
 服务用户需要读取配置、证书私钥、SQL、模板和前端资源，以及写入日志和诊断目录。配置与私钥应只允许管理员和服务用户读取；代码目录及前端产物无需开放写权限。
 

@@ -112,6 +112,8 @@ pub async fn run(args: Clis) -> io::Result<()> {
     };
 
     let db_config = config.database;
+    info!(target: "server::startup", init_database_file = %db_config.init_database_file,
+        sql_file_path = %db_config.sql_file_path, "数据库 SQL 路径已解析");
     let database_c = db_config.clone();
     let database_c2 = db_config.clone();
 
@@ -611,6 +613,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             match insert_system_status(
                 &db_pool,
                 database_c.db_name.clone(),
+                &database_c.sql_file_path,
                 sys.clone(),
                 &elasticsearch_service,
                 &system_resource_cache,

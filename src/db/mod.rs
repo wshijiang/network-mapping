@@ -203,7 +203,12 @@ pub async fn init_database_table(
     cpool: &deadpool_postgres::Pool,
     file_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let sql = fs::read_to_string(file_path).await?;
+    let sql = fs::read_to_string(file_path).await.map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("无法读取数据库初始化 SQL {file_path}: {error}"),
+        )
+    })?;
     let mut client = cpool.get().await?;
     let transaction = client.transaction().await?;
     debug!(init_database_file = file_path, "开始执行数据库初始化事务");

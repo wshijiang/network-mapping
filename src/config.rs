@@ -1302,7 +1302,31 @@ pub struct DatabaseConfig {
     pub pool_recycle_timeout_ms: u64,
     pub tls: bool,                  //是否使用tls
     pub init_database_file: String, //初始化数据库表的sql文件
-    pub sql_file_path: String,      //sql文件存放路径（相对）
+    pub sql_file_path: String,      // SQL 文件存放目录
+}
+
+impl DatabaseConfig {
+    fn resolve_relative_to(&mut self, config_path: &Path, working_directory: &Path) {
+        for value in [&mut self.init_database_file, &mut self.sql_file_path] {
+            let configured = Path::new(value.as_str());
+            if configured.is_absolute() || configured.as_os_str().is_empty() {
+                continue;
+            }
+            let config_candidate = config_path
+                .parent()
+                .unwrap_or(working_directory)
+                .join(configured);
+            let legacy_candidate = working_directory.join(configured);
+            let resolved = if matches!(config_candidate.try_exists(), Ok(false))
+                && matches!(legacy_candidate.try_exists(), Ok(true))
+            {
+                legacy_candidate
+            } else {
+                config_candidate
+            };
+            *value = resolved.to_string_lossy().into_owned();
+        }
+    }
 }
 
 impl SelfChecking for DatabaseConfig {
@@ -1549,7 +1573,8 @@ impl Config {
             .human_verification
             .validate()
             .map_err(std::io::Error::other)?;
-        config.resolve_paths(&std::env::current_dir()?.join(".environment"));
+        let working_directory = std::env::current_dir()?;
+        config.resolve_paths(&working_directory.join(".environment"), &working_directory);
         Ok((config, report))
     }
 
@@ -1590,12 +1615,16 @@ impl Config {
             .human_verification
             .validate()
             .map_err(std::io::Error::other)?;
-        config.resolve_paths(path);
+        let working_directory = std::env::current_dir()?;
+        config.resolve_paths(path, &working_directory);
         Ok((config, report))
     }
 
-    fn resolve_paths(&mut self, path: &Path) {
+    fn resolve_paths(&mut self, path: &Path, working_directory: &Path) {
         let config = self;
+        config
+            .database
+            .resolve_relative_to(&working_directory.join(path), working_directory);
         if config.scanner_diagnostics.directory.is_relative() {
             config.scanner_diagnostics.directory = path
                 .parent()
@@ -1833,6 +1862,98 @@ mod tests {
             "/opt/network-mapping/source/database/"
         );
         assert_eq!(report.error_count(), 0);
+    }
+
+    #[test]
+    fn database_sql_paths_prefer_config_directory_and_keep_absolute_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let config_dir = root.path().join("config");
+        let cwd = root.path().join("working");
+        for base in [&config_dir, &cwd] {
+            std::fs::create_dir_all(base.join("source/database")).unwrap();
+            std::fs::write(base.join("source/database/init.sql"), "SELECT 1").unwrap();
+        }
+        let (mut config, _) = super::Config::from_env_pairs(environment_pairs(&[])).unwrap();
+        config.database.init_database_file = "source/database/init.sql".into();
+        config.database.sql_file_path = "source/database".into();
+        config
+            .database
+            .resolve_relative_to(&config_dir.join("config.toml"), &cwd);
+        assert_eq!(
+            Path::new(&config.database.init_database_file),
+            config_dir.join("source/database/init.sql")
+        );
+        assert_eq!(
+            Path::new(&config.database.sql_file_path),
+            config_dir.join("source/database")
+        );
+
+        let absolute = cwd.join("custom/init.sql");
+        config.database.init_database_file = absolute.to_str().unwrap().into();
+        config
+            .database
+            .resolve_relative_to(&config_dir.join("config.toml"), &cwd);
+        assert_eq!(Path::new(&config.database.init_database_file), absolute);
+    }
+
+    #[test]
+    fn database_sql_paths_support_legacy_working_directory_and_report_missing_config_path() {
+        let root = tempfile::tempdir().unwrap();
+        let config_dir = root.path().join("config");
+        let cwd = root.path().join("working");
+        std::fs::create_dir_all(cwd.join("source/database")).unwrap();
+        std::fs::write(cwd.join("source/database/init.sql"), "SELECT 1").unwrap();
+        let (mut config, _) = super::Config::from_env_pairs(environment_pairs(&[])).unwrap();
+        config.database.init_database_file = "source/database/init.sql".into();
+        config.database.sql_file_path = "source/database".into();
+        config
+            .database
+            .resolve_relative_to(&config_dir.join("config.toml"), &cwd);
+        assert_eq!(
+            Path::new(&config.database.init_database_file),
+            cwd.join("source/database/init.sql")
+        );
+        assert_eq!(
+            Path::new(&config.database.sql_file_path),
+            cwd.join("source/database")
+        );
+
+        config.database.init_database_file = "missing.sql".into();
+        config
+            .database
+            .resolve_relative_to(&config_dir.join("config.toml"), &cwd);
+        assert_eq!(
+            Path::new(&config.database.init_database_file),
+            config_dir.join("missing.sql")
+        );
+    }
+
+    #[tokio::test]
+    async fn file_config_loads_sql_from_its_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let sql_dir = root.path().join("source/database");
+        std::fs::create_dir_all(&sql_dir).unwrap();
+        std::fs::write(sql_dir.join("init.sql"), "SELECT 1;").unwrap();
+        std::fs::write(sql_dir.join("get_table_size.sql"), "SELECT 2;").unwrap();
+        let content = include_str!("../docker/config.example.toml")
+            .replace(
+                "/opt/network-mapping/source/database/init.sql",
+                "source/database/init.sql",
+            )
+            .replace("/opt/network-mapping/source/database/", "source/database/");
+        let file = root.path().join("config.toml");
+        std::fs::write(&file, content).unwrap();
+        let (config, _) = super::Config::from_file_with_check(&file).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&config.database.init_database_file).unwrap(),
+            "SELECT 1;"
+        );
+        assert_eq!(
+            crate::db::get_sql_from_file(&config.database.sql_file_path, "get_table_size.sql")
+                .await
+                .unwrap(),
+            "SELECT 2;"
+        );
     }
     #[test]
     fn environment_requires_deployment_secrets() {
