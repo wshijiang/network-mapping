@@ -97,6 +97,16 @@ async fn upload_report_image_to(
     auth_url: &str,
     image_url: &str,
 ) -> Result<String, Outcome> {
+    let token = authenticate(client, app_id, app_secret, auth_url).await?;
+    upload_image_with_token(client, &token, image, image_url).await
+}
+
+async fn authenticate(
+    client: &reqwest::Client,
+    app_id: &str,
+    app_secret: &str,
+    auth_url: &str,
+) -> Result<String, Outcome> {
     let response = client
         .post(auth_url)
         .json(&json!({"app_id":app_id,"app_secret":app_secret}))
@@ -104,10 +114,19 @@ async fn upload_report_image_to(
         .await
         .map_err(|_| Outcome::failure("feishu_auth_unavailable", true))?;
     let token_response = read_api_response(response, "feishu_auth_failed").await?;
-    let token = token_response["tenant_access_token"]
+    token_response["tenant_access_token"]
         .as_str()
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| Outcome::failure("feishu_auth_failed", false))?;
+        .map(str::to_owned)
+        .ok_or_else(|| Outcome::failure("feishu_auth_failed", false))
+}
+
+async fn upload_image_with_token(
+    client: &reqwest::Client,
+    token: &str,
+    image: Vec<u8>,
+    image_url: &str,
+) -> Result<String, Outcome> {
     let part = reqwest::multipart::Part::bytes(image)
         .file_name("trend.png")
         .mime_str("image/png")
@@ -128,6 +147,101 @@ async fn upload_report_image_to(
         .filter(|s| !s.is_empty() && s.len() <= 512)
         .map(str::to_owned)
         .ok_or_else(|| Outcome::failure("feishu_image_upload_failed", false))
+}
+
+/// Send as an application bot. Endpoints are fixed by the server, never channel input.
+pub(super) async fn send_application(
+    client: &reqwest::Client,
+    app_id: &str,
+    app_secret: &str,
+    chat_id: &str,
+    payload: Value,
+    image: Option<Vec<u8>>,
+    delivery_id: uuid::Uuid,
+) -> Outcome {
+    send_application_to(
+        client,
+        app_id,
+        app_secret,
+        chat_id,
+        payload,
+        image,
+        delivery_id,
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+        "https://open.feishu.cn/open-apis/im/v1/images",
+        "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_application_to(
+    client: &reqwest::Client,
+    app_id: &str,
+    app_secret: &str,
+    chat_id: &str,
+    mut payload: Value,
+    image: Option<Vec<u8>>,
+    delivery_id: uuid::Uuid,
+    auth_url: &str,
+    image_url: &str,
+    message_url: &str,
+) -> Outcome {
+    let token = match authenticate(client, app_id, app_secret, auth_url).await {
+        Ok(token) => token,
+        Err(outcome) => return outcome,
+    };
+    if let Some(image) = image {
+        let image_key = match upload_image_with_token(client, &token, image, image_url).await {
+            Ok(key) => key,
+            Err(outcome) => return outcome,
+        };
+        payload = match attach_report_image(payload, &image_key) {
+            Ok(payload) => payload,
+            Err(outcome) => return outcome,
+        };
+    }
+    let Some(kind) = payload["msg_type"].as_str() else {
+        return Outcome::failure("invalid_payload", false);
+    };
+    let content = if kind == "interactive" {
+        &payload["card"]
+    } else if kind == "post" {
+        &payload["content"]["post"]
+    } else {
+        &payload["content"]
+    };
+    if content.is_null() || !matches!(kind, "text" | "post" | "interactive") {
+        return Outcome::failure("invalid_payload", false);
+    }
+    let Ok(content) = serde_json::to_string(content) else {
+        return Outcome::failure("invalid_payload", false);
+    };
+    let body = json!({"receive_id":chat_id,"msg_type":kind,"content":content,"uuid":delivery_id.to_string()});
+    if !serde_json::to_vec(&body).is_ok_and(|bytes| bytes.len() <= 20 * 1024) {
+        return Outcome::failure("payload_too_large", false);
+    }
+    let response = match client
+        .post(message_url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return Outcome::failure("network_or_tls_error", true),
+    };
+    match read_api_response(response, "feishu_send_failed").await {
+        Ok(_) => Outcome {
+            sent: true,
+            retryable: false,
+            http: Some(200),
+            code: Some(0),
+            retry_after: 0,
+            reason: "sent",
+        },
+        Err(outcome) => outcome,
+    }
 }
 
 async fn read_api_response(
@@ -288,6 +402,57 @@ pub fn client() -> Result<reqwest::Client, reqwest::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[actix_web::test]
+    async fn application_bot_authenticates_uploads_and_sends_card_to_chat() {
+        use actix_web::{App, HttpRequest, HttpResponse, HttpServer, web};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = HttpServer::new(|| {
+            App::new()
+                .route(
+                    "/auth",
+                    web::post().to(|body: web::Json<Value>| async move {
+                        assert_eq!(body["app_id"], "app-id");
+                        assert_eq!(body["app_secret"], "app-secret");
+                        HttpResponse::Ok().json(json!({"code":0,"tenant_access_token":"token"}))
+                    }),
+                )
+                .route(
+                    "/images",
+                    web::post().to(|req: HttpRequest| async move {
+                        assert_eq!(req.headers().get("Authorization").unwrap(), "Bearer token");
+                        HttpResponse::Ok().json(json!({"code":0,"data":{"image_key":"img_test"}}))
+                    }),
+                )
+                .route(
+                    "/messages",
+                    web::post().to(|req: HttpRequest, body: web::Json<Value>| async move {
+                        assert_eq!(req.query_string(), "receive_id_type=chat_id");
+                        assert_eq!(req.headers().get("Authorization").unwrap(), "Bearer token");
+                        assert_eq!(body["receive_id"], "oc_target");
+                        assert_eq!(body["msg_type"], "interactive");
+                        assert!(uuid::Uuid::parse_str(body["uuid"].as_str().unwrap()).is_ok());
+                        let card: Value =
+                            serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
+                        assert_eq!(card["body"]["elements"][1]["img_key"], "img_test");
+                        HttpResponse::Ok().json(json!({"code":0,"data":{"message_id":"om_test"}}))
+                    }),
+                )
+        })
+        .listen(listener)
+        .unwrap()
+        .run();
+        let handle = server.handle();
+        actix_web::rt::spawn(server);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let outcome = send_application_to(&client, "app-id", "app-secret", "oc_target",
+            json!({"msg_type":"interactive","card":{"body":{"elements":[{"tag":"markdown","content":"report"}]}}}),
+            Some(b"png".to_vec()), uuid::Uuid::new_v4(), &format!("http://{address}/auth"),
+            &format!("http://{address}/images"), &format!("http://{address}/messages?receive_id_type=chat_id")).await;
+        assert!(outcome.sent);
+        handle.stop(true).await;
+    }
 
     #[actix_web::test]
     async fn report_upload_authenticates_uploads_and_embeds_returned_key() {

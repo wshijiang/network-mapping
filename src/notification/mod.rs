@@ -138,6 +138,16 @@ pub struct ChannelSettings {
     pub chat_id: String,
     #[serde(default)]
     pub feishu_app_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub feishu_bot_type: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub feishu_chat_id: String,
+}
+
+impl ChannelSettings {
+    fn feishu_application(&self) -> bool {
+        self.feishu_bot_type == "app"
+    }
 }
 
 impl ChannelInput {
@@ -172,7 +182,30 @@ impl ChannelInput {
         }
         match self.provider.as_str() {
             "feishu" => {
-                if creating || !self.webhook_url.is_empty() {
+                if !matches!(
+                    self.settings.feishu_bot_type.as_str(),
+                    "" | "webhook" | "app"
+                ) {
+                    return Err(Error::bad("飞书机器人类型无效"));
+                }
+                if self.settings.feishu_application() {
+                    if !self.webhook_url.is_empty()
+                        || !self.signing_secret.is_empty()
+                        || self.clear_signing_secret
+                        || self.settings.feishu_app_id.is_empty()
+                        || self.settings.feishu_chat_id.is_empty()
+                        || self.settings.feishu_chat_id.len() > 128
+                        || self
+                            .settings
+                            .feishu_chat_id
+                            .chars()
+                            .any(char::is_whitespace)
+                        || self.clear_feishu_app_secret
+                        || (creating && self.feishu_app_secret.is_empty())
+                    {
+                        return Err(Error::bad("应用机器人须配置应用 ID、密钥和群聊 ID"));
+                    }
+                } else if creating || !self.webhook_url.is_empty() {
                     feishu::validate_url(&self.webhook_url).map_err(Error::bad)?;
                 }
                 if self.signing_secret.len() > 512
@@ -243,6 +276,8 @@ pub struct Channel {
     pub updated_at: DateTime<Utc>,
 }
 fn channel(row: &Row) -> Channel {
+    let settings: ChannelSettings = serde_json::from_value(row.get("settings")).unwrap_or_default();
+    let custom_bot = !settings.feishu_application();
     Channel {
         id: row.get("id"),
         provider: row.get("provider"),
@@ -250,8 +285,9 @@ fn channel(row: &Row) -> Channel {
         enabled: row.get("enabled"),
         event_types: row.get("event_types"),
         minimum_severity: row.get("minimum_severity"),
-        webhook_configured: row.get::<_, String>("provider") == "feishu",
+        webhook_configured: row.get::<_, String>("provider") == "feishu" && custom_bot,
         signing_secret_configured: row.get::<_, String>("provider") == "feishu"
+            && custom_bot
             && row.get("secret_configured"),
         credential_configured: row.get("secret_configured"),
         feishu_app_secret_configured: row.get("feishu_app_secret_configured"),
@@ -261,7 +297,7 @@ fn channel(row: &Row) -> Channel {
             .unwrap_or_default(),
         proxy_configured: row.get("proxy_configured"),
         proxy_endpoint: row.get("proxy_endpoint"),
-        settings: serde_json::from_value(row.get("settings")).unwrap_or_default(),
+        settings,
         revision: row.get("revision"),
         updated_at: row.get("updated_at"),
     }
@@ -323,7 +359,12 @@ pub async fn save(
     tx.query_one("SELECT pg_advisory_xact_lock(728104, 1)", &[])
         .await?;
     let target = id.unwrap_or_else(Uuid::now_v7);
-    let settings = serde_json::to_value(&input.settings).map_err(|_| Error::internal())?;
+    let mut stored_settings = input.settings.clone();
+    if !stored_settings.feishu_application() {
+        stored_settings.feishu_bot_type.clear();
+        stored_settings.feishu_chat_id.clear();
+    }
+    let settings = serde_json::to_value(&stored_settings).map_err(|_| Error::internal())?;
     let credential = match input.provider.as_str() {
         "email" => &input.smtp_password,
         "telegram" => &input.bot_token,
@@ -370,10 +411,14 @@ pub async fn save(
         let previous_settings: ChannelSettings =
             serde_json::from_value(row.get("settings")).map_err(|_| Error::internal())?;
         if input.provider == "feishu" {
+            if previous_settings.feishu_application() != input.settings.feishu_application() {
+                return Err(Error::bad("机器人类型不可修改，请创建新渠道"));
+            }
             let configured = (!input.feishu_app_secret.is_empty()
                 || row.get::<_, bool>("app_secret_configured"))
                 && !input.clear_feishu_app_secret;
             if configured == input.settings.feishu_app_id.is_empty()
+                || (input.settings.feishu_application() && !configured)
                 || (previous_settings.feishu_app_id != input.settings.feishu_app_id
                     && configured
                     && input.feishu_app_secret.is_empty())
@@ -385,6 +430,10 @@ pub async fn save(
         }
         let destination_changed = url.is_some()
             || (input.provider != "feishu" && previous_settings != input.settings)
+            || (input.provider == "feishu"
+                && input.settings.feishu_application()
+                && (previous_settings.feishu_app_id != input.settings.feishu_app_id
+                    || previous_settings.feishu_chat_id != input.settings.feishu_chat_id))
             || (input.provider == "telegram" && secret.is_some());
         tx.execute("UPDATE notification_channel SET name=$2,enabled=$3,event_types=$4,minimum_severity=$5,webhook_ciphertext=COALESCE($6,webhook_ciphertext),secret_ciphertext=CASE WHEN $8 THEN NULL ELSE COALESCE($7,secret_ciphertext) END,settings=$9,revision=revision+1,destination_revision=destination_revision+CASE WHEN $10 THEN 1 ELSE 0 END,proxy_mode=$11,proxy_ciphertext=$12,proxy_endpoint=$13,updated_at=NOW() WHERE id=$1", &[&id,&input.name.trim(),&input.enabled,&input.event_types,&input.minimum_severity,&url,&secret,&clear,&settings,&destination_changed,&proxy_mode.as_str(),&proxy_ciphertext,&proxy_endpoint]).await?;
         // An edit cancels queued work. In-flight requests may already have left the process.
@@ -405,7 +454,7 @@ pub async fn save(
         if count >= 32 {
             return Err(Error::bad("最多配置 32 个通知渠道"));
         }
-        let url = if input.provider == "feishu" {
+        let url = if input.provider == "feishu" && !input.settings.feishu_application() {
             encrypt(&input.webhook_url, key)?
         } else {
             Vec::new()

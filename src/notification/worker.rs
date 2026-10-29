@@ -273,6 +273,32 @@ pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client
                                 None
                             };
                             if claimed.provider == "feishu" {
+                                if claimed.settings.feishu_application() {
+                                    let app_secret = match claimed
+                                        .feishu_app_secret
+                                        .as_deref()
+                                        .map(|value| decrypt(value, key))
+                                        .transpose()
+                                    {
+                                        Ok(Some(secret)) => secret,
+                                        _ => {
+                                            return Ok(Outcome::failure(
+                                                "secret_unavailable",
+                                                false,
+                                            ));
+                                        }
+                                    };
+                                    return Ok(feishu::send_application(
+                                        &delivery_client,
+                                        &claimed.settings.feishu_app_id,
+                                        &app_secret,
+                                        &claimed.settings.feishu_chat_id,
+                                        payload,
+                                        image,
+                                        claimed.id,
+                                    )
+                                    .await);
+                                }
                                 if let Some(image) = image {
                                     let app_secret = match claimed
                                         .feishu_app_secret

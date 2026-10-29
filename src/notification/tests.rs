@@ -1033,6 +1033,68 @@ async fn feishu_image_credentials_are_encrypted_preserved_and_cleared() {
     cleanup(pool, schema).await;
 }
 
+#[test]
+fn application_bot_validation_requires_target_and_credentials() {
+    let mut value = input();
+    value.webhook_url.clear();
+    value.signing_secret.clear();
+    value.settings.feishu_bot_type = "app".into();
+    assert!(value.validate(true).is_err());
+    value.settings.feishu_app_id = "cli_example".into();
+    value.settings.feishu_chat_id = "oc_example".into();
+    value.feishu_app_secret = "secret".into();
+    assert!(value.validate(true).is_ok());
+    value.settings.feishu_chat_id = "bad target".into();
+    assert!(value.validate(true).is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn application_bot_preserves_secret_and_fences_destination_changes() {
+    let (pool, schema) = database().await;
+    let audit = AuditContext::cli("notification-test");
+    let mut create = input();
+    create.webhook_url.clear();
+    create.signing_secret.clear();
+    create.settings.feishu_bot_type = "app".into();
+    create.settings.feishu_app_id = "cli_example".into();
+    create.settings.feishu_chat_id = "oc_first".into();
+    create.feishu_app_secret = "private-secret".into();
+    let channel = save(&pool, &key(), None, create, &user(1), &audit)
+        .await
+        .unwrap();
+    assert!(!channel.webhook_configured);
+    assert!(channel.feishu_app_secret_configured);
+    assert!(
+        !serde_json::to_string(&channel)
+            .unwrap()
+            .contains("private-secret")
+    );
+    let mut edit = input();
+    edit.webhook_url.clear();
+    edit.signing_secret.clear();
+    edit.settings.feishu_bot_type = "app".into();
+    edit.settings.feishu_app_id = "cli_example".into();
+    edit.settings.feishu_chat_id = "oc_second".into();
+    edit.expected_revision = Some(channel.revision);
+    let updated = save(&pool, &key(), Some(channel.id), edit, &user(1), &audit)
+        .await
+        .unwrap();
+    assert!(updated.feishu_app_secret_configured);
+    let conn = pool.get().await.unwrap();
+    let revision: i64 = conn
+        .query_one(
+            "SELECT destination_revision FROM notification_channel WHERE id=$1",
+            &[&channel.id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(revision, 2);
+    drop(conn);
+    cleanup(pool, schema).await;
+}
+
 #[tokio::test]
 #[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
 async fn manually_selected_report_can_be_claimed_and_retried_without_subscription() {

@@ -45,6 +45,10 @@
 
 ## 添加飞书渠道
 
+先选择「群聊自定义机器人」或「应用机器人」。类型创建后不可更改；已有飞书渠道按群聊自定义机器人处理。
+
+### 群聊自定义机器人
+
 1. 在飞书群添加「自定义机器人」，复制 Webhook；建议启用签名校验并复制签名密钥。
 2. 选择「飞书」，填写名称、Webhook、可选签名密钥及事件订阅，保存并启用。
 3. 如需报告趋势图，创建飞书自建应用，开启机器人能力并授予图片上传所需权限，填写应用 ID 和应用密钥。应用密钥加密保存、不回显，留空保留；更换应用 ID 时须同时输入新密钥。未配置应用凭据时报告只发送文字。
@@ -58,6 +62,10 @@
 签名按官方协议，以 `timestamp + "\n" + secret` 为 HMAC-SHA256 key，对空消息计算摘要并 Base64 编码。HTTP 成功还必须满足 JSON `code == 0`，兼容 `StatusCode`。签名密钥留空保留；移除须明确勾选清除。
 
 协议参考：[飞书自定义机器人](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)。
+
+### 应用机器人
+
+在飞书开放平台创建企业自建应用，启用机器人、申请发送群消息和上传图片所需权限，发布应用，并将机器人加入目标群。获取应用 ID、应用密钥和目标群 chat ID；在通知渠道选择「应用机器人」并填写这三项。应用使用 `tenant_access_token` 调用飞书消息 API，不需要 Webhook 或签名密钥。报告趋势图使用同一应用上传并附加到消息；上传或发送失败会记录失败，不会静默降级为纯文本。当前只支持向群聊发送。密钥加密保存，不回显；更换应用 ID 必须重新填写密钥。测试发送仅验证普通消息，请通过实际发送报告验证图片链路。
 
 ## 添加 Telegram 渠道
 
@@ -117,13 +125,15 @@
 
 共用字段为 `provider,name,enabled,event_types,minimum_severity,expected_revision`。`provider` 支持 `email/feishu/telegram`，旧飞书客户端未传时默认 feishu。
 
-- 飞书：`webhook_url,signing_secret,clear_signing_secret,feishu_app_secret,clear_feishu_app_secret`，`settings.feishu_app_id`；应用密钥仅写入，响应通过 `feishu_app_secret_configured` 表示是否配置。
+- 飞书：`settings.feishu_bot_type` 为 `webhook` 或 `app`，历史缺省为自定义机器人。自定义机器人使用 `webhook_url,signing_secret,clear_signing_secret`，可选 `settings.feishu_app_id,feishu_app_secret,clear_feishu_app_secret` 以发送报告图片；应用机器人必须填写 `settings.feishu_app_id,settings.feishu_chat_id,feishu_app_secret`，编辑留空保留密钥。应用密钥仅写入，响应通过 `feishu_app_secret_configured` 表示是否配置。
 - Telegram：`bot_token,settings.chat_id`。
 - 邮件：`smtp_password,settings.smtp_host,settings.smtp_port,settings.smtp_sender,settings.recipients`。
 
 响应使用 `{success,data}`，仅包含凭据是否配置；DELETE body 为 `{"expected_revision":1}`。编辑凭据留空保留，不可通过 provider 变更复用别类凭据。
 
 升级时先停止所有旧后端实例，再启动新版后端；迁移完成后只运行新版，避免旧 worker 继续发送已转移的队列或误领新增类型。启动自动执行幂等迁移，`init.sql` 与升级脚本一致。保留 `server.encrypt_key`，否则无法解密历史凭据。回滚前先停用新增的邮件和 Telegram 渠道，再回退前后端；仅支持飞书的旧版本不能处理新 provider。新增表保留即可。SMTP 一次性导入后，以统一页面订阅为准，不从旧偏好重复恢复渠道。
+
+飞书应用机器人需要新前后端配套，先升级全部后端再升级前端。回退到不支持应用机器人的后端前，删除应用机器人渠道并处理其未完成投递；旧版无法解析新增的渠道配置。群聊自定义机器人的原有配置继续使用。
 
 投递一直 pending 时检查计划时间、维护状态、notification-worker 和数据库。`no_recipients` 检查个人/管理员邮箱或指定收件人；`secret_unavailable` 检查服务主密钥；`provider_rejected` 检查机器人目标、权限、签名及访问限制；SMTP 失败检查域名、端口和授权密钥。服务商限流、网络/TLS 和临时故障按有限次数重试，不关闭 TLS 验证。
 
