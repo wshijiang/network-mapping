@@ -239,6 +239,11 @@ pub(crate) async fn query(
         "scanner":filters.scanner_id,"source":filters.task_source,"mode":mode,"mode_revision":settings.revision,"version":2}).to_string();
     let data_type = body.data_type.clone();
     let group_by = body.group_by.clone();
+    let start_at = filters.start_at;
+    let end_at = filters.end_at;
+    let has_scanner_filter = filters.scanner_id.is_some();
+    let has_source_filter = filters.task_source.is_some();
+    let comparison = body.comparison.is_some();
     let result=service.execute(key,user.id,mode.to_owned(),move |deadline| async move {
         let mut cluster_slot=crate::statistics::ClusterSlot::acquire(&pool).await?;
         let output=async {
@@ -260,7 +265,11 @@ pub(crate) async fn query(
             .insert_header(("X-Statistics-Cache", cache))
             .content_type("application/json; charset=utf-8")
             .body(bytes),
-        Err(e) => error_response(&req, e, &data_type, Some(&group_by)),
+        Err(e) => {
+            tracing::warn!(event = "StatisticsQueryContext", request_id = %crate::logs::write::request_id(&req),
+                data_type, group_by, mode, %start_at, %end_at, has_scanner_filter, has_source_filter, comparison, error_code = e.0);
+            error_response(&req, e, &data_type, Some(&group_by))
+        }
     }
 }
 pub(super) fn error_response(
@@ -294,6 +303,20 @@ fn remaining(deadline: Instant) -> Result<StdDuration, Failure> {
         .checked_duration_since(Instant::now())
         .filter(|d| !d.is_zero())
         .ok_or_else(Failure::timeout)
+}
+
+fn budget_exceeded(
+    kind: &str,
+    group: &str,
+    mode: &str,
+    reason: &str,
+    observed: usize,
+    limit: usize,
+    f: &AnalysisFilters,
+) -> String {
+    tracing::warn!(event = "StatisticsBudgetExceeded", data_type = kind, group_by = group, mode, reason,
+        observed, limit, start_at = %f.start_at, end_at = %f.end_at);
+    "too_large".into()
 }
 fn previous_filters(f: &AnalysisFilters) -> Result<AnalysisFilters, Failure> {
     let tz = f
@@ -517,7 +540,15 @@ async fn operations<C: GenericClient + Sync>(
         .await
         .map_err(|e| e.to_string())?;
     if result.len() > MAX_GROUPS {
-        return Err("too_large".into());
+        return Err(budget_exceeded(
+            kind,
+            group,
+            "retained_history",
+            "groups",
+            result.len(),
+            MAX_GROUPS,
+            f,
+        ));
     }
     let mut rows = Vec::new();
     let mut summary = json!({});
@@ -550,7 +581,15 @@ async fn scan_snapshot<C: GenericClient + Sync>(
     if kind != "discovery" {
         let rows = client.query(&format!("SELECT label, SUM(endpoint_count)::BIGINT AS count FROM analytics_distribution_30m WHERE {scope} AND bucket_start >= $1 AND bucket_start < $2 AND dimension=$6 GROUP BY label ORDER BY count DESC,label LIMIT 10001"), &[&f.start_at,&f.end_at,&owner,&f.scanner_id,&f.task_source,&kind]).await.map_err(|e|e.to_string())?;
         if rows.len() > MAX_GROUPS {
-            return Err("too_large".into());
+            return Err(budget_exceeded(
+                kind,
+                group,
+                "snapshot",
+                "groups",
+                rows.len(),
+                MAX_GROUPS,
+                f,
+            ));
         }
         return Ok(distribution(
             rows.iter()
@@ -583,7 +622,15 @@ async fn scan_snapshot<C: GenericClient + Sync>(
     };
     let result = client.query(&format!("SELECT {label} AS label, GROUPING({label}) AS is_total, COUNT(DISTINCT ip_address)::BIGINT AS count FROM analytics_discovery_fact WHERE {scope} AND {range} AND $6::TEXT IS NOT NULL GROUP BY GROUPING SETS (({label}),()) ORDER BY label LIMIT 10001"),params).await.map_err(|e|e.to_string())?;
     if result.len() > MAX_GROUPS {
-        return Err("too_large".into());
+        return Err(budget_exceeded(
+            kind,
+            group,
+            "snapshot",
+            "groups",
+            result.len(),
+            MAX_GROUPS,
+            f,
+        ));
     }
     let mut rows = Vec::new();
     let mut total = 0;
@@ -647,7 +694,15 @@ async fn scan_realtime(
             composite["after"] = cursor.clone();
         }
         if *processed >= MAX_ES_BUCKETS {
-            return Err("too_large".into());
+            return Err(budget_exceeded(
+                kind,
+                group,
+                "realtime",
+                "es_buckets",
+                *processed,
+                MAX_ES_BUCKETS,
+                f,
+            ));
         }
         let budget = deadline
             .checked_duration_since(Instant::now())
@@ -666,7 +721,15 @@ async fn scan_realtime(
             .ok_or("missing aggregation")?;
         *processed += buckets.len();
         if *processed > MAX_ES_BUCKETS {
-            return Err("too_large".into());
+            return Err(budget_exceeded(
+                kind,
+                group,
+                "realtime",
+                "es_buckets",
+                *processed,
+                MAX_ES_BUCKETS,
+                f,
+            ));
         }
         for bucket in buckets {
             let key = bucket.get("key").ok_or("missing key")?;
@@ -696,7 +759,15 @@ async fn scan_realtime(
             *counts.entry(label).or_default() += 1;
         }
         if counts.len() > MAX_GROUPS {
-            return Err("too_large".into());
+            return Err(budget_exceeded(
+                kind,
+                group,
+                "realtime",
+                "groups",
+                counts.len(),
+                MAX_GROUPS,
+                f,
+            ));
         }
         let next = result.pointer("/aggregations/groups/after_key").cloned();
         if buckets.is_empty() || next.is_none() {
@@ -754,6 +825,74 @@ fn fill_dates(rows: &mut Vec<Value>, f: &AnalysisFilters, group: &str, kind: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn budget_log_records_limit_and_request_without_filter_values() {
+        use std::io::{self, Write};
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::prelude::*;
+
+        #[derive(Clone, Default)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buffer {
+            type Writer = Writer;
+            fn make_writer(&'a self) -> Writer {
+                Writer(self.0.clone())
+            }
+        }
+        impl Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Buffer::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(output.clone())
+                .with_current_span(true),
+        );
+        let _default = tracing::subscriber::set_default(subscriber);
+        let span = tracing::info_span!("http_request", request_id = "test-request");
+        let _entered = span.enter();
+        let start_at = Utc::now();
+        let end_at = start_at + Duration::days(1);
+        let filters = AnalysisFilters {
+            timezone: "UTC".into(),
+            start_at,
+            end_at,
+            start_ms: start_at.timestamp_millis(),
+            end_ms: end_at.timestamp_millis(),
+            scanner_id: Some("private-scanner".into()),
+            task_source: None,
+        };
+        assert_eq!(
+            budget_exceeded(
+                "port",
+                "port",
+                "realtime",
+                "es_buckets",
+                50_000,
+                MAX_ES_BUCKETS,
+                &filters
+            ),
+            "too_large"
+        );
+        let text = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        let event: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(event["fields"]["event"], "StatisticsBudgetExceeded");
+        assert_eq!(event["fields"]["reason"], "es_buckets");
+        assert_eq!(event["fields"]["observed"], 50_000);
+        assert_eq!(event["fields"]["limit"], 50_000);
+        assert_eq!(event["span"]["request_id"], "test-request");
+        assert!(!text.contains("private-scanner"));
+    }
+
     #[actix_web::test]
     async fn statistics_failures_reach_client_with_reason_and_retry_contract() {
         use crate::api_response::ApiErrorMiddleware;

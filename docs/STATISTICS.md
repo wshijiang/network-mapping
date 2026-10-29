@@ -56,6 +56,8 @@ IP 各组独立去重，周期去重直接计算，不能累加每天或各扫�
 - Elasticsearch 每页 1000 个组合桶、单次调用最多 3 秒、当前期加上期合计最多 50000 桶；最多 10000 个汇总分组。超限返回明确错误，不把截断结果作为完整统计。
 - 过载返回 429，超时/预算耗尽返回 503，均携带 `Retry-After`；前端手动重试，不循环刷新聚合。明细也复用相同计算限额。
 - 统计查询及明细的 503 保留固定公开原因码和提示：`statistics_timeout`、`statistics_budget_exceeded`、`statistics_snapshot_pending`、`statistics_config_unavailable`、`statistics_failed`；底层数据库与 Elasticsearch 诊断不进入响应。拒绝日志 `StatisticsRequestRejected` 记录请求 ID、统计类型、汇总维度（明细为空）及原因码，并写入请求日志的 `reason_code`。统计后台任务继承发起请求的 tracing span，便于关联底层失败日志。
+- 查询失败时，`StatisticsQueryContext` 记录请求 ID、数据类型、维度、数据模式、半开时间范围、是否启用扫描器或来源筛选及上期对比；不记录筛选值或结果。`StatisticsBudgetExceeded` 记录 `reason`（`es_buckets` 或 `groups`）、已处理数量 `observed`、`limit` 和发生超限的周期范围。实时桶数在本期和上期之间累计；SQL 查询有 `LIMIT 10001`，达到上限时观测数量不代表实际总分组数。
+- `StatisticsAdmissionRejected` 的 `reason` 区分 `user_rate_limit`、`user_in_flight`、`queue_full`、`subscribers_full`、`rate_registry_full`、`permit_wait_failed`、`cluster_slots_full`、`cluster_lock_error`、`pool_timeout` 和 `pool_unavailable`。限频日志含窗口内冷查询数与已过时间；其他拒绝记录可用的容量信息。用 JSON 日志中的 `span.request_id` 与请求日志关联；合并的相同查询共享后台计算，后台事件属于发起计算的请求。
 - 后台快照回填分页间隔至少 100 毫秒；每轮启动任务时间窗口 2 秒（已开始任务继续完成）。失败指数退避 30 秒至 30 分钟；单执行去重集合超过 200000 条时暂停自动重试，保留错误和已有事实，拆分任务或离线处理后再手动重建。此限制不等于进程 RSS 硬上限。
 
 ## Web 缓存配置

@@ -93,8 +93,20 @@ impl ClusterSlot {
     pub async fn acquire(pool: &deadpool_postgres::Pool) -> Result<Self, Failure> {
         let client = tokio::time::timeout(Duration::from_secs(2), pool.get())
             .await
-            .map_err(|_| Failure::busy())?
-            .map_err(|_| Failure::busy())?;
+            .map_err(|_| {
+                tracing::warn!(
+                    event = "StatisticsAdmissionRejected",
+                    reason = "pool_timeout"
+                );
+                Failure::busy()
+            })?
+            .map_err(|_| {
+                tracing::warn!(
+                    event = "StatisticsAdmissionRejected",
+                    reason = "pool_unavailable"
+                );
+                Failure::busy()
+            })?;
         let mut guard = Self {
             client: Some(client),
             slot: 0,
@@ -104,7 +116,13 @@ impl ClusterSlot {
             let row = client
                 .query_one("SELECT pg_try_advisory_lock(1313686356,$1)", &[&slot])
                 .await
-                .map_err(|_| Failure::busy())?;
+                .map_err(|_| {
+                    tracing::warn!(
+                        event = "StatisticsAdmissionRejected",
+                        reason = "cluster_lock_error"
+                    );
+                    Failure::busy()
+                })?;
             if row.get::<_, bool>(0) {
                 guard.slot = slot;
                 return Ok(guard);
@@ -112,6 +130,11 @@ impl ClusterSlot {
         }
         // No session lock was acquired; this connection can be recycled.
         guard.client.take();
+        tracing::warn!(
+            event = "StatisticsAdmissionRejected",
+            reason = "cluster_slots_full",
+            limit = CONCURRENCY
+        );
         Err(Failure::busy())
     }
     pub async fn release(mut self) -> Result<(), Failure> {
@@ -310,6 +333,12 @@ impl StatisticsService {
             }
             if let Some(f) = s.flights.get(&key) {
                 if f.sender.receiver_count() >= 16 {
+                    tracing::warn!(
+                        event = "StatisticsAdmissionRejected",
+                        reason = "subscribers_full",
+                        subscribers = f.sender.receiver_count(),
+                        limit = 16
+                    );
                     s.rejected += 1;
                     return Err(Failure::busy());
                 }
@@ -317,20 +346,47 @@ impl StatisticsService {
                 s.joined += 1;
                 (rx, false, s.generation)
             } else {
-                if s.flights.len() >= CONCURRENCY + QUEUE
-                    || s.flights.values().any(|f| f.user == user)
-                {
+                if s.flights.len() >= CONCURRENCY + QUEUE {
+                    tracing::warn!(
+                        event = "StatisticsAdmissionRejected",
+                        reason = "queue_full",
+                        in_flight = s.flights.len(),
+                        limit = CONCURRENCY + QUEUE
+                    );
+                    s.rejected += 1;
+                    return Err(Failure::busy());
+                }
+                if s.flights.values().any(|f| f.user == user) {
+                    tracing::warn!(
+                        event = "StatisticsAdmissionRejected",
+                        reason = "user_in_flight",
+                        in_flight = s.flights.len()
+                    );
                     s.rejected += 1;
                     return Err(Failure::busy());
                 }
                 s.rate
                     .retain(|_, (at, _)| at.elapsed() < Duration::from_secs(60));
                 if s.rate.len() >= 4096 && !s.rate.contains_key(&user) {
+                    tracing::warn!(
+                        event = "StatisticsAdmissionRejected",
+                        reason = "rate_registry_full",
+                        tracked_users = s.rate.len(),
+                        limit = 4096
+                    );
                     s.rejected += 1;
                     return Err(Failure::busy());
                 }
                 let rate = s.rate.entry(user).or_insert((Instant::now(), 0));
                 if rate.1 >= 12 {
+                    tracing::warn!(
+                        event = "StatisticsAdmissionRejected",
+                        reason = "user_rate_limit",
+                        cold_queries = rate.1,
+                        limit = 12,
+                        window_seconds = 60,
+                        window_elapsed_ms = rate.0.elapsed().as_millis() as u64
+                    );
                     s.rejected += 1;
                     return Err(Failure::busy());
                 }
@@ -373,7 +429,14 @@ impl StatisticsService {
                             })
                         }
                     }
-                    _ => Err(Failure::busy()),
+                    _ => {
+                        tracing::warn!(
+                            event = "StatisticsAdmissionRejected",
+                            reason = "permit_wait_failed",
+                            wait_limit_ms = 2000
+                        );
+                        Err(Failure::busy())
+                    }
                 };
                 let mut s = service.lock();
                 if let Ok(body) = &outcome
@@ -443,6 +506,61 @@ impl Drop for FlightGuard {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn rate_limit_log_identifies_cause_without_logging_query_key() {
+        use std::io::{self, Write};
+        use tracing_subscriber::prelude::*;
+
+        #[derive(Clone, Default)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buffer {
+            type Writer = Writer;
+            fn make_writer(&'a self) -> Writer {
+                Writer(self.0.clone())
+            }
+        }
+        impl Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let output = Buffer::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(output.clone())
+                .with_current_span(true),
+        );
+        let _default = tracing::subscriber::set_default(subscriber);
+        let span = tracing::info_span!("http_request", request_id = "test-request");
+        let _entered = span.enter();
+        let service = StatisticsService::new();
+        service.lock().rate.insert(1, (Instant::now(), 12));
+        let error = service
+            .execute(
+                "sensitive-query-key".into(),
+                1,
+                "realtime".into(),
+                |_| async { panic!("rate-limited query must not run") },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, "statistics_busy");
+        let text = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        let event: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(event["fields"]["event"], "StatisticsAdmissionRejected");
+        assert_eq!(event["fields"]["reason"], "user_rate_limit");
+        assert_eq!(event["fields"]["cold_queries"], 12);
+        assert_eq!(event["span"]["request_id"], "test-request");
+        assert!(!text.contains("sensitive-query-key"));
+    }
 
     #[test]
     fn validates_cache_ranges_and_types() {
