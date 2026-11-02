@@ -11,7 +11,7 @@
 | `dot` | TCP/853 + TLS | 验证证书后进行 DNS 分帧和请求关联 |
 | `doh` | TCP/443 + HTTPS | 默认 POST `/dns-query`，校验 200、媒体类型及 DNS 正文；关闭重定向、代理继承和自动重试 |
 | `vnc` | TCP/5900 等 | 只接收合法 RFB 003.003 / 003.007 / 003.008 问候，不认证或进入桌面 |
-| `modbus` | TCP/502 | Read Device Identification 0x2B/0x0E；匹配事务、Unit ID、功能及标识对象。关联异常仅确认协议，不保证可采集设备标识 |
+| `modbus` | TCP/502 | 由固定版 zgrab2 执行 Read Device Identification 0x2B/0x0E；适配器匹配事务、Unit ID、功能及标识对象。每个引擎进程使用随机请求 ID；关联异常仅确认协议，不保证可采集设备标识。遵守 zgrab2 blocklist，镜像默认列表包含 RFC 1918 地址，内网探测需部署方按授权配置 |
 | `enip` | TCP/44818 | 有界 ListIdentity；校验 SenderContext、封装长度及身份条目 |
 | `enip_udp` → `service=enip` | UDP/44818 | 单播 ListIdentity，校验来源及 SenderContext；不广播或建立 I/O 连接 |
 | `s7` | TCP/102 | TPKT/COTP + 经典 S7 Setup Communication；匹配 PDU 引用，不读取过程数据。S7comm Plus 不在范围内 |
