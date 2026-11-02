@@ -1,4 +1,6 @@
+analytics_snapshot.execution_timeout_minutes
 analytics_snapshot.interval_minutes
+analytics_snapshot.max_staging_mib
 analytics_snapshot.mode
 automatic_target.authorized_cidrs
 automatic_target.change_refresh_seconds

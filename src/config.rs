@@ -195,6 +195,8 @@ impl AnalyticsSnapshotMode {
 pub struct AnalyticsSnapshotConfig {
     pub mode: AnalyticsSnapshotMode,
     pub interval_minutes: u64,
+    pub execution_timeout_minutes: u64,
+    pub max_staging_mib: u64,
 }
 
 impl Default for AnalyticsSnapshotConfig {
@@ -202,6 +204,8 @@ impl Default for AnalyticsSnapshotConfig {
         Self {
             mode: AnalyticsSnapshotMode::Realtime,
             interval_minutes: 30,
+            execution_timeout_minutes: 360,
+            max_staging_mib: 4096,
         }
     }
 }
@@ -216,6 +220,14 @@ impl SelfChecking for AnalyticsSnapshotConfig {
     fn try_check(&self) -> Result<bool, Box<dyn std::error::Error>> {
         if !(1..=24 * 60).contains(&self.interval_minutes) {
             return Err("analytics_snapshot.interval_minutes 必须在 1 到 1440 之间".into());
+        }
+        if !(30..=1440).contains(&self.execution_timeout_minutes) {
+            return Err(
+                "analytics_snapshot.execution_timeout_minutes 必须在 30 到 1440 之间".into(),
+            );
+        }
+        if !(256..=65536).contains(&self.max_staging_mib) {
+            return Err("analytics_snapshot.max_staging_mib 必须在 256 到 65536 之间".into());
         }
         Ok(true)
     }
