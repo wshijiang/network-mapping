@@ -38,7 +38,7 @@ tower = { version = "0.5", features = ["util"] }
 http = "1"
 futures-util = "0.3"
 futures = "0.3"
-prost = "0.13"
+prost = "0.14"
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system"] }
 fs2 = "0.4"
