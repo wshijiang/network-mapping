@@ -579,11 +579,8 @@ impl ElasticsearchService {
         Ok(result)
     }
 
-    pub(crate) async fn scan_observations(
-        &self,
-        indices: &[String],
-        body: &Value,
-    ) -> Result<Value, String> {
+    /// Open a stable view for a bounded, paginated analytics build.
+    pub(crate) async fn open_analytics_pit(&self, indices: &[String]) -> Result<String, String> {
         if !self.can_read() {
             return Err("Elasticsearch 扫描事实读路径尚未就绪".to_owned());
         }
@@ -593,13 +590,44 @@ impl ElasticsearchService {
             .send_json_request(
                 ElasticsearchOperation::ScanQuery,
                 Method::POST,
-                &format!("/{target}/_search?allow_no_indices=true&ignore_unavailable=true"),
-                |request| request.json(body),
+                &format!("/{target}/_pit?keep_alive=30m&allow_partial_search_results=false"),
+                |r| r,
+            )
+            .await?;
+        validate_scan_search_response(&result)?;
+        result
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "Elasticsearch 统计 PIT 缺少 id".to_owned())
+    }
+
+    pub(crate) async fn search_analytics_pit(&self, body: &Value) -> Result<Value, String> {
+        let result = self
+            .send_json_request(
+                ElasticsearchOperation::ScanQuery,
+                Method::POST,
+                "/_search?allow_partial_search_results=false",
+                |r| r.json(body),
             )
             .await?;
         validate_scan_search_response(&result)?;
         self.mark_success();
         Ok(result)
+    }
+
+    pub(crate) async fn close_analytics_pit(&self, id: &str) {
+        if let Err(error) = self
+            .send_json_request(
+                ElasticsearchOperation::ScanQuery,
+                Method::DELETE,
+                "/_pit",
+                |r| r.json(&json!({"id": id})),
+            )
+            .await
+        {
+            warn!(event = "AnalyticsSnapshotPitCloseFailed", %error);
+        }
     }
 
     /// Returns the immutable DNS observations for one task. Comparison is
@@ -5145,7 +5173,7 @@ mod tests {
 
 #[cfg(test)]
 #[path = "elasticsearch_storage_tests.rs"]
-mod storage_tests;
+pub(crate) mod storage_tests;
 
 #[cfg(test)]
 #[path = "elasticsearch/stress_tests.rs"]

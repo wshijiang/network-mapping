@@ -5,15 +5,15 @@ use std::net::TcpListener;
 use std::sync::Mutex;
 
 #[derive(Default)]
-pub(super) struct FixtureState {
+pub(crate) struct FixtureState {
     pub(super) requests: Vec<String>,
     pub(super) query_bodies: Vec<(String, Value)>,
-    pub(super) documents: BTreeMap<(String, String), Value>,
+    pub(crate) documents: BTreeMap<(String, String), Value>,
     #[allow(clippy::type_complexity)]
     pub(super) pits: BTreeMap<String, Vec<((String, String), Value)>>,
     pub(super) pit_counter: usize,
-    pub(super) rotate_pit_ids: bool,
-    pub(super) closed_pit_ids: Vec<String>,
+    pub(crate) rotate_pit_ids: bool,
+    pub(crate) closed_pit_ids: Vec<String>,
     pub(super) pit_not_found: bool,
     pub(super) fail_path: Option<String>,
     pub(super) fail_request: Option<String>,
@@ -32,15 +32,15 @@ pub(super) struct FixtureState {
     dns_generation: usize,
 }
 
-pub(super) struct EsFixture {
+pub(crate) struct EsFixture {
     pub(super) url: String,
-    pub(super) state: Arc<Mutex<FixtureState>>,
+    pub(crate) state: Arc<Mutex<FixtureState>>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl EsFixture {
-    pub(super) fn start() -> Self {
+    pub(crate) fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -66,7 +66,7 @@ impl EsFixture {
         }
     }
 
-    pub(super) fn service(&self) -> ElasticsearchService {
+    pub(crate) fn service(&self) -> ElasticsearchService {
         ElasticsearchService::new(ElasticsearchConfig {
             url: self.url.clone(),
             bulk_max_retries: 0,
