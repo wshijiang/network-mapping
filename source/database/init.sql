@@ -315,6 +315,7 @@ CREATE TABLE IF NOT EXISTS analytics_outbox (
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE analytics_outbox ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_analytics_outbox_pending
 	ON analytics_outbox(available_at, execution_id) WHERE status <> 'completed';
 CREATE INDEX IF NOT EXISTS idx_analytics_outbox_pending_ready

@@ -195,6 +195,8 @@ p = 2
 # [analytics_snapshot]
 # mode = "realtime"
 # interval_minutes = 30
+# execution_timeout_minutes = 360
+# max_staging_mib = 4096
 
 # 报告邮件策略仅 TOML 或 Web；启用远程图片需先填写外部 HTTPS 地址。
 # [report_mail]

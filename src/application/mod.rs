@@ -301,9 +301,13 @@ pub async fn run(args: Clis) -> io::Result<()> {
         .await
         .map_err(|error| io::Error::other(format!("扫描存储切换检查失败：{error}")))?;
     if args.rebuild_analytics_snapshots {
-        let processed = crate::analytics_snapshot::rebuild_all(&db_pool, &elasticsearch_service)
-            .await
-            .map_err(|error| io::Error::other(format!("重建分析快照失败：{error}")))?;
+        let processed = crate::analytics_snapshot::rebuild_all(
+            &db_pool,
+            &elasticsearch_service,
+            &analytics_snapshot_config,
+        )
+        .await
+        .map_err(|error| io::Error::other(format!("重建分析快照失败：{error}")))?;
         println!("分析快照重建完成：已处理 {processed} 个扫描执行");
         return Ok(());
     }

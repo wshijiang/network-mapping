@@ -5,10 +5,14 @@
 //! from older server versions do not lose executions that were completed before this module was
 //! installed.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::net::IpAddr;
 
-use chrono::{DateTime, NaiveDate, Timelike, Utc};
+use chrono::{DateTime, Utc};
+#[cfg(test)]
+use chrono::{NaiveDate, Timelike};
 use deadpool_postgres::Pool;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -22,8 +26,9 @@ use crate::runtime_config::RuntimeConfig;
 const WORKER_LOCK_KEY: i64 = 0x4e4d_4153_4e50_0001;
 const MAX_EXECUTIONS_PER_TICK: usize = 100;
 const READ_BATCH_SIZE: usize = 5000;
+#[cfg(test)]
 const WRITE_BATCH_SIZE: usize = 1000;
-const EXECUTION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const PAGE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug)]
 struct ExecutionContext {
@@ -38,6 +43,7 @@ struct ExecutionContext {
     observation_indices: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct ExecutionFacts {
     distribution: BTreeMap<(DateTime<Utc>, String, String), i64>,
@@ -139,7 +145,7 @@ pub async fn run_worker(
             if !config.get().await.value.mode.runs_worker() {
                 break;
             }
-            match process_one(&pool, &elasticsearch).await {
+            match process_one(&pool, &elasticsearch, &settings).await {
                 Ok(true) => {}
                 Ok(false) => {
                     exhausted = false;
@@ -264,7 +270,11 @@ async fn publish_build(transaction: &deadpool_postgres::Transaction<'_>) -> Resu
 /// Rebuilds all completed IP-scan executions. The operation only replaces compact analytics
 /// facts; it never alters scan observations or task results. It is intentionally explicit so an
 /// upgraded installation can finish historical backfill before selecting `mode = "snapshot"`.
-pub async fn rebuild_all(pool: &Pool, elasticsearch: &ElasticsearchService) -> Result<u64, String> {
+pub async fn rebuild_all(
+    pool: &Pool,
+    elasticsearch: &ElasticsearchService,
+    settings: &AnalyticsSnapshotConfig,
+) -> Result<u64, String> {
     reconcile(pool).await?;
     let mut connection = pool
         .get()
@@ -309,7 +319,7 @@ pub async fn rebuild_all(pool: &Pool, elasticsearch: &ElasticsearchService) -> R
         .map_err(|error| crate::logs::write::error_chain_diagnostics(&error))?;
     drop(connection);
     let mut processed = 0_u64;
-    while process_one(pool, elasticsearch).await? {
+    while process_one(pool, elasticsearch, settings).await? {
         processed += 1;
     }
     let connection = pool
@@ -328,7 +338,11 @@ pub async fn rebuild_all(pool: &Pool, elasticsearch: &ElasticsearchService) -> R
     Ok(processed)
 }
 
-async fn process_one(pool: &Pool, elasticsearch: &ElasticsearchService) -> Result<bool, String> {
+async fn process_one(
+    pool: &Pool,
+    elasticsearch: &ElasticsearchService,
+    settings: &AnalyticsSnapshotConfig,
+) -> Result<bool, String> {
     let Some(context) = claim_execution(pool).await.map_err(|error| {
         warn!(
             event = "AnalyticsSnapshotClaimError",
@@ -347,16 +361,7 @@ async fn process_one(pool: &Pool, elasticsearch: &ElasticsearchService) -> Resul
     let started = std::time::Instant::now();
     info!(event = "AnalyticsSnapshotExecutionStarted", execution_id = %context.execution_id,
         "开始构建执行统计");
-    let result = tokio::time::timeout(EXECUTION_TIMEOUT, async {
-        let facts = { facts_from_elasticsearch(elasticsearch, &context).await? };
-        info!(event = "AnalyticsSnapshotFactsComputed", execution_id = %context.execution_id,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            distribution_rows = facts.distribution.len(), discovery_rows = facts.discovery.len(),
-            "执行统计计算完成，开始批量写入");
-        replace_execution_facts(pool, &context, facts).await
-    })
-    .await
-    .unwrap_or_else(|_| Err("扫描统计执行超过 30 分钟时间预算".to_owned()));
+    let result = process_staged_execution(pool, elasticsearch, &context, settings).await;
 
     match result {
         Ok(()) => {
@@ -434,7 +439,7 @@ async fn claim_execution(pool: &Pool) -> Result<Option<ExecutionContext>, String
         .execute(
             "UPDATE analytics_outbox SET status = 'pending', available_at = NOW(), locked_at = NULL, \
              updated_at = NOW() WHERE status = 'running' \
-             AND locked_at < NOW() - INTERVAL '60 minutes';",
+             AND COALESCE(heartbeat_at, locked_at) < NOW() - INTERVAL '60 minutes';",
             &[],
         )
         .await
@@ -445,7 +450,7 @@ async fn claim_execution(pool: &Pool) -> Result<Option<ExecutionContext>, String
     let active = transaction
         .query_one(
             "SELECT EXISTS (SELECT 1 FROM analytics_outbox \
-             WHERE status = 'running' AND locked_at >= NOW() - INTERVAL '60 minutes');",
+             WHERE status = 'running' AND COALESCE(heartbeat_at, locked_at) >= NOW() - INTERVAL '60 minutes');",
             &[],
         )
         .await
@@ -499,7 +504,7 @@ async fn claim_build_execution(
                 FOR UPDATE OF o SKIP LOCKED LIMIT 1 \
              ), claimed AS ( \
                 UPDATE analytics_outbox o SET status = 'running', attempts = attempts + 1, \
-                    locked_at = clock_timestamp(), updated_at = NOW() \
+                    locked_at = clock_timestamp(), heartbeat_at = clock_timestamp(), updated_at = NOW() \
                 FROM candidate WHERE o.execution_id = candidate.execution_id \
                 RETURNING o.execution_id, o.locked_at, o.attempts \
              ) \
@@ -533,7 +538,7 @@ async fn claim_pending_execution(
                 FOR UPDATE SKIP LOCKED LIMIT 1 \
              ), claimed AS ( \
                 UPDATE analytics_outbox o SET status = 'running', attempts = attempts + 1, \
-                    locked_at = clock_timestamp(), updated_at = NOW() \
+                    locked_at = clock_timestamp(), heartbeat_at = clock_timestamp(), updated_at = NOW() \
                 FROM candidate WHERE o.execution_id = candidate.execution_id \
                 RETURNING o.execution_id, o.locked_at, o.attempts \
              ) \
@@ -555,59 +560,136 @@ async fn claim_pending_execution(
         .map_err(|error| crate::logs::write::error_chain_diagnostics(&error))
 }
 
-async fn facts_from_elasticsearch(
+// A connection owns the temporary staging tables for exactly one claim. On cancellation,
+// cleanup runs before it is returned to the pool; stale tables are also dropped on entry.
+async fn process_staged_execution(
+    pool: &Pool,
     elasticsearch: &ElasticsearchService,
     context: &ExecutionContext,
-) -> Result<ExecutionFacts, String> {
-    if context.expected_observations == 0 && context.observation_indices.is_empty() {
-        return Ok(ExecutionFacts::default());
+    settings: &AnalyticsSnapshotConfig,
+) -> Result<(), String> {
+    let mut client = pool
+        .get()
+        .await
+        .map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?;
+    let previous_timeout: String = client
+        .query_one("SHOW statement_timeout", &[])
+        .await
+        .map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?
+        .get(0);
+    client.batch_execute("DROP TABLE IF EXISTS pg_temp.nm_analytics_endpoints, pg_temp.nm_analytics_ips; \
+        CREATE TEMP TABLE nm_analytics_endpoints (dimension TEXT COLLATE \"C\" NOT NULL, label TEXT COLLATE \"C\" NOT NULL, endpoint TEXT COLLATE \"C\" NOT NULL, first_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(dimension,label,endpoint)); \
+        CREATE TEMP TABLE nm_analytics_ips (ip INET PRIMARY KEY, first_at TIMESTAMPTZ NOT NULL); \
+        SET statement_timeout = '5min';").await.map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?;
+    let mut pit = None;
+    let result = tokio::time::timeout(
+        Duration::from_secs(settings.execution_timeout_minutes * 60),
+        async {
+            stage_observations(
+                &client,
+                elasticsearch,
+                context,
+                &mut pit,
+                settings.max_staging_mib,
+            )
+            .await?;
+            publish_staged_facts(&mut client, context).await
+        },
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(format!(
+            "扫描统计执行超过 {} 分钟时间预算",
+            settings.execution_timeout_minutes
+        ))
+    });
+    if let Some(id) = pit {
+        elasticsearch.close_analytics_pit(&id).await;
     }
-    let mut facts = ExecutionFacts::default();
-    let mut endpoint_first = BTreeMap::<(String, String, String), DateTime<Utc>>::new();
-    let mut ip_first = BTreeMap::<IpAddr, DateTime<Utc>>::new();
+    let cleanup = async {
+        client
+            .batch_execute(
+                "DROP TABLE IF EXISTS pg_temp.nm_analytics_endpoints, pg_temp.nm_analytics_ips;",
+            )
+            .await
+            .map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?;
+        client
+            .query_one(
+                "SELECT set_config('statement_timeout', $1, false)",
+                &[&previous_timeout],
+            )
+            .await
+            .map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?;
+        Ok::<(), String>(())
+    }
+    .await;
+    if cleanup.is_err() {
+        // Do not return a session with temporary tables or a changed timeout to the pool.
+        drop(deadpool_postgres::Client::take(client));
+    }
+    result.and(cleanup)
+}
+
+async fn stage_observations(
+    client: &deadpool_postgres::Client,
+    elasticsearch: &ElasticsearchService,
+    context: &ExecutionContext,
+    pit: &mut Option<String>,
+    max_staging_mib: u64,
+) -> Result<(), String> {
+    if context.expected_observations == 0 && context.observation_indices.is_empty() {
+        return Ok(());
+    }
+    *pit = Some(
+        tokio::time::timeout(
+            PAGE_TIMEOUT,
+            elasticsearch.open_analytics_pit(&context.observation_indices),
+        )
+        .await
+        .map_err(|_| "打开统计 PIT 超时".to_owned())??,
+    );
     let mut after: Option<Value> = None;
     let mut observed_count = 0_i64;
     loop {
-        if after.is_some() {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        let mut body = json!({
-            "size": READ_BATCH_SIZE,
-            "track_total_hits": false,
+        let mut body = json!({"size": READ_BATCH_SIZE, "track_total_hits": false,
             "_source": ["kind", "service", "ip_address", "port", "endpoint_id", "observed_at"],
             "query": {"term": {"execution_id": &context.execution_id}},
-            "sort": [{"observed_at": {"order": "asc", "format": "epoch_millis"}}, {"observation_key": "asc"}]
-        });
-        if let Some(after) = after.as_ref() {
-            body.as_object_mut()
-                .expect("JSON object")
-                .insert("search_after".to_owned(), after.clone());
+            "sort": [{"_shard_doc": "asc"}],
+            "pit": {"id": pit.as_ref().expect("PIT opened"), "keep_alive": "30m"}});
+        if let Some(cursor) = &after {
+            body["search_after"] = cursor.clone();
         }
-        let response = elasticsearch
-            .scan_observations(&context.observation_indices, &body)
-            .await?;
+        let response =
+            tokio::time::timeout(PAGE_TIMEOUT, elasticsearch.search_analytics_pit(&body))
+                .await
+                .map_err(|_| "Elasticsearch 统计分页超时".to_owned())??;
+        if let Some(id) = response.get("pit_id").and_then(Value::as_str) {
+            *pit = Some(id.to_owned());
+        }
         let hits = response
             .pointer("/hits/hits")
             .and_then(Value::as_array)
             .ok_or_else(|| "Elasticsearch 扫描统计响应缺少 hits".to_owned())?;
+        let mut endpoints = BTreeMap::<(String, String, String), DateTime<Utc>>::new();
+        let mut ips = BTreeMap::<IpAddr, DateTime<Utc>>::new();
         for hit in hits {
             observed_count += 1;
             let source = hit
-                .pointer("/_source")
+                .get("_source")
                 .ok_or_else(|| "Elasticsearch 统计文档缺少 _source".to_owned())?;
-            let observed_at = source
+            let millis = source
                 .get("observed_at")
                 .and_then(Value::as_i64)
                 .ok_or_else(|| "Elasticsearch 统计文档缺少 observed_at".to_owned())?;
-            let timestamp = DateTime::<Utc>::from_timestamp_millis(observed_at)
+            let timestamp = DateTime::<Utc>::from_timestamp_millis(millis)
                 .ok_or_else(|| "Elasticsearch 统计文档 observed_at 无效".to_owned())?;
             let ip = source
                 .get("ip_address")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "Elasticsearch 统计文档缺少 ip_address".to_owned())?;
-            let ip_address = ip.parse::<IpAddr>().map_err(|error| {
-                format!("Elasticsearch 统计文档 ip_address 无效（{ip}）：{error}")
-            })?;
+            let ip_address = ip
+                .parse::<IpAddr>()
+                .map_err(|error| format!("Elasticsearch 统计文档 ip_address 无效：{error}"))?;
             let port = source
                 .get("port")
                 .and_then(Value::as_i64)
@@ -618,8 +700,8 @@ async fn facts_from_elasticsearch(
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("{ip}:{port}"));
             update_first(
-                &mut endpoint_first,
-                ("port".to_owned(), port.to_string(), endpoint.clone()),
+                &mut endpoints,
+                ("port".into(), port.to_string(), endpoint.clone()),
                 timestamp,
             );
             if source.get("kind").and_then(Value::as_str) == Some("service")
@@ -628,21 +710,50 @@ async fn facts_from_elasticsearch(
                 let label = service.trim().to_lowercase();
                 if !label.is_empty() {
                     update_first(
-                        &mut endpoint_first,
-                        ("service".to_owned(), label, endpoint),
+                        &mut endpoints,
+                        ("service".into(), label, endpoint),
                         timestamp,
                     );
                 }
             }
-            update_first(&mut ip_first, ip_address, timestamp);
-            if endpoint_first.len().saturating_add(ip_first.len()) > 200_000 {
-                return Err("statistics_resource_limit: 执行去重集合超过 200000 条，需拆分扫描任务或离线处理".into());
-            }
+            update_first(&mut ips, ip_address, timestamp);
         }
         let next = hits.last().and_then(|hit| hit.get("sort")).cloned();
-        if hits.len() == READ_BATCH_SIZE && (next.is_none() || next == after) {
-            return Err("Elasticsearch 统计分页游标缺失或未推进".to_owned());
+        if !hits.is_empty()
+            && !next
+                .as_ref()
+                .is_some_and(|v| v.as_array().is_some_and(|a| a.len() == 1 && a[0].is_i64()))
+        {
+            return Err("Elasticsearch 统计分页游标缺失或无效".into());
         }
+        if !hits.is_empty() && next == after {
+            return Err("Elasticsearch 统计分页游标未推进".into());
+        }
+        let endpoint_rows: Vec<Value> = endpoints.into_iter().map(|((dimension,label,endpoint), first_at)| json!({"dimension":dimension,"label":label,"endpoint":endpoint,"first_at":first_at})).collect();
+        let ip_rows: Vec<Value> = ips
+            .into_iter()
+            .map(|(ip, first_at)| json!({"ip":ip.to_string(),"first_at":first_at}))
+            .collect();
+        client.execute("INSERT INTO pg_temp.nm_analytics_endpoints SELECT * FROM jsonb_to_recordset($1::JSONB) AS x(dimension TEXT,label TEXT,endpoint TEXT,first_at TIMESTAMPTZ) \
+            ON CONFLICT (dimension,label,endpoint) DO UPDATE SET first_at = LEAST(nm_analytics_endpoints.first_at, EXCLUDED.first_at)", &[&postgres_types::Json(json!(endpoint_rows))]).await.map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?;
+        client.execute("INSERT INTO pg_temp.nm_analytics_ips SELECT * FROM jsonb_to_recordset($1::JSONB) AS x(ip INET,first_at TIMESTAMPTZ) \
+            ON CONFLICT (ip) DO UPDATE SET first_at = LEAST(nm_analytics_ips.first_at, EXCLUDED.first_at)", &[&postgres_types::Json(json!(ip_rows))]).await.map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?;
+        let size: i64 = client.query_one("SELECT pg_total_relation_size('pg_temp.nm_analytics_endpoints') + pg_total_relation_size('pg_temp.nm_analytics_ips')", &[]).await.map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?.get(0);
+        if size > (max_staging_mib as i64) * 1024 * 1024 {
+            return Err(format!(
+                "statistics_resource_limit: 统计暂存空间超过 {max_staging_mib} MiB，请检查容量并调整限制"
+            ));
+        }
+        let changed = client.execute("UPDATE analytics_outbox SET heartbeat_at = clock_timestamp(), updated_at = NOW() WHERE execution_id = $1 AND status = 'running' AND locked_at = $2", &[&context.database_id, &context.locked_at]).await.map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?;
+        if changed == 0 {
+            return Err("扫描统计任务已被重新排队，丢弃过期计算结果".into());
+        }
+        info!(
+            event = "AnalyticsSnapshotProgress",
+            execution_database_id = context.database_id,
+            observed_count,
+            staging_bytes = size
+        );
         after = next;
         if hits.len() < READ_BATCH_SIZE {
             break;
@@ -654,16 +765,7 @@ async fn facts_from_elasticsearch(
             context.expected_observations
         ));
     }
-    for ((dimension, label, _endpoint), first_observed_at) in endpoint_first {
-        *facts
-            .distribution
-            .entry((bucket_start(first_observed_at), dimension, label))
-            .or_default() += 1;
-    }
-    for (ip, first_observed_at) in ip_first {
-        facts.discovery.insert((first_observed_at, ip));
-    }
-    Ok(facts)
+    Ok(())
 }
 
 fn update_first<K: Ord>(values: &mut BTreeMap<K, DateTime<Utc>>, key: K, timestamp: DateTime<Utc>) {
@@ -673,6 +775,63 @@ fn update_first<K: Ord>(values: &mut BTreeMap<K, DateTime<Utc>>, key: K, timesta
         .or_insert(timestamp);
 }
 
+async fn publish_staged_facts(
+    client: &mut deadpool_postgres::Client,
+    context: &ExecutionContext,
+) -> Result<(), String> {
+    let tx = client
+        .transaction()
+        .await
+        .map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?;
+    tx.query_one(
+        "SELECT singleton FROM analytics_snapshot_build FOR UPDATE",
+        &[],
+    )
+    .await
+    .map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?;
+    if tx.query_opt("SELECT execution_id FROM analytics_outbox WHERE execution_id = $1 AND status = 'running' AND locked_at = $2 FOR UPDATE", &[&context.database_id,&context.locked_at]).await.map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?.is_none() {
+        return Err("扫描统计任务已被重新排队，丢弃过期计算结果".into());
+    }
+    let legacy_count: i64 = tx.query_one("SELECT COUNT(*) FROM analytics_discovery_fact WHERE execution_id = $1 AND first_observed_at IS NULL", &[&context.database_id]).await.map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?.get(0);
+    let new_count: i64 = tx
+        .query_one("SELECT COUNT(*) FROM pg_temp.nm_analytics_ips", &[])
+        .await
+        .map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?
+        .get(0);
+    if legacy_count > new_count {
+        return Err("原始观测不足以恢复旧统计的 UTC 时间，保留原有历史事实".into());
+    }
+    tx.execute(
+        "DELETE FROM analytics_distribution_30m WHERE execution_id = $1",
+        &[&context.database_id],
+    )
+    .await
+    .map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?;
+    tx.execute(
+        "DELETE FROM analytics_discovery_fact WHERE execution_id = $1",
+        &[&context.database_id],
+    )
+    .await
+    .map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?;
+    tx.execute("INSERT INTO analytics_distribution_30m (execution_id,owner_id,scanner_id,task_source,bucket_start,dimension,label,endpoint_count) \
+        SELECT $1,$2,$3,$4,date_bin('30 minutes',first_at,TIMESTAMPTZ '1970-01-01 00:00:00+00'),dimension,label,COUNT(*) \
+        FROM pg_temp.nm_analytics_endpoints GROUP BY 5,dimension,label", &[&context.database_id,&context.owner_id,&context.scanner_id,&context.task_source]).await.map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?;
+    tx.execute("INSERT INTO analytics_discovery_fact (execution_id,owner_id,scanner_id,task_source,day_start,ip_address,first_observed_at) \
+        SELECT $1,$2,$3,$4,(first_at AT TIME ZONE 'Asia/Shanghai')::date,ip,first_at FROM pg_temp.nm_analytics_ips", &[&context.database_id,&context.owner_id,&context.scanner_id,&context.task_source]).await.map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?;
+    tx.execute("UPDATE analytics_outbox SET status = 'completed', completed_at = NOW(), locked_at = NULL, heartbeat_at = NULL, updated_at = NOW(), last_error = NULL WHERE execution_id = $1", &[&context.database_id]).await.map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?;
+    tx.execute(
+        "DELETE FROM analytics_snapshot_build_execution WHERE execution_id = $1",
+        &[&context.database_id],
+    )
+    .await
+    .map_err(|e| crate::logs::write::error_chain_diagnostics(&e))?;
+    publish_build(&tx).await?;
+    tx.commit()
+        .await
+        .map_err(|e| crate::logs::write::error_chain_diagnostics(&e))
+}
+
+#[cfg(test)]
 async fn replace_execution_facts(
     pool: &Pool,
     context: &ExecutionContext,
@@ -827,6 +986,7 @@ async fn fail_execution(
     Ok(())
 }
 
+#[cfg(test)]
 fn bucket_start(timestamp: DateTime<Utc>) -> DateTime<Utc> {
     timestamp
         .with_minute((timestamp.minute() / 30) * 30)
@@ -837,6 +997,7 @@ fn bucket_start(timestamp: DateTime<Utc>) -> DateTime<Utc> {
         .expect("valid nanosecond")
 }
 
+#[cfg(test)]
 fn shanghai_day(timestamp: DateTime<Utc>) -> NaiveDate {
     timestamp
         .with_timezone(&chrono_tz::Asia::Shanghai)
@@ -871,6 +1032,75 @@ mod tests {
         assert_eq!(snapshot_retry_seconds(0), 30);
         assert_eq!(snapshot_retry_seconds(3), 120);
         assert_eq!(snapshot_retry_seconds(i32::MAX), 1800);
+    }
+
+    /// Opt-in real Elasticsearch test: the named index must contain exactly 610512
+    /// observations for execution `analytics-real-test`, with 210001 distinct IPs
+    /// and endpoints, each having a `https` service. Uses only PG temporary tables.
+    #[tokio::test]
+    #[ignore = "requires disposable ANALYTICS_TEST_DATABASE_URL and a preloaded real ANALYTICS_REAL_ES_URL/INDEX"]
+    async fn real_elasticsearch_large_execution() {
+        let config: tokio_postgres::Config = std::env::var("ANALYTICS_TEST_DATABASE_URL")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let pool = Pool::builder(deadpool_postgres::Manager::new(
+            config,
+            tokio_postgres::NoTls,
+        ))
+        .max_size(1)
+        .build()
+        .unwrap();
+        let client = pool.get().await.unwrap();
+        client.batch_execute("SET search_path TO pg_temp; \
+            CREATE TEMP TABLE scan_task(id INT PRIMARY KEY, user_id INT, task_source TEXT, task_kind TEXT); \
+            CREATE TEMP TABLE scan_task_execution(id INT PRIMARY KEY, execution_id TEXT, task_id INT, execution_status TEXT, assigned_scanner_id TEXT, requested_scanner_id TEXT, result_observation_count BIGINT); \
+            CREATE TEMP TABLE scan_result_batch(execution_id INT, storage_backend TEXT, storage_references JSONB); \
+            INSERT INTO scan_task VALUES (1, 1, 'manual', 'ip'); \
+            INSERT INTO scan_task_execution VALUES (1, 'analytics-real-test', 1, 'succeeded', 'scanner', NULL, 610512);").await.unwrap();
+        let schema = include_str!("../source/database/init.sql");
+        let start = schema
+            .find("CREATE TABLE IF NOT EXISTS analytics_outbox")
+            .unwrap();
+        let end = schema[start..].find("-- 表 session").unwrap() + start;
+        client
+            .batch_execute(&schema[start..end].replace(
+                "CREATE TABLE IF NOT EXISTS",
+                "CREATE TEMP TABLE IF NOT EXISTS",
+            ))
+            .await
+            .unwrap();
+        let index = std::env::var("ANALYTICS_REAL_ES_INDEX").unwrap();
+        client
+            .execute(
+                "INSERT INTO scan_result_batch VALUES (1, 'elasticsearch', $1)",
+                &[&postgres_types::Json(json!([index]))],
+            )
+            .await
+            .unwrap();
+        drop(client);
+        reconcile(&pool).await.unwrap();
+        let context = claim_execution(&pool).await.unwrap().unwrap();
+        let service =
+            crate::elasticsearch::ElasticsearchService::new(crate::config::ElasticsearchConfig {
+                url: std::env::var("ANALYTICS_REAL_ES_URL").unwrap(),
+                ..Default::default()
+            })
+            .unwrap();
+        service.open_api_test_ready();
+        process_staged_execution(
+            &pool,
+            &service,
+            &context,
+            &AnalyticsSnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let client = pool.get().await.unwrap();
+        let row = client.query_one("SELECT (SELECT count(*) FROM analytics_discovery_fact), (SELECT sum(endpoint_count)::bigint FROM analytics_distribution_30m), (SELECT status FROM analytics_outbox WHERE execution_id = 1)", &[]).await.unwrap();
+        assert_eq!(row.get::<_, i64>(0), 210001);
+        assert_eq!(row.get::<_, i64>(1), 420002);
+        assert_eq!(row.get::<_, String>(2), "completed");
     }
 
     /// Uses only connection-local temporary tables, never application tables.
@@ -1093,5 +1323,146 @@ mod tests {
             .unwrap();
         let client = pool.get().await.unwrap();
         assert_eq!(snapshot_progress(&client).await.unwrap().remaining, 0);
+
+        // Publication handles more than the former 200,000-key in-memory limit.
+        client.batch_execute("INSERT INTO scan_task_execution VALUES (5, 'five', 1, 'succeeded', 'scanner', NULL, 0);").await.unwrap();
+        drop(client);
+        reconcile(&pool).await.unwrap();
+        let large = claim_execution(&pool).await.unwrap().unwrap();
+        let mut client = pool.get().await.unwrap();
+        client.batch_execute("CREATE TEMP TABLE nm_analytics_endpoints (dimension TEXT COLLATE \"C\", label TEXT COLLATE \"C\", endpoint TEXT COLLATE \"C\", first_at TIMESTAMPTZ, PRIMARY KEY(dimension,label,endpoint)); \
+            CREATE TEMP TABLE nm_analytics_ips (ip INET PRIMARY KEY, first_at TIMESTAMPTZ); \
+            INSERT INTO nm_analytics_endpoints SELECT 'port','443','endpoint-' || n,'2026-09-01T10:47:00Z'::timestamptz FROM generate_series(1,210001) n; \
+            INSERT INTO nm_analytics_ips VALUES ('192.0.2.1','2026-09-01T16:30:00Z'),('2001:db8::1','2026-09-01T10:47:00Z');").await.unwrap();
+        let mut stale = large.clone();
+        stale.locked_at -= chrono::Duration::seconds(1);
+        assert!(publish_staged_facts(&mut client, &stale).await.is_err());
+        client.batch_execute("INSERT INTO analytics_distribution_30m VALUES (5, '2026-09-01T10:30:00Z', 1, 'scanner', 'manual', 'port', 'old', 1); ALTER TABLE analytics_distribution_30m ADD CONSTRAINT reject_staged_test CHECK (label <> '443');").await.unwrap();
+        assert!(publish_staged_facts(&mut client, &large).await.is_err());
+        assert_eq!(
+            client
+                .query_one(
+                    "SELECT label FROM analytics_distribution_30m WHERE execution_id = 5",
+                    &[]
+                )
+                .await
+                .unwrap()
+                .get::<_, String>(0),
+            "old"
+        );
+        assert_eq!(
+            client
+                .query_one(
+                    "SELECT status FROM analytics_outbox WHERE execution_id = 5",
+                    &[]
+                )
+                .await
+                .unwrap()
+                .get::<_, String>(0),
+            "running"
+        );
+        client
+            .batch_execute(
+                "ALTER TABLE analytics_distribution_30m DROP CONSTRAINT reject_staged_test",
+            )
+            .await
+            .unwrap();
+        publish_staged_facts(&mut client, &large).await.unwrap();
+        let row = client.query_one("SELECT endpoint_count, bucket_start FROM analytics_distribution_30m WHERE execution_id = 5", &[]).await.unwrap();
+        assert_eq!(row.get::<_, i64>(0), 210001);
+        assert_eq!(row.get::<_, DateTime<Utc>>(1), timestamp);
+        let days = client.query("SELECT day_start::TEXT FROM analytics_discovery_fact WHERE execution_id = 5 ORDER BY day_start", &[]).await.unwrap();
+        assert_eq!(
+            days.iter()
+                .map(|row| row.get::<_, String>(0))
+                .collect::<Vec<_>>(),
+            ["2026-09-01", "2026-09-02"]
+        );
+        client.batch_execute("DROP TABLE nm_analytics_endpoints, nm_analytics_ips; INSERT INTO scan_task_execution VALUES (6, 'six', 1, 'succeeded', 'scanner', NULL, 5001); INSERT INTO scan_result_batch VALUES (6, 'elasticsearch', '[\"network-mapping-scan-observations-v1-2026.09\"]');").await.unwrap();
+        drop(client);
+        reconcile(&pool).await.unwrap();
+        let mut context = claim_execution(&pool).await.unwrap().unwrap();
+        assert_eq!(context.database_id, 6);
+        let fixture = crate::elasticsearch::storage_tests::EsFixture::start();
+        let service = fixture.service();
+        service.open_api_test_ready();
+        {
+            let mut state = fixture.state.lock().unwrap();
+            state.rotate_pit_ids = true;
+            for n in 0..5001 {
+                let ip = format!("192.0.2.{}", n % 100 + 1);
+                let document = json!({"execution_id":"six", "kind":"service", "service":" HTTPS ", "ip_address":ip, "port":443, "endpoint_id":format!("endpoint-{}", n % 100), "observed_at": 1_788_266_400_000_i64 - n as i64});
+                state.documents.insert(
+                    (
+                        "network-mapping-scan-observations-v1-2026.09".to_owned(),
+                        format!("{n:05}"),
+                    ),
+                    document,
+                );
+            }
+        }
+        context.expected_observations = 5002;
+        assert!(
+            process_staged_execution(
+                &pool,
+                &service,
+                &context,
+                &AnalyticsSnapshotConfig::default()
+            )
+            .await
+            .unwrap_err()
+            .contains("尚未完整可见")
+        );
+        let client = pool.get().await.unwrap();
+        assert_eq!(
+            client
+                .query_one(
+                    "SELECT count(*) FROM analytics_distribution_30m WHERE execution_id = 6",
+                    &[]
+                )
+                .await
+                .unwrap()
+                .get::<_, i64>(0),
+            0
+        );
+        drop(client);
+        context.expected_observations = 5001;
+        process_staged_execution(
+            &pool,
+            &service,
+            &context,
+            &AnalyticsSnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let client = pool.get().await.unwrap();
+        let row = client.query_one("SELECT sum(endpoint_count)::bigint FROM analytics_distribution_30m WHERE execution_id = 6", &[]).await.unwrap();
+        assert_eq!(row.get::<_, i64>(0), 200);
+        assert_eq!(
+            client
+                .query_one(
+                    "SELECT count(*) FROM analytics_discovery_fact WHERE execution_id = 6",
+                    &[]
+                )
+                .await
+                .unwrap()
+                .get::<_, i64>(0),
+            100
+        );
+        assert_eq!(
+            client
+                .query_one(
+                    "SELECT status FROM analytics_outbox WHERE execution_id = 6",
+                    &[]
+                )
+                .await
+                .unwrap()
+                .get::<_, String>(0),
+            "completed"
+        );
+        let first: DateTime<Utc> = client.query_one("SELECT first_observed_at FROM analytics_discovery_fact WHERE execution_id = 6 AND ip_address = '192.0.2.1'::inet", &[]).await.unwrap().get(0);
+        assert_eq!(first.timestamp_millis(), 1_788_266_400_000_i64 - 5000);
+        let state = fixture.state.lock().unwrap();
+        assert_eq!(state.closed_pit_ids, ["pit-3", "pit-6"]);
     }
 }

@@ -1,0 +1,1 @@
+ALTER TABLE analytics_outbox ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;

@@ -814,6 +814,7 @@ fn config() -> RuntimeConfig<AnalyticsSnapshotConfig> {
         AnalyticsSnapshotConfig {
             mode: AnalyticsSnapshotMode::Shadow,
             interval_minutes: 1,
+            ..Default::default()
         },
         0,
     )

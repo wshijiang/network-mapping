@@ -234,6 +234,11 @@ pub async fn init_database_table(
         ))
         .await?;
     transaction
+        .batch_execute(include_str!(
+            "../../source/database/migrate_analytics_snapshot.sql"
+        ))
+        .await?;
+    transaction
         .batch_execute(include_str!("../../source/database/migrate_reports.sql"))
         .await?;
     transaction
