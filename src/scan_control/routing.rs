@@ -327,7 +327,7 @@ pub async fn candidates<C: GenericClient + Sync>(
         FROM scanner_info s WHERE s.is_enable AND s.deleted_at IS NULL AND s.accepting_tasks AND s.runtime_state <> 'stopping' \
         AND s.last_seen_at >= NOW()-({})*INTERVAL '1 second' \
         AND (($1='ipv4' AND s.supports_ipv4 AND s.ipv4_ready) OR ($1='ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
-        AND ($2='legacy' OR s.scan_capabilities->'profiles' ? $2) \
+        AND s.scan_capabilities->'profiles' ? $2 \
         AND COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> $5::jsonb AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length($5::jsonb) \
         AND (NOT $3 OR (s.supports_ipv6 AND s.ipv6_ready)) \
         AND (NOT $4 OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN,FALSE)) ORDER BY s.scanner_id LIMIT 256",
@@ -400,7 +400,7 @@ pub fn claim_guard(scanner_parameter: &str) -> String {
         AND p.is_enable AND p.deleted_at IS NULL AND p.accepting_tasks AND p.runtime_state<>'stopping' \
         AND p.last_seen_at>=NOW()-({})*INTERVAL '1 second' \
         AND ((t.address_family='ipv4' AND p.supports_ipv4 AND p.ipv4_ready) OR (t.address_family='ipv6' AND p.supports_ipv6 AND p.ipv6_ready)) \
-        AND (t.scan_profile='legacy' OR p.scan_capabilities->'profiles' ? t.scan_profile) \
+        AND p.scan_capabilities->'profiles' ? t.scan_profile \
         AND COALESCE(p.scan_capabilities->'service_protocols','[]'::jsonb) @> COALESCE(t.scan_plan->'required_services','[]'::jsonb) \
         AND (jsonb_array_length(t.dns_resolvers)=0 OR COALESCE((p.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN,FALSE)) \
         AND (NOT EXISTS(SELECT 1 FROM jsonb_array_elements(t.dns_resolvers) d WHERE d->>'ip' LIKE '%:%') OR (p.supports_ipv6 AND p.ipv6_ready)) \

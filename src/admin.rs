@@ -44,7 +44,7 @@ const SECURITY_SETTING_TYPE: &str = "security";
 const SESSION_TTL_SETTING_KEY: &str = "session_ttl_seconds";
 const SCAN_SETTING_TYPE: &str = "scan";
 const DEFAULT_SCAN_PROFILE_SETTING_KEY: &str = "default_profile";
-const FALLBACK_SCAN_PROFILE: &str = "legacy";
+const FALLBACK_SCAN_PROFILE: &str = crate::scan_control::profiles::FALLBACK_DEFAULT_PROFILE;
 const MAX_CONCURRENT_SMTP_SENDS: usize = 4;
 const BACKGROUND_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
 const INTERACTIVE_RETRY_DELAYS: [Duration; 1] = [Duration::from_secs(1)];
@@ -1362,7 +1362,8 @@ pub async fn write_config_to_database(
 }
 
 /// Read the scan profile used when a task does not explicitly select one.
-/// Invalid legacy values are ignored so task creation always has a safe fallback.
+/// Invalid or retired values (including a stored `legacy` default) are ignored
+/// so task creation always has a safe, defaultable fallback.
 pub async fn get_default_scan_profile_from_database(
     pool: &deadpool_postgres::Pool,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -1375,7 +1376,7 @@ pub async fn get_default_scan_profile_from_database(
         .await?;
     Ok(row
         .map(|row| row.get::<_, String>("value").trim().to_lowercase())
-        .filter(|profile| crate::scan_control::creation::is_ip_scan_profile(profile))
+        .filter(|profile| crate::scan_control::profiles::is_defaultable_profile(profile))
         .unwrap_or_else(|| FALLBACK_SCAN_PROFILE.to_owned()))
 }
 
@@ -1392,7 +1393,7 @@ pub async fn write_scan_settings_to_database(
     settings: &ScanSettingsRequest,
 ) -> Result<ScanSettingsResponse, Box<dyn std::error::Error>> {
     let profile = settings.default_scan_profile.trim().to_lowercase();
-    if !crate::scan_control::creation::is_ip_scan_profile(&profile) {
+    if !crate::scan_control::profiles::is_defaultable_profile(&profile) {
         return Err("unsupported default IP scan profile".into());
     }
     let conn = pool.get().await?;

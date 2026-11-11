@@ -243,39 +243,49 @@ fn resolve_dns_scan_request(
     legacy_follow_up_enabled: bool,
     legacy_follow_up_profile: &str,
 ) -> Result<ResolvedDnsScanRequest, &'static str> {
+    use crate::scan_control::profiles;
     match scan_profile {
         "dns_records" if legacy_follow_up_enabled => {
-            if !crate::scan_control::creation::is_ip_scan_profile(legacy_follow_up_profile) {
+            let follow_up = profiles::ip_profile_alias(legacy_follow_up_profile)
+                .unwrap_or(legacy_follow_up_profile);
+            if !profiles::is_ip_scan_profile(follow_up) || follow_up == "legacy" {
                 return Err("invalid DNS follow-up scan profile");
             }
             Ok(ResolvedDnsScanRequest {
-                task_profile: "dns_records".into(),
-                follow_up_profile: Some(legacy_follow_up_profile.into()),
+                task_profile: profiles::DNS_PARENT_PROFILE.into(),
+                follow_up_profile: Some(follow_up.into()),
             })
         }
         "dns_records" => Ok(ResolvedDnsScanRequest {
-            task_profile: "dns_records".into(),
+            task_profile: profiles::DNS_PARENT_PROFILE.into(),
             follow_up_profile: None,
         }),
         // Unified domain modes always run DNS first. The server then creates
         // address-family-specific child tasks from authorized A/AAAA answers.
+        // A requested `legacy` follow-up is normalized to `port_only`.
         "legacy" | "port_only" | "service_inventory" | "vulnerability_scan" => {
             if legacy_follow_up_enabled {
                 return Err("follow_up_port_scan must not be combined with a unified scan profile");
             }
+            let follow_up = profiles::ip_profile_alias(scan_profile).unwrap_or(scan_profile);
             Ok(ResolvedDnsScanRequest {
-                task_profile: "dns_records".into(),
-                follow_up_profile: Some(scan_profile.into()),
+                task_profile: profiles::DNS_PARENT_PROFILE.into(),
+                follow_up_profile: Some(follow_up.into()),
             })
         }
-        // Retain the original in-scanner DNS profiles for rolling upgrades and
-        // existing API clients. The web UI no longer creates these profiles.
-        "dns_ports" | "dns_full" if !legacy_follow_up_enabled => Ok(ResolvedDnsScanRequest {
-            task_profile: scan_profile.into(),
-            follow_up_profile: None,
-        }),
+        // Retired in-scanner DNS profiles converge onto the unified flow: the
+        // parent archives DNS records and a `port_only` child scans the
+        // authorized A/AAAA answers. Requires dns_follow_up to be enabled.
         "dns_ports" | "dns_full" => {
-            Err("follow_up_port_scan is not valid for legacy DNS scan profiles")
+            if legacy_follow_up_enabled {
+                return Err("follow_up_port_scan is not valid for legacy DNS scan profiles");
+            }
+            let (task_profile, follow_up) = profiles::dns_profile_alias(scan_profile)
+                .expect("dns_ports and dns_full have canonical aliases");
+            Ok(ResolvedDnsScanRequest {
+                task_profile: task_profile.into(),
+                follow_up_profile: Some(follow_up.into()),
+            })
         }
         _ => Err("invalid DNS scan profile"),
     }
@@ -2192,6 +2202,20 @@ pub(crate) async fn create_task(
             "message": "udp_passive 模式已移除，主动 UDP 识别请使用 udp_inventory"
         }));
     }
+    // Retired `legacy` requests are normalized at the boundary so no new task
+    // rows are written with a deprecated profile.
+    let scan_profile =
+        if let Some(canonical) = crate::scan_control::profiles::ip_profile_alias(&scan_profile) {
+            tracing::warn!(
+                event = "DeprecatedScanProfileNormalized",
+                requested = %scan_profile,
+                canonical,
+                "legacy 扫描模式已弃用，按规范模式创建任务"
+            );
+            canonical.to_owned()
+        } else {
+            scan_profile
+        };
     if !crate::scan_control::creation::is_ip_scan_profile(&scan_profile)
         && scan_profile != "udp_inventory"
     {
@@ -2250,7 +2274,7 @@ pub(crate) async fn create_task(
             let query = format!(
                 "SELECT scanner_id FROM scanner_info WHERE scanner_id = ANY($1::text[]) \
                  AND is_enable = true AND deleted_at IS NULL AND {capability_filter} \
-                 AND ($2 = 'legacy' OR scan_capabilities->'profiles' ? $2) \
+                 AND scan_capabilities->'profiles' ? $2 \
                  AND COALESCE(scan_capabilities->'service_protocols','[]'::jsonb) @> $3::jsonb AND COALESCE((scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length($3::jsonb);"
             );
             let rows = match connection.query(&query, &[&values, &scan_profile, &required_services]).await {
@@ -2273,7 +2297,7 @@ pub(crate) async fn create_task(
             let query = format!(
                 "SELECT scanner_id FROM scanner_info WHERE is_enable = true AND deleted_at IS NULL \
                  AND {capability_filter} \
-                 AND ($1 = 'legacy' OR scan_capabilities->'profiles' ? $1) \
+                 AND scan_capabilities->'profiles' ? $1 \
                  AND COALESCE(scan_capabilities->'service_protocols','[]'::jsonb) @> $2::jsonb AND COALESCE((scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length($2::jsonb) ORDER BY scanner_id;"
             );
             let rows = match connection.query(&query, &[&scan_profile, &required_services]).await {
@@ -2368,6 +2392,18 @@ async fn create_dns_task(
             return HttpResponse::BadRequest().json(json!({"success": false, "message": message}));
         }
     };
+    if matches!(
+        requested_scan_profile.as_str(),
+        "dns_ports" | "dns_full" | "legacy"
+    ) {
+        tracing::warn!(
+            event = "DeprecatedScanProfileMapped",
+            requested = %requested_scan_profile,
+            task_profile = %resolved_scan.task_profile,
+            follow_up_profile = ?resolved_scan.follow_up_profile,
+            "旧 DNS 扫描模式已映射为统一域名流程，请更新调用方"
+        );
+    }
     if resolved_scan.follow_up_profile.is_some() && !dns_follow_up.get().await.value.enabled {
         return HttpResponse::Conflict().json(json!({
             "success": false,
@@ -3313,19 +3349,26 @@ mod tests {
     }
 
     #[test]
-    fn dns_port_scan_uses_all_ports_when_port_is_blank() {
+    fn retired_dns_profiles_converge_to_unified_flow_and_ports() {
+        for profile in ["dns_ports", "dns_full"] {
+            let resolved = resolve_dns_scan_request(profile, false, "port_only").unwrap();
+            assert_eq!(resolved.task_profile, "dns_records");
+            assert_eq!(resolved.follow_up_profile.as_deref(), Some("port_only"));
+            assert!(resolve_dns_scan_request(profile, true, "port_only").is_err());
+        }
+        // The mapped parent task resolves ports through the follow-up path.
         for port in [None, Some(""), Some("  ")] {
             assert_eq!(
-                resolve_dns_task_port("dns_full", false, port).unwrap(),
+                resolve_dns_task_port("dns_records", true, port).unwrap(),
                 "1-65535"
             );
         }
         assert_eq!(
-            resolve_dns_task_port("dns_ports", false, Some("80,443")).unwrap(),
+            resolve_dns_task_port("dns_records", true, Some("80,443")).unwrap(),
             "80,443"
         );
         assert_eq!(
-            resolve_dns_task_port("dns_ports", false, Some("80,abc")).unwrap_err(),
+            resolve_dns_task_port("dns_records", true, Some("80,abc")).unwrap_err(),
             "invalid port range"
         );
     }
@@ -3350,6 +3393,11 @@ mod tests {
             assert_eq!(resolved.follow_up_profile.as_deref(), Some(profile));
         }
 
+        // A retired `legacy` domain request normalizes its follow-up child.
+        let legacy_input = resolve_dns_scan_request("legacy", false, "port_only").unwrap();
+        assert_eq!(legacy_input.task_profile, "dns_records");
+        assert_eq!(legacy_input.follow_up_profile.as_deref(), Some("port_only"));
+
         let dns_only = resolve_dns_scan_request("dns_records", false, "port_only").unwrap();
         assert_eq!(dns_only.task_profile, "dns_records");
         assert_eq!(dns_only.follow_up_profile, None);
@@ -3358,6 +3406,9 @@ mod tests {
 
     #[test]
     fn legacy_dns_follow_up_accepts_vulnerability_profile() {
+        // A stored `legacy` follow-up profile normalizes to `port_only`.
+        let normalized = resolve_dns_scan_request("dns_records", true, "legacy").unwrap();
+        assert_eq!(normalized.follow_up_profile.as_deref(), Some("port_only"));
         let resolved = resolve_dns_scan_request("dns_records", true, "vulnerability_scan").unwrap();
         assert_eq!(resolved.task_profile, "dns_records");
         assert_eq!(

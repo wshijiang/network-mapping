@@ -31,8 +31,9 @@ DNS engine 默认逐类查询 A、AAAA、CNAME、NS、MX、PTR、SRV、TXT、CAA
 创建扫描页对 IP/CIDR 和域名使用同一组模式：`vulnerability_scan`（全部）、`port_only`
 （仅端口）、`service_inventory`（服务识别）和 `dns_records`（仅 DNS）。前三种域名任务先执行
 DNS 查询，再由服务端把授权的 A/AAAA 地址按地址族拆为对应 IP 子任务；`dns_records` 只归档
-记录，不创建子任务。旧协议的 `dns_ports`、`dns_full` 仍可被已有客户端和扫描器接受，但
-新前端不再创建这两种任务。
+记录，不创建子任务。旧协议的 `dns_ports`、`dns_full` 不再落库：创建边界将其映射为
+`dns_records` 父任务加 `port_only` 后续子任务（要求已启用 `dns_follow_up`），并记录 WARN
+日志提示调用方迁移；存量此类任务仍可被旧扫描器执行。
 
 DNS 任务由管理员 API 创建，可自动分配、指定扫描器或分配给全部扫描器。候选节点必须在
 heartbeat 中声明对应 DNS profile 与 `dns_lookup` 能力：

@@ -18,14 +18,21 @@ IPv4/IPv6 和任务上限拆分为对应 profile 的子任务。“仅 DNS”不
 `scanner_ids`，另外两种模式不能附带 `scanner_ids`。域名接口按 DNS 父任务能力及显式解析器
 能力校验所选节点，并为每台指定或符合“全部扫描器”的节点创建独立执行记录。
 
-协议层还保留以下兼容 profile：
+权威模式注册表位于 `src/scan_control/profiles.rs`。以下退役取值仅在 API 边界被接受，
+规范化后才落库，不会再产生新的对应 profile 任务行：
 
-- `legacy`：兼容旧扫描器，由节点本地配置决定是否识别服务；
-- `dns_ports`：对显式 domain 查询 A/AAAA 后扫描解析地址的端口；
-- `dns_full`：归档 DNS 记录，并扫描解析地址的端口。
+- `legacy` → 按 `port_only` 创建（IP 接口）；作为域名后续 profile 时同样规范化为
+  `port_only`。系统默认模式设置不再接受 `legacy`，存量设置读取时回退为 `port_only`；
+- `dns_ports` / `dns_full` → 映射为统一的 `dns_records` 父任务 + `port_only` 后续子任务，
+  因此要求 `dns_follow_up` 已启用；映射发生时服务端记录 WARN 日志；
+- `udp_passive` → 直接拒绝（被动引擎已随扫描器一并移除）。
 
-未传入时默认 `legacy`。服务端将 profile 展开为版本 1 `scan_plan` 并保存，客户端不能传入
-任意命令、二进制路径或 CLI 参数。任务领取响应包含完整计划。
+数据库 profile 约束和心跳能力校验仍容忍上述历史取值，保证存量任务行读取、旧节点心跳与
+滚动升级不受影响；存量 `dns_ports` / `dns_full` / `legacy` 任务仍可被领取执行。
+
+未传入时默认使用系统设置的默认模式（未配置或配置已退役时为 `port_only`）。服务端将
+profile 展开为版本 1 `scan_plan` 并保存，客户端不能传入任意命令、二进制路径或 CLI 参数。
+任务领取响应包含完整计划。
 
 漏洞扫描计划固定为：
 

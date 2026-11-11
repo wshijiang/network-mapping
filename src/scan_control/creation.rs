@@ -253,15 +253,9 @@ mod service_plan_tests {
     }
 }
 
-/// Profiles valid for IP/CIDR tasks and the system-wide default. DNS profiles
-/// require the dedicated domain-task endpoint and must never be inherited by
-/// an IP task.
-pub fn is_ip_scan_profile(profile: &str) -> bool {
-    matches!(
-        profile,
-        "legacy" | "port_only" | "service_inventory" | "vulnerability_scan"
-    )
-}
+/// Profiles valid for IP/CIDR tasks. The authoritative registry lives in
+/// [`super::profiles`]; this re-export keeps existing call paths working.
+pub use super::profiles::is_ip_scan_profile;
 
 /// Returns the profile selected by the user for display purposes. A domain
 /// follow-up request keeps `dns_records` as its executable parent profile and
