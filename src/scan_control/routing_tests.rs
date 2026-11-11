@@ -1200,30 +1200,28 @@ async fn native_service_creation_and_preview_agree_on_node_capabilities() {
         plan["required_services"],
         json!(["dns_udp", "enip_udp", "bacnet"])
     );
+    // The retired passive profile is rejected at the creation boundary even
+    // when a scanner still advertises the legacy capability set.
     f.pool.get().await.unwrap().execute(
         "UPDATE scanner_info SET scan_capabilities=$2 WHERE scanner_id=$1",
         &[&scanner.to_string(), &json!({"profiles":["udp_passive"],"max_service_probes":2,"service_protocols":["opcua_pubsub","enip_io"]})]
     ).await.unwrap();
     let response = test::call_service(&app, test::TestRequest::post().uri("/api/task/create")
         .set_json(json!({"ip":"192.0.2.1","port":"2222","level":1,"scan_profile":"udp_passive","dispatch_mode":"selected","scanner_ids":[scanner],"service_probe_options":{"passive_bind":"192.0.2.10"}})).to_request()).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let plan: Value = f
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let passive_tasks: i64 = f
         .pool
         .get()
         .await
         .unwrap()
         .query_one(
-            "SELECT scan_plan FROM scan_task WHERE scan_profile='udp_passive'",
+            "SELECT COUNT(*) FROM scan_task WHERE scan_profile='udp_passive'",
             &[],
         )
         .await
         .unwrap()
         .get(0);
-    assert_eq!(
-        plan["required_services"],
-        json!(["opcua_pubsub", "enip_io"])
-    );
-    assert_eq!(plan["version"], 2);
+    assert_eq!(passive_tasks, 0);
     drop(app);
     f.finish().await;
 }

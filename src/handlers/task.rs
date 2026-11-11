@@ -441,6 +441,9 @@ impl ScannerScanCapabilities {
                         | "dns_udp"
                         | "enip_udp"
                         | "bacnet"
+                        // Retired passive-UDP values stay tolerated so old
+                        // scanners keep heartbeating during rolling upgrades;
+                        // the server never creates tasks using them anymore.
                         | "opcua_pubsub"
                         | "enip_io"
                 )
@@ -462,7 +465,7 @@ impl ScannerScanCapabilities {
                     | "dns_ports"
                     | "dns_full"
                     | "udp_inventory"
-                    | "udp_passive"
+                    | "udp_passive" // retired; tolerated in heartbeats only
             )
         }) || self.stages.iter().any(|value| {
             !matches!(
@@ -2183,8 +2186,14 @@ pub(crate) async fn create_task(
             }
         },
     };
+    if scan_profile == "udp_passive" {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "message": "udp_passive 模式已移除，主动 UDP 识别请使用 udp_inventory"
+        }));
+    }
     if !crate::scan_control::creation::is_ip_scan_profile(&scan_profile)
-        && !matches!(scan_profile.as_str(), "udp_inventory" | "udp_passive")
+        && scan_profile != "udp_inventory"
     {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "success": false,
@@ -2225,11 +2234,6 @@ pub(crate) async fn create_task(
     };
 
     let dispatch_mode = create_data.dispatch_mode.trim().to_lowercase();
-    if scan_profile == "udp_passive"
-        && (dispatch_mode != "selected" || create_data.scanner_ids.len() != 1)
-    {
-        return HttpResponse::BadRequest().json(serde_json::json!({"success":false,"message":"被动接收需明确指定一台具有接收接口的扫描节点"}));
-    }
 
     let requested_scanners: Vec<Option<String>> = match dispatch_mode.as_str() {
         "automatic" if create_data.scanner_ids.is_empty() => vec![None],
