@@ -358,12 +358,13 @@ pub async fn recover_scanner_task_with_failure(
                        OR (t.address_family = 'ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
                      AND s.scan_capabilities->'profiles' ? t.scan_profile \
            AND COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> COALESCE(t.scan_plan->'required_services','[]'::jsonb) AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length(COALESCE(t.scan_plan->'required_services','[]'::jsonb)) \
+                     @engine_gate@ \
                      AND (jsonb_array_length(t.dns_resolvers) = 0 \
                        OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
            AND (NOT EXISTS(SELECT 1 FROM jsonb_array_elements(t.dns_resolvers) d WHERE d->>'ip' LIKE '%:%') OR (s.supports_ipv6 AND s.ipv6_ready)))) \
              ORDER BY CASE WHEN e.execution_status = 'running' THEN 0 ELSE 1 END, \
                  e.task_start_time NULLS FIRST, e.id \
-             FOR UPDATE OF e SKIP LOCKED LIMIT 1;".replace("@routing_guard@", &super::routing::claim_guard("$1")),
+             FOR UPDATE OF e SKIP LOCKED LIMIT 1;".replace("@routing_guard@", &super::routing::claim_guard("$1")).replace("@engine_gate@", &crate::scanner_config::required_stage_engine_gate("s", "t.scan_plan")),
             &[&scanner_id, &requested_task_id],
         )
         .await
@@ -487,7 +488,8 @@ pub async fn apply_task(
 
     let row = transaction
         .query_opt(
-            "/* nm:claim_selected_pending */ \
+            &format!(
+                "/* nm:claim_selected_pending */ \
              SELECT t.id AS task_pk, e.id AS execution_pk, t.user_id, t.task_id, \
              CASE WHEN t.task_kind = 'dns' THEN t.dns_targets ELSE t.task_target::text[] END AS task_target, \
              t.task_port, t.address_family, t.scan_plan, t.dns_resolvers \
@@ -501,11 +503,14 @@ pub async fn apply_task(
              OR (t.address_family = 'ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
            AND s.scan_capabilities->'profiles' ? t.scan_profile \
            AND COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> COALESCE(t.scan_plan->'required_services','[]'::jsonb) AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length(COALESCE(t.scan_plan->'required_services','[]'::jsonb)) \
+           {engine_gate} \
            AND (jsonb_array_length(t.dns_resolvers) = 0 \
              OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
            AND (NOT EXISTS(SELECT 1 FROM jsonb_array_elements(t.dns_resolvers) d WHERE d->>'ip' LIKE '%:%') OR (s.supports_ipv6 AND s.ipv6_ready)) \
          ORDER BY t.task_level DESC, t.task_create_time, t.id, e.id \
          FOR UPDATE OF e SKIP LOCKED LIMIT 1;",
+                engine_gate = crate::scanner_config::required_stage_engine_gate("s", "t.scan_plan"),
+            ),
             &[&scanner_id],
         )
         .await
@@ -540,11 +545,12 @@ pub async fn apply_task(
                      OR (t.address_family = 'ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
                    AND s.scan_capabilities->'profiles' ? t.scan_profile \
            AND COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> COALESCE(t.scan_plan->'required_services','[]'::jsonb) AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length(COALESCE(t.scan_plan->'required_services','[]'::jsonb)) \
+                   @engine_gate@ \
                    AND (jsonb_array_length(t.dns_resolvers) = 0 \
                      OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
            AND (NOT EXISTS(SELECT 1 FROM jsonb_array_elements(t.dns_resolvers) d WHERE d->>'ip' LIKE '%:%') OR (s.supports_ipv6 AND s.ipv6_ready)) \
                  ORDER BY t.task_level DESC, t.task_create_time, t.id, e.execution_pk \
-                 LIMIT 1;".replace("@routing_guard@", &super::routing::claim_guard("$2")),
+                 LIMIT 1;".replace("@routing_guard@", &super::routing::claim_guard("$2")).replace("@engine_gate@", &crate::scanner_config::required_stage_engine_gate("s", "t.scan_plan")),
                 &[&get_unix_epoch_ms(), &scanner_id],
             )
             .await

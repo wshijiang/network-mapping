@@ -226,10 +226,11 @@ async fn health_policy_database_publication_presence_and_outage_lifecycle() {
     assert!(latency.stale);
     assert_eq!(latency.severity, "normal");
     let profile = "legacy";
+    let profile_plan = crate::scan_control::creation::build_scan_plan(profile).unwrap();
     let ready: bool = client
         .query_one(
             &crate::target_generated::ready_scanner_exists_query("ipv4"),
-            &[&profile],
+            &[&profile, &profile_plan],
         )
         .await
         .unwrap()
@@ -245,7 +246,7 @@ async fn health_policy_database_publication_presence_and_outage_lifecycle() {
     let ready: bool = client
         .query_one(
             &crate::target_generated::ready_scanner_exists_query("ipv4"),
-            &[&profile],
+            &[&profile, &profile_plan],
         )
         .await
         .unwrap()

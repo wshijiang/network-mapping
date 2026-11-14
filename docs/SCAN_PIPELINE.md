@@ -105,11 +105,17 @@ Nuclei 启动失败、非零退出、输出无效、超时或超过本地安全�
 - 心跳 `scan_capabilities.plan_versions` 包含 `1`；
 - `scan_capabilities.profiles` 包含 `vulnerability_scan`；
 - `scan_capabilities.stages` 包含 `vulnerability_detection`；
+- 服务端扫描配置（`scanner_runtime_configuration`）未禁用任务必需阶段的引擎：
+  `vulnerability_detection` 对应 `nuclei.enabled`，`service_detection` 与 `dns_lookup`
+  同理对应各自开关；
 - 目标地址族当前就绪；
 - 节点在线、启用且没有被其他执行占用。
 
-扫描器只有在本地启用 Nuclei，并通过二进制和模板目录启动检查后才声明这些能力。指定扫描器
-和全部扫描器模式仍逐个应用相同的能力条件。
+扫描器只有在本地启用 Nuclei，并通过二进制和模板目录启动检查后才声明这些能力。心跳能力
+只反映扫描器本地配置，而扫描器实际执行时的有效开关是"本地 AND 服务端配置"，因此调度
+（创建任务、分配预览、规划预留、领取与恢复）额外按服务端配置校验必需阶段的引擎开关，
+避免把任务派给必然拒绝执行的节点。节点尚无服务端配置记录时不施加该限制，保持仅按心跳
+能力调度的行为。指定扫描器和全部扫描器模式仍逐个应用相同的能力条件。
 
 ## 类型化结果协议
 

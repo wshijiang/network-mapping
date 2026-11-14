@@ -2275,9 +2275,11 @@ pub(crate) async fn create_task(
                 "SELECT scanner_id FROM scanner_info WHERE scanner_id = ANY($1::text[]) \
                  AND is_enable = true AND deleted_at IS NULL AND {capability_filter} \
                  AND scan_capabilities->'profiles' ? $2 \
-                 AND COALESCE(scan_capabilities->'service_protocols','[]'::jsonb) @> $3::jsonb AND COALESCE((scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length($3::jsonb);"
+                 AND COALESCE(scan_capabilities->'service_protocols','[]'::jsonb) @> $3::jsonb AND COALESCE((scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length($3::jsonb) \
+                 {engine_gate};",
+                engine_gate = crate::scanner_config::required_stage_engine_gate("scanner_info", "$4::jsonb"),
             );
-            let rows = match connection.query(&query, &[&values, &scan_profile, &required_services]).await {
+            let rows = match connection.query(&query, &[&values, &scan_profile, &required_services, &scan_plan]).await {
                 Ok(rows) => rows,
                 Err(error) => { error_logs_error(&req, "ResolveTaskScannersError", "resolve_selected_scanners", &error); return HttpResponse::InternalServerError().finish(); }
             };
@@ -2298,9 +2300,11 @@ pub(crate) async fn create_task(
                 "SELECT scanner_id FROM scanner_info WHERE is_enable = true AND deleted_at IS NULL \
                  AND {capability_filter} \
                  AND scan_capabilities->'profiles' ? $1 \
-                 AND COALESCE(scan_capabilities->'service_protocols','[]'::jsonb) @> $2::jsonb AND COALESCE((scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length($2::jsonb) ORDER BY scanner_id;"
+                 AND COALESCE(scan_capabilities->'service_protocols','[]'::jsonb) @> $2::jsonb AND COALESCE((scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length($2::jsonb) \
+                 {engine_gate} ORDER BY scanner_id;",
+                engine_gate = crate::scanner_config::required_stage_engine_gate("scanner_info", "$3::jsonb"),
             );
-            let rows = match connection.query(&query, &[&scan_profile, &required_services]).await {
+            let rows = match connection.query(&query, &[&scan_profile, &required_services, &scan_plan]).await {
                 Ok(rows) => rows,
                 Err(error) => { error_logs_error(&req, "ResolveTaskScannersError", "resolve_all_scanners", &error); return HttpResponse::InternalServerError().finish(); }
             };
@@ -2459,23 +2463,42 @@ async fn create_dns_task(
             .parse::<IpAddr>()
             .is_ok_and(|address| address.is_ipv6())
     });
+    let dns_parent_plan = match crate::scan_control::creation::build_scan_plan(
+        crate::scan_control::profiles::DNS_PARENT_PROFILE,
+    ) {
+        Ok(plan) => plan,
+        Err(message) => {
+            error_logs_error(
+                &req,
+                "ResolveDnsTaskPlanError",
+                "build_dns_parent_plan",
+                &std::io::Error::other(message),
+            );
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+    let dns_engine_gate =
+        crate::scanner_config::required_stage_engine_gate("scanner_info", "$4::jsonb");
     let requested_scanners: Vec<Option<String>> = match dispatch_mode.as_str() {
         "automatic" if input.scanner_ids.is_empty() => {
             match connection
                 .query(
-                    "SELECT 1 FROM scanner_info WHERE is_enable = true AND deleted_at IS NULL \
+                    &format!(
+                        "SELECT 1 FROM scanner_info WHERE is_enable = true AND deleted_at IS NULL \
                      AND supports_ipv4 AND ipv4_ready AND scan_capabilities->'profiles' ? $1 \
                      AND ($2 = FALSE OR COALESCE((scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
                      AND ($3 = FALSE OR (supports_ipv6 AND ipv6_ready)) \
-                     LIMIT 1;",
-                    &[&resolved_scan.task_profile, &requires_explicit_resolvers, &requires_ipv6_resolver],
+                     {dns_engine_gate} \
+                     LIMIT 1;"
+                    ),
+                    &[&resolved_scan.task_profile, &requires_explicit_resolvers, &requires_ipv6_resolver, &dns_parent_plan],
                 )
                 .await
             {
                 Ok(rows) if !rows.is_empty() => {}
                 Ok(_) => return HttpResponse::ServiceUnavailable().json(json!({
                     "success": false,
-                    "message": "no DNS-capable scanner is currently available; enable DNS on a scanner and wait for its next heartbeat"
+                    "message": "no DNS-capable scanner is currently available; enable DNS in the scanner's local and server-side scan configuration and wait for its next heartbeat"
                 })),
                 Err(error) => {
                     error_logs_error(&req, "ResolveDnsTaskScannersError", "resolve_automatic_dns_scanner", &error);
@@ -2493,13 +2516,17 @@ async fn create_dns_task(
             let values = ids.into_iter().collect::<Vec<_>>();
             let rows = match connection
                 .query(
-                    "SELECT scanner_id FROM scanner_info WHERE scanner_id = ANY($1::text[]) \
+                    &format!(
+                        "SELECT scanner_id FROM scanner_info WHERE scanner_id = ANY($1::text[]) \
                      AND is_enable = true AND deleted_at IS NULL AND supports_ipv4 AND ipv4_ready \
                      AND scan_capabilities->'profiles' ? $2 \
                      AND ($3 = FALSE OR COALESCE((scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
                      AND ($4 = FALSE OR (supports_ipv6 AND ipv6_ready)) \
+                     {engine_gate} \
                      ORDER BY scanner_id;",
-                    &[&values, &resolved_scan.task_profile, &requires_explicit_resolvers, &requires_ipv6_resolver],
+                        engine_gate = crate::scanner_config::required_stage_engine_gate("scanner_info", "$5::jsonb"),
+                    ),
+                    &[&values, &resolved_scan.task_profile, &requires_explicit_resolvers, &requires_ipv6_resolver, &dns_parent_plan],
                 )
                 .await
             {
@@ -2522,12 +2549,15 @@ async fn create_dns_task(
         "all" if input.scanner_ids.is_empty() => {
             let rows = match connection
                 .query(
-                    "SELECT scanner_id FROM scanner_info WHERE is_enable = true AND deleted_at IS NULL \
+                    &format!(
+                        "SELECT scanner_id FROM scanner_info WHERE is_enable = true AND deleted_at IS NULL \
                      AND supports_ipv4 AND ipv4_ready AND scan_capabilities->'profiles' ? $1 \
                      AND ($2 = FALSE OR COALESCE((scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
                      AND ($3 = FALSE OR (supports_ipv6 AND ipv6_ready)) \
-                     ORDER BY scanner_id;",
-                    &[&resolved_scan.task_profile, &requires_explicit_resolvers, &requires_ipv6_resolver],
+                     {dns_engine_gate} \
+                     ORDER BY scanner_id;"
+                    ),
+                    &[&resolved_scan.task_profile, &requires_explicit_resolvers, &requires_ipv6_resolver, &dns_parent_plan],
                 )
                 .await
             {
