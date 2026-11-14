@@ -299,6 +299,11 @@ pub async fn init_database_table(
         .await?;
     transaction
         .batch_execute(include_str!(
+            "../../source/database/migrate_domain_discovery_proxy.sql"
+        ))
+        .await?;
+    transaction
+        .batch_execute(include_str!(
             "../../source/database/migrate_notification_proxies.sql"
         ))
         .await?;

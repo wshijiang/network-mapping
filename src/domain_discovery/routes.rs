@@ -1,10 +1,20 @@
 use super::*;
+use crate::config::ServerConfig;
 use actix_web::{HttpRequest, HttpResponse, web};
 fn respond<T: Serialize>(result: Result<T>) -> HttpResponse {
     match result {
         Ok(data) => HttpResponse::Ok().json(json!({"success":true,"data":data})),
         Err(e) => HttpResponse::build(e.status)
             .json(json!({"success":false,"code":e.code,"message":e.code})),
+    }
+}
+#[allow(clippy::result_large_err)]
+fn admin(user: &UserBaseI) -> std::result::Result<(), HttpResponse> {
+    if user.role == 1 {
+        Ok(())
+    } else {
+        Err(HttpResponse::Forbidden()
+            .json(json!({"success":false,"message":"仅管理员可以管理域名发现代理设置"})))
     }
 }
 async fn create_job(
@@ -72,6 +82,48 @@ async fn dns(
 }
 async fn cancel(pool: web::Data<Pool>, user: UserBaseI, id: web::Path<Uuid>) -> HttpResponse {
     respond(async {owned(&pool,user.id,*id).await?;pool.get().await?.execute("UPDATE domain_discovery_job SET status='cancelled',claim_token=NULL,lease_until=NULL,updated_at=NOW() WHERE id=$1 AND owner_id=$2 AND status IN ('pending','running')", &[&*id,&user.id]).await?;Ok(json!({"id":*id}))}.await)
+}
+async fn get_settings(pool: web::Data<Pool>, user: UserBaseI) -> HttpResponse {
+    if let Err(response) = admin(&user) {
+        return response;
+    }
+    respond(
+        settings::load(&pool)
+            .await
+            .map(|settings| settings.public()),
+    )
+}
+async fn save_settings(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    config: web::Data<ServerConfig>,
+    user: UserBaseI,
+    input: web::Json<settings::SettingsInput>,
+) -> HttpResponse {
+    if let Err(response) = admin(&user) {
+        return response;
+    }
+    respond(
+        settings::save(
+            &pool,
+            &config.encrypt_key,
+            input.into_inner(),
+            &user,
+            &AuditContext::from_request(&req),
+        )
+        .await,
+    )
+}
+async fn test_settings(
+    pool: web::Data<Pool>,
+    config: web::Data<ServerConfig>,
+    user: UserBaseI,
+    input: web::Json<settings::TestInput>,
+) -> HttpResponse {
+    if let Err(response) = admin(&user) {
+        return response;
+    }
+    respond(settings::test(&pool, &config.encrypt_key, input.into_inner()).await)
 }
 async fn relations(
     pool: web::Data<Pool>,
@@ -189,6 +241,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api/domain-discovery")
             .app_data(web::JsonConfig::default().limit(128 * 1024))
+            .route("/settings", web::get().to(get_settings))
+            .route("/settings", web::put().to(save_settings))
+            .route("/settings/test", web::post().to(test_settings))
             .route("/jobs", web::post().to(create_job))
             .route("/jobs", web::get().to(list))
             .route("/jobs/{id}", web::get().to(detail))

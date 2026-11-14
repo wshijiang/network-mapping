@@ -1,4 +1,5 @@
 use super::*;
+use crate::outbound_proxy::{ProxyConfig, ProxyMode};
 
 #[test]
 fn matching_identities_are_not_complete_sans_or_ownership_claims() {
@@ -259,13 +260,13 @@ async fn source_queries_merge_matching_names_and_fetch_full_certificates() {
     let handle = server.handle();
     actix_web::rt::spawn(server);
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
-    let basic = client::collect_from(&client, "example.com", false, &endpoint)
+    let basic = client::collect_from(&client, "example.com", false, &endpoint, ProxyMode::Direct)
         .await
         .unwrap();
     assert!(basic.candidates.iter().any(|c| c.name == "example.com"));
     assert!(basic.candidates.iter().any(|c| c.name == "api.example.com"));
     assert!(!basic.certificates[0].full_san);
-    let complete = client::collect_from(&client, "example.com", true, &endpoint)
+    let complete = client::collect_from(&client, "example.com", true, &endpoint, ProxyMode::Direct)
         .await
         .unwrap();
     assert!(
@@ -307,4 +308,254 @@ fn root_relationships_include_discovered_children_even_without_a_root_san() {
             .iter()
             .all(|c| c["full_san"] == true)
     );
+}
+
+#[test]
+fn invalid_custom_proxy_url_is_rejected_before_any_request() {
+    let error = client::http_client(&ProxyConfig {
+        mode: ProxyMode::Custom,
+        url: "ftp://proxy.example:21".into(),
+    })
+    .unwrap_err();
+    assert_eq!(error.code, "proxy_invalid");
+    assert!(!error.retryable);
+}
+
+#[tokio::test]
+async fn proxy_authentication_failure_is_permanent_and_never_reaches_the_source() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let proxy = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let mut header = vec![];
+                while !header.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0u8; 1];
+                    if stream.read_exact(&mut byte).await.is_err() {
+                        return;
+                    }
+                    header.push(byte[0]);
+                }
+                let _ = tx.send(header);
+                let _ = stream
+                    .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+                    .await;
+            });
+        }
+    });
+    let proxy_config = ProxyConfig {
+        mode: ProxyMode::Custom,
+        url: format!("http://user:secret@127.0.0.1:{port}"),
+    };
+    let http = client::http_client(&proxy_config).unwrap();
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client::probe(&http, ProxyMode::Custom),
+    )
+    .await
+    .expect("proxy response")
+    .unwrap_err();
+    assert_eq!(error.code, "proxy_authentication_failed");
+    assert!(!error.retryable);
+    assert!(rx.recv().await.unwrap().starts_with(b"CONNECT "));
+    proxy.abort();
+}
+
+#[tokio::test]
+async fn proxy_connection_failure_is_transient() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let proxy_config = ProxyConfig {
+        mode: ProxyMode::Custom,
+        url: format!("http://127.0.0.1:{port}"),
+    };
+    let http = client::http_client(&proxy_config).unwrap();
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client::probe(&http, ProxyMode::Custom),
+    )
+    .await
+    .expect("proxy connect")
+    .unwrap_err();
+    assert_eq!(error.code, "proxy_connection_failed");
+    assert!(error.retryable);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn proxy_settings_encrypt_retain_and_reuse_credentials() {
+    let (c, conn) = tokio_postgres::connect(
+        &std::env::var("STORAGE_TEST_DATABASE_URL").unwrap(),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .unwrap();
+    tokio::spawn(async move { conn.await.unwrap() });
+    let schema = format!("discovery_proxy_{}", Uuid::new_v4().simple());
+    c.batch_execute(&format!(
+        "CREATE SCHEMA {schema}; SET search_path TO {schema};"
+    ))
+    .await
+    .unwrap();
+    c.batch_execute(include_str!("../../source/database/init.sql"))
+        .await
+        .unwrap();
+    c.batch_execute(include_str!(
+        "../../source/database/migrate_domain_discovery.sql"
+    ))
+    .await
+    .unwrap();
+    c.batch_execute(include_str!(
+        "../../source/database/migrate_domain_discovery_proxy.sql"
+    ))
+    .await
+    .unwrap();
+    c.batch_execute(
+        "INSERT INTO users(id,username,password,role) VALUES(1,'proxy-admin','unused',1)",
+    )
+    .await
+    .unwrap();
+    let mut config: tokio_postgres::Config = std::env::var("STORAGE_TEST_DATABASE_URL")
+        .unwrap()
+        .parse()
+        .unwrap();
+    config.options(format!("-c search_path={schema}"));
+    let pool = Pool::builder(deadpool_postgres::Manager::new(
+        config,
+        tokio_postgres::NoTls,
+    ))
+    .max_size(2)
+    .build()
+    .unwrap();
+    let key = openssl::base64::encode_block(&[7u8; 32]);
+    let other_key = openssl::base64::encode_block(&[9u8; 32]);
+    let user = UserBaseI {
+        id: 1,
+        username: "proxy-admin".into(),
+        role: 1,
+        email: None,
+        limit_login: false,
+        enable_2fa: false,
+    };
+    let context = AuditContext::cli("proxy-settings-test");
+    let url = "socks5h://user:secret@proxy.example.com:1080";
+    let first = settings::save(
+        &pool,
+        &key,
+        settings::SettingsInput {
+            expected_revision: 1,
+            proxy_mode: ProxyMode::Custom,
+            proxy_url: url.into(),
+            change_reason: String::new(),
+        },
+        &user,
+        &context,
+    )
+    .await
+    .unwrap();
+    let first = serde_json::to_value(first).unwrap();
+    assert_eq!(first["proxy_mode"], "custom");
+    assert_eq!(first["proxy_configured"], true);
+    assert_eq!(first["revision"], 2);
+    assert!(!first["proxy_endpoint"].as_str().unwrap().contains("secret"));
+    assert!(!first["proxy_endpoint"].as_str().unwrap().contains("user@"));
+    assert!(!first.to_string().contains("secret"));
+    let stored: Option<Vec<u8>> = c
+        .query_one(
+            "SELECT proxy_ciphertext FROM domain_discovery_settings WHERE singleton",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(!stored.unwrap().windows(6).any(|window| window == b"secret"));
+    assert_eq!(
+        settings::load(&pool)
+            .await
+            .unwrap()
+            .proxy_config(&key)
+            .unwrap()
+            .url,
+        url
+    );
+    let direct = settings::save(
+        &pool,
+        &key,
+        settings::SettingsInput {
+            expected_revision: 2,
+            proxy_mode: ProxyMode::Direct,
+            proxy_url: String::new(),
+            change_reason: "pause".into(),
+        },
+        &user,
+        &context,
+    )
+    .await
+    .unwrap();
+    let direct = serde_json::to_value(direct).unwrap();
+    assert_eq!(direct["proxy_mode"], "direct");
+    assert_eq!(direct["proxy_configured"], true);
+    assert_eq!(direct["revision"], 3);
+    let loaded = settings::load(&pool).await.unwrap();
+    let config = loaded.proxy_config(&key).unwrap();
+    assert_eq!(config.mode, ProxyMode::Direct);
+    assert!(config.url.is_empty());
+    let resumed = settings::save(
+        &pool,
+        &key,
+        settings::SettingsInput {
+            expected_revision: 3,
+            proxy_mode: ProxyMode::Custom,
+            proxy_url: String::new(),
+            change_reason: "resume".into(),
+        },
+        &user,
+        &context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(serde_json::to_value(resumed).unwrap()["revision"], 4);
+    assert_eq!(
+        settings::load(&pool)
+            .await
+            .unwrap()
+            .proxy_config(&key)
+            .unwrap()
+            .url,
+        url
+    );
+    assert_eq!(
+        settings::load(&pool)
+            .await
+            .unwrap()
+            .proxy_config(&other_key)
+            .unwrap_err()
+            .reason(),
+        "proxy_configuration_unavailable"
+    );
+    let conflict = settings::save(
+        &pool,
+        &key,
+        settings::SettingsInput {
+            expected_revision: 1,
+            proxy_mode: ProxyMode::System,
+            proxy_url: String::new(),
+            change_reason: String::new(),
+        },
+        &user,
+        &context,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(conflict.reason(), "settings_revision_conflict");
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
 }

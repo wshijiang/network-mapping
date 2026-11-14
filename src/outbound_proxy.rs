@@ -130,25 +130,43 @@ pub fn endpoint(value: &str) -> Result<String, ProxyError> {
     Ok(url.to_string())
 }
 impl ProxyConfig {
-    pub fn http_client(&self) -> Result<reqwest::Client, ProxyError> {
-        let mut builder = reqwest::Client::builder()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(10));
+    /// Apply this transport to a caller-owned builder so modules keep their
+    /// own timeouts and user agents while sharing proxy semantics.
+    pub fn apply_to(
+        &self,
+        builder: reqwest::ClientBuilder,
+    ) -> Result<reqwest::ClientBuilder, ProxyError> {
         match self.mode {
-            ProxyMode::System => {}
-            ProxyMode::Direct => builder = builder.no_proxy(),
+            ProxyMode::System => Ok(builder),
+            ProxyMode::Direct => Ok(builder.no_proxy()),
             ProxyMode::Custom => {
                 let url = validate_url(&self.url)?;
-                builder = builder.proxy(
+                // Adding an explicit proxy disables reqwest's automatic
+                // environment proxy handling for this client.
+                Ok(builder.proxy(
                     reqwest::Proxy::all(url).map_err(|_| ProxyError::permanent("proxy_invalid"))?,
-                );
+                ))
             }
         }
-        builder
-            .build()
-            .map_err(|_| ProxyError::permanent("proxy_invalid"))
+    }
+
+    pub fn validate(&self) -> Result<(), ProxyError> {
+        match self.mode {
+            ProxyMode::Custom => validate_url(&self.url).map(|_| ()),
+            ProxyMode::System | ProxyMode::Direct => Ok(()),
+        }
+    }
+
+    pub fn http_client(&self) -> Result<reqwest::Client, ProxyError> {
+        self.apply_to(
+            reqwest::Client::builder()
+                .https_only(true)
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(10)),
+        )?
+        .build()
+        .map_err(|_| ProxyError::permanent("proxy_invalid"))
     }
 }
 type Stream = Box<dyn AsyncTokioStream>;

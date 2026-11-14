@@ -1,6 +1,7 @@
 //! Passive certificate discovery. Evidence stays separate from DNS observations.
 mod client;
 mod routes;
+mod settings;
 #[cfg(test)]
 mod tests;
 mod worker;
@@ -48,6 +49,21 @@ impl Error {
             status: StatusCode::NOT_FOUND,
             code: "discovery_not_found",
         }
+    }
+    fn internal(code: &'static str) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code,
+        }
+    }
+    fn conflict(code: &'static str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code,
+        }
+    }
+    pub(super) fn reason(&self) -> &'static str {
+        self.code
     }
 }
 impl From<tokio_postgres::Error> for Error {

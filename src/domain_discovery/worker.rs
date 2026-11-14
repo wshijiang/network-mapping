@@ -6,15 +6,12 @@ pub async fn run(
     pool: Pool,
     es: ElasticsearchService,
     maintenance: actix_web::web::Data<SystemMaintenanceState>,
+    encryption_key: String,
 ) {
-    let client = match client::http_client() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
     loop {
         if !maintenance.snapshot().await.enabled
             && es.enabled()
-            && process_one(&pool, &es, &client).await.is_err()
+            && process_one(&pool, &es, &encryption_key).await.is_err()
         {
             tracing::warn!(
                 event = "DomainDiscoveryWorkerFailed",
@@ -27,7 +24,7 @@ pub async fn run(
 pub(super) async fn process_one(
     pool: &Pool,
     es: &ElasticsearchService,
-    client: &reqwest::Client,
+    encryption_key: &str,
 ) -> Result<bool> {
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
@@ -44,7 +41,22 @@ pub(super) async fn process_one(
     tx.execute("UPDATE domain_discovery_job SET status='running',attempts=attempts+1,claim_token=$2,lease_until=NOW()+INTERVAL '3 minutes',updated_at=NOW() WHERE id=$1", &[&id,&token]).await?;
     tx.commit().await?;
     drop(c);
-    match client::collect(client, &seed, related).await {
+    let settings = settings::load(pool).await?;
+    let proxy = match settings.proxy_config(encryption_key) {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            fail(pool, id, token, error.reason()).await?;
+            return Ok(true);
+        }
+    };
+    let client = match client::http_client(&proxy) {
+        Ok(client) => client,
+        Err(error) => {
+            fail(pool, id, token, error.code).await?;
+            return Ok(true);
+        }
+    };
+    match client::collect(&client, &seed, related, proxy.mode).await {
         Ok(evidence) => {
             if es
                 .discovery_write(id, owner, attempt, &evidence)
@@ -64,11 +76,16 @@ pub(super) async fn process_one(
             };
             pool.get().await?.execute("UPDATE domain_discovery_job SET status=$3,summary=$4,last_error=NULL,claim_token=NULL,lease_until=NULL,updated_at=NOW() WHERE id=$1 AND claim_token=$2 AND status='running' AND lease_until>NOW()", &[&id,&token,&state,&json!({"domains":evidence.candidates.len(),"certificates":evidence.certificates.len(),"truncated":evidence.truncated,"incomplete_certificates":evidence.incomplete_certificates,"source_errors":evidence.source_errors})]).await?;
         }
-        Err(reason) => retry(pool, id, token, reason).await?,
+        Err(error) if error.retryable => retry(pool, id, token, error.code).await?,
+        Err(error) => fail(pool, id, token, error.code).await?,
     }
     Ok(true)
 }
-async fn retry(pool: &Pool, id: Uuid, token: Uuid, reason: &str) -> Result<()> {
+async fn fail(pool: &Pool, id: Uuid, token: Uuid, reason: &'static str) -> Result<()> {
+    pool.get().await?.execute("UPDATE domain_discovery_job SET status='failed',last_error=$3,claim_token=NULL,lease_until=NULL,updated_at=NOW() WHERE id=$1 AND claim_token=$2 AND status='running' AND lease_until>NOW()", &[&id,&token,&reason]).await?;
+    Ok(())
+}
+async fn retry(pool: &Pool, id: Uuid, token: Uuid, reason: &'static str) -> Result<()> {
     pool.get().await?.execute("UPDATE domain_discovery_job SET status=CASE WHEN attempts>=3 THEN 'failed' ELSE 'pending' END,last_error=$3,available_at=NOW()+INTERVAL '30 seconds'*attempts,claim_token=NULL,lease_until=NULL,updated_at=NOW() WHERE id=$1 AND claim_token=$2 AND status='running' AND lease_until>NOW()", &[&id,&token,&reason]).await?;
     Ok(())
 }

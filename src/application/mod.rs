@@ -556,6 +556,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             db_pool.clone(),
             elasticsearch_service.clone(),
             system_maintenance_state.clone(),
+            ser_con.encrypt_key.clone(),
         ),
     );
     let rate_limiter = RateLimitMiddleware::default();
