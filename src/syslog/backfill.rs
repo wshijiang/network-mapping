@@ -434,6 +434,10 @@ async fn send_item(
     counters: &mut Counters,
 ) {
     for (index, target) in targets.iter().enumerate() {
+        // 与实时转发一致：只重放该目标订阅的日志类型。
+        if !target.sources.contains(&item.source) {
+            continue;
+        }
         let max_bytes = if target.protocol == Protocol::Udp {
             UDP_MAX_BYTES
         } else {

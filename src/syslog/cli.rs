@@ -15,7 +15,7 @@ use crate::syslog::config::{
     Facility, MinLevel, NAMESPACE, Protocol, SyslogConfig, TargetConfig, TlsOptions,
 };
 use crate::syslog::forwarder::send_test;
-use crate::syslog::metrics;
+use crate::syslog::metrics::{self, Source};
 use crate::syslog::status;
 
 type CliResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -104,6 +104,9 @@ pub enum SyslogCommand {
         no_tls_verify: bool,
         #[arg(long)]
         tls_server_name: Option<String>,
+        /// 订阅的日志类型（逗号分隔：system,audit,access,scanner），默认全部
+        #[arg(long, value_enum, value_delimiter = ',')]
+        sources: Option<Vec<Source>>,
         #[arg(long, default_value = "")]
         reason: String,
     },
@@ -128,6 +131,9 @@ pub enum SyslogCommand {
         no_tls_verify: bool,
         #[arg(long)]
         tls_server_name: Option<String>,
+        /// 订阅的日志类型（逗号分隔：system,audit,access,scanner）
+        #[arg(long, value_enum, value_delimiter = ',')]
+        sources: Option<Vec<Source>>,
         #[arg(long, default_value = "")]
         reason: String,
     },
@@ -283,6 +289,7 @@ pub async fn execute(command: &SyslogCommand, pool: &Pool) -> CliResult {
             tls_ca,
             no_tls_verify,
             tls_server_name,
+            sources,
             reason,
         } => {
             let (mut config, revision) = load_current(pool).await?;
@@ -298,6 +305,9 @@ pub async fn execute(command: &SyslogCommand, pool: &Pool) -> CliResult {
                     verify: !no_tls_verify,
                     server_name: tls_server_name.clone().unwrap_or_default(),
                 },
+                sources: sources
+                    .clone()
+                    .unwrap_or_else(crate::syslog::config::default_sources),
             };
             config.targets.push(target.clone());
             let revision = save_change(pool, &config, revision, reason, "cli.syslog.add").await?;
@@ -318,6 +328,7 @@ pub async fn execute(command: &SyslogCommand, pool: &Pool) -> CliResult {
             tls_ca,
             no_tls_verify,
             tls_server_name,
+            sources,
             reason,
         } => {
             let (mut config, revision) = load_current(pool).await?;
@@ -355,6 +366,9 @@ pub async fn execute(command: &SyslogCommand, pool: &Pool) -> CliResult {
             }
             if let Some(value) = tls_server_name {
                 item.tls.server_name = value.clone();
+            }
+            if let Some(values) = sources {
+                item.sources = values.clone();
             }
             let revision =
                 save_change(pool, &config, revision, reason, "cli.syslog.update").await?;
@@ -528,6 +542,17 @@ async fn show(pool: &Pool, as_json: bool) -> CliResult {
                     "（已停用）"
                 }
             );
+            let sources = if target.sources.len() == Source::ALL.len() {
+                "全部".to_owned()
+            } else {
+                target
+                    .sources
+                    .iter()
+                    .map(|source| source.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            println!("      日志类型：{sources}");
         }
     }
     print_alerts(&config);

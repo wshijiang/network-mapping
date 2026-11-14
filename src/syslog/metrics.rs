@@ -12,7 +12,10 @@ use crate::syslog::config::SyslogConfig;
 
 pub const SOURCE_KEYS: [&str; 4] = ["system", "audit", "access", "scanner"];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, clap::ValueEnum,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum Source {
     System,
     Audit,
@@ -21,6 +24,13 @@ pub enum Source {
 }
 
 impl Source {
+    pub const ALL: [Source; 4] = [
+        Source::System,
+        Source::Audit,
+        Source::Access,
+        Source::Scanner,
+    ];
+
     pub fn index(self) -> usize {
         match self {
             Self::System => 0,

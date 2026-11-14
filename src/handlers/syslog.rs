@@ -111,6 +111,7 @@ pub(crate) async fn syslog_test(
             port: body.port.unwrap_or_else(|| protocol.default_port()),
             protocol,
             enabled: true,
+            sources: crate::syslog::config::default_sources(),
             tls: body.tls.clone().unwrap_or_default(),
         };
         if let Err(message) = validate_target(&candidate) {

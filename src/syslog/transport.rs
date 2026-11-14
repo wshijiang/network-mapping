@@ -150,6 +150,7 @@ mod tests {
             protocol,
             enabled: true,
             tls: TlsOptions::default(),
+            sources: crate::syslog::config::default_sources(),
         }
     }
 

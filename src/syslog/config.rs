@@ -142,6 +142,13 @@ pub struct TargetConfig {
     pub protocol: Protocol,
     pub enabled: bool,
     pub tls: TlsOptions,
+    /// 发往该目标的日志类型；默认全部。
+    #[serde(default = "default_sources")]
+    pub sources: Vec<crate::syslog::metrics::Source>,
+}
+
+pub fn default_sources() -> Vec<crate::syslog::metrics::Source> {
+    crate::syslog::metrics::Source::ALL.to_vec()
 }
 
 impl Default for TargetConfig {
@@ -154,6 +161,7 @@ impl Default for TargetConfig {
             protocol: Protocol::Udp,
             enabled: true,
             tls: TlsOptions::default(),
+            sources: default_sources(),
         }
     }
 }
@@ -344,6 +352,15 @@ pub fn validate_target(target: &TargetConfig) -> Result<(), String> {
     if !target.tls.server_name.is_empty() && !valid_host(&target.tls.server_name) {
         return Err("TLS 服务器名无效".into());
     }
+    if target.sources.is_empty() {
+        return Err("至少选择一种日志类型".into());
+    }
+    let mut seen_sources = std::collections::HashSet::new();
+    for source in &target.sources {
+        if !seen_sources.insert(*source) {
+            return Err("日志类型重复".into());
+        }
+    }
     Ok(())
 }
 
@@ -487,5 +504,36 @@ mod tests {
         assert!(config.find_target(&id).is_some());
         assert!(config.find_target("主 siem").is_some());
         assert!(config.find_target("missing").is_none());
+    }
+
+    #[test]
+    fn targets_default_to_all_sources_and_require_at_least_one() {
+        let mut item = target("a", "10.0.0.1", 514, Protocol::Udp);
+        assert_eq!(item.sources, crate::syslog::metrics::Source::ALL.to_vec());
+        assert!(validate_target(&item).is_ok());
+        item.sources = vec![crate::syslog::metrics::Source::Audit];
+        assert!(validate_target(&item).is_ok());
+        item.sources.clear();
+        assert!(validate_target(&item).is_err());
+        item.sources = vec![
+            crate::syslog::metrics::Source::Audit,
+            crate::syslog::metrics::Source::Audit,
+        ];
+        assert!(validate_target(&item).is_err());
+    }
+
+    #[test]
+    fn legacy_target_document_without_sources_deserializes_to_all() {
+        let value = serde_json::json!({
+            "id": Uuid::now_v7(),
+            "name": "legacy",
+            "host": "10.0.0.1",
+            "port": 514,
+            "protocol": "udp",
+            "enabled": true,
+            "tls": { "caFile": "", "verify": true, "serverName": "" }
+        });
+        let item: TargetConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(item.sources, crate::syslog::metrics::Source::ALL.to_vec());
     }
 }

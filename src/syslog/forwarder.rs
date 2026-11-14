@@ -346,7 +346,7 @@ impl Pipeline {
         let mut target_senders = Vec::new();
         for target in config.targets.iter().filter(|target| target.enabled) {
             let (target_sender, target_receiver) = mpsc::channel(config.queue_capacity);
-            target_senders.push((target.id, target_sender));
+            target_senders.push((target.id, target.sources.clone(), target_sender));
             tasks.spawn(worker(
                 pool.clone(),
                 target.clone(),
@@ -386,7 +386,7 @@ impl Pipeline {
 
 async fn dispatcher(
     mut receiver: mpsc::Receiver<ForwardItem>,
-    targets: Vec<(Uuid, mpsc::Sender<ForwardItem>)>,
+    targets: Vec<(Uuid, Vec<Source>, mpsc::Sender<ForwardItem>)>,
     registry: StatusRegistry,
     mut stop: watch::Receiver<bool>,
 ) {
@@ -395,7 +395,11 @@ async fn dispatcher(
             _ = stop.changed() => break,
             maybe = receiver.recv() => match maybe {
                 Some(item) => {
-                    for (id, sender) in &targets {
+                    for (id, sources, sender) in &targets {
+                        // 按目标订阅的日志类型过滤；未订阅的类型不入队也不计丢弃。
+                        if !sources.contains(&item.source) {
+                            continue;
+                        }
                         if sender.try_send(item.clone()).is_err() {
                             registry.add_dropped(*id, 1);
                         }
