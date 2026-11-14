@@ -206,3 +206,99 @@ pub(crate) async fn syslog_statistics(
         }
     }
 }
+
+// ---- 历史日志回填（仅用户手动下发） ----
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackfillCreateRequest {
+    /// 「N 天前至今」，默认 7 天；提供 start/end 时忽略。
+    days: Option<i64>,
+    start: Option<chrono::DateTime<chrono::Utc>>,
+    end: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[post("/api/syslog/backfill")]
+pub(crate) async fn syslog_backfill_create(
+    req: HttpRequest,
+    pool: web::Data<deadpool_postgres::Pool>,
+    user: UserBaseI,
+    body: web::Json<BackfillCreateRequest>,
+) -> impl Responder {
+    if user.role != 1 {
+        return forbidden();
+    }
+    let (start, end) = match crate::syslog::backfill::resolve_range(body.days, body.start, body.end)
+    {
+        Ok(range) => range,
+        Err(message) => {
+            return HttpResponse::BadRequest().json(json!({"success": false, "message": message}));
+        }
+    };
+    match crate::syslog::backfill::create_job(pool.get_ref(), Some(user.id), start, end).await {
+        Ok(id) => {
+            let mut event =
+                AuditEvent::user("configuration", "syslog_backfill_create", "success", &user)
+                    .resource("syslog_backfill_job", id.to_string());
+            event.metadata = json!({"rangeStart": start, "rangeEnd": end});
+            write_standalone(pool.get_ref(), &AuditContext::from_request(&req), &event).await;
+            HttpResponse::Ok().json(json!({
+                "success": true,
+                "data": { "id": id, "rangeStart": start, "rangeEnd": end }
+            }))
+        }
+        Err(message) => {
+            HttpResponse::BadRequest().json(json!({"success": false, "message": message}))
+        }
+    }
+}
+
+#[get("/api/syslog/backfill")]
+pub(crate) async fn syslog_backfill_list(
+    pool: web::Data<deadpool_postgres::Pool>,
+    user: UserBaseI,
+) -> impl Responder {
+    if user.role != 1 {
+        return forbidden();
+    }
+    match crate::syslog::backfill::list_jobs(pool.get_ref(), 20).await {
+        Ok(jobs) => HttpResponse::Ok().json(json!({"success": true, "data": jobs})),
+        Err(error) => {
+            tracing::error!(
+                event = "SyslogBackfillListError",
+                operation = "list_syslog_backfill_jobs",
+                error_message = %error,
+                "回填任务列表查询失败"
+            );
+            HttpResponse::InternalServerError()
+                .json(json!({"success": false, "message": "回填任务列表查询失败"}))
+        }
+    }
+}
+
+#[post("/api/syslog/backfill/{id}/cancel")]
+pub(crate) async fn syslog_backfill_cancel(
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    pool: web::Data<deadpool_postgres::Pool>,
+    user: UserBaseI,
+) -> impl Responder {
+    if user.role != 1 {
+        return forbidden();
+    }
+    let id = path.into_inner();
+    match crate::syslog::backfill::cancel_job(pool.get_ref(), id).await {
+        Ok(true) => {
+            let event =
+                AuditEvent::user("configuration", "syslog_backfill_cancel", "success", &user)
+                    .resource("syslog_backfill_job", id.to_string());
+            write_standalone(pool.get_ref(), &AuditContext::from_request(&req), &event).await;
+            HttpResponse::Ok().json(json!({"success": true}))
+        }
+        Ok(false) => HttpResponse::NotFound()
+            .json(json!({"success": false, "message": "任务不存在或已结束"})),
+        Err(message) => {
+            HttpResponse::InternalServerError().json(json!({"success": false, "message": message}))
+        }
+    }
+}

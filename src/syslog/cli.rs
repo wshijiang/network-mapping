@@ -158,6 +158,35 @@ pub enum SyslogCommand {
         #[command(subcommand)]
         command: AlertsCommand,
     },
+    /// 历史日志回填（下发任务，由运行中的服务执行）
+    Backfill {
+        #[command(subcommand)]
+        command: BackfillCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BackfillCommand {
+    /// 下发回填任务：默认最近 7 天；--days N 或 --start/--end 自定义
+    Create {
+        #[arg(long)]
+        days: Option<i64>,
+        /// 开始时间（RFC 3339，如 2026-11-01T00:00:00Z）
+        #[arg(long, requires = "end")]
+        start: Option<DateTime<Utc>>,
+        /// 结束时间（RFC 3339）
+        #[arg(long, requires = "start")]
+        end: Option<DateTime<Utc>>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 查看回填任务列表
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// 取消回填任务
+    Cancel { id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -372,6 +401,7 @@ pub async fn execute(command: &SyslogCommand, pool: &Pool) -> CliResult {
             json,
         } => stats(pool, window, target.as_deref(), granularity, *json).await,
         SyslogCommand::Alerts { command } => alerts(pool, command).await,
+        SyslogCommand::Backfill { command } => backfill(pool, command).await,
     }
 }
 
@@ -857,6 +887,83 @@ async fn alerts(pool: &Pool, command: &AlertsCommand) -> CliResult {
                 save_change(pool, &config, revision, reason, "cli.syslog.alerts_set").await?;
             println!("通知策略已保存，当前版本 #{revision}");
             Ok(())
+        }
+    }
+}
+
+// ---- 历史日志回填 ----
+
+async fn backfill(pool: &Pool, command: &BackfillCommand) -> CliResult {
+    use crate::syslog::backfill;
+    match command {
+        BackfillCommand::Create {
+            days,
+            start,
+            end,
+            json,
+        } => {
+            let (range_start, range_end) = backfill::resolve_range(*days, *start, *end)?;
+            let id = backfill::create_job(pool, None, range_start, range_end).await?;
+            let mut event =
+                AuditEvent::system("configuration", "cli.syslog.backfill_create", "success")
+                    .resource("syslog_backfill_job", id.to_string());
+            event.metadata = json!({"rangeStart": range_start, "rangeEnd": range_end});
+            write_standalone(pool, &AuditContext::cli("syslog backfill create"), &event).await;
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "id": id, "rangeStart": range_start, "rangeEnd": range_end,
+                    }))?
+                );
+            } else {
+                println!(
+                    "回填任务已下发：{id}\n范围：{} ～ {}\n由运行中的服务执行；用 `syslog backfill list` 查看进度。",
+                    range_start.format("%Y-%m-%d %H:%M:%S UTC"),
+                    range_end.format("%Y-%m-%d %H:%M:%S UTC")
+                );
+            }
+            Ok(())
+        }
+        BackfillCommand::List { json } => {
+            let jobs = backfill::list_jobs(pool, 20).await?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&json!({"jobs": jobs}))?);
+                return Ok(());
+            }
+            if jobs.is_empty() {
+                println!("暂无回填任务。");
+                return Ok(());
+            }
+            for job in &jobs {
+                println!(
+                    "  {}　{}　{} ～ {}　处理 {} / 发送 {} / 失败 {}",
+                    job.id,
+                    job.status,
+                    job.range_start.format("%m-%d %H:%M"),
+                    job.range_end.format("%m-%d %H:%M"),
+                    job.processed_count,
+                    job.sent_count,
+                    job.failed_count
+                );
+                if !job.last_error.is_empty() {
+                    println!("    错误：{}", job.last_error);
+                }
+            }
+            Ok(())
+        }
+        BackfillCommand::Cancel { id } => {
+            let job_id = Uuid::parse_str(id).map_err(|_| "任务 ID 必须为 UUID")?;
+            if backfill::cancel_job(pool, job_id).await? {
+                let event =
+                    AuditEvent::system("configuration", "cli.syslog.backfill_cancel", "success")
+                        .resource("syslog_backfill_job", job_id.to_string());
+                write_standalone(pool, &AuditContext::cli("syslog backfill cancel"), &event).await;
+                println!("已请求取消任务 {job_id}");
+                Ok(())
+            } else {
+                Err("任务不存在或已结束".into())
+            }
         }
     }
 }

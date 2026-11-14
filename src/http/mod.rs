@@ -138,6 +138,9 @@ fn configuration(cfg: &mut web::ServiceConfig) {
     cfg.service(handlers::syslog::syslog_status);
     cfg.service(handlers::syslog::syslog_test);
     cfg.service(handlers::syslog::syslog_statistics);
+    cfg.service(handlers::syslog::syslog_backfill_create);
+    cfg.service(handlers::syslog::syslog_backfill_list);
+    cfg.service(handlers::syslog::syslog_backfill_cancel);
 }
 
 fn assets(cfg: &mut web::ServiceConfig) {

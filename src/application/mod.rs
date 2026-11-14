@@ -370,6 +370,14 @@ pub async fn run(args: Clis) -> io::Result<()> {
             background.subscribe(),
         ),
     );
+    background.spawn_draining(
+        "syslog-backfill",
+        crate::syslog::backfill::run_worker(
+            db_pool.clone(),
+            runtime_settings.syslog.clone(),
+            background.subscribe(),
+        ),
+    );
     background.spawn(
         "syslog-status-persistence",
         crate::syslog::status::run_persistence(

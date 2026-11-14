@@ -6,6 +6,7 @@
 //! - 分钟级指标支撑 Web 统计图与 CLI 终端图（malevich），以及失败率/P95/P99 通知策略。
 
 pub mod alerts;
+pub mod backfill;
 pub mod cli;
 pub mod config;
 pub mod format;

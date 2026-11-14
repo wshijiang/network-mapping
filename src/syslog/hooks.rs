@@ -1,7 +1,9 @@
 //! 四类转发源的入队钩子：审计事件、IP 访问日志、扫描器诊断事件。
 //! 系统运行日志由 `forwarder::SyslogLayer` 直接捕获。
+//!
+//! 消息构造器（`*_item`）同时供历史回填复用，保证实时与回填格式一致。
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::audit::{AuditContext, AuditEvent};
@@ -15,11 +17,11 @@ fn truncate(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
-pub fn forward_audit(event: &AuditEvent, context: &AuditContext) {
-    let handle = capture();
-    if !handle.is_active() {
-        return;
-    }
+pub fn audit_item(
+    event: &AuditEvent,
+    context: &AuditContext,
+    timestamp: DateTime<Utc>,
+) -> ForwardItem {
     let severity = match event.severity.as_str() {
         "critical" | "error" => Severity::Error,
         "warning" => Severity::Warning,
@@ -44,11 +46,11 @@ pub fn forward_audit(event: &AuditEvent, context: &AuditContext) {
     if let Some(ip) = context.source_ip {
         sd.push(("source_ip".to_owned(), ip.to_string()));
     }
-    handle.enqueue_source(ForwardItem {
+    ForwardItem {
         source: Source::Audit,
         severity,
         msgid: "AuditEvent",
-        timestamp: Utc::now(),
+        timestamp,
         text: truncate(
             &format!(
                 "{} {} outcome={}",
@@ -57,19 +59,25 @@ pub fn forward_audit(event: &AuditEvent, context: &AuditContext) {
             2048,
         ),
         sd,
-    });
+    }
 }
 
-pub fn forward_access(entry: &RequestLogEntry) {
-    // 防自激放大：syslog 自身的管理/状态/统计接口（前端轮询）不转发。
-    if entry.request_path.starts_with("/api/syslog")
-        || entry.request_path == "/api/config/runtime/syslog"
-    {
-        return;
-    }
+pub fn forward_audit(event: &AuditEvent, context: &AuditContext) {
     let handle = capture();
     if !handle.is_active() {
         return;
+    }
+    handle.enqueue_source(audit_item(event, context, Utc::now()));
+}
+
+/// 防自激放大：syslog 自身的管理/状态/统计接口（前端轮询）不转发。
+fn is_syslog_management_path(path: &str) -> bool {
+    path.starts_with("/api/syslog") || path == "/api/config/runtime/syslog"
+}
+
+pub fn access_item(entry: &RequestLogEntry) -> Option<ForwardItem> {
+    if is_syslog_management_path(&entry.request_path) {
+        return None;
     }
     let status = entry.status_code;
     let severity = if status >= 500 {
@@ -100,7 +108,7 @@ pub fn forward_access(entry: &RequestLogEntry) {
     if let Some(reason) = &entry.reason_code {
         sd.push(("reason_code".to_owned(), truncate(reason, 128)));
     }
-    handle.enqueue_source(ForwardItem {
+    Some(ForwardItem {
         source: Source::Access,
         severity,
         msgid: "HttpRequest",
@@ -110,14 +118,20 @@ pub fn forward_access(entry: &RequestLogEntry) {
             2048,
         ),
         sd,
-    });
+    })
 }
 
-pub fn forward_scanner_event(scanner_id: Uuid, event: &ParsedEvent) {
+pub fn forward_access(entry: &RequestLogEntry) {
     let handle = capture();
     if !handle.is_active() {
         return;
     }
+    if let Some(item) = access_item(entry) {
+        handle.enqueue_source(item);
+    }
+}
+
+pub fn scanner_item(scanner_id: Uuid, event: &ParsedEvent) -> ForwardItem {
     let severity = if event.level == "ERROR" {
         Severity::Error
     } else {
@@ -137,12 +151,20 @@ pub fn forward_scanner_event(scanner_id: Uuid, event: &ParsedEvent) {
         ("category".to_owned(), truncate(&event.category, 64)),
         ("operation".to_owned(), truncate(&event.operation, 128)),
     ];
-    handle.enqueue_source(ForwardItem {
+    ForwardItem {
         source: Source::Scanner,
         severity,
         msgid: "ScannerDiagnostic",
         timestamp: event.occurred_at,
         text: truncate(&format!("{} {}", event.error_code, message), 2048),
         sd,
-    });
+    }
+}
+
+pub fn forward_scanner_event(scanner_id: Uuid, event: &ParsedEvent) {
+    let handle = capture();
+    if !handle.is_active() {
+        return;
+    }
+    handle.enqueue_source(scanner_item(scanner_id, event));
 }
