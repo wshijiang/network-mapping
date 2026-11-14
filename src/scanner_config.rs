@@ -284,6 +284,37 @@ pub struct RuntimeConfigurationQuery {
     scannerid: Uuid,
 }
 
+/// SQL gate keeping dispatch consistent with the runtime configuration the
+/// server itself publishes: a scanner must not be matched to a task whose
+/// required stage is disabled by its `scanner_runtime_configuration` document.
+/// Heartbeat capabilities only reflect the scanner's local configuration, while
+/// the effective engine switch is local AND remote, so routing must apply the
+/// remote half itself. A missing row means the scanner has not fetched a
+/// document yet and runs on local configuration only (no restriction).
+///
+/// `scanner_alias` is the `scanner_info` alias in the surrounding query;
+/// `plan_expr` must resolve to the task's `scan_plan` jsonb (column or
+/// parameter). Append the returned fragment to the WHERE clause.
+pub fn required_stage_engine_gate(scanner_alias: &str, plan_expr: &str) -> String {
+    let engine_enabled = |engine: &str| {
+        format!(
+            "COALESCE((SELECT (c.document->'{engine}'->>'enabled')::BOOLEAN \
+             FROM scanner_runtime_configuration c WHERE c.scanner_id = {scanner_alias}.scanner_id), TRUE)"
+        )
+    };
+    format!(
+        "AND NOT EXISTS ( \
+         SELECT 1 FROM jsonb_array_elements(COALESCE(({plan_expr})::jsonb->'stages','[]'::jsonb)) AS nm_required_stage \
+         WHERE COALESCE((nm_required_stage->>'required')::BOOLEAN, FALSE) AND ( \
+         (nm_required_stage->>'type' = 'vulnerability_detection' AND NOT {nuclei}) \
+         OR (nm_required_stage->>'type' = 'service_detection' AND NOT {service}) \
+         OR (nm_required_stage->>'type' = 'dns_lookup' AND NOT {dns})))",
+        nuclei = engine_enabled("nuclei"),
+        service = engine_enabled("service_detection"),
+        dns = engine_enabled("dns"),
+    )
+}
+
 pub async fn ensure_configuration<C>(
     client: &C,
     scanner_id: &str,

@@ -552,6 +552,12 @@ pub(crate) async fn dispatch(
                 .get::<_, Option<Value>>("generation_metadata")
                 .and_then(|v| v.pointer("/dns_follow_up/scan_profile").cloned())
                 .unwrap_or_else(|| original["scan_profile"].clone());
+            // Retire historical `legacy` values so retries use the canonical set.
+            let profile = if profile.as_str() == Some("legacy") {
+                serde_json::json!("port_only")
+            } else {
+                profile
+            };
             let mut input =
                 json!({"ports":original["ports"],"scan_profile":profile,"remark":"API task retry"});
             if row.get::<_, String>("task_kind") == "dns" {

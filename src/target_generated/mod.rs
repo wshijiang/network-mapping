@@ -227,7 +227,7 @@ impl AutomaticTargetService {
         let scanner_available: bool = transaction
             .query_one(
                 &ready_scanner_exists_query(generator.family),
-                &[&scan_profile],
+                &[&scan_profile, &scan_plan],
             )
             .await?
             .get("available");
@@ -429,6 +429,8 @@ impl AutomaticTargetService {
         pool: &Pool,
     ) -> Result<AutomaticTargetStatus, Box<dyn std::error::Error + Send + Sync>> {
         let scan_profile = get_default_scan_profile_from_database(pool).await?;
+        let scan_plan = build_scan_plan(&scan_profile)
+            .map_err(|message| -> Box<dyn std::error::Error + Send + Sync> { message.into() })?;
         let client = pool.get().await?;
         let mut families = Vec::new();
         for generator in &self.generators {
@@ -445,7 +447,7 @@ impl AutomaticTargetService {
             let ready_scanners: i64 = client
                 .query_one(
                     &ready_scanner_count_query(generator.family),
-                    &[&scan_profile],
+                    &[&scan_profile, &scan_plan],
                 )
                 .await?
                 .get("count");
@@ -744,8 +746,11 @@ pub(crate) fn ready_scanner_exists_query(family: &str) -> String {
     format!(
         "SELECT EXISTS(SELECT 1 FROM scanner_info WHERE is_enable = true AND deleted_at IS NULL AND accepting_tasks \
         AND runtime_state <> 'stopping' AND last_seen_at >= NOW() - ({}) * INTERVAL '1 second' AND supports_{family} AND {family}_ready \
-        AND ($1 = 'legacy' OR scan_capabilities->'profiles' ? $1)) AS available;",
-        crate::scanner_health::seconds_sql()
+        AND ($1 = 'legacy' OR scan_capabilities->'profiles' ? $1) \
+        {engine_gate}) AS available;",
+        crate::scanner_health::seconds_sql(),
+        engine_gate =
+            crate::scanner_config::required_stage_engine_gate("scanner_info", "$2::jsonb"),
     )
 }
 
@@ -753,8 +758,11 @@ fn ready_scanner_count_query(family: &str) -> String {
     format!(
         "SELECT COUNT(*)::BIGINT AS count FROM scanner_info WHERE is_enable = true AND deleted_at IS NULL AND accepting_tasks \
         AND runtime_state <> 'stopping' AND last_seen_at >= NOW() - ({}) * INTERVAL '1 second' AND supports_{family} AND {family}_ready \
-        AND ($1 = 'legacy' OR scan_capabilities->'profiles' ? $1);",
-        crate::scanner_health::seconds_sql()
+        AND ($1 = 'legacy' OR scan_capabilities->'profiles' ? $1) \
+        {engine_gate};",
+        crate::scanner_health::seconds_sql(),
+        engine_gate =
+            crate::scanner_config::required_stage_engine_gate("scanner_info", "$2::jsonb"),
     )
 }
 

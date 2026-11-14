@@ -240,6 +240,13 @@ async fn execution_for_upload_attempt(
 ///
 /// When `task_id` is supplied, only that exact task is considered. This is used
 /// to reconcile a durable local upload before any new work is requested.
+///
+/// Recovery happens at task boundaries, never mid-scan, so the runtime
+/// configuration gate applies to the running arm as well: once the server
+/// disables a required engine, the task is not handed back to this scanner
+/// (which would resume it under the new configuration and fail). The lease
+/// expires instead and a capable node reclaims it through the gated general
+/// claim; durable uploads still reconcile through the idempotent upload path.
 pub async fn recover_scanner_task(
     pool: &deadpool_postgres::Pool,
     scanner_id: Uuid,
@@ -350,20 +357,22 @@ pub async fn recover_scanner_task_with_failure(
              WHERE COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> COALESCE(t.scan_plan->'required_services','[]'::jsonb) AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length(COALESCE(t.scan_plan->'required_services','[]'::jsonb)) \
              AND e.cancel_requested = false AND api_scan_task_enabled(t) AND dns_scan_task_enabled(t) AND ( \
                  (e.execution_status = 'running' AND e.assigned_scanner_id = $1 \
-                  AND ($2::TEXT IS NULL OR t.task_id = $2)) \
+                  AND ($2::TEXT IS NULL OR t.task_id = $2) \
+                  @engine_gate@) \
                  OR ($2::TEXT IS NOT NULL AND t.task_id = $2 AND e.execution_status = 'pending' \
                      AND e.assigned_scanner_id IS NULL AND s.accepting_tasks AND @routing_guard@ \
                      AND (e.requested_scanner_id IS NULL OR e.requested_scanner_id = $1) \
                      AND ((t.address_family = 'ipv4' AND s.supports_ipv4 AND s.ipv4_ready) \
                        OR (t.address_family = 'ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
-                     AND (t.scan_profile = 'legacy' OR s.scan_capabilities->'profiles' ? t.scan_profile) \
+                     AND s.scan_capabilities->'profiles' ? t.scan_profile \
            AND COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> COALESCE(t.scan_plan->'required_services','[]'::jsonb) AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length(COALESCE(t.scan_plan->'required_services','[]'::jsonb)) \
+                     @engine_gate@ \
                      AND (jsonb_array_length(t.dns_resolvers) = 0 \
                        OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
            AND (NOT EXISTS(SELECT 1 FROM jsonb_array_elements(t.dns_resolvers) d WHERE d->>'ip' LIKE '%:%') OR (s.supports_ipv6 AND s.ipv6_ready)))) \
              ORDER BY CASE WHEN e.execution_status = 'running' THEN 0 ELSE 1 END, \
                  e.task_start_time NULLS FIRST, e.id \
-             FOR UPDATE OF e SKIP LOCKED LIMIT 1;".replace("@routing_guard@", &super::routing::claim_guard("$1")),
+             FOR UPDATE OF e SKIP LOCKED LIMIT 1;".replace("@routing_guard@", &super::routing::claim_guard("$1")).replace("@engine_gate@", &crate::scanner_config::required_stage_engine_gate("s", "t.scan_plan")),
             &[&scanner_id, &requested_task_id],
         )
         .await
@@ -487,7 +496,8 @@ pub async fn apply_task(
 
     let row = transaction
         .query_opt(
-            "/* nm:claim_selected_pending */ \
+            &format!(
+                "/* nm:claim_selected_pending */ \
              SELECT t.id AS task_pk, e.id AS execution_pk, t.user_id, t.task_id, \
              CASE WHEN t.task_kind = 'dns' THEN t.dns_targets ELSE t.task_target::text[] END AS task_target, \
              t.task_port, t.address_family, t.scan_plan, t.dns_resolvers \
@@ -499,13 +509,16 @@ pub async fn apply_task(
            AND api_scan_task_enabled(t) AND dns_scan_task_enabled(t) \
            AND ((t.address_family = 'ipv4' AND s.supports_ipv4 AND s.ipv4_ready) \
              OR (t.address_family = 'ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
-           AND (t.scan_profile = 'legacy' OR s.scan_capabilities->'profiles' ? t.scan_profile) \
+           AND s.scan_capabilities->'profiles' ? t.scan_profile \
            AND COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> COALESCE(t.scan_plan->'required_services','[]'::jsonb) AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length(COALESCE(t.scan_plan->'required_services','[]'::jsonb)) \
+           {engine_gate} \
            AND (jsonb_array_length(t.dns_resolvers) = 0 \
              OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
            AND (NOT EXISTS(SELECT 1 FROM jsonb_array_elements(t.dns_resolvers) d WHERE d->>'ip' LIKE '%:%') OR (s.supports_ipv6 AND s.ipv6_ready)) \
          ORDER BY t.task_level DESC, t.task_create_time, t.id, e.id \
          FOR UPDATE OF e SKIP LOCKED LIMIT 1;",
+                engine_gate = crate::scanner_config::required_stage_engine_gate("s", "t.scan_plan"),
+            ),
             &[&scanner_id],
         )
         .await
@@ -538,13 +551,14 @@ pub async fn apply_task(
                    AND api_scan_task_enabled(t) AND dns_scan_task_enabled(t) \
                    AND ((t.address_family = 'ipv4' AND s.supports_ipv4 AND s.ipv4_ready) \
                      OR (t.address_family = 'ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
-                   AND (t.scan_profile = 'legacy' OR s.scan_capabilities->'profiles' ? t.scan_profile) \
+                   AND s.scan_capabilities->'profiles' ? t.scan_profile \
            AND COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> COALESCE(t.scan_plan->'required_services','[]'::jsonb) AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length(COALESCE(t.scan_plan->'required_services','[]'::jsonb)) \
+                   @engine_gate@ \
                    AND (jsonb_array_length(t.dns_resolvers) = 0 \
                      OR COALESCE((s.scan_capabilities->>'explicit_dns_resolvers')::BOOLEAN, FALSE)) \
            AND (NOT EXISTS(SELECT 1 FROM jsonb_array_elements(t.dns_resolvers) d WHERE d->>'ip' LIKE '%:%') OR (s.supports_ipv6 AND s.ipv6_ready)) \
                  ORDER BY t.task_level DESC, t.task_create_time, t.id, e.execution_pk \
-                 LIMIT 1;".replace("@routing_guard@", &super::routing::claim_guard("$2")),
+                 LIMIT 1;".replace("@routing_guard@", &super::routing::claim_guard("$2")).replace("@engine_gate@", &crate::scanner_config::required_stage_engine_gate("s", "t.scan_plan")),
                 &[&get_unix_epoch_ms(), &scanner_id],
             )
             .await

@@ -38,10 +38,6 @@ pub struct ServiceProbeOptions {
     pub server_name: Option<String>,
     pub doh_path: Option<String>,
     pub tls_ca_pem: Option<String>,
-    pub passive_bind: Option<String>,
-    pub passive_group: Option<String>,
-    pub passive_interface: Option<String>,
-    pub passive_window_seconds: Option<u16>,
 }
 impl ServiceProbeOptions {
     pub fn validate(&self) -> Result<(), &'static str> {
@@ -89,16 +85,6 @@ pub fn build_service_scan_plan_with_options(
     options.validate()?;
     let automatic_tcp =
         services.is_empty() && matches!(profile, "service_inventory" | "vulnerability_scan");
-    let has_passive = options.passive_bind.is_some()
-        || options.passive_group.is_some()
-        || options.passive_interface.is_some()
-        || options.passive_window_seconds.is_some();
-    if profile == "udp_passive" {
-        validate_passive_options(options)?;
-    } else if has_passive {
-        return Err("passive options require udp_passive profile");
-    }
-
     if profile == "udp_inventory" && *options != ServiceProbeOptions::default() {
         return Err("UDP inventory does not accept TCP probe options");
     }
@@ -148,7 +134,7 @@ pub fn build_scan_plan(profile: &str) -> Result<Value, &'static str> {
         "port_only" => serde_json::json!([
             {"type": "port_discovery", "required": true}
         ]),
-        "udp_inventory" | "udp_passive" => {
+        "udp_inventory" => {
             serde_json::json!([{"type":"service_detection","required":true}])
         }
         "service_inventory" => serde_json::json!([
@@ -174,7 +160,7 @@ pub fn build_scan_plan(profile: &str) -> Result<Value, &'static str> {
         _ => return Err("unsupported scan profile"),
     };
     Ok(serde_json::json!({
-        "version": if matches!(profile,"udp_inventory"|"udp_passive") {2} else {1},
+        "version": if profile == "udp_inventory" {2} else {1},
         "profile": profile,
         "stages": stages,
     }))
@@ -183,25 +169,17 @@ pub fn build_scan_plan(profile: &str) -> Result<Value, &'static str> {
 /// Empty TCP requirements enable automatic detection. UDP plans persist their
 /// automatic protocol set so dispatch, recovery and workers share requirements.
 pub fn build_service_scan_plan(profile: &str, services: &[String]) -> Result<Value, &'static str> {
-    if matches!(profile, "udp_inventory" | "udp_passive") {
-        let defaults = if profile == "udp_passive" {
-            vec!["opcua_pubsub".into(), "enip_io".into()]
-        } else {
-            vec!["dns_udp".into(), "enip_udp".into(), "bacnet".into()]
-        };
+    if profile == "udp_inventory" {
+        let defaults = vec!["dns_udp".into(), "enip_udp".into(), "bacnet".into()];
         let services = if services.is_empty() {
             &defaults
         } else {
             services
         };
-        if services.len() > if profile == "udp_passive" { 2 } else { 3 }
-            || services.iter().any(|s| {
-                if profile == "udp_passive" {
-                    !matches!(s.as_str(), "opcua_pubsub" | "enip_io")
-                } else {
-                    !matches!(s.as_str(), "dns_udp" | "enip_udp" | "bacnet")
-                }
-            })
+        if services.len() > 3
+            || services
+                .iter()
+                .any(|s| !matches!(s.as_str(), "dns_udp" | "enip_udp" | "bacnet"))
             || services
                 .iter()
                 .collect::<std::collections::HashSet<_>>()
@@ -275,15 +253,9 @@ mod service_plan_tests {
     }
 }
 
-/// Profiles valid for IP/CIDR tasks and the system-wide default. DNS profiles
-/// require the dedicated domain-task endpoint and must never be inherited by
-/// an IP task.
-pub fn is_ip_scan_profile(profile: &str) -> bool {
-    matches!(
-        profile,
-        "legacy" | "port_only" | "service_inventory" | "vulnerability_scan"
-    )
-}
+/// Profiles valid for IP/CIDR tasks. The authoritative registry lives in
+/// [`super::profiles`]; this re-export keeps existing call paths working.
+pub use super::profiles::is_ip_scan_profile;
 
 /// Returns the profile selected by the user for display purposes. A domain
 /// follow-up request keeps `dns_records` as its executable parent profile and
@@ -427,7 +399,7 @@ pub fn validate_udp_targets(
     targets: &[String],
     ports: &str,
 ) -> Result<(), &'static str> {
-    if !matches!(profile, "udp_inventory" | "udp_passive") {
+    if profile != "udp_inventory" {
         return Ok(());
     }
     let mut count = 0u128;
@@ -436,9 +408,6 @@ pub fn validate_udp_targets(
             .parse()
             .or_else(|_| target.parse::<std::net::IpAddr>().map(Into::into))
             .map_err(|_| "invalid UDP IP target")?;
-        if profile == "udp_passive" && !net.addr().is_ipv4() {
-            return Err("passive receiver currently supports IPv4 only");
-        }
         let bits = match net {
             IpNet::V4(n) => 32 - n.prefix_len(),
             IpNet::V6(n) => 128 - n.prefix_len(),
@@ -470,46 +439,8 @@ pub fn validate_udp_targets(
             return Err("UDP inventory supports at most 32 explicit ports");
         }
     }
-    if profile == "udp_passive" && selected.len() != 1 {
-        return Err("passive receiver requires exactly one listening port");
-    }
     if count == 0 || selected.is_empty() {
         return Err("empty UDP targets");
-    }
-    Ok(())
-}
-
-fn validate_passive_options(o: &ServiceProbeOptions) -> Result<(), &'static str> {
-    let bind: std::net::Ipv4Addr = o
-        .passive_bind
-        .as_ref()
-        .ok_or("explicit local receiver IP required")?
-        .parse()
-        .map_err(|_| "invalid receiver IPv4")?;
-    if bind.is_unspecified()
-        || bind.is_multicast()
-        || bind.is_broadcast()
-        || o.passive_window_seconds
-            .is_some_and(|s| !(1..=60).contains(&s))
-    {
-        return Err("invalid receiver address or observation window");
-    }
-    if let Some(group) = &o.passive_group {
-        let group: std::net::Ipv4Addr = group.parse().map_err(|_| "invalid multicast group")?;
-        if !group.is_multicast() || o.passive_interface.as_deref() != o.passive_bind.as_deref() {
-            return Err("multicast requires explicit matching IPv4 interface");
-        }
-    } else if o.passive_interface.is_some() {
-        return Err("multicast interface requires group");
-    }
-    if o.modbus_unit_id.is_some()
-        || o.s7_tsap.is_some()
-        || o.mqtt_version.is_some()
-        || o.server_name.is_some()
-        || o.doh_path.is_some()
-        || o.tls_ca_pem.is_some()
-    {
-        return Err("TCP options are not valid for passive UDP");
     }
     Ok(())
 }
@@ -544,15 +475,8 @@ mod protocol_options_tests {
             plan["required_services"],
             serde_json::json!(["dns_udp", "enip_udp", "bacnet"])
         );
-        let options = ServiceProbeOptions {
-            passive_bind: Some("192.0.2.1".into()),
-            ..Default::default()
-        };
-        let plan = build_service_scan_plan_with_options("udp_passive", &[], &options).unwrap();
-        assert_eq!(
-            plan["required_services"],
-            serde_json::json!(["opcua_pubsub", "enip_io"])
-        );
+        // The retired passive profile must no longer produce a plan.
+        assert!(build_service_scan_plan("udp_passive", &[]).is_err());
     }
 
     #[test]
@@ -617,7 +541,7 @@ mod protocol_options_tests {
         );
     }
     #[test]
-    fn udp_profiles_support_automatic_protocols_and_remain_version_two_and_bounded() {
+    fn udp_inventory_supports_automatic_protocols_and_remains_version_two_and_bounded() {
         let plan = build_service_scan_plan_with_options(
             "udp_inventory",
             &["dns_udp".into(), "enip_udp".into()],
@@ -635,17 +559,18 @@ mod protocol_options_tests {
         assert!(validate_udp_targets("udp_inventory", &["10.0.0.0/16".into()], "53").is_err());
         assert!(validate_udp_targets("udp_inventory", &["192.0.2.1".into()], "1-65535").is_err());
         let options = ServiceProbeOptions {
-            passive_bind: Some("127.0.0.1".into()),
-            passive_window_seconds: Some(1),
+            modbus_unit_id: Some(7),
             ..Default::default()
         };
-        let plan =
-            build_service_scan_plan_with_options("udp_passive", &["opcua_pubsub".into()], &options)
-                .unwrap();
-        assert_eq!(plan["version"], 2);
-        assert!(validate_udp_targets("udp_passive", &["192.0.2.1".into()], "2222,4840").is_err());
+        // TCP probe options stay incompatible with UDP plans, and the retired
+        // passive profile/protocols are rejected everywhere.
         assert!(
-            build_service_scan_plan_with_options("service_inventory", &["opcua".into()], &options)
+            build_service_scan_plan_with_options("udp_inventory", &["dns_udp".into()], &options)
+                .is_err()
+        );
+        assert!(build_scan_plan("udp_passive").is_err());
+        assert!(
+            build_service_scan_plan("udp_inventory", &["opcua_pubsub".into(), "enip_io".into()])
                 .is_err()
         );
     }

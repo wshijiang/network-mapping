@@ -120,15 +120,15 @@ pub async fn placement_preview(
         }
         family.unwrap_or("ipv4")
     };
+    let plan = plan.unwrap();
     let required_services = plan
-        .unwrap()
         .get("required_services")
         .cloned()
         .unwrap_or_else(|| json!([]));
     let result: Result<Value, Error> = async {
         let client = pool.get().await?;
         let cfg = routing::config(&client).await?;
-        let nodes = routing::candidates(&client, &maxmind, &input.targets, family, &profile, &input.port, user.id, &resolvers, &required_services, &cfg).await?;
+        let nodes = routing::candidates(&client, &maxmind, &input.targets, family, &profile, &input.port, user.id, &resolvers, &required_services, &plan, &cfg).await?;
         let preferred = cfg.enabled.then(|| nodes.iter().find(|n| !n.busy).map(|n| n.scanner_id.clone())).flatten();
         Ok(json!({"enabled":cfg.enabled,"target_geo":routing::target_geo(&input.targets,&maxmind),"preferred_scanner_id":preferred,"candidates":nodes,"reason":if !cfg.enabled{"disabled"}else if preferred.is_some(){"ranked_candidate"}else{"no_idle_candidate"}}))
     }.await;

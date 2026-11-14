@@ -982,6 +982,7 @@ async fn native_service_requirements_gate_claim_resume_and_candidates() {
             f.owner,
             &json!([]),
             &required,
+            &plan,
             &cfg
         )
         .await
@@ -1006,6 +1007,7 @@ async fn native_service_requirements_gate_claim_resume_and_candidates() {
             f.owner,
             &json!([]),
             &required,
+            &plan,
             &cfg
         )
         .await
@@ -1038,6 +1040,7 @@ async fn native_service_requirements_gate_claim_resume_and_candidates() {
             f.owner,
             &json!([]),
             &required,
+            &plan,
             &cfg
         )
         .await
@@ -1064,6 +1067,336 @@ async fn native_service_requirements_gate_claim_resume_and_candidates() {
         recover_scanner_task(&f.pool, scanner, Some(id), None, &token(scanner), PEPPER).await,
         Err(ApplyTaskError::NoTask)
     ));
+    f.finish().await;
+}
+
+#[actix_web::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn server_runtime_configuration_gates_claim_candidates_and_preferences() {
+    let f = Fixture::new().await;
+    let scanner = f.scanner().await;
+    let (task, id, execution) = f.task("automatic", None).await;
+    let plan = crate::scan_control::creation::build_scan_plan("vulnerability_scan").unwrap();
+    let c = f.pool.get().await.unwrap();
+    c.execute(
+        "UPDATE scan_task SET scan_profile='vulnerability_scan', scan_plan=$2 WHERE id=$1",
+        &[&task, &plan],
+    )
+    .await
+    .unwrap();
+    drop(c);
+
+    // No runtime configuration row yet: advertised local capabilities alone
+    // must remain sufficient (backward compatibility with older scanners).
+    apply_task(&f.pool, scanner, &token(scanner), PEPPER)
+        .await
+        .unwrap();
+    let c = f.pool.get().await.unwrap();
+    c.execute(
+        "UPDATE scan_task_execution SET execution_status='pending', assigned_scanner_id=NULL, lease_expires_at=NULL, task_start_time=NULL WHERE id=$1",
+        &[&execution],
+    )
+    .await
+    .unwrap();
+
+    // The server-published document disables nuclei even though the heartbeat
+    // capabilities still advertise vulnerability_scan: claims and planner
+    // candidates must both exclude the node immediately.
+    let document =
+        serde_json::to_value(crate::scanner_config::ScannerRuntimeConfig::default()).unwrap();
+    assert_eq!(document["nuclei"]["enabled"], json!(false));
+    c.execute(
+        "INSERT INTO scanner_runtime_configuration(scanner_id, document) VALUES($1,$2)",
+        &[&scanner.to_string(), &document],
+    )
+    .await
+    .unwrap();
+    drop(c);
+    assert!(matches!(
+        apply_task(&f.pool, scanner, &token(scanner), PEPPER).await,
+        Err(ApplyTaskError::NoTask)
+    ));
+    let c = f.pool.get().await.unwrap();
+    let cfg = RoutingConfig::default();
+    let geo = MaxMindState::from_directory("/workspace/work/absent-mmdb");
+    assert!(
+        candidates(
+            &c,
+            &geo,
+            &["192.0.2.1".into()],
+            "ipv4",
+            "vulnerability_scan",
+            "443",
+            f.owner,
+            &json!([]),
+            &json!([]),
+            &plan,
+            &cfg
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    drop(c);
+
+    // A preference for a node whose server configuration disables the required
+    // engine must not block other capable nodes (claim_guard applies the gate).
+    let preferred = f.scanner().await;
+    let c = f.pool.get().await.unwrap();
+    c.execute(
+        "INSERT INTO scanner_runtime_configuration(scanner_id, document) VALUES($1,$2)",
+        &[&preferred.to_string(), &document],
+    )
+    .await
+    .unwrap();
+    c.execute(
+        "UPDATE scanner_runtime_configuration SET document=jsonb_set(document,'{nuclei,enabled}','true') WHERE scanner_id=$1",
+        &[&scanner.to_string()],
+    )
+    .await
+    .unwrap();
+    drop(c);
+    f.preference(task, preferred, crate::clock::get_unix_epoch_ms() + 15000)
+        .await;
+    let c = f.pool.get().await.unwrap();
+    assert_eq!(
+        candidates(
+            &c,
+            &geo,
+            &["192.0.2.1".into()],
+            "ipv4",
+            "vulnerability_scan",
+            "443",
+            f.owner,
+            &json!([]),
+            &json!([]),
+            &plan,
+            &cfg
+        )
+        .await
+        .unwrap()
+        .len(),
+        1
+    );
+    drop(c);
+    apply_task(&f.pool, scanner, &token(scanner), PEPPER)
+        .await
+        .unwrap();
+    let _ = id;
+    f.finish().await;
+}
+
+#[actix_web::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn recovery_does_not_return_running_tasks_whose_required_engine_was_disabled() {
+    let f = Fixture::new().await;
+    let scanner = f.scanner().await;
+    let (task, id, _) = f.task("automatic", None).await;
+    let plan = crate::scan_control::creation::build_scan_plan("vulnerability_scan").unwrap();
+    let c = f.pool.get().await.unwrap();
+    c.execute(
+        "UPDATE scan_task SET scan_profile='vulnerability_scan', scan_plan=$2 WHERE id=$1",
+        &[&task, &plan],
+    )
+    .await
+    .unwrap();
+    drop(c);
+    apply_task(&f.pool, scanner, &token(scanner), PEPPER)
+        .await
+        .unwrap();
+
+    // The server disables nuclei while the execution is running. Recovery at
+    // the next task boundary must not hand the task back to this scanner,
+    // which would resume it under the new configuration and fail.
+    let c = f.pool.get().await.unwrap();
+    let document =
+        serde_json::to_value(crate::scanner_config::ScannerRuntimeConfig::default()).unwrap();
+    c.execute(
+        "INSERT INTO scanner_runtime_configuration(scanner_id, document) VALUES($1,$2)",
+        &[&scanner.to_string(), &document],
+    )
+    .await
+    .unwrap();
+    drop(c);
+    assert!(matches!(
+        recover_scanner_task(&f.pool, scanner, Some(id), None, &token(scanner), PEPPER).await,
+        Err(ApplyTaskError::NoTask)
+    ));
+    assert!(matches!(
+        recover_scanner_task(&f.pool, scanner, None, None, &token(scanner), PEPPER).await,
+        Err(ApplyTaskError::NoTask)
+    ));
+
+    // Re-enabling the engine restores recovery of the same execution.
+    let c = f.pool.get().await.unwrap();
+    c.execute(
+        "UPDATE scanner_runtime_configuration SET document=jsonb_set(document,'{nuclei,enabled}','true') WHERE scanner_id=$1",
+        &[&scanner.to_string()],
+    )
+    .await
+    .unwrap();
+    drop(c);
+    let recovered = recover_scanner_task(&f.pool, scanner, Some(id), None, &token(scanner), PEPPER)
+        .await
+        .unwrap();
+    assert_eq!(recovered.task_id, id);
+    f.finish().await;
+}
+
+#[actix_web::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn server_runtime_configuration_gates_dns_and_service_engines() {
+    let f = Fixture::new().await;
+    let scanner = f.scanner().await;
+    let c = f.pool.get().await.unwrap();
+    let mut document =
+        serde_json::to_value(crate::scanner_config::ScannerRuntimeConfig::default()).unwrap();
+    document["dns"]["enabled"] = json!(false);
+    document["service_detection"]["enabled"] = json!(false);
+    c.execute(
+        "INSERT INTO scanner_runtime_configuration(scanner_id, document) VALUES($1,$2)",
+        &[&scanner.to_string(), &document],
+    )
+    .await
+    .unwrap();
+    // Advertise every profile so only the runtime configuration can exclude it.
+    c.execute(
+        "UPDATE scanner_info SET scan_capabilities=$2 WHERE scanner_id=$1",
+        &[
+            &scanner.to_string(),
+            &json!({"profiles":["port_only","dns_records","service_inventory","vulnerability_scan"],"explicit_dns_resolvers":true}),
+        ],
+    )
+    .await
+    .unwrap();
+    drop(c);
+    let c = f.pool.get().await.unwrap();
+    let cfg = RoutingConfig::default();
+    let geo = MaxMindState::from_directory("/workspace/work/absent-mmdb");
+    for (profile, expected) in [
+        ("dns_records", 0),
+        ("service_inventory", 0),
+        ("vulnerability_scan", 0),
+        ("port_only", 1),
+    ] {
+        let plan = crate::scan_control::creation::build_scan_plan(profile).unwrap();
+        assert_eq!(
+            candidates(
+                &c,
+                &geo,
+                &["192.0.2.1".into()],
+                "ipv4",
+                profile,
+                "443",
+                f.owner,
+                &json!([]),
+                &json!([]),
+                &plan,
+                &cfg
+            )
+            .await
+            .unwrap()
+            .len(),
+            expected,
+            "profile {profile}"
+        );
+    }
+    drop(c);
+    f.finish().await;
+}
+
+#[actix_web::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn server_runtime_configuration_gates_task_creation_and_preview() {
+    use actix_web::{App, HttpMessage, dev::Service, http::StatusCode, test, web};
+    let f = Fixture::new().await;
+    let scanner = f.scanner().await;
+    let owner = f.owner;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(f.pool.clone()))
+            .app_data(web::Data::new(MaxMindState::from_directory(
+                "/workspace/work/absent-mmdb",
+            )))
+            .wrap_fn(move |req, srv| {
+                req.extensions_mut().insert(crate::admin::UserBaseI {
+                    id: owner,
+                    username: "routing".into(),
+                    role: 1,
+                    email: None,
+                    limit_login: false,
+                    enable_2fa: false,
+                });
+                srv.call(req)
+            })
+            .service(crate::handlers::scan_routing::placement_preview)
+            .service(crate::handlers::task::create_task),
+    )
+    .await;
+    let c = f.pool.get().await.unwrap();
+    let document =
+        serde_json::to_value(crate::scanner_config::ScannerRuntimeConfig::default()).unwrap();
+    c.execute(
+        "INSERT INTO scanner_runtime_configuration(scanner_id, document) VALUES($1,$2)",
+        &[&scanner.to_string(), &document],
+    )
+    .await
+    .unwrap();
+    drop(c);
+    for enabled in [false, true] {
+        if enabled {
+            f.pool
+                .get()
+                .await
+                .unwrap()
+                .execute(
+                    "UPDATE scanner_runtime_configuration SET document=jsonb_set(document,'{nuclei,enabled}','true') WHERE scanner_id=$1",
+                    &[&scanner.to_string()],
+                )
+                .await
+                .unwrap();
+        }
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/task/placement-preview")
+                .set_json(json!({"targets":["192.0.2.1"],"port":"443","scan_profile":"vulnerability_scan"}))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let data: Value = test::read_body_json(response).await;
+        assert_eq!(
+            data["data"]["candidates"].as_array().unwrap().len(),
+            usize::from(enabled)
+        );
+        for mode in ["selected", "all"] {
+            let ids = if mode == "selected" {
+                json!([scanner])
+            } else {
+                json!([])
+            };
+            let response = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri("/api/task/create")
+                    .set_json(json!({"ip":"192.0.2.1","port":"443","level":1,"scan_profile":"vulnerability_scan","dispatch_mode":mode,"scanner_ids":ids}))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                if enabled {
+                    StatusCode::OK
+                } else if mode == "all" {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::BAD_REQUEST
+                },
+                "mode {mode}, enabled {enabled}"
+            );
+        }
+    }
     f.finish().await;
 }
 
@@ -1200,30 +1533,28 @@ async fn native_service_creation_and_preview_agree_on_node_capabilities() {
         plan["required_services"],
         json!(["dns_udp", "enip_udp", "bacnet"])
     );
+    // The retired passive profile is rejected at the creation boundary even
+    // when a scanner still advertises the legacy capability set.
     f.pool.get().await.unwrap().execute(
         "UPDATE scanner_info SET scan_capabilities=$2 WHERE scanner_id=$1",
         &[&scanner.to_string(), &json!({"profiles":["udp_passive"],"max_service_probes":2,"service_protocols":["opcua_pubsub","enip_io"]})]
     ).await.unwrap();
     let response = test::call_service(&app, test::TestRequest::post().uri("/api/task/create")
         .set_json(json!({"ip":"192.0.2.1","port":"2222","level":1,"scan_profile":"udp_passive","dispatch_mode":"selected","scanner_ids":[scanner],"service_probe_options":{"passive_bind":"192.0.2.10"}})).to_request()).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let plan: Value = f
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let passive_tasks: i64 = f
         .pool
         .get()
         .await
         .unwrap()
         .query_one(
-            "SELECT scan_plan FROM scan_task WHERE scan_profile='udp_passive'",
+            "SELECT COUNT(*) FROM scan_task WHERE scan_profile='udp_passive'",
             &[],
         )
         .await
         .unwrap()
         .get(0);
-    assert_eq!(
-        plan["required_services"],
-        json!(["opcua_pubsub", "enip_io"])
-    );
-    assert_eq!(plan["version"], 2);
+    assert_eq!(passive_tasks, 0);
     drop(app);
     f.finish().await;
 }

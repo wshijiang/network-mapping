@@ -41,9 +41,9 @@ TLS 的 `server_name` 仅控制 Host/SNI 与证书名校验，实际连接固定
 
 其他选项：`modbus_unit_id` 为 0–255（默认 1）；`s7_tsap` 为 0–65535（默认 258 / 0x0102，仅一组 TSAP）；`mqtt_version` 为 4（默认，MQTT 3.1.1）或 5。自动识别可直接配置上述参数，不限制候选协议；旧 API 使用非空协议列表时，参数仍需匹配该列表。DoH 路径最多 256 字节，只支持单一路径 POST，不含 GET、JSON DNS API、HTTP/3、DoQ 或路径枚举。
 
-## UDP 主动与被动任务
+## UDP 主动任务
 
-UDP 使用 plan v2，结果仍为上传协议 3；与 TCP 分开创建任务，当前不支持同一任务混合 TCP/UDP 或自动域名后续任务。服务端启动初始化更新任务 profile 约束，允许 `udp_inventory` / `udp_passive`；升级部署须同步程序随附的数据库初始化 SQL。两类 UDP 任务均自动识别其支持的全部协议，无需手动勾选；服务端将规范化的默认集合写入 plan，预览、创建、调度与恢复共用此集合。主动默认 DNS、EtherNet/IP、BACnet/IP；经典 BACnet/IP 仅适用于 IPv4。被动默认 EtherNet/IP I/O 与 OPC UA UADP。旧 API 非空列表仍可限制范围。最多 256 个单播来源/目标地址；`udp_inventory` 最多 32 个明确端口，不使用隐式全端口扫描。
+UDP 使用 plan v2，结果仍为上传协议 3；与 TCP 分开创建任务，当前不支持同一任务混合 TCP/UDP 或自动域名后续任务。服务端启动初始化更新任务 profile 约束；升级部署须同步程序随附的数据库初始化 SQL。`udp_inventory` 自动识别其支持的全部协议，无需手动勾选；服务端将规范化的默认集合写入 plan，预览、创建、调度与恢复共用此集合。默认 DNS、EtherNet/IP、BACnet/IP；经典 BACnet/IP 仅适用于 IPv4。旧 API 非空列表仍可限制范围。最多 256 个单播目标地址、最多 32 个明确端口，不使用隐式全端口扫描。
 
 ```json
 {
@@ -54,21 +54,7 @@ UDP 使用 plan v2，结果仍为上传协议 3；与 TCP 分开创建任务，�
 
 主动任务串行执行，受阶段累计期限、每目标超时、取消及速率限制；上限为节点配置与 5 次/秒中较小值，每请求最多接收 32 个不匹配报文，每报文最多 8192 字节。一个目标/端口完成后保存 ACK 检查点；恢复从下一端点继续。无有效响应不生成开放/关闭观察，也不产生伪造的成功服务。
 
-```json
-{
-  "ip": "192.0.2.20", "port": "4840", "level": 1,
-  "scan_profile": "udp_passive",
-  "dispatch_mode": "selected", "scanner_ids": ["019c0000-0000-7000-8000-000000000001"],
-  "service_probe_options": {
-    "passive_bind": "192.0.2.10", "passive_window_seconds": 10,
-    "passive_group": "239.0.0.1", "passive_interface": "192.0.2.10"
-  }
-}
-```
-
-被动任务的 `ip` 是获授权的发送源，`port` 是扫描节点唯一的本机接收端口；`passive_bind` 必须是节点实际 IPv4 接口。组播可选，配置时接口必须与 bind 相同。不支持混杂抓包、镜像口捕获或离线 PCAP 导入；只接收已送达本机/加入组播组的流量。窗口默认 10 秒，范围 1–60 秒；最多处理 1024 个报文、记录 256 个源端点。被动任务必须以 selected 模式明确指定一台接收节点，不能自动分配或多节点广播。
-
-被动结果归属实际 UDP 发送源 IP/源端口，不把接收端口或组播地址登记成目标资产；`source=passive_udp`、confidence 80，证据标记 `reachability_asserted=false`。没有合格报文表示未观察到，不能判为关闭。仅保留结构摘要，不保存 I/O / DataSet 载荷。检查点保留已确认结果和累计窗口；恢复不延长总观察预算。
+早期的 `udp_passive` 被动接收模式（EtherNet/IP I/O、OPC UA UADP）已随扫描模式收敛下线：创建接口拒绝该 profile，`service_probe_options` 不再接受 `passive_*` 字段，节点不再声明 `opcua_pubsub` / `enip_io` 协议能力。数据库 profile 约束与心跳能力校验仍容忍这些历史取值，保证存量任务行与滚动升级期间的旧节点心跳不受影响；历史被动结果（`source=passive_udp`）只读展示，不参与新任务。
 
 ## 能力、显示与兼容
 

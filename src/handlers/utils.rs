@@ -890,7 +890,7 @@ async fn save_scan_settings_h(
         }));
     }
     let requested_profile = settings.default_scan_profile.trim().to_lowercase();
-    if !crate::scan_control::creation::is_ip_scan_profile(&requested_profile) {
+    if !crate::scan_control::profiles::is_defaultable_profile(&requested_profile) {
         return HttpResponse::BadRequest().json(json!({
             "success": false,
             "message": "不支持的默认扫描模式"

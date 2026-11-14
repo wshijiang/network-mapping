@@ -103,6 +103,8 @@ BEGIN
     END IF;
 END $$;
 ALTER TABLE scan_task DROP CONSTRAINT IF EXISTS scan_task_profile_check;
+-- 'udp_passive'、'legacy'、'dns_ports'、'dns_full' 仅保留给历史任务行读取，
+-- 创建路径已不再写入这些取值（见 docs/SCAN_PIPELINE.md 的兼容映射说明）。
 ALTER TABLE scan_task ADD CONSTRAINT scan_task_profile_check
     CHECK (scan_profile IN (
         'legacy',

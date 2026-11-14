@@ -292,7 +292,19 @@ async fn queue_evidence(
         }
     }
     if !pending.is_empty() {
-        let capable:bool=tx.query_one("SELECT EXISTS(SELECT 1 FROM scanner_info WHERE is_enable AND deleted_at IS NULL AND supports_ipv4 AND ipv4_ready AND scan_capabilities->'profiles' ? 'dns_records')", &[]).await?.get(0);
+        let dns_plan = crate::scan_control::creation::build_scan_plan(
+            crate::scan_control::profiles::DNS_PARENT_PROFILE,
+        )
+        .map_err(|_| Error {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "dns_scan_plan_invalid",
+        })?;
+        let capable:bool=tx.query_one(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM scanner_info WHERE is_enable AND deleted_at IS NULL AND supports_ipv4 AND ipv4_ready AND scan_capabilities->'profiles' ? 'dns_records' {engine_gate})",
+                engine_gate = crate::scanner_config::required_stage_engine_gate("scanner_info", "$1::jsonb"),
+            ),
+            &[&dns_plan]).await?.get(0);
         if !capable {
             return Err(Error {
                 status: StatusCode::SERVICE_UNAVAILABLE,
