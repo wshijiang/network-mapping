@@ -221,6 +221,9 @@ pub(crate) fn validate_test_url(value: &str) -> Result<reqwest::Url, &'static st
 }
 
 pub(crate) async fn probe_url(proxy: &ProxyConfig, url: &str) -> Result<u16, ProxyError> {
+    if proxy.mode == ProxyMode::Custom {
+        ensure_proxy_reachable(proxy).await?;
+    }
     let builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
@@ -230,12 +233,59 @@ pub(crate) async fn probe_url(proxy: &ProxyConfig, url: &str) -> Result<u16, Pro
         .map_err(|_| ProxyError::permanent("proxy_invalid"))?
         .build()
         .map_err(|_| ProxyError::permanent("proxy_invalid"))?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|error| outbound_proxy::classify_request_error(&error, proxy.mode))?;
-    Ok(response.status().as_u16())
+    match client.get(url).send().await {
+        Ok(response) => Ok(response.status().as_u16()),
+        Err(error) => {
+            let classified = outbound_proxy::classify_request_error(&error, proxy.mode);
+            if proxy.mode == ProxyMode::Custom && target_level(classified.code) {
+                Err(ProxyError::transient("proxy_test_target_unreachable"))
+            } else {
+                Err(classified)
+            }
+        }
+    }
+}
+
+/// A failed request through a reachable proxy is normally a destination
+/// failure. Keep explicit proxy authentication, TLS and protocol errors
+/// separate so the test does not blame a working proxy for a bad target.
+fn target_level(code: &str) -> bool {
+    matches!(
+        code,
+        "proxy_connect_rejected" | "proxy_connection_failed" | "proxy_dns_failed"
+    )
+}
+
+async fn ensure_proxy_reachable(proxy: &ProxyConfig) -> Result<(), ProxyError> {
+    let url = outbound_proxy::validate_url(&proxy.url)?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| ProxyError::permanent("proxy_invalid"))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| ProxyError::permanent("proxy_invalid"))?;
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::net::TcpStream::connect((host, port)),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => {
+            let message = error.to_string().to_ascii_lowercase();
+            Err(
+                if message.contains("dns")
+                    || message.contains("resolve")
+                    || message.contains("lookup")
+                {
+                    ProxyError::transient("proxy_dns_failed")
+                } else {
+                    ProxyError::transient("proxy_connection_failed")
+                },
+            )
+        }
+        Err(_) => Err(ProxyError::transient("proxy_connection_failed")),
+    }
 }
 
 #[cfg(test)]
@@ -346,6 +396,40 @@ mod tests {
         assert!(validate_test_url("ftp://example.com/").is_err());
         assert!(validate_test_url("https://user:secret@example.com/").is_err());
         assert!(validate_test_url("https://example.com/#fragment").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_reachable_proxy_with_a_missing_target_reports_the_target_not_the_proxy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let proxy = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut header = vec![];
+                    while !header.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0u8; 1];
+                        if stream.read_exact(&mut byte).await.is_err() {
+                            return;
+                        }
+                        header.push(byte[0]);
+                    }
+                    let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+                });
+            }
+        });
+        let config = ProxyConfig {
+            mode: ProxyMode::Custom,
+            url: format!("http://127.0.0.1:{port}"),
+        };
+        let error = probe_url(&config, "https://does-not-exist.invalid/")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "proxy_test_target_unreachable");
+        proxy.abort();
     }
 
     #[tokio::test]
