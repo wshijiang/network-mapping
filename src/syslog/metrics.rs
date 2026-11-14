@@ -260,7 +260,13 @@ pub async fn query(
     query: &StatsQuery,
 ) -> Result<(Summary, Vec<TrendPoint>), Box<dyn std::error::Error + Send + Sync>> {
     let client = pool.get().await?;
-    let target_filter = if query.target_id.is_some() {
+    // 汇总/按源查询只绑定 $1～$3；趋势查询额外绑定粒度 $3，目标过滤为 $4。
+    let summary_target_filter = if query.target_id.is_some() {
+        " AND target_id = $3"
+    } else {
+        ""
+    };
+    let trend_target_filter = if query.target_id.is_some() {
         " AND target_id = $4"
     } else {
         ""
@@ -270,7 +276,7 @@ pub async fn query(
     let summary_sql = format!(
         "SELECT COALESCE(SUM(sent),0)::BIGINT AS sent, COALESCE(SUM(failed),0)::BIGINT AS failed, \
          COALESCE(SUM(dropped),0)::BIGINT AS dropped, MAX(p95_ms) AS p95, MAX(p99_ms) AS p99 \
-         FROM syslog_metric_minute WHERE bucket_start >= $1 AND bucket_start < $2{target_filter}"
+         FROM syslog_metric_minute WHERE bucket_start >= $1 AND bucket_start < $2{summary_target_filter}"
     );
     let mut summary_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
         vec![&query.start, &query.end];
@@ -287,7 +293,7 @@ pub async fn query(
     let source_sql = format!(
         "SELECT e.key AS key, SUM(e.value::BIGINT)::BIGINT AS total \
          FROM syslog_metric_minute m, LATERAL jsonb_each_text(m.by_source) e \
-         WHERE m.bucket_start >= $1 AND m.bucket_start < $2{target_filter} \
+         WHERE m.bucket_start >= $1 AND m.bucket_start < $2{summary_target_filter} \
          GROUP BY e.key"
     );
     let source_rows = client.query(&source_sql, &summary_params).await?;
@@ -319,13 +325,13 @@ pub async fn query(
              SELECT (EXTRACT(EPOCH FROM bucket_start)::BIGINT / $3::BIGINT) * $3::BIGINT AS bucket_start, \
                     SUM(sent)::BIGINT AS sent, SUM(failed)::BIGINT AS failed, SUM(dropped)::BIGINT AS dropped, \
                     MAX(p95_ms) AS p95, MAX(p99_ms) AS p99 \
-             FROM syslog_metric_minute WHERE bucket_start >= $1 AND bucket_start < $2{target_filter} \
+             FROM syslog_metric_minute WHERE bucket_start >= $1 AND bucket_start < $2{trend_target_filter} \
              GROUP BY 1 \
          ), source_agg AS ( \
              SELECT (EXTRACT(EPOCH FROM m.bucket_start)::BIGINT / $3::BIGINT) * $3::BIGINT AS bucket_start, \
                     e.key AS key, SUM(e.value::BIGINT)::BIGINT AS total \
              FROM syslog_metric_minute m, LATERAL jsonb_each_text(m.by_source) e \
-             WHERE m.bucket_start >= $1 AND m.bucket_start < $2{target_filter} \
+             WHERE m.bucket_start >= $1 AND m.bucket_start < $2{trend_target_filter} \
              GROUP BY 1, 2 \
          ) \
          SELECT to_timestamp(b.bucket_start) AS bucket, \

@@ -66,23 +66,15 @@ pub fn hostname() -> &'static str {
     })
 }
 
-/// 编码为 RFC 5424 字节流；总长度不超过 `max_bytes`（按 UTF-8 边界截断 MSG）。
+/// 编码为 RFC 5424 字节流；总长度不超过 `max_bytes`。
+/// 结构化数据按预算纳入（放不下的参数整条丢弃，保证 SD well-formed），
+/// MSG 按 UTF-8 边界截断。
 pub fn render(message: &Message, facility_code: u8, app_name: &str, max_bytes: usize) -> Vec<u8> {
     let priority = facility_code
         .saturating_mul(8)
         .saturating_add(message.severity.code());
-    let structured = if message.sd.is_empty() {
-        "-".to_owned()
-    } else {
-        let params: Vec<String> = message
-            .sd
-            .iter()
-            .map(|(key, value)| format!("{}=\"{}\"", sanitize_key(key), escape_sd_value(value)))
-            .collect();
-        format!("[nm {}]", params.join(" "))
-    };
-    let header = format!(
-        "<{priority}>1 {} {} {} {} {} {structured} ",
+    let base = format!(
+        "<{priority}>1 {} {} {} {} {} ",
         message.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
         hostname(),
         app_name,
@@ -93,6 +85,29 @@ pub fn render(message: &Message, facility_code: u8, app_name: &str, max_bytes: u
             message.msgid
         },
     );
+    // SD 预算：总上限减去固定头与 SD 后的空格；至少容下 "[nm]" 才纳入参数。
+    let sd_budget = max_bytes.saturating_sub(base.len() + 1);
+    let structured = if message.sd.is_empty() {
+        "-".to_owned()
+    } else {
+        let mut block = String::from("[nm");
+        let mut any = false;
+        for (key, value) in &message.sd {
+            let param = format!(" {}=\"{}\"", sanitize_key(key), escape_sd_value(value));
+            if block.len() + param.len() + 1 > sd_budget {
+                break;
+            }
+            block.push_str(&param);
+            any = true;
+        }
+        if any {
+            block.push(']');
+            block
+        } else {
+            "-".to_owned()
+        }
+    };
+    let header = format!("{base}{structured} ");
     let mut output = header.into_bytes();
     let remaining = max_bytes.saturating_sub(output.len());
     let text = &message.text;
@@ -104,6 +119,15 @@ pub fn render(message: &Message, facility_code: u8, app_name: &str, max_bytes: u
             end -= 1;
         }
         output.extend_from_slice(&text.as_bytes()[..end]);
+    }
+    // 兜底：极端配置（超长主机名等）下仍保证不超过上限。
+    if output.len() > max_bytes {
+        let mut end = max_bytes;
+        let as_text = String::from_utf8_lossy(&output);
+        while end > 0 && !as_text.is_char_boundary(end) {
+            end -= 1;
+        }
+        output.truncate(end);
     }
     output
 }
@@ -186,6 +210,23 @@ mod tests {
         let output = render(&item, 16, "app", UDP_MAX_BYTES);
         assert!(output.len() <= UDP_MAX_BYTES);
         assert!(String::from_utf8(output).is_ok());
+    }
+
+    #[test]
+    fn oversized_structured_data_stays_within_limit_and_well_formed() {
+        let mut item = message();
+        item.sd = (0..16)
+            .map(|index| (format!("field{index}"), "长值".repeat(120)))
+            .collect();
+        item.text = "msg".into();
+        let output = render(&item, 16, "app", UDP_MAX_BYTES);
+        assert!(output.len() <= UDP_MAX_BYTES);
+        let text = String::from_utf8(output).unwrap();
+        // 放不下的参数整条丢弃：SD 要么为 NILVALUE，要么以 [nm 开头、] 闭合。
+        assert!(text.contains(" AppLog - msg") || text.contains("[nm "));
+        if let Some(start) = text.find("[nm ") {
+            assert!(text[start..].contains(']'));
+        }
     }
 
     #[test]

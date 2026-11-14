@@ -360,6 +360,10 @@ async fn process(
         for (item, at, id) in batch {
             send_item(&targets, &mut connections, settings, &item, &mut counters).await;
             counters.processed += 1;
+            // 批次内也检查取消，避免慢目标让取消长时间不生效。
+            if counters.processed % 50 == 0 {
+                check_cancel!();
+            }
             cursor_at = at;
             cursor_id = id;
             pace(&counters).await;
@@ -383,6 +387,10 @@ async fn process(
                 send_item(&targets, &mut connections, settings, &item, &mut counters).await;
             }
             counters.processed += 1;
+            // 批次内也检查取消，避免慢目标让取消长时间不生效。
+            if counters.processed % 50 == 0 {
+                check_cancel!();
+            }
             cursor_at = at;
             cursor_id = id;
             pace(&counters).await;
@@ -408,6 +416,10 @@ async fn process(
                 send_item(&targets, &mut connections, settings, &item, &mut counters).await;
             }
             counters.processed += 1;
+            // 批次内也检查取消，避免慢目标让取消长时间不生效。
+            if counters.processed % 50 == 0 {
+                check_cancel!();
+            }
             cursor_at = at;
             cursor_scanner = scanner;
             cursor_event = event_id;

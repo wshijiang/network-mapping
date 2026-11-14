@@ -346,7 +346,14 @@ impl Pipeline {
         let mut target_senders = Vec::new();
         for target in config.targets.iter().filter(|target| target.enabled) {
             let (target_sender, target_receiver) = mpsc::channel(config.queue_capacity);
-            target_senders.push((target.id, target.sources.clone(), target_sender));
+            // 队列满丢弃由 dispatcher 计数，worker 定期汇入分钟指标。
+            let overflow = Arc::new(AtomicU64::new(0));
+            target_senders.push((
+                target.id,
+                target.sources.clone(),
+                target_sender,
+                overflow.clone(),
+            ));
             tasks.spawn(worker(
                 pool.clone(),
                 target.clone(),
@@ -355,6 +362,7 @@ impl Pipeline {
                 config.facility.code(),
                 config.app_name.clone(),
                 stop_receiver.clone(),
+                overflow,
             ));
         }
         tasks.spawn(dispatcher(
@@ -384,9 +392,11 @@ impl Pipeline {
     }
 }
 
+type TargetChannel = (Uuid, Vec<Source>, mpsc::Sender<ForwardItem>, Arc<AtomicU64>);
+
 async fn dispatcher(
     mut receiver: mpsc::Receiver<ForwardItem>,
-    targets: Vec<(Uuid, Vec<Source>, mpsc::Sender<ForwardItem>)>,
+    targets: Vec<TargetChannel>,
     registry: StatusRegistry,
     mut stop: watch::Receiver<bool>,
 ) {
@@ -395,13 +405,14 @@ async fn dispatcher(
             _ = stop.changed() => break,
             maybe = receiver.recv() => match maybe {
                 Some(item) => {
-                    for (id, sources, sender) in &targets {
+                    for (id, sources, sender, overflow) in &targets {
                         // 按目标订阅的日志类型过滤；未订阅的类型不入队也不计丢弃。
                         if !sources.contains(&item.source) {
                             continue;
                         }
                         if sender.try_send(item.clone()).is_err() {
                             registry.add_dropped(*id, 1);
+                            overflow.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
@@ -415,6 +426,7 @@ fn backoff(failures: u32) -> Duration {
     Duration::from_secs(1u64 << failures.min(6))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn worker(
     pool: Pool,
     target: TargetConfig,
@@ -423,6 +435,7 @@ async fn worker(
     facility_code: u8,
     app_name: String,
     mut stop: watch::Receiver<bool>,
+    overflow: Arc<AtomicU64>,
 ) {
     let max_bytes = if target.protocol == Protocol::Udp {
         UDP_MAX_BYTES
@@ -434,15 +447,24 @@ async fn worker(
     let mut next_retry_at: Option<Instant> = None;
     let mut metrics = MinuteMetrics::new(metrics::minute_bucket(Utc::now()));
     registry.set_state(target.id, "connecting");
+    // 空闲时也定期落库当前分钟桶，避免低流量目标的统计与告警长期滞后。
+    let mut idle_tick = tokio::time::interval(Duration::from_secs(15));
+    idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         let item = tokio::select! {
             _ = stop.changed() => break,
+            _ = idle_tick.tick() => {
+                drain_overflow(&overflow, &mut metrics);
+                roll_minute(&pool, target.id, &mut metrics).await;
+                continue;
+            }
             maybe = receiver.recv() => match maybe {
                 Some(item) => item,
                 None => break,
             },
         };
+        drain_overflow(&overflow, &mut metrics);
 
         // 失败退避期内不发起连接；消息按失败计数（失败率告警口径 = 消息丢失率）。
         if let Some(at) = next_retry_at.take() {
@@ -502,7 +524,7 @@ async fn worker(
         roll_minute(&pool, target.id, &mut metrics).await;
     }
 
-    // 停机：队列中剩余消息计为丢弃，聚合器落库。
+    // 停机：队列中剩余消息与溢出丢弃计为丢弃，聚合器落库。
     let mut remaining = 0u64;
     while receiver.try_recv().is_ok() {
         remaining += 1;
@@ -511,6 +533,7 @@ async fn worker(
         metrics.record_dropped(remaining);
         registry.add_dropped(target.id, remaining);
     }
+    drain_overflow(&overflow, &mut metrics);
     if let Err(error) = metrics::flush(&pool, target.id, &mut metrics).await {
         tracing::warn!(
             event = "SyslogMetricsFlushFailed",
@@ -519,6 +542,13 @@ async fn worker(
             error_message = %error,
             "syslog 分钟指标落库失败"
         );
+    }
+}
+
+fn drain_overflow(overflow: &AtomicU64, metrics: &mut MinuteMetrics) {
+    let dropped = overflow.swap(0, Ordering::Relaxed);
+    if dropped > 0 {
+        metrics.record_dropped(dropped);
     }
 }
 
