@@ -332,6 +332,15 @@ pub(in crate::threat_intel) async fn runtime_transport(
     revision: i64,
     key: &str,
 ) -> Result<Resolved> {
+    let network_proxy = crate::network_proxy::GlobalProxyState::system();
+    runtime_transport_with_proxy(pool, revision, key, &network_proxy).await
+}
+pub(in crate::threat_intel) async fn runtime_transport_with_proxy(
+    pool: &Pool,
+    revision: i64,
+    key: &str,
+    network_proxy: &crate::network_proxy::GlobalProxyState,
+) -> Result<Resolved> {
     let mut c = pool.get().await?;
     let tx = c
         .build_transaction()
@@ -347,7 +356,7 @@ pub(in crate::threat_intel) async fn runtime_transport(
         .await?
         .ok_or_else(Error::conflict)?;
     let document: Value = row.get(0);
-    let resolved = if let Some(id) = document.get("llm_provider_id").and_then(Value::as_str) {
+    let mut resolved = if let Some(id) = document.get("llm_provider_id").and_then(Value::as_str) {
         let id = Uuid::parse_str(id).map_err(|_| invalid())?;
         let s = state(&tx, key).await?;
         if s.revision != revision {
@@ -360,14 +369,26 @@ pub(in crate::threat_intel) async fn runtime_transport(
     } else {
         resolve(&Transport::global(), &Transport::default())?
     };
+    apply_platform_proxy(&mut resolved, network_proxy).await?;
     tx.commit().await?;
     Ok(resolved)
 }
+#[cfg(test)]
 pub(super) async fn debug_runtime(
     pool: &Pool,
     id: Uuid,
     model: &str,
     key: &str,
+) -> Result<(Settings, Resolved, String)> {
+    let network_proxy = crate::network_proxy::GlobalProxyState::system();
+    debug_runtime_with_proxy(pool, id, model, key, &network_proxy).await
+}
+pub(super) async fn debug_runtime_with_proxy(
+    pool: &Pool,
+    id: Uuid,
+    model: &str,
+    key: &str,
+    network_proxy: &crate::network_proxy::GlobalProxyState,
 ) -> Result<(Settings, Resolved, String)> {
     let mut c = pool.get().await?;
     let tx = c
@@ -386,6 +407,7 @@ pub(super) async fn debug_runtime(
     let settings = p.settings(model, false)?;
     let mut transport = resolve(&s.global, &p.transport)?;
     transport.provider_id = Some(id);
+    apply_platform_proxy(&mut transport, network_proxy).await?;
     let row = tx
         .query_one(
             "SELECT credential_ciphertext FROM llm_provider WHERE id=$1",
@@ -406,7 +428,17 @@ pub(super) async fn debug_runtime(
     tx.commit().await?;
     Ok((settings, transport, credential))
 }
+#[cfg(test)]
 pub(super) async fn models(pool: &Pool, id: Uuid, key: &str) -> Result<Vec<Model>> {
+    let network_proxy = crate::network_proxy::GlobalProxyState::system();
+    models_with_proxy(pool, id, key, &network_proxy).await
+}
+pub(super) async fn models_with_proxy(
+    pool: &Pool,
+    id: Uuid,
+    key: &str,
+    network_proxy: &crate::network_proxy::GlobalProxyState,
+) -> Result<Vec<Model>> {
     let mut c = pool.get().await?;
     let tx = c
         .build_transaction()
@@ -419,7 +451,8 @@ pub(super) async fn models(pool: &Pool, id: Uuid, key: &str) -> Result<Vec<Model
     if p.models_url.is_empty() {
         return Err(Error::bad("llm_models_url_required"));
     }
-    let resolved = resolve(&s.global, &p.transport)?;
+    let mut resolved = resolve(&s.global, &p.transport)?;
+    apply_platform_proxy(&mut resolved, network_proxy).await?;
     let row = tx
         .query_one(
             "SELECT credential_ciphertext FROM llm_provider WHERE id=$1",

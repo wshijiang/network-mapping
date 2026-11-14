@@ -7,6 +7,7 @@ pub mod health;
 pub mod login_allowlist;
 pub mod login_record;
 pub mod mail_template;
+pub mod network;
 pub mod open_source;
 pub mod operations;
 pub mod report_mail_assets;

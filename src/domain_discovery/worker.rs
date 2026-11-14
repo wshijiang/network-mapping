@@ -1,17 +1,23 @@
 use super::*;
+use crate::network_proxy::GlobalProxyState;
+use crate::outbound_proxy::settings;
+use crate::outbound_proxy::settings::{DOMAIN_DISCOVERY_SCOPE, SettingsError};
 use crate::system_maintenance::SystemMaintenanceState;
 use std::time::Duration;
 
-pub async fn run(
+pub(crate) async fn run(
     pool: Pool,
     es: ElasticsearchService,
     maintenance: actix_web::web::Data<SystemMaintenanceState>,
     encryption_key: String,
+    network_proxy: GlobalProxyState,
 ) {
     loop {
         if !maintenance.snapshot().await.enabled
             && es.enabled()
-            && process_one(&pool, &es, &encryption_key).await.is_err()
+            && process_one(&pool, &es, &encryption_key, &network_proxy)
+                .await
+                .is_err()
         {
             tracing::warn!(
                 event = "DomainDiscoveryWorkerFailed",
@@ -25,6 +31,7 @@ pub(super) async fn process_one(
     pool: &Pool,
     es: &ElasticsearchService,
     encryption_key: &str,
+    network_proxy: &GlobalProxyState,
 ) -> Result<bool> {
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
@@ -41,11 +48,25 @@ pub(super) async fn process_one(
     tx.execute("UPDATE domain_discovery_job SET status='running',attempts=attempts+1,claim_token=$2,lease_until=NOW()+INTERVAL '3 minutes',updated_at=NOW() WHERE id=$1", &[&id,&token]).await?;
     tx.commit().await?;
     drop(c);
-    let settings = settings::load(pool).await?;
-    let proxy = match settings.proxy_config(encryption_key) {
+    let stored = match settings::load(pool, DOMAIN_DISCOVERY_SCOPE).await {
+        Ok(stored) => stored,
+        Err(SettingsError::Database) => return Err(Error::from(SettingsError::Database)),
+        Err(error) => {
+            fail(pool, id, token, error.code()).await?;
+            return Ok(true);
+        }
+    };
+    let local = match stored.proxy_config(encryption_key) {
         Ok(proxy) => proxy,
         Err(error) => {
-            fail(pool, id, token, error.reason()).await?;
+            fail(pool, id, token, error.code).await?;
+            return Ok(true);
+        }
+    };
+    let proxy = match network_proxy.resolve(&local).await {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            fail(pool, id, token, error.code).await?;
             return Ok(true);
         }
     };

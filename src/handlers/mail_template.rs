@@ -255,6 +255,7 @@ pub async fn restore_mail_template_version(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[post("/api/mail/templates/{template_key}/test")]
 pub async fn test_mail_template(
     req: HttpRequest,
@@ -263,6 +264,7 @@ pub async fn test_mail_template(
     options: web::Query<TemplateSampleOptions>,
     pool: web::Data<Pool>,
     server_config: web::Data<ServerConfig>,
+    network_proxy: web::Data<crate::network_proxy::GlobalProxyState>,
     user: UserBaseI,
 ) -> impl Responder {
     if let Err(response) = require_admin(&user) {
@@ -285,6 +287,7 @@ pub async fn test_mail_template(
         body.recipient.trim(),
         &body.source,
         options.notification_state,
+        &network_proxy,
     )
     .await
     {

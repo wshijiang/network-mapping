@@ -58,47 +58,12 @@ pub(super) fn http_client(proxy: &ProxyConfig) -> std::result::Result<Client, So
         .map_err(|_| SourceError::permanent("proxy_invalid"))
 }
 
-/// reqwest does not expose typed proxy failures. Inspect the local cause chain
-/// for stable classifications only; raw messages never leave this function.
+/// reqwest does not expose typed proxy failures. The shared classifier keeps
+/// stable codes without allowing raw upstream messages to escape.
 fn classify_transport(error: &reqwest::Error, proxy_mode: ProxyMode) -> SourceError {
-    use std::error::Error as _;
-
-    if error.is_timeout() {
-        return SourceError::transient("source_timeout");
-    }
-    let mut messages = Vec::new();
-    let mut current = error.source();
-    while let Some(cause) = current {
-        messages.push(cause.to_string().to_ascii_lowercase());
-        current = cause.source();
-    }
-    let chain = messages.join(" | ");
-    let custom = proxy_mode == ProxyMode::Custom;
-    if chain.contains("proxy authorization required")
-        || (custom && chain.contains("authentication"))
-    {
-        return SourceError::permanent("proxy_authentication_failed");
-    }
-    if chain.contains("certificate") {
-        if custom && (chain.contains("tunnel") || chain.contains("proxy")) {
-            return SourceError::permanent("proxy_tls_error");
-        }
-        return SourceError::permanent("source_tls_error");
-    }
-    if custom {
-        if chain.contains("dns") || chain.contains("resolve") || chain.contains("lookup") {
-            return SourceError::transient("proxy_dns_failed");
-        }
-        if chain.contains("tunnel error") {
-            return if chain.contains("unsuccessful") {
-                SourceError::transient("proxy_connect_rejected")
-            } else {
-                SourceError::transient("proxy_connection_failed")
-            };
-        }
-        return SourceError::transient("proxy_connection_failed");
-    }
-    SourceError::transient("source_transport")
+    SourceError::from(crate::outbound_proxy::classify_request_error(
+        error, proxy_mode,
+    ))
 }
 
 async fn bytes(

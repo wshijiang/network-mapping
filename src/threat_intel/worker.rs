@@ -1,22 +1,25 @@
 use super::*;
+use crate::network_proxy::GlobalProxyState;
 use std::time::Duration;
 use storage::Source;
 use tracing::Instrument;
 
-pub async fn run(
+pub(crate) async fn run(
     pool: Pool,
     maintenance: actix_web::web::Data<crate::system_maintenance::SystemMaintenanceState>,
     encryption_key: String,
+    network_proxy: GlobalProxyState,
 ) {
     let sources = pool.clone();
     let ai = pool;
     let source_maintenance = maintenance.clone();
     let source_key = encryption_key.clone();
+    let source_proxy = network_proxy.clone();
     tokio::join!(
         async move {
             loop {
                 if !source_maintenance.snapshot().await.enabled {
-                    match source_tick(&sources, &source_key).await {
+                    match source_tick_with_proxy(&sources, &source_key, &source_proxy).await {
                         Ok(true) => continue,
                         Ok(false) => {}
                         Err(e) => {
@@ -30,7 +33,7 @@ pub async fn run(
         async move {
             loop {
                 if !maintenance.snapshot().await.enabled
-                    && let Err(e) = ai_tick(&ai, &encryption_key).await
+                    && let Err(e) = ai_tick_with_proxy(&ai, &encryption_key, &network_proxy).await
                 {
                     tracing::warn!(event = "IntelAiWorkerFailed", code = e.code, diagnostic=%e.diagnostic);
                 }
@@ -39,7 +42,16 @@ pub async fn run(
         }
     );
 }
+#[cfg(test)]
 pub(super) async fn source_tick(pool: &Pool, encryption_key: &str) -> Result<bool> {
+    let network_proxy = GlobalProxyState::system();
+    source_tick_with_proxy(pool, encryption_key, &network_proxy).await
+}
+pub(super) async fn source_tick_with_proxy(
+    pool: &Pool,
+    encryption_key: &str,
+    network_proxy: &GlobalProxyState,
+) -> Result<bool> {
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
     tx.execute("UPDATE intel_sync_run SET status='failed',error_code='intel_attempts_exhausted',finished_at=NOW() WHERE status='running' AND lease_until<NOW() AND attempts>=3",&[]).await?;
@@ -66,12 +78,13 @@ pub(super) async fn source_tick(pool: &Pool, encryption_key: &str) -> Result<boo
     drop(c);
     let result = tokio::time::timeout(
         Duration::from_secs(150),
-        sync(
+        sync_with_proxy(
             pool,
             source_id,
             revision,
             Some(storage::Fence::Sync(id, token)),
             encryption_key,
+            network_proxy,
         ),
     )
     .await
@@ -135,12 +148,24 @@ pub(super) async fn finish_source_run(
     tx.commit().await?;
     Ok(())
 }
+#[cfg(test)]
 pub(super) async fn sync(
     pool: &Pool,
     id: Uuid,
     revision: i64,
     fence: Option<storage::Fence>,
     encryption_key: &str,
+) -> Result<(Value, bool)> {
+    let network_proxy = GlobalProxyState::system();
+    sync_with_proxy(pool, id, revision, fence, encryption_key, &network_proxy).await
+}
+pub(super) async fn sync_with_proxy(
+    pool: &Pool,
+    id: Uuid,
+    revision: i64,
+    fence: Option<storage::Fence>,
+    encryption_key: &str,
+    network_proxy: &GlobalProxyState,
 ) -> Result<(Value, bool)> {
     let mut s = storage::get_source(pool, id).await?;
     s.fence = fence;
@@ -153,7 +178,7 @@ pub(super) async fn sync(
     if s.input.kind == "article" {
         return Err(Error::bad("intel_article_submission_required"));
     }
-    let data = client::source_bytes(&s, encryption_key).await?;
+    let data = client::source_bytes_with_proxy(&s, encryption_key, network_proxy).await?;
     match s.input.kind.as_str() {
         "mitre_stix" => Ok((
             json!({"entities":storage::import_stix(pool,&s,&data).await?,"dataset_hash":digest(&data)}),
@@ -176,7 +201,7 @@ pub(super) async fn sync(
                 false,
             ))
         }
-        "eset_github" => github(pool, &s, &data, encryption_key).await,
+        "eset_github" => github(pool, &s, &data, encryption_key, network_proxy).await,
         kind => {
             let (entries, validation) = if kind == "threatfox" {
                 parse::threatfox_document(&data, kind, true)?
@@ -197,6 +222,7 @@ async fn github(
     s: &Source,
     data: &[u8],
     encryption_key: &str,
+    network_proxy: &GlobalProxyState,
 ) -> Result<(Value, bool)> {
     let tree: Value =
         serde_json::from_slice(data).map_err(|_| Error::bad("intel_invalid_github_tree"))?;
@@ -284,6 +310,7 @@ async fn github(
             MAX_BYTES,
             Duration::from_secs(30),
             encryption_key,
+            network_proxy,
         )
         .await?;
         let (count, supported, report) = github_file(pool, s, path, sha, &data).await?;
@@ -376,7 +403,16 @@ pub(super) async fn github_file(
     Ok((added, supported, validation))
 }
 
+#[cfg(test)]
 pub(super) async fn ai_tick(pool: &Pool, encryption_key: &str) -> Result<bool> {
+    let network_proxy = GlobalProxyState::system();
+    ai_tick_with_proxy(pool, encryption_key, &network_proxy).await
+}
+pub(super) async fn ai_tick_with_proxy(
+    pool: &Pool,
+    encryption_key: &str,
+    network_proxy: &GlobalProxyState,
+) -> Result<bool> {
     let (settings, settings_revision) = storage::settings(pool).await?;
     let mut c = pool.get().await?;
     let tx = c.transaction().await?;
@@ -407,6 +443,7 @@ pub(super) async fn ai_tick(pool: &Pool, encryption_key: &str) -> Result<bool> {
             settings: &settings,
             revision: settings_revision,
             encryption_key,
+            network_proxy,
         },
         token,
     )
@@ -459,6 +496,7 @@ struct AiConfig<'a> {
     settings: &'a Settings,
     revision: i64,
     encryption_key: &'a str,
+    network_proxy: &'a GlobalProxyState,
 }
 #[derive(Serialize)]
 struct ExtractionSummary {
@@ -491,6 +529,7 @@ async fn extract(
             settings,
             revision: settings_revision,
             encryption_key,
+            network_proxy,
         } = config;
         let mut source = storage::get_source(pool, source_id).await?;
         source.fence = Some(storage::Fence::Article(id, token));
@@ -528,6 +567,7 @@ async fn extract(
                 2 * 1024 * 1024,
                 Duration::from_secs(30),
                 encryption_key,
+                network_proxy,
             )
             .await?;
             stage = "article_parse";
@@ -561,7 +601,13 @@ async fn extract(
         if !storage::settings(pool).await?.0.ai_enabled {
             return Err(Error::bad("intel_ai_disabled"));
         }
-        let transport = llm::runtime_transport(pool, settings_revision, encryption_key).await?;
+        let transport = llm::runtime_transport_with_proxy(
+            pool,
+            settings_revision,
+            encryption_key,
+            network_proxy,
+        )
+        .await?;
         let key = storage::ai_credential(pool, settings, settings_revision, encryption_key).await?;
         let blocks = evidence::Document::new(&body).prompt_blocks();
         stage = "ai_request";

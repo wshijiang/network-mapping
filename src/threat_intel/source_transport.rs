@@ -133,6 +133,12 @@ impl RequestConfig {
             _ => Err(Error::bad("intel_invalid_proxy")),
         }
     }
+    pub fn with_proxy(&self, proxy: &crate::outbound_proxy::ProxyConfig) -> Self {
+        let mut out = self.clone();
+        out.proxy_mode = proxy.mode.as_str().to_owned();
+        out.proxy_url = proxy.url.clone();
+        out
+    }
     pub fn encrypt(&self, key: &str) -> Result<Vec<u8>> {
         let value = serde_json::to_string(self).map_err(|_| Error::unavailable())?;
         crate::notification::encrypt(&value, key)

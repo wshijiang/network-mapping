@@ -3,6 +3,7 @@
 //! The gateway issues protobuf frames rather than ordinary JSON WebSocket
 //! messages. No gateway URL, event payload, or credential is ever logged.
 use super::{ChannelSettings, FeishuTargetType, feishu_binding};
+use crate::network_proxy::GlobalProxyState;
 use crate::outbound_proxy::{ProxyConfig, ProxyMode};
 use deadpool_postgres::Pool;
 use futures_util::{SinkExt, StreamExt};
@@ -69,61 +70,111 @@ struct Active {
 }
 
 /// Reconcile configured app connections. Multiple channels can share an app
-/// only when they agree on credentials and network settings.
-pub(crate) async fn run(pool: Pool, key: String, mut shutdown: watch::Receiver<bool>) {
+/// only when they agree on credentials and network settings. A global proxy
+/// revision triggers an immediate reconciliation so long-lived WebSockets
+/// disconnect and reconnect with the effective proxy.
+pub(crate) async fn run(
+    pool: Pool,
+    key: String,
+    mut shutdown: watch::Receiver<bool>,
+    network_proxy: GlobalProxyState,
+) {
     let replies = tokio::spawn(run_replies(pool.clone(), key.clone()));
     let mut active: HashMap<String, Active> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut proxy_revisions = network_proxy.subscribe();
     loop {
-        tokio::select! {
+        let reconcile = tokio::select! {
             _ = shutdown.changed() => break,
-            _ = tick.tick() => {
-                let Ok(client) = pool.get().await else { continue };
-                let rows = match client.query("SELECT c.settings,c.feishu_app_secret_ciphertext,c.proxy_mode,c.proxy_ciphertext FROM notification_channel c WHERE c.provider='feishu' AND c.deleted_at IS NULL AND c.settings->>'feishu_bot_type'='app' AND (c.settings->>'feishu_target_type'='user' OR EXISTS(SELECT 1 FROM feishu_binding_request b WHERE b.channel_id=c.id AND b.status='pending' AND b.expires_at>NOW())) ORDER BY c.id", &[]).await {
-                    Ok(rows) => rows,
-                    Err(_) => continue,
-                };
-                let mut desired: HashMap<String, Option<AppConfig>> = HashMap::new();
-                for row in rows {
-                    let Ok(settings) = serde_json::from_value::<ChannelSettings>(row.get("settings")) else { continue };
-                    let Some(ciphertext) = row.get::<_,Option<Vec<u8>>>("feishu_app_secret_ciphertext") else { continue };
-                    let Ok(secret) = super::decrypt(&ciphertext, &key) else { continue };
-                    let Ok(mode) = row.get::<_,String>("proxy_mode").parse::<ProxyMode>() else { continue };
-                    let proxy_bytes: Option<Vec<u8>> = row.get("proxy_ciphertext");
-                    let Ok(proxy) = super::decrypted_proxy(mode, proxy_bytes.as_deref(), &key) else { continue };
-                    let config = AppConfig { app_id: settings.feishu_app_id.clone(), secret, proxy_mode: mode, proxy_url: proxy.url };
-                    match desired.entry(settings.feishu_app_id) {
-                        std::collections::hash_map::Entry::Vacant(entry) => { entry.insert(Some(config)); }
-                        std::collections::hash_map::Entry::Occupied(mut entry) => {
-                            if entry.get().as_ref().is_some_and(|old| old != &config) { entry.insert(None); }
-                        }
-                    }
-                }
-                drop(client);
-                active.retain(|app, task| {
-                    let keep = desired.get(app).and_then(Option::as_ref).is_some_and(|new| *new == task.config) && !task.handle.is_finished();
-                    if !keep { task.handle.abort(); }
-                    keep
-                });
-                for (app, config) in desired {
-                    let Some(config) = config else {
-                        if let Ok(client) = pool.get().await {
-                            let _ = client.execute("INSERT INTO feishu_binding_connection(app_id,state) VALUES($1,'conflict') ON CONFLICT(app_id) DO UPDATE SET state='conflict',updated_at=NOW() WHERE feishu_binding_connection.lease_until IS NULL OR feishu_binding_connection.lease_until<NOW()", &[&app]).await;
-                        }
-                        continue;
-                    };
-                    active.entry(app).or_insert_with(|| {
-                        let handle = tokio::spawn(run_app(pool.clone(), key.clone(), config.clone()));
-                        Active { config, handle }
-                    });
-                }
+            changed = proxy_revisions.changed() => {
+                if changed.is_err() { break; }
+                true
             }
+            _ = tick.tick() => true,
+        };
+        if reconcile {
+            reconcile_connections(&pool, &key, &network_proxy, &mut active).await;
         }
     }
     replies.abort();
     for (_, task) in active {
         task.handle.abort();
+    }
+}
+
+async fn reconcile_connections(
+    pool: &Pool,
+    key: &str,
+    network_proxy: &GlobalProxyState,
+    active: &mut HashMap<String, Active>,
+) {
+    let Ok(client) = pool.get().await else { return };
+    let rows = match client.query("SELECT c.settings,c.feishu_app_secret_ciphertext,c.proxy_mode,c.proxy_ciphertext FROM notification_channel c WHERE c.provider='feishu' AND c.deleted_at IS NULL AND c.settings->>'feishu_bot_type'='app' AND (c.settings->>'feishu_target_type'='user' OR EXISTS(SELECT 1 FROM feishu_binding_request b WHERE b.channel_id=c.id AND b.status='pending' AND b.expires_at>NOW())) ORDER BY c.id", &[]).await {
+        Ok(rows) => rows,
+        Err(_) => return,
+    };
+    let mut desired: HashMap<String, Option<AppConfig>> = HashMap::new();
+    for row in rows {
+        let Ok(settings) = serde_json::from_value::<ChannelSettings>(row.get("settings")) else {
+            continue;
+        };
+        let Some(ciphertext) = row.get::<_, Option<Vec<u8>>>("feishu_app_secret_ciphertext") else {
+            continue;
+        };
+        let Ok(secret) = super::decrypt(&ciphertext, key) else {
+            continue;
+        };
+        let Ok(mode) = row.get::<_, String>("proxy_mode").parse::<ProxyMode>() else {
+            continue;
+        };
+        let proxy_bytes: Option<Vec<u8>> = row.get("proxy_ciphertext");
+        let Ok(proxy) = super::decrypted_proxy(mode, proxy_bytes.as_deref(), key) else {
+            continue;
+        };
+        let Ok(proxy) = network_proxy.resolve(&proxy).await else {
+            continue;
+        };
+        let config = AppConfig {
+            app_id: settings.feishu_app_id.clone(),
+            secret,
+            proxy_mode: proxy.mode,
+            proxy_url: proxy.url,
+        };
+        match desired.entry(settings.feishu_app_id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(Some(config));
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry.get().as_ref().is_some_and(|old| old != &config) {
+                    entry.insert(None);
+                }
+            }
+        }
+    }
+    drop(client);
+    active.retain(|app, task| {
+        let keep = desired
+            .get(app)
+            .and_then(Option::as_ref)
+            .is_some_and(|new| *new == task.config)
+            && !task.handle.is_finished();
+        if !keep {
+            task.handle.abort();
+        }
+        keep
+    });
+    for (app, config) in desired {
+        let Some(config) = config else {
+            if let Ok(client) = pool.get().await {
+                let _ = client.execute("INSERT INTO feishu_binding_connection(app_id,state) VALUES($1,'conflict') ON CONFLICT(app_id) DO UPDATE SET state='conflict',updated_at=NOW() WHERE feishu_binding_connection.lease_until IS NULL OR feishu_binding_connection.lease_until<NOW()", &[&app]).await;
+            }
+            continue;
+        };
+        active.entry(app).or_insert_with(|| {
+            let handle = tokio::spawn(run_app(pool.clone(), key.to_owned(), config.clone()));
+            Active { config, handle }
+        });
     }
 }
 

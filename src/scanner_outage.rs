@@ -10,6 +10,7 @@ use tracing::{error, warn};
 
 use crate::admin::get_mail_settings_from_database;
 use crate::mail_template::{ScannerOutageMail, get_admin_recipients, send_scanner_outage_email};
+use crate::network_proxy::GlobalProxyState;
 use crate::system_maintenance::SystemMaintenanceState;
 
 /// Called inside the scanner-state transaction, after a valid heartbeat updates scanner_info.
@@ -72,11 +73,20 @@ pub async fn run_worker(
     encryption_key: String,
     maintenance: actix_web::web::Data<SystemMaintenanceState>,
     policy: RuntimeConfig<ScannerHealthConfig>,
+    network_proxy: GlobalProxyState,
 ) {
     let mut revisions = policy.subscribe();
     loop {
         let current = policy.get().await.value;
-        if let Err(error_value) = run_once(&pool, &encryption_key, &maintenance, &current).await {
+        if let Err(error_value) = run_once(
+            &pool,
+            &encryption_key,
+            &maintenance,
+            &current,
+            &network_proxy,
+        )
+        .await
+        {
             error!(event = "ScannerOutageWorkerError", error = %error_value, "扫描器掉线通知处理失败");
         }
         tokio::select! {
@@ -91,6 +101,7 @@ pub(crate) async fn run_once(
     encryption_key: &str,
     maintenance: &SystemMaintenanceState,
     policy: &ScannerHealthConfig,
+    network_proxy: &GlobalProxyState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let snapshot = maintenance.snapshot().await;
     if snapshot.enabled
@@ -160,7 +171,7 @@ pub(crate) async fn run_once(
         return Ok(());
     }
     for _ in 0..20 {
-        if !send_next(pool, encryption_key).await? {
+        if !send_next(pool, encryption_key, network_proxy).await? {
             break;
         }
     }
@@ -263,6 +274,7 @@ async fn enqueue_recoveries(pool: &Pool) -> Result<(), Box<dyn std::error::Error
 async fn send_next(
     pool: &Pool,
     encryption_key: &str,
+    network_proxy: &GlobalProxyState,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let connection = pool.get().await?;
     let row = connection
@@ -346,7 +358,7 @@ async fn send_next(
         last_seen_at,
         event_at,
     };
-    let result = send_scanner_outage_email(pool, encryption_key, &recipient, &mail)
+    let result = send_scanner_outage_email(pool, encryption_key, &recipient, &mail, network_proxy)
         .await
         .map_err(|error| error.to_string());
     let connection = pool.get().await?;

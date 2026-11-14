@@ -1,13 +1,15 @@
 use super::*;
+use crate::network_proxy::GlobalProxyState;
 use crate::system_maintenance::SystemMaintenanceState;
 use std::time::Duration;
 use tokio::sync::watch;
 
-pub async fn run(
+pub(crate) async fn run(
     pool: Pool,
     key: String,
     maintenance: actix_web::web::Data<SystemMaintenanceState>,
     mut stopping: watch::Receiver<bool>,
+    network_proxy: GlobalProxyState,
 ) {
     let client = match feishu::client() {
         Ok(client) => client,
@@ -35,7 +37,7 @@ pub async fn run(
                 if maintenance.snapshot().await.enabled {
                     break;
                 }
-                match deliver_one(&pool, &key, &client).await {
+                match deliver_one(&pool, &key, &client, &network_proxy).await {
                     Ok(true) => {}
                     Ok(false) => break,
                     Err(_) => {
@@ -218,7 +220,12 @@ pub(super) async fn claim(pool: &Pool) -> Result<ClaimOutcome> {
     Ok(ClaimOutcome::Ready(Box::new(result)))
 }
 
-pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client) -> Result<bool> {
+pub(crate) async fn deliver_one(
+    pool: &Pool,
+    key: &str,
+    client: &reqwest::Client,
+    network_proxy: &GlobalProxyState,
+) -> Result<bool> {
     let claimed = match claim(pool).await? {
         ClaimOutcome::Empty => return Ok(false),
         ClaimOutcome::Processed => return Ok(true),
@@ -237,15 +244,19 @@ pub(crate) async fn deliver_one(pool: &Pool, key: &str, client: &reqwest::Client
                     Ok(proxy) => proxy,
                     Err(_) => return Ok(Outcome::failure("secret_unavailable", false)),
                 };
-            let delivery_client =
-                if claimed.proxy_mode == ProxyMode::System || claimed.provider == "email" {
-                    client.clone()
-                } else {
-                    match proxy.http_client() {
-                        Ok(client) => client,
-                        Err(e) => return Ok(Outcome::failure(e.code, e.retryable)),
-                    }
-                };
+            let proxy = match network_proxy.resolve(&proxy).await {
+                Ok(proxy) => proxy,
+                Err(error) => return Ok(Outcome::failure(error.code, error.retryable)),
+            };
+            let delivery_client = if proxy.mode == ProxyMode::System || claimed.provider == "email"
+            {
+                client.clone()
+            } else {
+                match proxy.http_client() {
+                    Ok(client) => client,
+                    Err(e) => return Ok(Outcome::failure(e.code, e.retryable)),
+                }
+            };
             let outcome = match claimed.provider.as_str() {
                 "feishu" | "telegram" => {
                     match templates::delivery_payload(

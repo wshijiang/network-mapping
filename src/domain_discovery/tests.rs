@@ -1,4 +1,6 @@
 use super::*;
+use crate::outbound_proxy::settings;
+use crate::outbound_proxy::settings::DOMAIN_DISCOVERY_SCOPE;
 use crate::outbound_proxy::{ProxyConfig, ProxyMode};
 
 #[test]
@@ -413,7 +415,7 @@ async fn proxy_settings_encrypt_retain_and_reuse_credentials() {
     .await
     .unwrap();
     c.batch_execute(include_str!(
-        "../../source/database/migrate_domain_discovery_proxy.sql"
+        "../../source/database/migrate_outbound_proxy_settings.sql"
     ))
     .await
     .unwrap();
@@ -448,6 +450,7 @@ async fn proxy_settings_encrypt_retain_and_reuse_credentials() {
     let url = "socks5h://user:secret@proxy.example.com:1080";
     let first = settings::save(
         &pool,
+        DOMAIN_DISCOVERY_SCOPE,
         &key,
         settings::SettingsInput {
             expected_revision: 1,
@@ -457,9 +460,11 @@ async fn proxy_settings_encrypt_retain_and_reuse_credentials() {
         },
         &user,
         &context,
+        "domain.discovery_proxy_update",
     )
     .await
-    .unwrap();
+    .unwrap()
+    .public();
     let first = serde_json::to_value(first).unwrap();
     assert_eq!(first["proxy_mode"], "custom");
     assert_eq!(first["proxy_configured"], true);
@@ -469,7 +474,7 @@ async fn proxy_settings_encrypt_retain_and_reuse_credentials() {
     assert!(!first.to_string().contains("secret"));
     let stored: Option<Vec<u8>> = c
         .query_one(
-            "SELECT proxy_ciphertext FROM domain_discovery_settings WHERE singleton",
+            "SELECT proxy_ciphertext FROM outbound_proxy_settings WHERE scope='domain_discovery'",
             &[],
         )
         .await
@@ -477,7 +482,7 @@ async fn proxy_settings_encrypt_retain_and_reuse_credentials() {
         .get(0);
     assert!(!stored.unwrap().windows(6).any(|window| window == b"secret"));
     assert_eq!(
-        settings::load(&pool)
+        settings::load(&pool, DOMAIN_DISCOVERY_SCOPE)
             .await
             .unwrap()
             .proxy_config(&key)
@@ -487,6 +492,7 @@ async fn proxy_settings_encrypt_retain_and_reuse_credentials() {
     );
     let direct = settings::save(
         &pool,
+        DOMAIN_DISCOVERY_SCOPE,
         &key,
         settings::SettingsInput {
             expected_revision: 2,
@@ -496,19 +502,22 @@ async fn proxy_settings_encrypt_retain_and_reuse_credentials() {
         },
         &user,
         &context,
+        "domain.discovery_proxy_update",
     )
     .await
-    .unwrap();
+    .unwrap()
+    .public();
     let direct = serde_json::to_value(direct).unwrap();
     assert_eq!(direct["proxy_mode"], "direct");
     assert_eq!(direct["proxy_configured"], true);
     assert_eq!(direct["revision"], 3);
-    let loaded = settings::load(&pool).await.unwrap();
+    let loaded = settings::load(&pool, DOMAIN_DISCOVERY_SCOPE).await.unwrap();
     let config = loaded.proxy_config(&key).unwrap();
     assert_eq!(config.mode, ProxyMode::Direct);
     assert!(config.url.is_empty());
     let resumed = settings::save(
         &pool,
+        DOMAIN_DISCOVERY_SCOPE,
         &key,
         settings::SettingsInput {
             expected_revision: 3,
@@ -518,12 +527,14 @@ async fn proxy_settings_encrypt_retain_and_reuse_credentials() {
         },
         &user,
         &context,
+        "domain.discovery_proxy_update",
     )
     .await
-    .unwrap();
+    .unwrap()
+    .public();
     assert_eq!(serde_json::to_value(resumed).unwrap()["revision"], 4);
     assert_eq!(
-        settings::load(&pool)
+        settings::load(&pool, DOMAIN_DISCOVERY_SCOPE)
             .await
             .unwrap()
             .proxy_config(&key)
@@ -532,16 +543,17 @@ async fn proxy_settings_encrypt_retain_and_reuse_credentials() {
         url
     );
     assert_eq!(
-        settings::load(&pool)
+        settings::load(&pool, DOMAIN_DISCOVERY_SCOPE)
             .await
             .unwrap()
             .proxy_config(&other_key)
             .unwrap_err()
-            .reason(),
+            .code,
         "proxy_configuration_unavailable"
     );
     let conflict = settings::save(
         &pool,
+        DOMAIN_DISCOVERY_SCOPE,
         &key,
         settings::SettingsInput {
             expected_revision: 1,
@@ -551,10 +563,11 @@ async fn proxy_settings_encrypt_retain_and_reuse_credentials() {
         },
         &user,
         &context,
+        "domain.discovery_proxy_update",
     )
     .await
     .unwrap_err();
-    assert_eq!(conflict.reason(), "settings_revision_conflict");
+    assert_eq!(conflict.code(), "settings_revision_conflict");
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
         .unwrap();

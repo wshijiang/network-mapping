@@ -1957,7 +1957,13 @@ async fn worker_drains_expired_backlog_before_waiting_for_the_next_poll() {
             .unwrap(),
     );
     let (stop, stopping) = tokio::sync::watch::channel(false);
-    let worker = tokio::spawn(super::run(pool.clone(), key(), maintenance, stopping));
+    let worker = tokio::spawn(super::run(
+        pool.clone(),
+        key(),
+        maintenance,
+        stopping,
+        crate::network_proxy::GlobalProxyState::system(),
+    ));
     let drained = tokio::time::timeout(Duration::from_secs(4), async {
         loop {
             let status: String = pool
@@ -2048,6 +2054,7 @@ async fn worker_pauses_new_claims_when_maintenance_starts_during_a_batch() {
         key(),
         maintenance.clone(),
         stopping,
+        crate::network_proxy::GlobalProxyState::system(),
     ));
     let blocked = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -2748,7 +2755,14 @@ async fn proxies_are_private_preserved_and_do_not_change_recipient_revision() {
             );
             assert_eq!(transport.1, 465);
             assert_eq!(
-                email_proxy(&pool, &key()).await.unwrap().url,
+                email_proxy(
+                    &pool,
+                    &key(),
+                    &crate::network_proxy::GlobalProxyState::system(),
+                )
+                .await
+                .unwrap()
+                .url,
                 "socks5h://user:proxy-secret@proxy.example.com:1080"
             );
         }
@@ -2789,7 +2803,14 @@ async fn proxies_are_private_preserved_and_do_not_change_recipient_revision() {
         assert_eq!(direct.proxy_mode, ProxyMode::Direct);
         if provider == "email" {
             assert_eq!(
-                email_proxy(&pool, &key()).await.unwrap().mode,
+                email_proxy(
+                    &pool,
+                    &key(),
+                    &crate::network_proxy::GlobalProxyState::system(),
+                )
+                .await
+                .unwrap()
+                .mode,
                 ProxyMode::Direct
             );
         }

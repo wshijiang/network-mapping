@@ -282,6 +282,27 @@ pub(in crate::threat_intel) struct Resolved {
     pub session_value: String,
     pub stream: bool,
 }
+/// A resolved LLM transport still using `system` follows the platform-wide
+/// proxy. Provider `inherit` has already been resolved to the LLM global.
+pub(super) async fn apply_platform_proxy(
+    resolved: &mut Resolved,
+    network_proxy: &crate::network_proxy::GlobalProxyState,
+) -> Result<()> {
+    if resolved.proxy_mode != "system" {
+        return Ok(());
+    }
+    let local = crate::outbound_proxy::ProxyConfig {
+        mode: crate::outbound_proxy::ProxyMode::System,
+        url: String::new(),
+    };
+    let effective = network_proxy
+        .resolve(&local)
+        .await
+        .map_err(|error| Error::bad(error.code))?;
+    resolved.proxy_mode = effective.mode.as_str().to_owned();
+    resolved.proxy_url = effective.url;
+    Ok(())
+}
 pub(super) fn resolve(global: &Transport, local: &Transport) -> Result<Resolved> {
     let proxy = if local.proxy_mode == "inherit" {
         global

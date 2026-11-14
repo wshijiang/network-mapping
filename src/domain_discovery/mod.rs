@@ -1,7 +1,6 @@
 //! Passive certificate discovery. Evidence stays separate from DNS observations.
 mod client;
 mod routes;
-mod settings;
 #[cfg(test)]
 mod tests;
 mod worker;
@@ -20,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 pub use routes::configure;
-pub use worker::run;
+pub(crate) use worker::run;
 pub const MAX_NAMES: usize = 5000;
 pub const MAX_CERTIFICATES: usize = 50;
 pub const MAX_EVIDENCE_NAMES: usize = 10_000;
@@ -50,25 +49,25 @@ impl Error {
             code: "discovery_not_found",
         }
     }
-    fn internal(code: &'static str) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code,
-        }
-    }
-    fn conflict(code: &'static str) -> Self {
-        Self {
-            status: StatusCode::CONFLICT,
-            code,
-        }
-    }
-    pub(super) fn reason(&self) -> &'static str {
-        self.code
-    }
 }
 impl From<tokio_postgres::Error> for Error {
     fn from(_: tokio_postgres::Error) -> Self {
         Self::unavailable()
+    }
+}
+impl From<crate::outbound_proxy::settings::SettingsError> for Error {
+    fn from(error: crate::outbound_proxy::settings::SettingsError) -> Self {
+        use crate::outbound_proxy::settings::SettingsError;
+        let status = match error {
+            SettingsError::Invalid(_) => StatusCode::BAD_REQUEST,
+            SettingsError::Conflict => StatusCode::CONFLICT,
+            SettingsError::Unavailable(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SettingsError::Database => StatusCode::SERVICE_UNAVAILABLE,
+        };
+        Self {
+            status,
+            code: error.code(),
+        }
     }
 }
 impl From<deadpool_postgres::PoolError> for Error {

@@ -1772,9 +1772,9 @@ CREATE TABLE IF NOT EXISTS domain_discovery_dns_target (
     task_id VARCHAR(36) NOT NULL REFERENCES scan_task(task_id) ON DELETE CASCADE,
     PRIMARY KEY(job_id,domain)
 );
--- Outbound transport for crt.sh. Proxy credentials never enter the public JSON.
-CREATE TABLE IF NOT EXISTS domain_discovery_settings (
-    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+-- Shared outbound proxy settings. Credentials never enter the public JSON.
+CREATE TABLE IF NOT EXISTS outbound_proxy_settings (
+    scope TEXT PRIMARY KEY,
     proxy_mode TEXT NOT NULL DEFAULT 'system' CHECK(proxy_mode IN ('system','direct','custom')),
     proxy_endpoint TEXT NOT NULL DEFAULT '',
     proxy_ciphertext BYTEA,
@@ -1782,7 +1782,8 @@ CREATE TABLE IF NOT EXISTS domain_discovery_settings (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
 );
-INSERT INTO domain_discovery_settings (singleton) VALUES (TRUE) ON CONFLICT (singleton) DO NOTHING;
+INSERT INTO outbound_proxy_settings (scope) VALUES ('global'), ('domain_discovery')
+ON CONFLICT (scope) DO NOTHING;
 
 -- Proxy credentials never enter the public settings JSON.
 ALTER TABLE notification_channel ADD COLUMN IF NOT EXISTS proxy_mode TEXT NOT NULL DEFAULT 'system' CHECK(proxy_mode IN ('system','direct','custom'));

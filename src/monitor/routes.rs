@@ -45,6 +45,8 @@ pub const WEB_OPERATIONS: &[(&str, &str)] = &[
         "配置版本历史",
     ),
     ("GET /api/config/scan", "读取扫描默认配置"),
+    ("GET /api/config/network-proxy", "读取全局网络代理"),
+    ("GET /api/domain-discovery/settings", "读取域名发现代理"),
     ("GET /api/config/security/session", "读取会话有效期"),
     (
         "GET /api/config/security/trusted-proxies",
@@ -163,6 +165,16 @@ pub const WEB_OPERATIONS: &[(&str, &str)] = &[
     ("POST /api/config/mail", "提交邮件配置"),
     ("POST /api/config/runtime/{namespace}", "运行时配置"),
     ("POST /api/config/scan", "提交扫描默认配置"),
+    ("POST /api/config/network-proxy/clear", "清除全局网络代理"),
+    ("POST /api/config/network-proxy/test", "测试全局网络代理"),
+    (
+        "POST /api/domain-discovery/settings/clear",
+        "清除域名发现代理",
+    ),
+    (
+        "POST /api/domain-discovery/settings/test",
+        "测试域名发现代理",
+    ),
     ("POST /api/config/security/session", "提交会话有效期"),
     (
         "POST /api/config/security/trusted-proxies",
@@ -240,6 +252,8 @@ pub const WEB_OPERATIONS: &[(&str, &str)] = &[
         "PUT /api/admin/users/{user_id}/login-ip-allowlist",
         "更新用户登录白名单",
     ),
+    ("PUT /api/config/network-proxy", "保存全局网络代理"),
+    ("PUT /api/domain-discovery/settings", "保存域名发现代理"),
     ("PUT /api/config/human-verification", "保存登录保护配置"),
     (
         "PUT /api/mail/templates/{template_key}/draft",

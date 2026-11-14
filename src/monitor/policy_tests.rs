@@ -285,9 +285,15 @@ async fn health_policy_database_publication_presence_and_outage_lifecycle() {
     let maintenance = crate::system_maintenance::SystemMaintenanceState::from_database(&pool)
         .await
         .unwrap();
-    crate::scanner_outage::run_once(&pool, "", &maintenance, &policy)
-        .await
-        .unwrap();
+    crate::scanner_outage::run_once(
+        &pool,
+        "",
+        &maintenance,
+        &policy,
+        &crate::network_proxy::GlobalProxyState::system(),
+    )
+    .await
+    .unwrap();
     client
         .batch_execute(
             "UPDATE system_maintenance_state SET enabled=false, phase='off', updated_at=NOW();",
@@ -297,9 +303,15 @@ async fn health_policy_database_publication_presence_and_outage_lifecycle() {
     let grace = crate::system_maintenance::SystemMaintenanceState::from_database(&pool)
         .await
         .unwrap();
-    crate::scanner_outage::run_once(&pool, "", &grace, &policy)
-        .await
-        .unwrap();
+    crate::scanner_outage::run_once(
+        &pool,
+        "",
+        &grace,
+        &policy,
+        &crate::network_proxy::GlobalProxyState::system(),
+    )
+    .await
+    .unwrap();
     crate::scanner_outage::detect_outages(&pool, &recipients, policy.alert_after_seconds)
         .await
         .unwrap();
