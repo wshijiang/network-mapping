@@ -351,6 +351,38 @@ pub async fn run(args: Clis) -> io::Result<()> {
     )
     .await
     .map_err(|error| io::Error::other(format!("加载运行时配置失败：{error}")))?;
+    // Syslog 转发：主管任务（热重载）+ 告警评估 + 状态落库 + 指标清理。
+    let syslog_registry = crate::syslog::StatusRegistry::default();
+    background.spawn_draining(
+        "syslog-forwarder",
+        crate::syslog::forwarder::run_supervisor(
+            db_pool.clone(),
+            runtime_settings.syslog.clone(),
+            syslog_registry.clone(),
+            background.subscribe(),
+        ),
+    );
+    background.spawn_draining(
+        "syslog-alerts",
+        crate::syslog::alerts::run_evaluator(
+            db_pool.clone(),
+            runtime_settings.syslog.clone(),
+            background.subscribe(),
+        ),
+    );
+    background.spawn(
+        "syslog-status-persistence",
+        crate::syslog::status::run_persistence(
+            db_pool.clone(),
+            syslog_registry.clone(),
+            runtime_settings.syslog.clone(),
+        ),
+    );
+    background.spawn(
+        "syslog-metrics-retention",
+        crate::syslog::metrics::run_retention(db_pool.clone(), runtime_settings.syslog.clone()),
+    );
+    let syslog_registry_data = web::Data::new(syslog_registry);
     let report_renderer = web::Data::new(
         crate::reports::service::ReportRenderService::from_database(
             &db_pool,
@@ -745,6 +777,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             .app_data(analytics_snapshot.clone())
             .app_data(statistics_service.clone())
             .app_data(runtime_settings.clone())
+            .app_data(syslog_registry_data.clone())
             .app_data(report_renderer.clone())
             .app_data(web::Data::new(scanner_latency_history.clone()))
             .app_data(frontend_assets.clone())

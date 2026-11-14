@@ -134,6 +134,7 @@ pub async fn ingest(pool: &Pool, scanner_id: Uuid, records: &[EventRecord]) -> R
     let tx = client.transaction().await?;
     let scanner = scanner_id.to_string();
     let mut confirmed = Vec::new();
+    let mut forward_events: Vec<parser::ParsedEvent> = Vec::new();
     let mut source_cache = std::collections::HashMap::<Uuid, String>::new();
     for (value, evidence) in records {
         let fallback = if value
@@ -187,12 +188,16 @@ pub async fn ingest(pool: &Pool, scanner_id: Uuid, records: &[EventRecord]) -> R
                     acknowledged_at=CASE WHEN scanner_incident.recovered_at IS NOT NULL AND EXCLUDED.last_seen_at>scanner_incident.recovered_at THEN NULL ELSE scanner_incident.acknowledged_at END, \
                     recovered_at=CASE WHEN scanner_incident.recovered_at IS NOT NULL AND EXCLUDED.last_seen_at>scanner_incident.recovered_at THEN NULL ELSE scanner_incident.recovered_at END",
                 &[&scanner,&event.fingerprint,&event.error_code,&event.operation,&event.occurred_at]).await?;
+            forward_events.push(event.clone());
         }
         if let Some((file, line, offset)) = evidence {
             tx.execute("INSERT INTO scanner_error_evidence(scanner_id,event_id,file_id,line_number,byte_offset) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", &[&scanner,&event.event_id,file,line,offset]).await?;
         }
     }
     tx.commit().await?;
+    for event in &forward_events {
+        crate::syslog::hooks::forward_scanner_event(scanner_id, event);
+    }
     Ok(confirmed)
 }
 

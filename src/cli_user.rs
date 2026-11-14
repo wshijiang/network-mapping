@@ -31,6 +31,9 @@ pub async fn execute(
     match command {
         ServerCommand::Intel { command } => crate::threat_intel::cli::execute(command, pool).await,
         ServerCommand::User { command } => execute_user(command, pool, password_config).await,
+        ServerCommand::Syslog { command } => crate::syslog::cli::execute(command, pool)
+            .await
+            .map_err(|error| error as Box<dyn std::error::Error>),
     }
 }
 

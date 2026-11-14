@@ -2621,6 +2621,11 @@ pub enum ServerCommand {
         #[command(subcommand)]
         command: UserCommand,
     },
+    /// 管理 Syslog 转发（仅需 PostgreSQL，不启动 HTTP/Elasticsearch）
+    Syslog {
+        #[command(subcommand)]
+        command: crate::syslog::cli::SyslogCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
