@@ -240,6 +240,13 @@ async fn execution_for_upload_attempt(
 ///
 /// When `task_id` is supplied, only that exact task is considered. This is used
 /// to reconcile a durable local upload before any new work is requested.
+///
+/// Recovery happens at task boundaries, never mid-scan, so the runtime
+/// configuration gate applies to the running arm as well: once the server
+/// disables a required engine, the task is not handed back to this scanner
+/// (which would resume it under the new configuration and fail). The lease
+/// expires instead and a capable node reclaims it through the gated general
+/// claim; durable uploads still reconcile through the idempotent upload path.
 pub async fn recover_scanner_task(
     pool: &deadpool_postgres::Pool,
     scanner_id: Uuid,
@@ -350,7 +357,8 @@ pub async fn recover_scanner_task_with_failure(
              WHERE COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> COALESCE(t.scan_plan->'required_services','[]'::jsonb) AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length(COALESCE(t.scan_plan->'required_services','[]'::jsonb)) \
              AND e.cancel_requested = false AND api_scan_task_enabled(t) AND dns_scan_task_enabled(t) AND ( \
                  (e.execution_status = 'running' AND e.assigned_scanner_id = $1 \
-                  AND ($2::TEXT IS NULL OR t.task_id = $2)) \
+                  AND ($2::TEXT IS NULL OR t.task_id = $2) \
+                  @engine_gate@) \
                  OR ($2::TEXT IS NOT NULL AND t.task_id = $2 AND e.execution_status = 'pending' \
                      AND e.assigned_scanner_id IS NULL AND s.accepting_tasks AND @routing_guard@ \
                      AND (e.requested_scanner_id IS NULL OR e.requested_scanner_id = $1) \

@@ -1188,6 +1188,63 @@ async fn server_runtime_configuration_gates_claim_candidates_and_preferences() {
 
 #[actix_web::test]
 #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn recovery_does_not_return_running_tasks_whose_required_engine_was_disabled() {
+    let f = Fixture::new().await;
+    let scanner = f.scanner().await;
+    let (task, id, _) = f.task("automatic", None).await;
+    let plan = crate::scan_control::creation::build_scan_plan("vulnerability_scan").unwrap();
+    let c = f.pool.get().await.unwrap();
+    c.execute(
+        "UPDATE scan_task SET scan_profile='vulnerability_scan', scan_plan=$2 WHERE id=$1",
+        &[&task, &plan],
+    )
+    .await
+    .unwrap();
+    drop(c);
+    apply_task(&f.pool, scanner, &token(scanner), PEPPER)
+        .await
+        .unwrap();
+
+    // The server disables nuclei while the execution is running. Recovery at
+    // the next task boundary must not hand the task back to this scanner,
+    // which would resume it under the new configuration and fail.
+    let c = f.pool.get().await.unwrap();
+    let document =
+        serde_json::to_value(crate::scanner_config::ScannerRuntimeConfig::default()).unwrap();
+    c.execute(
+        "INSERT INTO scanner_runtime_configuration(scanner_id, document) VALUES($1,$2)",
+        &[&scanner.to_string(), &document],
+    )
+    .await
+    .unwrap();
+    drop(c);
+    assert!(matches!(
+        recover_scanner_task(&f.pool, scanner, Some(id), None, &token(scanner), PEPPER).await,
+        Err(ApplyTaskError::NoTask)
+    ));
+    assert!(matches!(
+        recover_scanner_task(&f.pool, scanner, None, None, &token(scanner), PEPPER).await,
+        Err(ApplyTaskError::NoTask)
+    ));
+
+    // Re-enabling the engine restores recovery of the same execution.
+    let c = f.pool.get().await.unwrap();
+    c.execute(
+        "UPDATE scanner_runtime_configuration SET document=jsonb_set(document,'{nuclei,enabled}','true') WHERE scanner_id=$1",
+        &[&scanner.to_string()],
+    )
+    .await
+    .unwrap();
+    drop(c);
+    let recovered = recover_scanner_task(&f.pool, scanner, Some(id), None, &token(scanner), PEPPER)
+        .await
+        .unwrap();
+    assert_eq!(recovered.task_id, id);
+    f.finish().await;
+}
+
+#[actix_web::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
 async fn server_runtime_configuration_gates_dns_and_service_engines() {
     let f = Fixture::new().await;
     let scanner = f.scanner().await;
