@@ -31,6 +31,8 @@ pub const REPORT_MAIL_NAMESPACE: &str = crate::reports::mail_config::NAMESPACE;
 
 pub const ANALYTICS_SNAPSHOT_NAMESPACE: &str = "analytics_snapshot";
 
+pub const SYSLOG_NAMESPACE: &str = crate::syslog::config::NAMESPACE;
+
 #[derive(Clone, Debug)]
 pub struct Versioned<T> {
     pub value: T,
@@ -82,6 +84,7 @@ pub struct RuntimeSettings {
     pub dns_resolvers: RuntimeConfig<DnsResolverSettings>,
     pub analytics_snapshot: RuntimeConfig<AnalyticsSnapshotConfig>,
     pub report_mail: RuntimeConfig<crate::reports::mail_config::ReportMailConfig>,
+    pub syslog: RuntimeConfig<crate::syslog::SyslogConfig>,
 }
 
 #[derive(Clone)]
@@ -260,6 +263,14 @@ impl RuntimeSettings {
                 validate_analytics_snapshot,
             )
             .await?,
+            syslog: load_namespace(
+                pool,
+                SYSLOG_NAMESPACE,
+                Default::default(),
+                Default::default(),
+                crate::syslog::SyslogConfig::validate,
+            )
+            .await?,
         })
     }
 }
@@ -314,6 +325,30 @@ pub async fn persist<T>(
     value: &T,
     change_reason: &str,
     user_id: i32,
+) -> Result<i64, PersistError>
+where
+    T: Serialize,
+{
+    persist_with_actor(
+        pool,
+        namespace,
+        expected_revision,
+        value,
+        change_reason,
+        Some(user_id),
+    )
+    .await
+}
+
+/// 以可选操作者身份发布：CLI 系统身份记 NULL，
+/// 审计由调用方另行以 `AuditEvent::system` 写入。
+pub async fn persist_with_actor<T>(
+    pool: &Pool,
+    namespace: &'static str,
+    expected_revision: i64,
+    value: &T,
+    change_reason: &str,
+    user_id: Option<i32>,
 ) -> Result<i64, PersistError>
 where
     T: Serialize,
@@ -475,6 +510,10 @@ pub fn parse_report_mail(
 
 pub fn parse_analytics_snapshot(value: Value) -> Result<AnalyticsSnapshotConfig, String> {
     parse(value, validate_analytics_snapshot)
+}
+
+pub fn parse_syslog(value: Value) -> Result<crate::syslog::SyslogConfig, String> {
+    parse(value, crate::syslog::SyslogConfig::validate)
 }
 
 fn parse<T>(value: Value, validate: fn(&T) -> Result<(), String>) -> Result<T, String>

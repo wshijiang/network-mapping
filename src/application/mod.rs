@@ -186,9 +186,14 @@ pub async fn run(args: Clis) -> io::Result<()> {
         }
     };
     if let Some(command) = args.command.as_ref() {
-        cli_user::execute(command, &db_pool, config.pwd_hash.clone())
-            .await
-            .map_err(|error| io::Error::other(format!("管理命令失败：{error}")))?;
+        cli_user::execute(
+            command,
+            &db_pool,
+            config.pwd_hash.clone(),
+            &ser_con.encrypt_key,
+        )
+        .await
+        .map_err(|error| io::Error::other(format!("管理命令失败：{error}")))?;
         return Ok(());
     }
     let (rebuild_concurrency, rebuild_page_size) = args.transport_rebuild_tuning();
@@ -351,6 +356,71 @@ pub async fn run(args: Clis) -> io::Result<()> {
     )
     .await
     .map_err(|error| io::Error::other(format!("加载运行时配置失败：{error}")))?;
+    // Syslog 转发：主管任务（热重载）+ 告警评估 + 状态落库 + 指标清理。
+    let syslog_registry = crate::syslog::StatusRegistry::default();
+    background.spawn_draining(
+        "syslog-forwarder",
+        crate::syslog::forwarder::run_supervisor(
+            db_pool.clone(),
+            runtime_settings.syslog.clone(),
+            syslog_registry.clone(),
+            network_proxy.clone(),
+            background.subscribe(),
+        ),
+    );
+    background.spawn_draining(
+        "syslog-alerts",
+        crate::syslog::alerts::run_evaluator(
+            db_pool.clone(),
+            runtime_settings.syslog.clone(),
+            background.subscribe(),
+        ),
+    );
+    background.spawn_draining(
+        "syslog-backfill",
+        crate::syslog::backfill::run_worker(
+            db_pool.clone(),
+            runtime_settings.syslog.clone(),
+            network_proxy.clone(),
+            background.subscribe(),
+        ),
+    );
+    background.spawn(
+        "syslog-status-persistence",
+        crate::syslog::status::run_persistence(
+            db_pool.clone(),
+            syslog_registry.clone(),
+            runtime_settings.syslog.clone(),
+        ),
+    );
+    background.spawn(
+        "syslog-metrics-retention",
+        crate::syslog::metrics::run_retention(db_pool.clone(), runtime_settings.syslog.clone()),
+    );
+    // CLI 直接写库的变更也要热生效：定期拉取 syslog 命名空间的更新 revision。
+    let syslog_refresh_pool = db_pool.clone();
+    let syslog_refresh_config = runtime_settings.syslog.clone();
+    background.spawn("syslog-configuration", async move {
+        loop {
+            if let Ok(client) = syslog_refresh_pool.get().await
+                && let Ok(Some(row)) = client
+                    .query_opt(
+                        "SELECT document, revision FROM runtime_configuration WHERE namespace = 'syslog'",
+                        &[],
+                    )
+                    .await
+            {
+                let revision: i64 = row.get("revision");
+                if revision > syslog_refresh_config.get().await.revision
+                    && let Ok(value) = crate::runtime_config::parse_syslog(row.get("document"))
+                {
+                    syslog_refresh_config.replace(value, revision).await;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+    let syslog_registry_data = web::Data::new(syslog_registry);
     let report_renderer = web::Data::new(
         crate::reports::service::ReportRenderService::from_database(
             &db_pool,
@@ -745,6 +815,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             .app_data(analytics_snapshot.clone())
             .app_data(statistics_service.clone())
             .app_data(runtime_settings.clone())
+            .app_data(syslog_registry_data.clone())
             .app_data(report_renderer.clone())
             .app_data(web::Data::new(scanner_latency_history.clone()))
             .app_data(frontend_assets.clone())

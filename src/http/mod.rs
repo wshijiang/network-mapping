@@ -135,6 +135,12 @@ fn configuration(cfg: &mut web::ServiceConfig) {
     cfg.service(handlers::utils::save_scan_settings_h);
     cfg.service(handlers::utils::test_mail_server_h);
     cfg.service(handlers::utils::get_server_version);
+    cfg.service(handlers::syslog::syslog_status);
+    cfg.service(handlers::syslog::syslog_test);
+    cfg.service(handlers::syslog::syslog_statistics);
+    cfg.service(handlers::syslog::syslog_backfill_create);
+    cfg.service(handlers::syslog::syslog_backfill_list);
+    cfg.service(handlers::syslog::syslog_backfill_cancel);
 }
 
 fn assets(cfg: &mut web::ServiceConfig) {

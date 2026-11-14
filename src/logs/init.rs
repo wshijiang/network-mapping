@@ -50,6 +50,7 @@ pub fn init(
     tracing_subscriber::registry()
         .with(console_layer)
         .with(json_layer)
+        .with(crate::syslog::forwarder::SyslogLayer)
         .init();
 
     guard // 返回guard 以确

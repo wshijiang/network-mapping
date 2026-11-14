@@ -196,6 +196,9 @@ where
             params,
         )
         .await?;
+    // 尽力而为的 syslog 转发：即使外层事务随后回滚，转发副本仍保留
+    // （日志转发不参与数据库事务）。
+    crate::syslog::hooks::forward_audit(event, context);
     Ok(())
 }
 

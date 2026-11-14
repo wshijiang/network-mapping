@@ -27,10 +27,16 @@ pub async fn execute(
     command: &ServerCommand,
     pool: &Pool,
     password_config: PasswordHashConfig,
+    encrypt_key: &str,
 ) -> CliResult {
     match command {
         ServerCommand::Intel { command } => crate::threat_intel::cli::execute(command, pool).await,
         ServerCommand::User { command } => execute_user(command, pool, password_config).await,
+        ServerCommand::Syslog { command } => {
+            crate::syslog::cli::execute(command, pool, encrypt_key)
+                .await
+                .map_err(|error| error as Box<dyn std::error::Error>)
+        }
     }
 }
 

@@ -20,10 +20,10 @@ use crate::runtime_config::{
     ANALYTICS_SNAPSHOT_NAMESPACE, AUTOMATIC_TARGET_NAMESPACE, DNS_FOLLOW_UP_NAMESPACE,
     DNS_RESOLVERS_NAMESPACE, GENERAL_NAMESPACE, MONITOR_NAMESPACE, PersistError,
     REPORT_MAIL_NAMESPACE, REQUESTS_NAMESPACE, RuntimeConfigResponse, RuntimeSettings,
-    SCAN_ROUTING_NAMESPACE, SCANNER_HEALTH_NAMESPACE, UpdateRuntimeConfigRequest,
+    SCAN_ROUTING_NAMESPACE, SCANNER_HEALTH_NAMESPACE, SYSLOG_NAMESPACE, UpdateRuntimeConfigRequest,
     parse_analytics_snapshot, parse_automatic_target, parse_dns_follow_up, parse_dns_resolvers,
     parse_general, parse_monitor, parse_report_mail, parse_requests, parse_scan_routing,
-    parse_scanner_health, persist,
+    parse_scanner_health, parse_syslog, persist,
 };
 use crate::statistics::{
     NAMESPACE as STATISTICS_CACHE_NAMESPACE, parse_config as parse_statistics_cache,
@@ -206,6 +206,10 @@ async fn get_runtime_config_h(
                 "progress_error": progress.as_ref().err()
             }))
         }
+        SYSLOG_NAMESPACE => {
+            let value = settings.syslog.get().await;
+            HttpResponse::Ok().json(json!({"success": true, "data": RuntimeConfigResponse { namespace: SYSLOG_NAMESPACE, revision: value.revision, document: value.value }}))
+        }
         _ => {
             HttpResponse::NotFound().json(json!({"success": false, "message": "未知运行时配置域"}))
         }
@@ -224,7 +228,10 @@ pub(crate) async fn runtime_config_history(
     }
     if !matches!(
         namespace.as_str(),
-        MONITOR_NAMESPACE | SCANNER_HEALTH_NAMESPACE | STATISTICS_CACHE_NAMESPACE
+        MONITOR_NAMESPACE
+            | SCANNER_HEALTH_NAMESPACE
+            | STATISTICS_CACHE_NAMESPACE
+            | SYSLOG_NAMESPACE
     ) {
         return HttpResponse::NotFound()
             .json(json!({"success": false, "message": "此配置域不支持历史查看"}));
@@ -375,6 +382,7 @@ async fn save_runtime_config_h(
             analytics_snapshot,
             |_| {}
         ),
+        SYSLOG_NAMESPACE => publish!(SYSLOG_NAMESPACE, parse_syslog, syslog, |_| {}),
         _ => {
             HttpResponse::NotFound().json(json!({"success": false, "message": "未知运行时配置域"}))
         }

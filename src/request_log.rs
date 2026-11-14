@@ -139,7 +139,12 @@ async fn flush_batch(pool: &Pool, batch: &mut Vec<RequestLogEntry>, dropped: &mu
     loop {
         attempt += 1;
         match insert_batch(pool, &entries).await {
-            Ok(()) => return,
+            Ok(()) => {
+                for entry in &entries {
+                    crate::syslog::hooks::forward_access(entry);
+                }
+                return;
+            }
             Err(error_value) => {
                 if attempt > RETRY_DELAYS_MS.len() {
                     *dropped += entries.len() as u64;

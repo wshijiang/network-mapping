@@ -45,7 +45,7 @@ pub fn redact(input: &str) -> String {
         .collect()
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ParsedEvent {
     pub event_id: String,
     pub occurred_at: DateTime<Utc>,
