@@ -79,7 +79,11 @@ pub(crate) async fn run(
     mut shutdown: watch::Receiver<bool>,
     network_proxy: GlobalProxyState,
 ) {
-    let replies = tokio::spawn(run_replies(pool.clone(), key.clone()));
+    let replies = tokio::spawn(run_replies(
+        pool.clone(),
+        key.clone(),
+        network_proxy.clone(),
+    ));
     let mut active: HashMap<String, Active> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -180,7 +184,7 @@ async fn reconcile_connections(
 
 /// Replies use their own durable outbox; a send failure never rolls back a
 /// completed binding. An updated channel cannot send a stale confirmation.
-pub(super) async fn run_replies(pool: Pool, key: String) {
+pub(super) async fn run_replies(pool: Pool, key: String, network_proxy: GlobalProxyState) {
     let mut tick = tokio::time::interval(Duration::from_secs(2));
     let mut cleanup = 0_u32;
     loop {
@@ -227,8 +231,14 @@ pub(super) async fn run_replies(pool: Pool, key: String) {
         let proxy: Option<Vec<u8>> = row.get("proxy_ciphertext");
         let mode = row.get::<_, String>("proxy_mode").parse::<ProxyMode>();
         let outcome = match (secret.as_deref().and_then(|v| super::decrypt(v,&key).ok()), mode) {
-            (Some(secret), Ok(mode)) => match super::decrypted_proxy(mode,proxy.as_deref(),&key).and_then(|p| p.http_client().map_err(|_| super::Error::internal())) {
-                Ok(client) => super::feishu::send_application(&client,&app_id,&secret,(FeishuTargetType::User,&target),json!({"msg_type":"text","content":{"text":"绑定成功，后续通知将发送到此聊天。"}}),None,id).await,
+            (Some(secret), Ok(mode)) => match super::decrypted_proxy(mode,proxy.as_deref(),&key) {
+                Ok(local) => match network_proxy.resolve(&local).await {
+                    Ok(effective) => match effective.http_client() {
+                        Ok(client) => super::feishu::send_application(&client,&app_id,&secret,(FeishuTargetType::User,&target),json!({"msg_type":"text","content":{"text":"绑定成功，后续通知将发送到此聊天。"}}),None,id).await,
+                        Err(error) => super::Outcome::failure(error.code,error.retryable),
+                    },
+                    Err(error) => super::Outcome::failure(error.code,error.retryable),
+                },
                 Err(_) => super::Outcome::failure("proxy_connection_failed",true),
             },
             _ => super::Outcome::failure("secret_unavailable",false),

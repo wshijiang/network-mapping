@@ -1016,7 +1016,11 @@ async fn feishu_binding_reply_releases_single_database_connection() {
         .max_size(1)
         .build()
         .unwrap();
-    let worker = tokio::spawn(feishu_ws::run_replies(pool.clone(), key()));
+    let worker = tokio::spawn(feishu_ws::run_replies(
+        pool.clone(),
+        key(),
+        crate::network_proxy::GlobalProxyState::system(),
+    ));
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let c = observer.get().await.unwrap();
