@@ -1,48 +1,108 @@
 use super::*;
+use crate::outbound_proxy::{ProxyConfig, ProxyError, ProxyMode};
 use reqwest::Client;
 use std::time::Duration;
 use tokio::time::{Instant, timeout_at};
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 
-pub(super) fn http_client() -> std::result::Result<Client, reqwest::Error> {
-    Client::builder()
-        .https_only(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(20))
-        .user_agent("NetworkMapping/1.0 certificate-discovery")
-        .build()
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SourceError {
+    pub code: &'static str,
+    pub retryable: bool,
 }
+
+impl SourceError {
+    const fn permanent(code: &'static str) -> Self {
+        Self {
+            code,
+            retryable: false,
+        }
+    }
+    const fn transient(code: &'static str) -> Self {
+        Self {
+            code,
+            retryable: true,
+        }
+    }
+}
+
+impl From<ProxyError> for SourceError {
+    fn from(error: ProxyError) -> Self {
+        Self {
+            code: error.code,
+            retryable: error.retryable,
+        }
+    }
+}
+
+impl std::fmt::Display for SourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code)
+    }
+}
+
+/// Keep the source-specific timeout and user agent while sharing the
+/// system/direct/custom proxy semantics of the rest of the server.
+pub(super) fn http_client(proxy: &ProxyConfig) -> std::result::Result<Client, SourceError> {
+    proxy
+        .apply_to(
+            Client::builder()
+                .https_only(true)
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(20))
+                .user_agent("NetworkMapping/1.0 certificate-discovery"),
+        )
+        .map_err(SourceError::from)?
+        .build()
+        .map_err(|_| SourceError::permanent("proxy_invalid"))
+}
+
+/// reqwest does not expose typed proxy failures. The shared classifier keeps
+/// stable codes without allowing raw upstream messages to escape.
+fn classify_transport(error: &reqwest::Error, proxy_mode: ProxyMode) -> SourceError {
+    SourceError::from(crate::outbound_proxy::classify_request_error(
+        error, proxy_mode,
+    ))
+}
+
 async fn bytes(
     client: &Client,
     params: &[(&str, String)],
     max: usize,
     endpoint: &str,
-) -> std::result::Result<Vec<u8>, &'static str> {
+    proxy_mode: ProxyMode,
+) -> std::result::Result<Vec<u8>, SourceError> {
     let mut response = client
         .get(endpoint)
         .query(params)
         .send()
         .await
-        .map_err(|_| "source_transport")?;
-    if !response.status().is_success() {
-        return Err(if response.status().as_u16() == 429 {
-            "source_rate_limited"
+        .map_err(|error| classify_transport(&error, proxy_mode))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(if status.as_u16() == 429 {
+            SourceError::transient("source_rate_limited")
         } else {
-            "source_status"
+            SourceError::transient("source_status")
         });
     }
     let mut data = vec![];
-    while let Some(chunk) = response.chunk().await.map_err(|_| "source_read")? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| SourceError::transient("source_read"))?
+    {
         if data.len() + chunk.len() > max {
-            return Err("source_too_large");
+            return Err(SourceError::permanent("source_too_large"));
         }
         data.extend_from_slice(&chunk);
     }
     Ok(data)
 }
-pub(super) fn parse_rows(data: &[u8], out: &mut Evidence) -> std::result::Result<(), &'static str> {
-    let rows: Vec<Value> = serde_json::from_slice(data).map_err(|_| "source_invalid_json")?;
+pub(super) fn parse_rows(data: &[u8], out: &mut Evidence) -> std::result::Result<(), SourceError> {
+    let rows: Vec<Value> =
+        serde_json::from_slice(data).map_err(|_| SourceError::transient("source_invalid_json"))?;
     if rows.len() > 20_000 {
         out.truncated = true;
     }
@@ -142,18 +202,21 @@ pub(super) async fn collect(
     client: &Client,
     seed: &str,
     related: bool,
-) -> std::result::Result<Evidence, &'static str> {
-    collect_from(client, seed, related, "https://crt.sh/").await
+    proxy_mode: ProxyMode,
+) -> std::result::Result<Evidence, SourceError> {
+    collect_from(client, seed, related, "https://crt.sh/", proxy_mode).await
 }
 pub(super) async fn collect_from(
     client: &Client,
     seed: &str,
     related: bool,
     endpoint: &str,
-) -> std::result::Result<Evidence, &'static str> {
+    proxy_mode: ProxyMode,
+) -> std::result::Result<Evidence, SourceError> {
     let mut out = Evidence::empty(seed);
     let deadline = Instant::now() + Duration::from_secs(100);
     let mut successful = 0;
+    let mut failures = Vec::new();
     for query in [seed.to_owned(), format!("%.{seed}")] {
         let result = match timeout_at(
             deadline,
@@ -162,27 +225,45 @@ pub(super) async fn collect_from(
                 &[("q", query), ("output", "json".into())],
                 MAX_RESPONSE,
                 endpoint,
+                proxy_mode,
             ),
         )
         .await
         {
             Ok(result) => result,
-            Err(_) => Err("source_timeout"),
+            Err(_) => Err(SourceError::transient("source_timeout")),
         };
         match result.and_then(|response| parse_rows(&response, &mut out)) {
             Ok(()) => successful += 1,
-            Err(reason) => out.source_errors.push(reason.to_owned()),
+            Err(error) => {
+                out.source_errors.push(error.code.to_owned());
+                failures.push(error);
+            }
         }
     }
     if successful == 0 {
-        return Err("source_unavailable");
+        if let Some(permanent) = failures.iter().find(|error| !error.retryable) {
+            return Err(*permanent);
+        }
+        if let Some(first) = failures.first().copied()
+            && failures.iter().all(|error| error.code == first.code)
+        {
+            return Err(first);
+        }
+        return Err(SourceError::transient("source_unavailable"));
     }
     if related {
         for index in 0..out.certificates.len() {
             let id = out.certificates[index].crtsh_id;
             let response = timeout_at(
                 deadline,
-                bytes(client, &[("d", id.to_string())], 1024 * 1024, endpoint),
+                bytes(
+                    client,
+                    &[("d", id.to_string())],
+                    1024 * 1024,
+                    endpoint,
+                    proxy_mode,
+                ),
             )
             .await;
             if let Ok(Ok(data)) = response {
@@ -210,4 +291,27 @@ pub(super) async fn collect_from(
     }
     out.rebuild(related);
     Ok(out)
+}
+
+/// Exercise the exact production client and source endpoint without storing
+/// evidence. Used by the admin settings card to validate a proxy change.
+pub(super) async fn probe(
+    client: &Client,
+    proxy_mode: ProxyMode,
+) -> std::result::Result<(), SourceError> {
+    let data = bytes(
+        client,
+        &[
+            ("q", "proxy-test.invalid".into()),
+            ("output", "json".into()),
+        ],
+        64 * 1024,
+        "https://crt.sh/",
+        proxy_mode,
+    )
+    .await?;
+    if !data.is_empty() && serde_json::from_slice::<Value>(&data).is_err() {
+        return Err(SourceError::transient("source_invalid_json"));
+    }
+    Ok(())
 }

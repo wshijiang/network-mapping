@@ -88,12 +88,29 @@ pub struct HumanVerificationService {
 
 impl HumanVerificationService {
     pub fn new(config: HumanVerificationConfig) -> std::io::Result<Self> {
+        Self::build(config, None)
+    }
+
+    pub(crate) fn with_global_proxy(
+        config: HumanVerificationConfig,
+        network_proxy: crate::network_proxy::GlobalProxyState,
+    ) -> std::io::Result<Self> {
+        Self::build(config, Some(network_proxy))
+    }
+
+    fn build(
+        config: HumanVerificationConfig,
+        network_proxy: Option<crate::network_proxy::GlobalProxyState>,
+    ) -> std::io::Result<Self> {
         config.validate().map_err(std::io::Error::other)?;
         let permits = Arc::new(Semaphore::new(config.max_in_flight));
         let timeout = Duration::from_millis(config.timeout_ms);
         let provider: Option<Arc<dyn VerificationProvider>> = match config.provider {
             ProviderKind::None => None,
-            ProviderKind::Turnstile => Some(Arc::new(turnstile::Turnstile::new(config)?)),
+            ProviderKind::Turnstile => Some(Arc::new(match network_proxy {
+                Some(network_proxy) => turnstile::Turnstile::new_with_proxy(config, network_proxy)?,
+                None => turnstile::Turnstile::new(config)?,
+            })),
         };
         Ok(Self {
             provider,

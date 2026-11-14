@@ -118,13 +118,14 @@ async fn delete(
 async fn models(
     pool: web::Data<Pool>,
     config: web::Data<crate::config::ServerConfig>,
+    network_proxy: web::Data<crate::network_proxy::GlobalProxyState>,
     user: UserBaseI,
     id: web::Path<Uuid>,
 ) -> HttpResponse {
     response(
         async {
             admin(&user)?;
-            storage::models(&pool, *id, &config.encrypt_key).await
+            storage::models_with_proxy(&pool, *id, &config.encrypt_key, &network_proxy).await
         }
         .await,
     )
@@ -199,6 +200,7 @@ async fn chat(
     req: HttpRequest,
     pool: web::Data<Pool>,
     config: web::Data<crate::config::ServerConfig>,
+    network_proxy: web::Data<crate::network_proxy::GlobalProxyState>,
     user: UserBaseI,
     input: web::Json<ChatInput>,
 ) -> HttpResponse {
@@ -207,11 +209,12 @@ async fn chat(
         admin(&user)?;
         input.validate()?;
         let lease = Lease::acquire(user.id)?;
-        let (mut settings, mut transport, key) = storage::debug_runtime(
+        let (mut settings, mut transport, key) = storage::debug_runtime_with_proxy(
             &pool,
             input.provider_id,
             &input.model_id,
             &config.encrypt_key,
+            &network_proxy,
         )
         .await?;
         input.parameters.apply(&mut settings, &mut transport)?;

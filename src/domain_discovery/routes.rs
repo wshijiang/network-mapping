@@ -1,10 +1,23 @@
 use super::*;
+use crate::config::ServerConfig;
+use crate::network_proxy::GlobalProxyState;
+use crate::outbound_proxy::settings;
+use crate::outbound_proxy::settings::DOMAIN_DISCOVERY_SCOPE;
 use actix_web::{HttpRequest, HttpResponse, web};
 fn respond<T: Serialize>(result: Result<T>) -> HttpResponse {
     match result {
         Ok(data) => HttpResponse::Ok().json(json!({"success":true,"data":data})),
         Err(e) => HttpResponse::build(e.status)
             .json(json!({"success":false,"code":e.code,"message":e.code})),
+    }
+}
+#[allow(clippy::result_large_err)]
+fn admin(user: &UserBaseI) -> std::result::Result<(), HttpResponse> {
+    if user.role == 1 {
+        Ok(())
+    } else {
+        Err(HttpResponse::Forbidden()
+            .json(json!({"success":false,"message":"仅管理员可以管理域名发现代理设置"})))
     }
 }
 async fn create_job(
@@ -72,6 +85,112 @@ async fn dns(
 }
 async fn cancel(pool: web::Data<Pool>, user: UserBaseI, id: web::Path<Uuid>) -> HttpResponse {
     respond(async {owned(&pool,user.id,*id).await?;pool.get().await?.execute("UPDATE domain_discovery_job SET status='cancelled',claim_token=NULL,lease_until=NULL,updated_at=NOW() WHERE id=$1 AND owner_id=$2 AND status IN ('pending','running')", &[&*id,&user.id]).await?;Ok(json!({"id":*id}))}.await)
+}
+async fn get_settings(pool: web::Data<Pool>, user: UserBaseI) -> HttpResponse {
+    if let Err(response) = admin(&user) {
+        return response;
+    }
+    respond(
+        settings::load(&pool, DOMAIN_DISCOVERY_SCOPE)
+            .await
+            .map(|settings| settings.public())
+            .map_err(Error::from),
+    )
+}
+async fn save_settings(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    config: web::Data<ServerConfig>,
+    user: UserBaseI,
+    input: web::Json<settings::SettingsInput>,
+) -> HttpResponse {
+    if let Err(response) = admin(&user) {
+        return response;
+    }
+    respond(
+        settings::save(
+            &pool,
+            DOMAIN_DISCOVERY_SCOPE,
+            &config.encrypt_key,
+            input.into_inner(),
+            &user,
+            &AuditContext::from_request(&req),
+            "domain.discovery_proxy_update",
+        )
+        .await
+        .map(|settings| settings.public())
+        .map_err(Error::from),
+    )
+}
+async fn clear_settings(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    input: web::Json<settings::ClearInput>,
+) -> HttpResponse {
+    if let Err(response) = admin(&user) {
+        return response;
+    }
+    respond(
+        settings::clear(
+            &pool,
+            DOMAIN_DISCOVERY_SCOPE,
+            input.into_inner(),
+            &user,
+            &AuditContext::from_request(&req),
+            "domain.discovery_proxy_clear",
+        )
+        .await
+        .map(|settings| settings.public())
+        .map_err(Error::from),
+    )
+}
+async fn test_settings(
+    pool: web::Data<Pool>,
+    config: web::Data<ServerConfig>,
+    network_proxy: web::Data<GlobalProxyState>,
+    user: UserBaseI,
+    input: web::Json<settings::ProxyTestInput>,
+) -> HttpResponse {
+    if let Err(response) = admin(&user) {
+        return response;
+    }
+    let result = async {
+        let local = settings::resolve_test_input(
+            &pool,
+            DOMAIN_DISCOVERY_SCOPE,
+            &config.encrypt_key,
+            &input,
+        )
+        .await
+        .map_err(Error::from)?;
+        let effective = network_proxy.resolve(&local).await.map_err(|error| Error {
+            status: StatusCode::BAD_REQUEST,
+            code: error.code,
+        })?;
+        let client = client::http_client(&effective).map_err(|error| Error {
+            status: StatusCode::BAD_REQUEST,
+            code: error.code,
+        })?;
+        let started = std::time::Instant::now();
+        let probe = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client::probe(&client, effective.mode),
+        )
+        .await;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        Ok(json!({
+            "ok": matches!(probe, Ok(Ok(()))),
+            "code": match probe {
+                Ok(Ok(())) => Value::Null,
+                Ok(Err(error)) => Value::String(error.code.to_owned()),
+                Err(_) => Value::String("source_timeout".into()),
+            },
+            "latency_ms": latency_ms,
+        }))
+    }
+    .await;
+    respond(result)
 }
 async fn relations(
     pool: web::Data<Pool>,
@@ -189,6 +308,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api/domain-discovery")
             .app_data(web::JsonConfig::default().limit(128 * 1024))
+            .route("/settings", web::get().to(get_settings))
+            .route("/settings", web::put().to(save_settings))
+            .route("/settings/clear", web::post().to(clear_settings))
+            .route("/settings/test", web::post().to(test_settings))
             .route("/jobs", web::post().to(create_job))
             .route("/jobs", web::get().to(list))
             .route("/jobs/{id}", web::get().to(detail))

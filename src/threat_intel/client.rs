@@ -1,4 +1,5 @@
 use super::*;
+use crate::network_proxy::GlobalProxyState;
 use std::{path::PathBuf, time::Duration};
 
 #[derive(Debug)]
@@ -151,6 +152,7 @@ pub(super) async fn request_bounded(
     auth: Option<(&str, &str)>,
     limit: usize,
 ) -> Result<Vec<u8>> {
+    let network_proxy = GlobalProxyState::system();
     configured_request(
         &source_transport::RequestConfig::default(),
         location,
@@ -159,9 +161,11 @@ pub(super) async fn request_bounded(
         auth,
         limit,
         Duration::from_secs(30),
+        &network_proxy,
     )
     .await
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn source_request(
     source: &storage::Source,
     location: &str,
@@ -170,6 +174,7 @@ pub(super) async fn source_request(
     limit: usize,
     timeout: Duration,
     encryption_key: &str,
+    network_proxy: &GlobalProxyState,
 ) -> Result<Vec<u8>> {
     let mut config = source_transport::RequestConfig::decrypt(
         source.request_config_ciphertext.as_deref(),
@@ -184,9 +189,11 @@ pub(super) async fn source_request(
         auth,
         limit,
         timeout,
+        network_proxy,
     )
     .await
 }
+#[allow(clippy::too_many_arguments)]
 async fn configured_request(
     config: &source_transport::RequestConfig,
     location: &str,
@@ -195,8 +202,22 @@ async fn configured_request(
     auth: Option<(&str, &str)>,
     limit: usize,
     timeout: Duration,
+    network_proxy: &GlobalProxyState,
 ) -> Result<Vec<u8>> {
     let started = std::time::Instant::now();
+    let mode = config
+        .proxy_mode
+        .parse::<crate::outbound_proxy::ProxyMode>()
+        .map_err(|_| Error::bad("intel_invalid_proxy"))?;
+    let local = crate::outbound_proxy::ProxyConfig {
+        mode,
+        url: config.proxy_url.clone(),
+    };
+    let effective = network_proxy
+        .resolve(&local)
+        .await
+        .map_err(|error| Error::bad(error.code))?;
+    let config = config.with_proxy(&effective);
     let url = validate_url(location, hosts)?;
     let host = url.host_str().unwrap();
     let proxy_env_keys = [
@@ -430,9 +451,19 @@ fn provider_error_diagnostic(bytes: &[u8]) -> Value {
     details
 }
 
+#[cfg(test)]
 pub(super) async fn source_bytes(
     source: &storage::Source,
     encryption_key: &str,
+) -> Result<Vec<u8>> {
+    let network_proxy = GlobalProxyState::system();
+    source_bytes_with_proxy(source, encryption_key, &network_proxy).await
+}
+
+pub(super) async fn source_bytes_with_proxy(
+    source: &storage::Source,
+    encryption_key: &str,
+    network_proxy: &GlobalProxyState,
 ) -> Result<Vec<u8>> {
     if source.input.transport == "upload" || source.input.kind == "threatfox_export" {
         return Err(Error::bad("intel_offline_export_required"));
@@ -470,6 +501,7 @@ pub(super) async fn source_bytes(
             30
         }),
         encryption_key,
+        network_proxy,
     )
     .await
 }

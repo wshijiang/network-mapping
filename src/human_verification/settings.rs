@@ -225,13 +225,15 @@ pub struct ManagedVerification {
     pool: Pool,
     key: Vec<u8>,
     active: RwLock<Snapshot>,
+    network_proxy: crate::network_proxy::GlobalProxyState,
 }
 
 impl ManagedVerification {
-    pub async fn initialize(
+    pub(crate) async fn initialize(
         pool: Pool,
         encoded_key: &str,
         bootstrap: HumanVerificationConfig,
+        network_proxy: crate::network_proxy::GlobalProxyState,
     ) -> Result<Self, SettingsError> {
         bootstrap.validate().map_err(SettingsError::Invalid)?;
         let key =
@@ -265,7 +267,7 @@ impl ManagedVerification {
         let saved: StoredSettings =
             serde_json::from_value(row.get("document")).map_err(|_| SettingsError::Unavailable)?;
         let service = Arc::new(
-            HumanVerificationService::new(saved.config(&key)?)
+            HumanVerificationService::with_global_proxy(saved.config(&key)?, network_proxy.clone())
                 .map_err(|_| SettingsError::Unavailable)?,
         );
         tx.commit().await.map_err(|_| SettingsError::Unavailable)?;
@@ -277,6 +279,7 @@ impl ManagedVerification {
                 revision: row.get("revision"),
                 service,
             }),
+            network_proxy,
         })
     }
 
@@ -327,8 +330,11 @@ impl ManagedVerification {
         let stored: StoredSettings =
             serde_json::from_value(row.get("document")).map_err(|_| SettingsError::Unavailable)?;
         let service = Arc::new(
-            HumanVerificationService::new(stored.config(&self.key)?)
-                .map_err(|_| SettingsError::Unavailable)?,
+            HumanVerificationService::with_global_proxy(
+                stored.config(&self.key)?,
+                self.network_proxy.clone(),
+            )
+            .map_err(|_| SettingsError::Unavailable)?,
         );
         Ok(self.install(revision, service))
     }
@@ -384,8 +390,11 @@ impl ManagedVerification {
             serde_json::from_value(row.get("document")).map_err(|_| SettingsError::Unavailable)?;
         let updated = stored.update(input, &self.key)?;
         let service = Arc::new(
-            HumanVerificationService::new(updated.config(&self.key)?)
-                .map_err(|_| SettingsError::Unavailable)?,
+            HumanVerificationService::with_global_proxy(
+                updated.config(&self.key)?,
+                self.network_proxy.clone(),
+            )
+            .map_err(|_| SettingsError::Unavailable)?,
         );
         let document = serde_json::to_value(&updated).map_err(|_| SettingsError::Unavailable)?;
         let row = tx.query_one("UPDATE runtime_configuration SET document=$2, revision=revision+1, updated_at=NOW(), updated_by_user_id=$3 WHERE namespace=$1 RETURNING revision", &[&NAMESPACE, &document, &user.id]).await.map_err(|_| SettingsError::Unavailable)?;

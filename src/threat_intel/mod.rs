@@ -26,7 +26,7 @@ mod worker;
 
 pub use routes::configure;
 pub(crate) use storage::{Annotation, annotate, annotate_assets, endpoint_keys};
-pub use worker::run;
+pub(crate) use worker::run;
 
 use actix_web::{HttpResponse, http::StatusCode};
 use deadpool_postgres::Pool;

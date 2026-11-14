@@ -26,6 +26,7 @@ pub mod mail_template;
 pub mod maxmind;
 pub use nm_module_runtime as module_runtime;
 pub mod monitor;
+pub mod network_proxy;
 pub mod notification;
 pub mod outbound_proxy;
 pub mod target_generated;
@@ -65,6 +66,7 @@ pub mod clock;
 pub mod identity;
 pub mod result_ingest;
 pub mod scan_control;
+pub(crate) mod secret;
 pub mod system_resources;
 pub mod web_support;
 

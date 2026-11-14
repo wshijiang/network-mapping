@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 pub use routes::configure;
-pub use worker::run;
+pub(crate) use worker::run;
 pub const MAX_NAMES: usize = 5000;
 pub const MAX_CERTIFICATES: usize = 50;
 pub const MAX_EVIDENCE_NAMES: usize = 10_000;
@@ -53,6 +53,21 @@ impl Error {
 impl From<tokio_postgres::Error> for Error {
     fn from(_: tokio_postgres::Error) -> Self {
         Self::unavailable()
+    }
+}
+impl From<crate::outbound_proxy::settings::SettingsError> for Error {
+    fn from(error: crate::outbound_proxy::settings::SettingsError) -> Self {
+        use crate::outbound_proxy::settings::SettingsError;
+        let status = match error {
+            SettingsError::Invalid(_) => StatusCode::BAD_REQUEST,
+            SettingsError::Conflict => StatusCode::CONFLICT,
+            SettingsError::Unavailable(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SettingsError::Database => StatusCode::SERVICE_UNAVAILABLE,
+        };
+        Self {
+            status,
+            code: error.code(),
+        }
     }
 }
 impl From<deadpool_postgres::PoolError> for Error {

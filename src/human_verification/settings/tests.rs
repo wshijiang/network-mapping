@@ -175,14 +175,20 @@ async fn web_configuration_lifecycle_is_atomic_private_and_authoritative() {
     };
     let (pool, schema) = database().await;
     let settings = web::Data::new(
-        ManagedVerification::initialize(pool.clone(), &encoded_key(), bootstrap())
-            .await
-            .unwrap(),
+        ManagedVerification::initialize(
+            pool.clone(),
+            &encoded_key(),
+            bootstrap(),
+            crate::network_proxy::GlobalProxyState::system(),
+        )
+        .await
+        .unwrap(),
     );
     let peer = ManagedVerification::initialize(
         pool.clone(),
         &encoded_key(),
         HumanVerificationConfig::default(),
+        crate::network_proxy::GlobalProxyState::system(),
     )
     .await
     .unwrap();
@@ -325,6 +331,7 @@ async fn web_configuration_lifecycle_is_atomic_private_and_authoritative() {
         pool.clone(),
         &encoded_key(),
         HumanVerificationConfig::default(),
+        crate::network_proxy::GlobalProxyState::system(),
     )
     .await
     .unwrap();
@@ -334,6 +341,7 @@ async fn web_configuration_lifecycle_is_atomic_private_and_authoritative() {
             pool.clone(),
             &openssl::base64::encode_block(&[12; 32]),
             HumanVerificationConfig::default(),
+            crate::network_proxy::GlobalProxyState::system(),
         )
         .await
         .is_err(),

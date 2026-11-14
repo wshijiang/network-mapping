@@ -22,6 +22,7 @@ pub async fn run_worker(
     maintenance: actix_web::web::Data<SystemMaintenanceState>,
     renderer: super::service::ReportRenderService,
     mut stopping: tokio::sync::watch::Receiver<bool>,
+    network_proxy: crate::network_proxy::GlobalProxyState,
 ) {
     let mut next_schedule = Instant::now();
     loop {
@@ -43,7 +44,7 @@ pub async fn run_worker(
             if *stopping.borrow() {
                 return;
             }
-            if let Err(error) = send_one(&pool, &encryption_key).await {
+            if let Err(error) = send_one(&pool, &encryption_key, &network_proxy).await {
                 warn!(event = "ReportDeliveryFailed", %error);
             }
         }
@@ -456,7 +457,11 @@ async fn generate(
     Ok(())
 }
 
-pub(crate) async fn send_one(pool: &Pool, encryption_key: &str) -> Result<bool, String> {
+pub(crate) async fn send_one(
+    pool: &Pool,
+    encryption_key: &str,
+    network_proxy: &crate::network_proxy::GlobalProxyState,
+) -> Result<bool, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let token = Uuid::new_v4();
     // Unified automatic mail may be waiting for its first SMTP channel; preserve it for transfer.
@@ -522,6 +527,7 @@ pub(crate) async fn send_one(pool: &Pool, encryption_key: &str) -> Result<bool, 
             &email,
             rendered.unwrap_or(Value::Null),
             id,
+            network_proxy,
         ),
     )
     .await

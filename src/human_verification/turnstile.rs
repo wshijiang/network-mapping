@@ -2,6 +2,11 @@ use futures_util::future::BoxFuture;
 use serde::Deserialize;
 use std::{net::IpAddr, time::Duration};
 
+use crate::{
+    network_proxy::GlobalProxyState,
+    outbound_proxy::{ProxyConfig, ProxyMode},
+};
+
 use super::{
     VerificationError,
     config::{HumanVerificationConfig, ProviderKind, hostname},
@@ -15,6 +20,7 @@ pub(super) struct Turnstile {
     client: reqwest::Client,
     config: HumanVerificationConfig,
     endpoint: String,
+    network_proxy: Option<GlobalProxyState>,
 }
 
 #[derive(Deserialize)]
@@ -28,6 +34,20 @@ struct Response {
 
 impl Turnstile {
     pub(super) fn new(config: HumanVerificationConfig) -> std::io::Result<Self> {
+        Self::build(config, None)
+    }
+
+    pub(super) fn new_with_proxy(
+        config: HumanVerificationConfig,
+        network_proxy: GlobalProxyState,
+    ) -> std::io::Result<Self> {
+        Self::build(config, Some(network_proxy))
+    }
+
+    fn build(
+        config: HumanVerificationConfig,
+        network_proxy: Option<GlobalProxyState>,
+    ) -> std::io::Result<Self> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
             .timeout(Duration::from_millis(config.timeout_ms))
@@ -40,6 +60,7 @@ impl Turnstile {
             client,
             config,
             endpoint: SITEVERIFY.into(),
+            network_proxy,
         })
     }
 
@@ -54,6 +75,7 @@ impl Turnstile {
                 .unwrap(),
             config,
             endpoint,
+            network_proxy: None,
         }
     }
 
@@ -70,8 +92,30 @@ impl Turnstile {
         {
             body["remoteip"] = ip.to_string().into();
         }
-        let mut response = self
-            .client
+        let client = match &self.network_proxy {
+            Some(network_proxy) => {
+                let local = ProxyConfig {
+                    mode: ProxyMode::System,
+                    url: String::new(),
+                };
+                let effective = network_proxy
+                    .resolve(&local)
+                    .await
+                    .map_err(|_| VerificationError::Unavailable("proxy_configuration"))?;
+                let builder = reqwest::Client::builder()
+                    .https_only(true)
+                    .connect_timeout(Duration::from_millis(self.config.connect_timeout_ms))
+                    .timeout(Duration::from_millis(self.config.timeout_ms))
+                    .redirect(reqwest::redirect::Policy::none());
+                effective
+                    .apply_to(builder)
+                    .map_err(|_| VerificationError::Unavailable("proxy_configuration"))?
+                    .build()
+                    .map_err(|_| VerificationError::Unavailable("proxy_configuration"))?
+            }
+            None => self.client.clone(),
+        };
+        let mut response = client
             .post(&self.endpoint)
             .json(&body)
             .send()

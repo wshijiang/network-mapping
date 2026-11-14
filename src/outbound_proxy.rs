@@ -1,4 +1,6 @@
 //! Per-channel proxy transport. No process-wide environment changes or direct fallback.
+pub(crate) mod settings;
+
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
     transport::smtp::{
@@ -66,14 +68,14 @@ pub struct ProxyError {
     pub(crate) mail_kind: Option<crate::admin::MailFailureKind>,
 }
 impl ProxyError {
-    fn permanent(code: &'static str) -> Self {
+    pub(crate) fn permanent(code: &'static str) -> Self {
         Self {
             code,
             retryable: false,
             mail_kind: None,
         }
     }
-    fn transient(code: &'static str) -> Self {
+    pub(crate) fn transient(code: &'static str) -> Self {
         Self {
             code,
             retryable: true,
@@ -87,6 +89,49 @@ impl fmt::Display for ProxyError {
     }
 }
 impl std::error::Error for ProxyError {}
+
+/// reqwest does not expose typed proxy failures. Inspect the local cause chain
+/// for stable classifications only; raw messages never leave this function.
+pub(crate) fn classify_request_error(error: &reqwest::Error, proxy_mode: ProxyMode) -> ProxyError {
+    use std::error::Error as _;
+
+    if error.is_timeout() {
+        return ProxyError::transient("source_timeout");
+    }
+    let mut messages = Vec::new();
+    let mut current = error.source();
+    while let Some(cause) = current {
+        messages.push(cause.to_string().to_ascii_lowercase());
+        current = cause.source();
+    }
+    let chain = messages.join(" | ");
+    let custom = proxy_mode == ProxyMode::Custom;
+    if chain.contains("proxy authorization required")
+        || (custom && chain.contains("authentication"))
+    {
+        return ProxyError::permanent("proxy_authentication_failed");
+    }
+    if chain.contains("certificate") {
+        if custom && (chain.contains("tunnel") || chain.contains("proxy")) {
+            return ProxyError::permanent("proxy_tls_error");
+        }
+        return ProxyError::permanent("source_tls_error");
+    }
+    if custom {
+        if chain.contains("dns") || chain.contains("resolve") || chain.contains("lookup") {
+            return ProxyError::transient("proxy_dns_failed");
+        }
+        if chain.contains("tunnel error") {
+            return if chain.contains("unsuccessful") {
+                ProxyError::transient("proxy_connect_rejected")
+            } else {
+                ProxyError::transient("proxy_connection_failed")
+            };
+        }
+        return ProxyError::transient("proxy_connection_failed");
+    }
+    ProxyError::transient("source_transport")
+}
 fn network(_: std::io::Error) -> ProxyError {
     ProxyError::transient("proxy_connection_failed")
 }
@@ -130,25 +175,43 @@ pub fn endpoint(value: &str) -> Result<String, ProxyError> {
     Ok(url.to_string())
 }
 impl ProxyConfig {
-    pub fn http_client(&self) -> Result<reqwest::Client, ProxyError> {
-        let mut builder = reqwest::Client::builder()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(10));
+    /// Apply this transport to a caller-owned builder so modules keep their
+    /// own timeouts and user agents while sharing proxy semantics.
+    pub fn apply_to(
+        &self,
+        builder: reqwest::ClientBuilder,
+    ) -> Result<reqwest::ClientBuilder, ProxyError> {
         match self.mode {
-            ProxyMode::System => {}
-            ProxyMode::Direct => builder = builder.no_proxy(),
+            ProxyMode::System => Ok(builder),
+            ProxyMode::Direct => Ok(builder.no_proxy()),
             ProxyMode::Custom => {
                 let url = validate_url(&self.url)?;
-                builder = builder.proxy(
+                // Adding an explicit proxy disables reqwest's automatic
+                // environment proxy handling for this client.
+                Ok(builder.proxy(
                     reqwest::Proxy::all(url).map_err(|_| ProxyError::permanent("proxy_invalid"))?,
-                );
+                ))
             }
         }
-        builder
-            .build()
-            .map_err(|_| ProxyError::permanent("proxy_invalid"))
+    }
+
+    pub fn validate(&self) -> Result<(), ProxyError> {
+        match self.mode {
+            ProxyMode::Custom => validate_url(&self.url).map(|_| ()),
+            ProxyMode::System | ProxyMode::Direct => Ok(()),
+        }
+    }
+
+    pub fn http_client(&self) -> Result<reqwest::Client, ProxyError> {
+        self.apply_to(
+            reqwest::Client::builder()
+                .https_only(true)
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(10)),
+        )?
+        .build()
+        .map_err(|_| ProxyError::permanent("proxy_invalid"))
     }
 }
 type Stream = Box<dyn AsyncTokioStream>;

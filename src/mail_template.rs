@@ -19,6 +19,7 @@ use crate::admin::{
 };
 use crate::config::EmailConfig;
 use crate::monitor::HealthEvent;
+use crate::network_proxy::GlobalProxyState;
 
 const DEFAULT_LOGIN_SUBJECT: &str = "{{ system_name }} 登录成功提醒";
 const DEFAULT_LOGIN_HTML: &str = include_str!("../templates/mail/login_success.html");
@@ -766,6 +767,7 @@ async fn send_rendered_mail(
     recipient: &str,
     rendered: RenderedMailTemplate,
     retry_policy: MailRetryPolicy,
+    network_proxy: &GlobalProxyState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     send_rendered_mail_with_id(
         pool,
@@ -774,6 +776,7 @@ async fn send_rendered_mail(
         rendered,
         retry_policy,
         None,
+        network_proxy,
     )
     .await
 }
@@ -785,6 +788,7 @@ async fn send_rendered_mail_with_id(
     rendered: RenderedMailTemplate,
     retry_policy: MailRetryPolicy,
     message_id: Option<String>,
+    network_proxy: &GlobalProxyState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (email_config, port) = if let Some(transport) =
         crate::notification::email_transport(pool, encryption_key)
@@ -810,6 +814,14 @@ async fn send_rendered_mail_with_id(
             settings.smtp_port,
         )
     };
+    let proxy = network_proxy
+        .resolve(&email_config.proxy)
+        .await
+        .map_err(|_| "邮件代理配置无法读取")?;
+    let email_config = EmailConfig {
+        proxy,
+        ..email_config
+    };
     let message = Message::builder()
         .from(Mailbox::new(
             Some("Network Mapping".to_owned()),
@@ -833,6 +845,7 @@ pub async fn send_template_test(
     recipient: &str,
     source: &MailTemplateSource,
     state: ScannerNotificationState,
+    network_proxy: &GlobalProxyState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut context = sample_context_for_state(template_key, state)?;
     if matches!(
@@ -860,6 +873,7 @@ pub async fn send_template_test(
         recipient,
         rendered,
         MailRetryPolicy::Interactive,
+        network_proxy,
     )
     .await
 }
@@ -888,6 +902,7 @@ pub async fn send_health_alert(
     pool: &Pool,
     encryption_key: &str,
     event: &HealthEvent,
+    network_proxy: &GlobalProxyState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let settings = get_mail_settings_from_database(pool).await?;
     if !settings.notification_prefs.health_alert_enabled {
@@ -918,6 +933,7 @@ pub async fn send_health_alert(
             &recipient,
             rendered.clone(),
             MailRetryPolicy::Background,
+            network_proxy,
         )
         .await
         {
@@ -962,6 +978,7 @@ pub async fn send_scanner_outage_email(
     encryption_key: &str,
     recipient: &str,
     mail: &ScannerOutageMail<'_>,
+    network_proxy: &GlobalProxyState,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let Some(source) = get_published_source(pool, SCANNER_OUTAGE_TEMPLATE_KEY).await? else {
         return Ok(false);
@@ -983,6 +1000,7 @@ pub async fn send_scanner_outage_email(
         recipient,
         rendered,
         MailRetryPolicy::Background,
+        network_proxy,
     )
     .await?;
     Ok(true)
@@ -1101,6 +1119,7 @@ pub(crate) async fn send_archived_report(
     recipient: &str,
     rendered: Value,
     delivery_id: uuid::Uuid,
+    network_proxy: &GlobalProxyState,
 ) -> Result<(), String> {
     let rendered: RenderedMailTemplate =
         serde_json::from_value(rendered).map_err(|e| e.to_string())?;
@@ -1111,6 +1130,7 @@ pub(crate) async fn send_archived_report(
         rendered,
         MailRetryPolicy::Background,
         Some(format!("<report-{delivery_id}@network-mapping.local>")),
+        network_proxy,
     )
     .await
     .map_err(|e| e.to_string())

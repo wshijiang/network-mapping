@@ -72,7 +72,13 @@ async fn deferred_legacy_reports_wait_for_transfer_while_manual_mail_still_runs(
     .await
     .unwrap();
     drop(c);
-    worker::send_one(&pool, "unused").await.unwrap();
+    worker::send_one(
+        &pool,
+        "unused",
+        &crate::network_proxy::GlobalProxyState::system(),
+    )
+    .await
+    .unwrap();
     let c = pool.get().await.unwrap();
     let auto_status: String = c
         .query_one(
@@ -1050,9 +1056,13 @@ async fn delivery_revalidates_administrator_role_without_sending_smtp() {
         .await
         .expect("demote");
     drop(client);
-    worker::send_one(&pool, "unused")
-        .await
-        .expect("cancel before SMTP");
+    worker::send_one(
+        &pool,
+        "unused",
+        &crate::network_proxy::GlobalProxyState::system(),
+    )
+    .await
+    .expect("cancel before SMTP");
     let status: String = pool
         .get()
         .await
@@ -1567,9 +1577,13 @@ async fn missing_smtp_configuration_retries_delivery_without_recomputing_report(
         .expect("enqueue");
     drop(client);
     for _ in 0..5 {
-        worker::send_one(&pool, "unused")
-            .await
-            .expect("failed delivery");
+        worker::send_one(
+            &pool,
+            "unused",
+            &crate::network_proxy::GlobalProxyState::system(),
+        )
+        .await
+        .expect("failed delivery");
         pool.get()
             .await
             .expect("client")

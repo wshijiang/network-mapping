@@ -311,11 +311,28 @@ pub async fn run(args: Clis) -> io::Result<()> {
         println!("分析快照重建完成：已处理 {processed} 个扫描执行");
         return Ok(());
     }
+    let network_proxy =
+        crate::network_proxy::GlobalProxyState::initialize(&db_pool, &ser_con.encrypt_key).await;
+    let network_proxy_refresh = network_proxy.clone();
+    let network_proxy_pool = db_pool.clone();
+    let network_proxy_key = ser_con.encrypt_key.clone();
+    background.spawn("network-proxy-refresh", async move {
+        loop {
+            if let Err(error) = network_proxy_refresh
+                .refresh(&network_proxy_pool, &network_proxy_key)
+                .await
+            {
+                tracing::warn!(event = "NetworkProxyRefreshFailed", %error);
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
     let human_verification = web::Data::new(
         crate::human_verification::settings::ManagedVerification::initialize(
             db_pool.clone(),
             &ser_con.encrypt_key,
             config.human_verification.clone(),
+            network_proxy.clone(),
         )
         .await
         .map_err(|_| io::Error::other("无法加载登录保护配置"))?,
@@ -384,6 +401,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             ser_con.encrypt_key.clone(),
             system_maintenance_state.clone(),
             runtime_settings.scanner_health.clone(),
+            network_proxy.clone(),
         ),
     );
     if let Ok(client) = db_pool.get().await
@@ -445,6 +463,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             ser_con.encrypt_key.clone(),
             system_maintenance_state.clone(),
             background.subscribe(),
+            network_proxy.clone(),
         ),
     );
     background.spawn_draining(
@@ -453,6 +472,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             db_pool.clone(),
             ser_con.encrypt_key.clone(),
             background.subscribe(),
+            network_proxy.clone(),
         ),
     );
     background.spawn_draining(
@@ -464,6 +484,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             system_maintenance_state.clone(),
             report_renderer.get_ref().clone(),
             background.subscribe(),
+            network_proxy.clone(),
         ),
     );
 
@@ -556,6 +577,8 @@ pub async fn run(args: Clis) -> io::Result<()> {
             db_pool.clone(),
             elasticsearch_service.clone(),
             system_maintenance_state.clone(),
+            ser_con.encrypt_key.clone(),
+            network_proxy.clone(),
         ),
     );
     let rate_limiter = RateLimitMiddleware::default();
@@ -685,6 +708,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             pool.clone(),
             system_maintenance_state.clone(),
             ser_con.encrypt_key.clone(),
+            network_proxy.clone(),
         ),
     );
 
@@ -714,6 +738,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             .app_data(open_source_catalog.clone())
             .app_data(backup_manager.clone())
             .app_data(elasticsearch_data.clone())
+            .app_data(web::Data::new(network_proxy.clone()))
             .app_data(trusted_proxy_state.clone())
             .app_data(system_maintenance_state.clone())
             .app_data(security.clone())

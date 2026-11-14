@@ -127,6 +127,10 @@ fn configuration(cfg: &mut web::ServiceConfig) {
     cfg.service(handlers::utils::save_session_settings_h);
     cfg.service(handlers::utils::get_trusted_proxy_settings_h);
     cfg.service(handlers::utils::save_trusted_proxy_settings_h);
+    cfg.service(handlers::network::get_network_proxy);
+    cfg.service(handlers::network::save_network_proxy);
+    cfg.service(handlers::network::clear_network_proxy);
+    cfg.service(handlers::network::test_network_proxy);
     cfg.service(handlers::utils::get_scan_settings_h);
     cfg.service(handlers::utils::save_scan_settings_h);
     cfg.service(handlers::utils::test_mail_server_h);

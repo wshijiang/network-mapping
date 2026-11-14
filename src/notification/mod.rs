@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 use tokio_postgres::{Row, Transaction};
 use uuid::Uuid;
 
+use crate::network_proxy::GlobalProxyState;
 use crate::outbound_proxy::{ProxyConfig, ProxyMode};
 use crate::{
     admin::UserBaseI,
@@ -29,7 +30,7 @@ use crate::{
 };
 pub(crate) use feishu_ws::run as run_feishu_binding;
 pub use routes::configure;
-pub use worker::run;
+pub(crate) use worker::run;
 
 pub const EVENT_TYPES: [&str; 6] = [
     "health.alert",
@@ -812,18 +813,26 @@ fn decrypted_proxy(mode: ProxyMode, ciphertext: Option<&[u8]>, key: &str) -> Res
     Ok(ProxyConfig { mode, url })
 }
 /// The same first-email transport is used by legacy template tests and manual reports.
-pub(crate) async fn email_proxy(pool: &Pool, key: &str) -> Result<ProxyConfig> {
+pub(crate) async fn email_proxy(
+    pool: &Pool,
+    key: &str,
+    network_proxy: &GlobalProxyState,
+) -> Result<ProxyConfig> {
     let row=pool.get().await?.query_opt("SELECT proxy_mode,proxy_ciphertext FROM notification_channel WHERE provider='email' AND deleted_at IS NULL ORDER BY created_at,id LIMIT 1", &[]).await?;
-    match row {
-        None => Ok(ProxyConfig::default()),
+    let local = match row {
+        None => ProxyConfig::default(),
         Some(row) => decrypted_proxy(
             row.get::<_, String>("proxy_mode")
                 .parse()
                 .map_err(|_| Error::internal())?,
             row.get::<_, Option<Vec<u8>>>("proxy_ciphertext").as_deref(),
             key,
-        ),
-    }
+        )?,
+    };
+    network_proxy
+        .resolve(&local)
+        .await
+        .map_err(|_| Error::internal())
 }
 
 /// Read the entire selected transport in one MVCC snapshot: never mix one

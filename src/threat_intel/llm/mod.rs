@@ -16,6 +16,7 @@ pub(super) use model::Resolved;
 use model::*;
 pub(super) use routes::configure;
 pub(super) use storage::runtime_transport;
+pub(super) use storage::runtime_transport_with_proxy;
 pub(super) use transport::execute;
 
 fn invalid() -> Error {
