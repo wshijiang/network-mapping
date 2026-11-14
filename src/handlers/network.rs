@@ -165,10 +165,6 @@ pub async fn test_network_proxy(
                 .json(json!({"success": false, "code": code, "message": code}));
         }
     };
-    if let Err(code) = network_proxy::ensure_public_test_host(&url, proxy.mode).await {
-        return HttpResponse::BadRequest()
-            .json(json!({"success": false, "code": code, "message": code}));
-    }
     let started = Instant::now();
     let result = network_proxy::probe_url(&proxy, url.as_str()).await;
     let latency_ms = started.elapsed().as_millis() as u64;

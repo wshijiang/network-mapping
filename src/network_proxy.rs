@@ -209,7 +209,7 @@ pub(crate) fn validate_test_url(value: &str) -> Result<reqwest::Url, &'static st
         return Err("proxy_test_url_invalid");
     }
     let url = reqwest::Url::parse(value).map_err(|_| "proxy_test_url_invalid")?;
-    if url.scheme() != "https"
+    if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
@@ -220,74 +220,22 @@ pub(crate) fn validate_test_url(value: &str) -> Result<reqwest::Url, &'static st
     Ok(url)
 }
 
-/// Direct/system probes connect from this server, so reject private
-/// destinations. A custom proxy owns its egress policy and may resolve
-/// `socks5h` remotely.
-pub(crate) async fn ensure_public_test_host(
-    url: &reqwest::Url,
-    proxy_mode: ProxyMode,
-) -> Result<(), &'static str> {
-    if proxy_mode == ProxyMode::Custom {
-        return Ok(());
-    }
-    let host = url.host_str().ok_or("proxy_test_url_invalid")?;
-    let port = url.port_or_known_default().unwrap_or(443);
-    let addresses = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::net::lookup_host((host, port)),
-    )
-    .await
-    .map_err(|_| "proxy_test_dns_failed")?
-    .map_err(|_| "proxy_test_dns_failed")?
-    .collect::<Vec<_>>();
-    if addresses.is_empty() || addresses.iter().any(|address| !public_ip(address.ip())) {
-        return Err("proxy_test_url_not_public");
-    }
-    Ok(())
-}
-
 pub(crate) async fn probe_url(proxy: &ProxyConfig, url: &str) -> Result<u16, ProxyError> {
-    let client = proxy.http_client()?;
+    let builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10));
+    let client = proxy
+        .apply_to(builder)
+        .map_err(|_| ProxyError::permanent("proxy_invalid"))?
+        .build()
+        .map_err(|_| ProxyError::permanent("proxy_invalid"))?;
     let response = client
         .get(url)
         .send()
         .await
         .map_err(|error| outbound_proxy::classify_request_error(&error, proxy.mode))?;
     Ok(response.status().as_u16())
-}
-
-fn public_ip(ip: std::net::IpAddr) -> bool {
-    match crate::client_ip::normalize_ip(ip) {
-        std::net::IpAddr::V4(ip) => {
-            let n = u32::from(ip);
-            ![
-                "0.0.0.0/8",
-                "10.0.0.0/8",
-                "100.64.0.0/10",
-                "127.0.0.0/8",
-                "169.254.0.0/16",
-                "172.16.0.0/12",
-                "192.0.0.0/24",
-                "192.0.2.0/24",
-                "192.88.99.0/24",
-                "192.168.0.0/16",
-                "198.18.0.0/15",
-                "198.51.100.0/24",
-                "203.0.113.0/24",
-                "224.0.0.0/3",
-            ]
-            .iter()
-            .any(|s| {
-                s.parse::<ipnet::Ipv4Net>()
-                    .expect("constant subnet")
-                    .contains(&std::net::Ipv4Addr::from(n))
-            })
-        }
-        std::net::IpAddr::V6(ip) => "2000::/3"
-            .parse::<ipnet::Ipv6Net>()
-            .expect("constant subnet")
-            .contains(&ip),
-    }
 }
 
 #[cfg(test)]
@@ -392,14 +340,12 @@ mod tests {
     }
 
     #[test]
-    fn test_urls_are_https_only_and_public_ip_classification_is_conservative() {
+    fn test_urls_accept_http_and_https_without_credentials_or_fragments() {
         assert!(validate_test_url("https://example.com/").is_ok());
-        assert!(validate_test_url("http://example.com/").is_err());
+        assert!(validate_test_url("http://example.com/").is_ok());
+        assert!(validate_test_url("ftp://example.com/").is_err());
         assert!(validate_test_url("https://user:secret@example.com/").is_err());
         assert!(validate_test_url("https://example.com/#fragment").is_err());
-        assert!(!public_ip("127.0.0.1".parse().unwrap()));
-        assert!(!public_ip("10.0.0.1".parse().unwrap()));
-        assert!(public_ip("1.1.1.1".parse().unwrap()));
     }
 
     #[tokio::test]
