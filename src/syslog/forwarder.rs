@@ -287,9 +287,11 @@ pub async fn run_supervisor(
     pool: Pool,
     config: RuntimeConfig<SyslogConfig>,
     registry: StatusRegistry,
+    network_proxy: crate::network_proxy::GlobalProxyState,
     mut stopping: watch::Receiver<bool>,
 ) {
     let mut changes = config.subscribe();
+    let mut proxy_changes = network_proxy.subscribe();
     let mut pipeline: Option<Pipeline> = None;
     loop {
         let snapshot = config.get().await;
@@ -297,11 +299,13 @@ pub async fn run_supervisor(
         if let Some(previous) = pipeline.take() {
             previous.shutdown().await;
         }
+        // 仅 SOCKS5 全局代理生效，其余自动回退直连。
+        let proxy = resolve_socks5(&network_proxy).await;
         let ids: Vec<Uuid> = settings.targets.iter().map(|target| target.id).collect();
         registry.retain(&ids);
         let active = settings.enabled && settings.targets.iter().any(|target| target.enabled);
         if active {
-            let started = Pipeline::start(&pool, &settings, registry.clone());
+            let started = Pipeline::start(&pool, &settings, registry.clone(), proxy.clone());
             capture().install(Some(started.sender.clone()), &settings);
             pipeline = Some(started);
             tracing::info!(
@@ -309,6 +313,10 @@ pub async fn run_supervisor(
                 component = "syslog",
                 targets = settings.targets.iter().filter(|t| t.enabled).count(),
                 revision = snapshot.revision,
+                proxy = proxy
+                    .as_ref()
+                    .map(|p| format!("{}:{}", p.host, p.port))
+                    .unwrap_or_else(|| "direct".to_owned()),
                 "syslog 转发管道已启动"
             );
         } else {
@@ -324,12 +332,29 @@ pub async fn run_supervisor(
                     break;
                 }
             }
+            changed = proxy_changes.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+            }
         }
     }
     if let Some(previous) = pipeline.take() {
         previous.shutdown().await;
     }
     capture().install(None, &SyslogConfig::default());
+}
+
+/// 解析全局代理为 SOCKS5；非 SOCKS5（含解析失败）回退 None = 直连。
+pub async fn resolve_socks5(
+    network_proxy: &crate::network_proxy::GlobalProxyState,
+) -> Option<crate::syslog::proxy::Socks5Proxy> {
+    let local = crate::outbound_proxy::ProxyConfig {
+        mode: crate::outbound_proxy::ProxyMode::System,
+        url: String::new(),
+    };
+    let effective = network_proxy.resolve(&local).await.ok()?;
+    crate::syslog::proxy::from_proxy_config(&effective)
 }
 
 struct Pipeline {
@@ -339,7 +364,12 @@ struct Pipeline {
 }
 
 impl Pipeline {
-    fn start(pool: &Pool, config: &SyslogConfig, registry: StatusRegistry) -> Self {
+    fn start(
+        pool: &Pool,
+        config: &SyslogConfig,
+        registry: StatusRegistry,
+        proxy: Option<crate::syslog::proxy::Socks5Proxy>,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel(config.queue_capacity);
         let (stop, stop_receiver) = watch::channel(false);
         let mut tasks = JoinSet::new();
@@ -363,6 +393,7 @@ impl Pipeline {
                 config.app_name.clone(),
                 stop_receiver.clone(),
                 overflow,
+                proxy.clone(),
             ));
         }
         tasks.spawn(dispatcher(
@@ -436,6 +467,7 @@ async fn worker(
     app_name: String,
     mut stop: watch::Receiver<bool>,
     overflow: Arc<AtomicU64>,
+    proxy: Option<crate::syslog::proxy::Socks5Proxy>,
 ) {
     let max_bytes = if target.protocol == Protocol::Udp {
         UDP_MAX_BYTES
@@ -478,7 +510,7 @@ async fn worker(
         }
 
         if connection.is_none() {
-            match transport::connect(&target, transport::CONNECT_TIMEOUT).await {
+            match transport::connect(&target, transport::CONNECT_TIMEOUT, proxy.as_ref()).await {
                 Ok(created) => {
                     connection = Some(created);
                     failures = 0;
@@ -573,6 +605,7 @@ pub async fn send_test(
     target: &TargetConfig,
     facility_code: u8,
     app_name: &str,
+    proxy: Option<&crate::syslog::proxy::Socks5Proxy>,
 ) -> Result<f64, String> {
     let message = Message {
         timestamp: Utc::now(),
@@ -588,7 +621,7 @@ pub async fn send_test(
     };
     let payload = format::render(&message, facility_code, app_name, max_bytes);
     let started = Instant::now();
-    let mut connection = transport::connect(target, transport::CONNECT_TIMEOUT).await?;
+    let mut connection = transport::connect(target, transport::CONNECT_TIMEOUT, proxy).await?;
     transport::send(&mut connection, &payload, transport::SEND_TIMEOUT).await?;
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }

@@ -13,6 +13,7 @@ pub mod format;
 pub mod forwarder;
 pub mod hooks;
 pub mod metrics;
+pub mod proxy;
 pub mod status;
 pub mod transport;
 

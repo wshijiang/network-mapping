@@ -186,9 +186,14 @@ pub async fn run(args: Clis) -> io::Result<()> {
         }
     };
     if let Some(command) = args.command.as_ref() {
-        cli_user::execute(command, &db_pool, config.pwd_hash.clone())
-            .await
-            .map_err(|error| io::Error::other(format!("管理命令失败：{error}")))?;
+        cli_user::execute(
+            command,
+            &db_pool,
+            config.pwd_hash.clone(),
+            &ser_con.encrypt_key,
+        )
+        .await
+        .map_err(|error| io::Error::other(format!("管理命令失败：{error}")))?;
         return Ok(());
     }
     let (rebuild_concurrency, rebuild_page_size) = args.transport_rebuild_tuning();
@@ -359,6 +364,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             db_pool.clone(),
             runtime_settings.syslog.clone(),
             syslog_registry.clone(),
+            network_proxy.clone(),
             background.subscribe(),
         ),
     );
@@ -375,6 +381,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
         crate::syslog::backfill::run_worker(
             db_pool.clone(),
             runtime_settings.syslog.clone(),
+            network_proxy.clone(),
             background.subscribe(),
         ),
     );
@@ -390,6 +397,29 @@ pub async fn run(args: Clis) -> io::Result<()> {
         "syslog-metrics-retention",
         crate::syslog::metrics::run_retention(db_pool.clone(), runtime_settings.syslog.clone()),
     );
+    // CLI 直接写库的变更也要热生效：定期拉取 syslog 命名空间的更新 revision。
+    let syslog_refresh_pool = db_pool.clone();
+    let syslog_refresh_config = runtime_settings.syslog.clone();
+    background.spawn("syslog-configuration", async move {
+        loop {
+            if let Ok(client) = syslog_refresh_pool.get().await
+                && let Ok(Some(row)) = client
+                    .query_opt(
+                        "SELECT document, revision FROM runtime_configuration WHERE namespace = 'syslog'",
+                        &[],
+                    )
+                    .await
+            {
+                let revision: i64 = row.get("revision");
+                if revision > syslog_refresh_config.get().await.revision
+                    && let Ok(value) = crate::runtime_config::parse_syslog(row.get("document"))
+                {
+                    syslog_refresh_config.replace(value, revision).await;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
     let syslog_registry_data = web::Data::new(syslog_registry);
     let report_renderer = web::Data::new(
         crate::reports::service::ReportRenderService::from_database(

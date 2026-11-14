@@ -17,19 +17,24 @@ pub enum Connection {
     Tls(tokio_native_tls::TlsStream<TcpStream>),
 }
 
-pub async fn connect(target: &TargetConfig, timeout: Duration) -> Result<Connection, String> {
-    let address = tokio::time::timeout(
-        timeout,
-        tokio::net::lookup_host((target.host.as_str(), target.port)),
-    )
-    .await
-    .map_err(|_| "DNS 解析超时".to_owned())?
-    .map_err(|error| sanitize_error(&format!("地址解析失败: {error}")))?
-    .next()
-    .ok_or_else(|| "地址解析结果为空".to_owned())?;
-
+/// 建立到目标的连接。`proxy` 仅作用于 TCP/TLS（SOCKS5）；UDP 始终直连。
+/// 非 SOCKS5 代理由调用方解析为 None，即自动回退直连。
+pub async fn connect(
+    target: &TargetConfig,
+    timeout: Duration,
+    proxy: Option<&crate::syslog::proxy::Socks5Proxy>,
+) -> Result<Connection, String> {
     match target.protocol {
         Protocol::Udp => {
+            let address = tokio::time::timeout(
+                timeout,
+                tokio::net::lookup_host((target.host.as_str(), target.port)),
+            )
+            .await
+            .map_err(|_| "DNS 解析超时".to_owned())?
+            .map_err(|error| sanitize_error(&format!("地址解析失败: {error}")))?
+            .next()
+            .ok_or_else(|| "地址解析结果为空".to_owned())?;
             let socket = if address.is_ipv4() {
                 UdpSocket::bind("0.0.0.0:0").await
             } else {
@@ -42,20 +47,9 @@ pub async fn connect(target: &TargetConfig, timeout: Duration) -> Result<Connect
                 .map_err(|error| sanitize_error(&format!("UDP 连接失败: {error}")))?;
             Ok(Connection::Udp(socket))
         }
-        Protocol::Tcp => {
-            let stream = tokio::time::timeout(timeout, TcpStream::connect(address))
-                .await
-                .map_err(|_| "TCP 连接超时".to_owned())?
-                .map_err(|error| sanitize_error(&format!("TCP 连接失败: {error}")))?;
-            let _ = stream.set_nodelay(true);
-            Ok(Connection::Tcp(stream))
-        }
+        Protocol::Tcp => Ok(Connection::Tcp(tcp_stream(target, timeout, proxy).await?)),
         Protocol::Tls => {
-            let stream = tokio::time::timeout(timeout, TcpStream::connect(address))
-                .await
-                .map_err(|_| "TCP 连接超时".to_owned())?
-                .map_err(|error| sanitize_error(&format!("TCP 连接失败: {error}")))?;
-            let _ = stream.set_nodelay(true);
+            let stream = tcp_stream(target, timeout, proxy).await?;
             let connector = tokio_native_tls::TlsConnector::from(tls_connector(target)?);
             let domain = if target.tls.server_name.is_empty() {
                 target.host.as_str()
@@ -69,6 +63,33 @@ pub async fn connect(target: &TargetConfig, timeout: Duration) -> Result<Connect
             Ok(Connection::Tls(tls))
         }
     }
+}
+
+async fn tcp_stream(
+    target: &TargetConfig,
+    timeout: Duration,
+    proxy: Option<&crate::syslog::proxy::Socks5Proxy>,
+) -> Result<TcpStream, String> {
+    if let Some(proxy) = proxy {
+        return crate::syslog::proxy::connect_tcp(proxy, &target.host, target.port, timeout)
+            .await
+            .map_err(|error| sanitize_error(&error));
+    }
+    let address = tokio::time::timeout(
+        timeout,
+        tokio::net::lookup_host((target.host.as_str(), target.port)),
+    )
+    .await
+    .map_err(|_| "DNS 解析超时".to_owned())?
+    .map_err(|error| sanitize_error(&format!("地址解析失败: {error}")))?
+    .next()
+    .ok_or_else(|| "地址解析结果为空".to_owned())?;
+    let stream = tokio::time::timeout(timeout, TcpStream::connect(address))
+        .await
+        .map_err(|_| "TCP 连接超时".to_owned())?
+        .map_err(|error| sanitize_error(&format!("TCP 连接失败: {error}")))?;
+    let _ = stream.set_nodelay(true);
+    Ok(stream)
 }
 
 fn tls_connector(target: &TargetConfig) -> Result<native_tls::TlsConnector, String> {
@@ -173,7 +194,7 @@ mod tests {
     async fn udp_loopback_receives_rfc5424_datagram() {
         let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let port = receiver.local_addr().unwrap().port();
-        let mut connection = connect(&target(Protocol::Udp, port), CONNECT_TIMEOUT)
+        let mut connection = connect(&target(Protocol::Udp, port), CONNECT_TIMEOUT, None)
             .await
             .unwrap();
         let message = payload();
@@ -192,7 +213,7 @@ mod tests {
     async fn tcp_loopback_receives_octet_counted_frame() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let mut connection = connect(&target(Protocol::Tcp, port), CONNECT_TIMEOUT)
+        let mut connection = connect(&target(Protocol::Tcp, port), CONNECT_TIMEOUT, None)
             .await
             .unwrap();
         let message = payload();
@@ -210,7 +231,7 @@ mod tests {
     #[tokio::test]
     async fn connect_failure_is_reported_not_panicked() {
         // 127.0.0.1:1 几乎必然拒绝连接。
-        let result = connect(&target(Protocol::Tcp, 1), Duration::from_secs(2)).await;
+        let result = connect(&target(Protocol::Tcp, 1), Duration::from_secs(2), None).await;
         assert!(result.is_err());
     }
 

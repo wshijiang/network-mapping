@@ -23,6 +23,7 @@ fn forbidden() -> HttpResponse {
 pub(crate) async fn syslog_status(
     settings: web::Data<RuntimeSettings>,
     registry: web::Data<StatusRegistry>,
+    network_proxy: web::Data<crate::network_proxy::GlobalProxyState>,
     user: UserBaseI,
 ) -> impl Responder {
     if user.role != 1 {
@@ -31,6 +32,15 @@ pub(crate) async fn syslog_status(
     let snapshot = settings.syslog.get().await;
     let config = snapshot.value;
     let handle = capture();
+    let proxy = crate::syslog::forwarder::resolve_socks5(network_proxy.get_ref()).await;
+    let proxy_info = match &proxy {
+        Some(p) => json!({
+            "mode": "socks5",
+            "endpoint": format!("{}:{}", p.host, p.port),
+            "remoteDns": p.remote_dns,
+        }),
+        None => json!({"mode": "direct", "endpoint": null, "remoteDns": false}),
+    };
     let targets: Vec<_> = config
         .targets
         .iter()
@@ -65,6 +75,7 @@ pub(crate) async fn syslog_status(
                 "capacity": config.queue_capacity,
                 "enqueueDrops": handle.enqueue_drops(),
             },
+            "proxy": proxy_info,
             "targets": targets,
         }
     }))
@@ -86,6 +97,7 @@ pub(crate) async fn syslog_test(
     req: HttpRequest,
     settings: web::Data<RuntimeSettings>,
     pool: web::Data<deadpool_postgres::Pool>,
+    network_proxy: web::Data<crate::network_proxy::GlobalProxyState>,
     user: UserBaseI,
     body: web::Json<SyslogTestRequest>,
 ) -> impl Responder {
@@ -120,7 +132,14 @@ pub(crate) async fn syslog_test(
         candidate
     };
 
-    let result = send_test(&target, config.facility.code(), &config.app_name).await;
+    let proxy = crate::syslog::forwarder::resolve_socks5(network_proxy.get_ref()).await;
+    let result = send_test(
+        &target,
+        config.facility.code(),
+        &config.app_name,
+        proxy.as_ref(),
+    )
+    .await;
     let (ok, latency_ms, error) = match &result {
         Ok(latency) => (true, Some(*latency), String::new()),
         Err(error) => (false, None, error.clone()),

@@ -233,10 +233,10 @@ pub enum AlertsCommand {
     },
 }
 
-pub async fn execute(command: &SyslogCommand, pool: &Pool) -> CliResult {
+pub async fn execute(command: &SyslogCommand, pool: &Pool, encrypt_key: &str) -> CliResult {
     match command {
         SyslogCommand::Show { json } => show(pool, *json).await,
-        SyslogCommand::Status { json } => show_status(pool, *json).await,
+        SyslogCommand::Status { json } => show_status(pool, encrypt_key, *json).await,
         SyslogCommand::History { limit, json } => history(pool, *limit, *json).await,
         SyslogCommand::Enable { reason } => set_enabled(pool, true, reason).await,
         SyslogCommand::Disable { reason } => set_enabled(pool, false, reason).await,
@@ -394,13 +394,25 @@ pub async fn execute(command: &SyslogCommand, pool: &Pool) -> CliResult {
             let item = config
                 .find_target(target)
                 .ok_or_else(|| format!("未找到服务器：{target}"))?;
+            let proxy = resolve_proxy(pool, encrypt_key).await;
+            let route = match &proxy {
+                Some(p) => format!("经 SOCKS5 代理 {}:{}", p.host, p.port),
+                None => "直连".to_owned(),
+            };
             println!(
-                "向 {}:{} ({}) 发送测试消息…",
+                "向 {}:{} ({}) 发送测试消息（{route}）…",
                 item.host,
                 item.port,
                 item.protocol.as_str()
             );
-            match send_test(item, config.facility.code(), &config.app_name).await {
+            match send_test(
+                item,
+                config.facility.code(),
+                &config.app_name,
+                proxy.as_ref(),
+            )
+            .await
+            {
                 Ok(latency) => {
                     println!("测试成功，耗时 {latency:.1} ms");
                     Ok(())
@@ -420,6 +432,19 @@ pub async fn execute(command: &SyslogCommand, pool: &Pool) -> CliResult {
 }
 
 // ---- 配置读写（与 Web 共用校验与持久化） ----
+
+/// 从全局网络代理设置解析 SOCKS5；非 SOCKS5 或不可用时回退 None（直连）。
+async fn resolve_proxy(
+    pool: &Pool,
+    encrypt_key: &str,
+) -> Option<crate::syslog::proxy::Socks5Proxy> {
+    let stored =
+        crate::outbound_proxy::settings::load(pool, crate::outbound_proxy::settings::GLOBAL_SCOPE)
+            .await
+            .ok()?;
+    let config = stored.proxy_config(encrypt_key).ok()?;
+    crate::syslog::proxy::from_proxy_config(&config)
+}
 
 async fn load_current(pool: &Pool) -> CliResult<(SyslogConfig, i64)> {
     let client = pool.get().await?;
@@ -590,9 +615,10 @@ fn print_alerts(config: &SyslogConfig) {
     );
 }
 
-async fn show_status(pool: &Pool, as_json: bool) -> CliResult {
+async fn show_status(pool: &Pool, encrypt_key: &str, as_json: bool) -> CliResult {
     let (config, _) = load_current(pool).await?;
     let rows = status::load_persisted(pool).await?;
+    let proxy = resolve_proxy(pool, encrypt_key).await;
     let now = Utc::now();
     let items: Vec<Value> = rows
         .iter()
@@ -619,13 +645,26 @@ async fn show_status(pool: &Pool, as_json: bool) -> CliResult {
             })
         })
         .collect();
+    let proxy_info = match &proxy {
+        Some(p) => {
+            json!({"mode": "socks5", "endpoint": format!("{}:{}", p.host, p.port), "remoteDns": p.remote_dns})
+        }
+        None => json!({"mode": "direct", "endpoint": null, "remoteDns": false}),
+    };
     if as_json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&json!({"targets": items}))?
+            serde_json::to_string_pretty(&json!({"proxy": proxy_info, "targets": items}))?
         );
         return Ok(());
     }
+    println!(
+        "代理：{}",
+        match &proxy {
+            Some(p) => format!("SOCKS5 {}:{}（仅 TCP/TLS；UDP 直连）", p.host, p.port),
+            None => "直连（全局代理非 SOCKS5 或未配置，已自动回退）".to_owned(),
+        }
+    );
     if items.is_empty() {
         println!("暂无状态快照（服务尚未运行过转发管道）。");
         return Ok(());

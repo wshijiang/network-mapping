@@ -175,6 +175,7 @@ enum Outcome {
 pub async fn run_worker(
     pool: Pool,
     config: RuntimeConfig<SyslogConfig>,
+    network_proxy: crate::network_proxy::GlobalProxyState,
     mut stopping: watch::Receiver<bool>,
 ) {
     // 重启恢复：中断的 running 任务标记失败（同备份任务模式）。
@@ -203,7 +204,8 @@ pub async fn run_worker(
             }
         };
         let settings = config.get().await.value;
-        let outcome = process(&pool, &settings, &job, &mut stopping).await;
+        let proxy = crate::syslog::forwarder::resolve_socks5(&network_proxy).await;
+        let outcome = process(&pool, &settings, &job, &mut stopping, proxy.as_ref()).await;
         let (status, counters, error) = match outcome {
             Outcome::Done(counters) => ("succeeded", counters, String::new()),
             Outcome::Cancelled(counters) => ("cancelled", counters, String::new()),
@@ -315,6 +317,7 @@ async fn process(
     settings: &SyslogConfig,
     job: &BackfillJob,
     stopping: &mut watch::Receiver<bool>,
+    proxy: Option<&crate::syslog::proxy::Socks5Proxy>,
 ) -> Outcome {
     if !settings.enabled {
         return Outcome::Failed(
@@ -358,7 +361,15 @@ async fn process(
             break;
         }
         for (item, at, id) in batch {
-            send_item(&targets, &mut connections, settings, &item, &mut counters).await;
+            send_item(
+                &targets,
+                &mut connections,
+                settings,
+                &item,
+                &mut counters,
+                proxy,
+            )
+            .await;
             counters.processed += 1;
             // 批次内也检查取消，避免慢目标让取消长时间不生效。
             if counters.processed % 50 == 0 {
@@ -384,7 +395,15 @@ async fn process(
         }
         for (item, at, id) in batch {
             if let Some(item) = item {
-                send_item(&targets, &mut connections, settings, &item, &mut counters).await;
+                send_item(
+                    &targets,
+                    &mut connections,
+                    settings,
+                    &item,
+                    &mut counters,
+                    proxy,
+                )
+                .await;
             }
             counters.processed += 1;
             // 批次内也检查取消，避免慢目标让取消长时间不生效。
@@ -413,7 +432,15 @@ async fn process(
         }
         for (item, at, scanner, event_id) in batch {
             if let Some(item) = item {
-                send_item(&targets, &mut connections, settings, &item, &mut counters).await;
+                send_item(
+                    &targets,
+                    &mut connections,
+                    settings,
+                    &item,
+                    &mut counters,
+                    proxy,
+                )
+                .await;
             }
             counters.processed += 1;
             // 批次内也检查取消，避免慢目标让取消长时间不生效。
@@ -444,6 +471,7 @@ async fn send_item(
     settings: &SyslogConfig,
     item: &ForwardItem,
     counters: &mut Counters,
+    proxy: Option<&crate::syslog::proxy::Socks5Proxy>,
 ) {
     for (index, target) in targets.iter().enumerate() {
         // 与实时转发一致：只重放该目标订阅的日志类型。
@@ -472,7 +500,7 @@ async fn send_item(
         let mut delivered = false;
         for attempt in 0..2 {
             if connection.is_none() {
-                match transport::connect(target, transport::CONNECT_TIMEOUT).await {
+                match transport::connect(target, transport::CONNECT_TIMEOUT, proxy).await {
                     Ok(created) => *connection = Some(created),
                     Err(_) => break,
                 }
