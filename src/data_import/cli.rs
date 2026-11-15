@@ -220,18 +220,31 @@ pub async fn execute(command: &ImportCommand, pool: &Pool, config: &DataImportCo
             let mapping = apply_overrides(&headers, matched.mapping, header_mapping)?;
             schema::validate_mapping(&headers, &mapping)?;
 
-            let bytes = std::fs::read(file)?;
-            if bytes.len() as u64 > config.max_upload_bytes {
-                return Err(format!("文件超过大小上限 {} 字节", config.max_upload_bytes).into());
-            }
-            let sha256: String = Sha256::digest(&bytes)
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
+            // CLI 直读本地文件，不受 Web 上传限额（max_upload_bytes）约束；
+            // 流式复制并计算 sha256，避免超大文件整文件载入内存。行数上限仍由 worker 强制。
             tokio::fs::create_dir_all(&config.directory).await?;
             let id = Uuid::now_v7();
             let stored = config.directory.join(format!("{id}.csv"));
-            tokio::fs::write(&stored, &bytes).await?;
+            let mut source = tokio::fs::File::open(file).await?;
+            let mut dest = tokio::fs::File::create(&stored).await?;
+            let mut hasher = Sha256::new();
+            let mut file_size: i64 = 0;
+            let mut buffer = vec![0u8; 64 * 1024];
+            loop {
+                let read = tokio::io::AsyncReadExt::read(&mut source, &mut buffer).await?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+                tokio::io::AsyncWriteExt::write_all(&mut dest, &buffer[..read]).await?;
+                file_size += read as i64;
+            }
+            tokio::io::AsyncWriteExt::flush(&mut dest).await?;
+            let sha256: String = hasher
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
             let file_name = file
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -243,7 +256,7 @@ pub async fn execute(command: &ImportCommand, pool: &Pool, config: &DataImportCo
                     id,
                     created_by: user_id,
                     file_name: &file_name,
-                    file_size: bytes.len() as i64,
+                    file_size,
                     sha256: &sha256,
                     storage_path: &stored.to_string_lossy(),
                     file_headers: serde_json::json!(headers),

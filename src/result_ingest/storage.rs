@@ -376,27 +376,43 @@ async fn save_scanner_results_inner(
                 ip: observation.ip.clone(),
                 source: source_error,
             })?;
-        let observation_key = serde_json::to_string(&serde_json::json!([
-            observation.kind,
-            ip_network,
-            observation.port,
-            observation.protocol,
-            observation.service,
-            observation.source,
-            observation
-                .data
-                .as_ref()
-                .and_then(|value| value.get("template_id")),
-            observation
-                .data
-                .as_ref()
-                .and_then(|value| value.get("matcher_name")),
-            observation
-                .data
-                .as_ref()
-                .and_then(|value| value.get("matched_at"))
-        ]))
-        .map_err(scanner_result_database_error)?;
+        let mut key_parts = vec![
+            serde_json::json!(observation.kind),
+            serde_json::json!(ip_network),
+            serde_json::json!(observation.port),
+            serde_json::json!(observation.protocol),
+            serde_json::json!(observation.service),
+            serde_json::json!(observation.source),
+            serde_json::json!(
+                observation
+                    .data
+                    .as_ref()
+                    .and_then(|value| value.get("template_id"))
+            ),
+            serde_json::json!(
+                observation
+                    .data
+                    .as_ref()
+                    .and_then(|value| value.get("matcher_name"))
+            ),
+            serde_json::json!(
+                observation
+                    .data
+                    .as_ref()
+                    .and_then(|value| value.get("matched_at"))
+            ),
+        ];
+        // 导入观察追加内容+时间判别符，使同端点不同时间/内容拥有独立文档身份以保留历史；
+        // 扫描器上传 enrichment=None，不追加，observation_key 与既有行为完全一致。
+        if let Some(discriminator) = observation
+            .enrichment
+            .as_ref()
+            .and_then(|e| e.observation_discriminator.as_ref())
+        {
+            key_parts.push(serde_json::json!(discriminator));
+        }
+        let observation_key =
+            serde_json::to_string(&key_parts).map_err(scanner_result_database_error)?;
         let endpoint_id = openssl::sha::sha256(
             format!(
                 "{}\0{}\0{}\0{}",

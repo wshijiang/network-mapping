@@ -279,6 +279,9 @@ async fn execute_task(
 
     while reader.read_record(&mut record)? {
         raw_count += 1;
+        if raw_count > config.max_rows as i64 {
+            return Err(format!("行数超过上限 {}", config.max_rows).into());
+        }
         if raw_count <= committed_rows {
             continue;
         }
@@ -449,7 +452,8 @@ async fn checkpoint_importing(
     Ok(())
 }
 
-/// 崩溃窗口内未确认批次：按台账原行区间与 batch_index 重放，保证校验和稳定。
+/// 续传重放：从连续已提交前缀之后，按台账原行区间与 batch_index 重放所有未提交批次，
+/// 并跳过其间已（乱序）提交的批次，保证最终批次序列连续、校验和稳定。
 #[allow(clippy::too_many_arguments)]
 async fn replay_pending(
     pool: &Pool,
@@ -461,47 +465,52 @@ async fn replay_pending(
     next_batch_index: &mut i32,
     committed_rows: &mut i64,
 ) -> Result<()> {
-    let Some((index, row_start, row_end)) = task::pending_batch(pool, task.id).await? else {
-        return Ok(());
-    };
-    let mut reader = open_reader(Path::new(&task.storage_path))?;
-    let mut record = ::csv::StringRecord::new();
-    let mut raw_count: i64 = 0;
-    let mut rows = Vec::new();
-    while reader.read_record(&mut record)? {
-        raw_count += 1;
-        if raw_count <= row_start {
+    let tail = task::ledger_batches(pool, task.id).await?;
+    for (index, row_start, row_end, status) in tail {
+        if index < *next_batch_index {
             continue;
         }
-        if raw_count > row_end {
-            break;
+        if status == "pending" {
+            let mut reader = open_reader(Path::new(&task.storage_path))?;
+            let mut record = ::csv::StringRecord::new();
+            let mut raw_count: i64 = 0;
+            let mut rows = Vec::new();
+            while reader.read_record(&mut record)? {
+                raw_count += 1;
+                if raw_count <= row_start {
+                    continue;
+                }
+                if raw_count > row_end {
+                    break;
+                }
+                if let Ok(row) = csv::parse_record(&record, raw_count, colmap, opts) {
+                    rows.push(row);
+                }
+            }
+            let observations: Vec<_> = rows
+                .iter()
+                .map(|row| ingest::build_observation(row, &task.overwrite_policy))
+                .collect();
+            let count = observations.len() as i32;
+            ingest::write_es_batch(
+                pool,
+                &services.maxmind,
+                &services.elasticsearch,
+                &services.dns_follow_up,
+                link,
+                index,
+                false,
+                observations,
+                &services.token,
+                &services.pepper,
+            )
+            .await
+            .map_err(|e| format!("重放批次 {index} 失败：{e}"))?;
+            task::commit_batch(pool, task.id, index, count, "").await?;
         }
-        if let Ok(row) = csv::parse_record(&record, raw_count, colmap, opts) {
-            rows.push(row);
-        }
+        *next_batch_index = (*next_batch_index).max(index + 1);
+        *committed_rows = (*committed_rows).max(row_end);
     }
-    let observations: Vec<_> = rows
-        .iter()
-        .map(|row| ingest::build_observation(row, &task.overwrite_policy))
-        .collect();
-    let count = observations.len() as i32;
-    ingest::write_es_batch(
-        pool,
-        &services.maxmind,
-        &services.elasticsearch,
-        &services.dns_follow_up,
-        link,
-        index,
-        false,
-        observations,
-        &services.token,
-        &services.pepper,
-    )
-    .await
-    .map_err(|e| format!("重放批次 {index} 失败：{e}"))?;
-    task::commit_batch(pool, task.id, index, count, "").await?;
-    *next_batch_index = (*next_batch_index).max(index + 1);
-    *committed_rows = (*committed_rows).max(row_end);
     Ok(())
 }
 

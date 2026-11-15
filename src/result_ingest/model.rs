@@ -138,6 +138,10 @@ pub struct ImportEnrichment {
     /// 导入覆盖策略（fill/overwrite），随观察文档进入当前态合并脚本；扫描器上传为 None。
     #[serde(default)]
     pub import_policy: Option<String>,
+    /// 导入观察的去重判别符（内容+时间哈希）。追加进 observation_key，使同一端点不同时间/内容的
+    /// 导入观察拥有独立 ES 文档身份以保留历史；扫描器上传为 None，observation_key 不变。
+    #[serde(default)]
+    pub observation_discriminator: Option<String>,
 }
 
 #[derive(Debug)]

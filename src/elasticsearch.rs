@@ -4236,6 +4236,8 @@ fn scan_endpoint_index_definition(replicas: u32) -> Value {
                 "country_name": {"type": "keyword", "normalizer": "lowercase_normalizer"},
                 "region_name": {"type": "keyword", "normalizer": "lowercase_normalizer"},
                 "city_name": {"type": "wildcard"},
+                "latitude": {"type": "double"},
+                "longitude": {"type": "double"},
                 "tags": {"type": "object", "properties": tag_mapping_properties()},
                 "tag_names": {"type": "keyword", "normalizer": "lowercase_normalizer"},
                 "tag_ids": {"type": "long"},
@@ -4352,6 +4354,8 @@ fn endpoint_projection_document(
         "country_name": observation.get("country_name").cloned().unwrap_or(Value::Null),
         "region_name": observation.get("region_name").cloned().unwrap_or(Value::Null),
         "city_name": observation.get("city_name").cloned().unwrap_or(Value::Null),
+        "latitude": observation.get("latitude").cloned().unwrap_or(Value::Null),
+        "longitude": observation.get("longitude").cloned().unwrap_or(Value::Null),
         "tags": tags, "tag_names": tag_names, "tag_ids": tag_ids, "tag_kinds": tag_kinds,
         "data": observation.get("data").cloned().unwrap_or(Value::Null)
     })
@@ -4502,6 +4506,8 @@ fn index_mapping_update() -> Value {
             "os": crate::os_detection::mapping(),
             "web": crate::web_detection::mapping(),
             "import_policy": {"type": "keyword"},
+            "latitude": {"type": "double"},
+            "longitude": {"type": "double"},
             "tls_mode": {"type": "keyword", "normalizer": "lowercase_normalizer"},
             "tls_version": {"type": "keyword", "normalizer": "lowercase_normalizer"},
             "tls_cipher_suite": {"type": "keyword", "normalizer": "lowercase_normalizer"},

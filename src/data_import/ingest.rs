@@ -193,6 +193,7 @@ pub fn build_observation(row: &ImportRow, policy: &str) -> ScannerObservation {
         os: os_preset(row),
         web: web_preset(row),
         import_policy: Some(policy.to_owned()),
+        observation_discriminator: Some(row.content_hash()),
     };
     ScannerObservation::Service {
         ip: row.ip.clone(),

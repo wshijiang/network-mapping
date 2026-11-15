@@ -285,11 +285,17 @@ pub async fn claim_next(pool: &Pool, worker_id: Uuid, lease_ms: i64) -> Result<O
                 "UPDATE data_import_task SET worker_id=$1, lease_expires_at=$2, updated_at=NOW(), \
                  started_at=COALESCE(started_at, NOW()) \
                  WHERE id = (SELECT id FROM data_import_task \
-                    WHERE status='pending' OR (status = ANY($3::TEXT[]) AND (lease_expires_at IS NULL OR lease_expires_at < $4)) \
+                    WHERE (status='pending' OR status = ANY($3::TEXT[])) \
+                      AND (lease_expires_at IS NULL OR lease_expires_at < $4) \
                     ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) \
                  RETURNING {SELECT_COLS}"
             ),
-            &[&worker_id, &(now + lease_ms), &ACTIVE_STATUSES.to_vec(), &now],
+            &[
+                &worker_id,
+                &(now + lease_ms),
+                &ACTIVE_STATUSES.to_vec(),
+                &now,
+            ],
         )
         .await?;
     Ok(row.as_ref().map(row_to_task))
@@ -438,31 +444,42 @@ pub async fn commit_batch(
     Ok(())
 }
 
-/// 崩溃窗口内未确认的批次（需按原行区间重放）。
-pub async fn pending_batch(pool: &Pool, task_id: Uuid) -> Result<Option<(i32, i64, i64)>> {
+/// 台账批次（按 batch_index 升序）：(index, row_start, row_end, status)。
+pub async fn ledger_batches(pool: &Pool, task_id: Uuid) -> Result<Vec<(i32, i64, i64, String)>> {
     let client = pool.get().await?;
-    let row = client
-        .query_opt(
-            "SELECT batch_index, row_start, row_end FROM data_import_batch WHERE task_id=$1 AND status='pending' ORDER BY batch_index LIMIT 1",
+    let rows = client
+        .query(
+            "SELECT batch_index, row_start, row_end, status FROM data_import_batch WHERE task_id=$1 ORDER BY batch_index",
             &[&task_id],
         )
         .await?;
-    Ok(row.map(|r| (r.get("batch_index"), r.get("row_start"), r.get("row_end"))))
+    Ok(rows
+        .iter()
+        .map(|r| {
+            (
+                r.get("batch_index"),
+                r.get("row_start"),
+                r.get("row_end"),
+                r.get("status"),
+            )
+        })
+        .collect())
 }
 
-/// 续传光标：下一个 ES batch_index 与已连续提交的行数（最大已提交批次的 row_end）。
+/// 续传光标：**连续已提交前缀**的下一个 batch_index 与行数。
+/// 并发波次可能乱序提交，取最高已提交 index 会跳过其间的未提交批次，故必须取连续前缀。
 pub async fn resume_cursor(pool: &Pool, task_id: Uuid) -> Result<(i32, i64)> {
-    let client = pool.get().await?;
-    let row = client
-        .query_opt(
-            "SELECT batch_index, row_end FROM data_import_batch WHERE task_id=$1 AND status='committed' ORDER BY batch_index DESC LIMIT 1",
-            &[&task_id],
-        )
-        .await?;
-    Ok(match row {
-        Some(r) => (r.get::<_, i32>("batch_index") + 1, r.get("row_end")),
-        None => (0, 0),
-    })
+    let batches = ledger_batches(pool, task_id).await?;
+    let mut next_index = 0i32;
+    let mut committed_rows = 0i64;
+    for (index, _start, end, status) in batches {
+        if index != next_index || status != "committed" {
+            break;
+        }
+        committed_rows = end;
+        next_index = index + 1;
+    }
+    Ok((next_index, committed_rows))
 }
 
 pub async fn error_samples(pool: &Pool, id: Uuid) -> Result<Value> {
