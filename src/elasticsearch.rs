@@ -4370,10 +4370,12 @@ fn append_projection_update(
         if (ctx._source.observed_at_ms == null) {
             ctx._source.putAll(params.doc);
         } else if (importFill && scanAuthoritative) {
-            def coalesceFields = ['service','banner','title','http_body','http_body_truncated','tls_mode','tls_version','tls_cipher_suite','tls_subject','tls_issuer','tls_names','tls_serial_number','tls_not_before','tls_not_after','tls_fingerprint_sha256','tls_self_signed','os','web','asn','asn_number','isp','as_org','country_code','country_name','region_name','city_name'];
+            def coalesceFields = ['service','banner','title','http_body','http_body_truncated','tls_mode','tls_version','tls_cipher_suite','tls_subject','tls_issuer','tls_names','tls_serial_number','tls_not_before','tls_not_after','tls_fingerprint_sha256','tls_self_signed','asn','asn_number','isp','as_org','country_code','country_name','region_name','city_name'];
             for (def f : coalesceFields) {
                 if (ctx._source[f] == null && params.doc[f] != null) { ctx._source[f] = params.doc[f]; }
             }
+            if (params.doc.os != null && (ctx._source.os == null || ctx._source.os.family == null)) { ctx._source.os = params.doc.os; }
+            if (params.doc.web != null && (ctx._source.web == null || ctx._source.web.technologies == null || ctx._source.web.technologies.isEmpty())) { ctx._source.web = params.doc.web; }
             if (params.doc.first_seen_ms != null && (ctx._source.first_seen_ms == null || params.doc.first_seen_ms < ctx._source.first_seen_ms)) {
                 ctx._source.first_seen = params.doc.first_seen;
                 ctx._source.first_seen_ms = params.doc.first_seen_ms;
