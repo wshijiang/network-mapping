@@ -787,6 +787,36 @@ pub async fn run(args: Clis) -> io::Result<()> {
             security.scanner_token_pepper.clone(),
         ),
     );
+    let federation_config = config.federation.clone();
+    let federation_policy = web::Data::new(runtime_settings.federation.clone());
+    background.spawn(
+        "federation",
+        crate::federation::worker::run_worker(
+            pool.clone(),
+            federation_config.clone(),
+            maxmind_state.clone(),
+            elasticsearch_data.clone(),
+            dns_follow_up.clone(),
+            federation_policy.clone(),
+            system_maintenance_state.clone(),
+            network_proxy.clone(),
+            ser_con.encrypt_key.clone(),
+            security.scanner_token_pepper.clone(),
+        ),
+    );
+    let federation_service = web::Data::new(crate::federation::search::FederationService {
+        pool: pool.clone(),
+        config: federation_config,
+        policy: runtime_settings.federation.clone(),
+        maxmind: maxmind_state.clone(),
+        elasticsearch: elasticsearch_data.clone(),
+        dns_follow_up: runtime_settings.dns_follow_up.clone(),
+        maintenance: system_maintenance_state.clone(),
+        network_proxy: network_proxy.clone(),
+        encrypt_key: ser_con.encrypt_key.clone(),
+        pepper: security.scanner_token_pepper.clone(),
+        run_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
+    });
     background.spawn(
         "threat-intelligence",
         crate::threat_intel::run(
@@ -836,6 +866,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             .app_data(frontend_assets.clone())
             .app_data(scanner_diagnostics_data.clone())
             .app_data(web::Data::new(data_import_config.clone()))
+            .app_data(federation_service.clone())
             .app_data(web::JsonConfig::default().limit(server_max_body))
             .wrap(CsrfMiddleware)
             .wrap(SHeaderM)

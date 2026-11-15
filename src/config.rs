@@ -32,6 +32,8 @@ pub struct Config {
     pub scanner_diagnostics: crate::scanner_diagnostics::DiagnosticsConfig,
     #[serde(default)]
     pub data_import: crate::data_import::DataImportConfig,
+    #[serde(default)]
+    pub federation: crate::federation::FederationConfig,
     pub server: ServerConfig,
     pub tls: TlsConfig,
     pub log: LogConfig,
@@ -127,6 +129,9 @@ impl SelfChecking for Config {
         self.data_import
             .validate()
             .expect("invalid data import configuration");
+        self.federation
+            .validate()
+            .expect("invalid federation configuration");
         let _ = &self.server.check();
         let _ = &self.database.check();
         let _ = &self.security.check();
@@ -153,6 +158,7 @@ impl SelfChecking for Config {
             .validate()
             .map_err(|e| e.to_string())?;
         self.data_import.validate()?;
+        self.federation.validate()?;
         match self.server.try_check() {
             Ok(true) => (),
             Ok(false) => return Ok(false),
@@ -2642,6 +2648,11 @@ pub enum ServerCommand {
     Import {
         #[command(subcommand)]
         command: crate::data_import::cli::ImportCommand,
+    },
+    /// 数据管理 · 联测（source test 本地出站；其余仅需 PostgreSQL，由运行中的服务器执行）
+    Federation {
+        #[command(subcommand)]
+        command: crate::federation::cli::FederationCommand,
     },
 }
 

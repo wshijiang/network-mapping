@@ -21,7 +21,7 @@ pub struct RowError {
     pub reason: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TechEntry {
     pub id: String,
     pub version: Option<String>,
