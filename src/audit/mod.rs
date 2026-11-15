@@ -308,10 +308,19 @@ mod tests {
     fn database_schema_allows_backup_audit_events_and_migrates_existing_constraints() {
         let initialization_sql = include_str!("../../source/database/init.sql");
 
-        assert!(initialization_sql.contains("'data_access', 'audit', 'backup'\n\t))"));
-        assert!(initialization_sql.contains("'data_access', 'audit', 'backup'\n        ))"));
+        assert!(
+            initialization_sql.contains("'data_access', 'audit', 'backup', 'data_import'\n\t))")
+        );
+        assert!(
+            initialization_sql
+                .contains("'data_access', 'audit', 'backup', 'data_import'\n        ))")
+        );
         assert!(
             initialization_sql.contains("OR POSITION('backup' IN pg_get_constraintdef(oid)) = 0")
+        );
+        assert!(
+            initialization_sql
+                .contains("OR POSITION('data_import' IN pg_get_constraintdef(oid)) = 0")
         );
     }
 }

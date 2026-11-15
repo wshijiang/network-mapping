@@ -92,6 +92,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
     let dns_follow_up_config = config.dns_follow_up.clone();
     let frontend_directory = config.frontend.directory.clone();
     let scanner_diagnostics_config = config.scanner_diagnostics.clone();
+    let data_import_config = config.data_import.clone();
     let maxmind_directory = config.maxmind.directory.clone();
     let ser_con = config.server.clone();
     let server = config.server;
@@ -191,6 +192,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             &db_pool,
             config.pwd_hash.clone(),
             &ser_con.encrypt_key,
+            &data_import_config,
         )
         .await
         .map_err(|error| io::Error::other(format!("管理命令失败：{error}")))?;
@@ -773,6 +775,19 @@ pub async fn run(args: Clis) -> io::Result<()> {
     );
     let scanner_diagnostics_data = web::Data::new(scanner_diagnostics);
     background.spawn(
+        "data-import",
+        crate::data_import::worker::run_worker(
+            pool.clone(),
+            data_import_config.clone(),
+            maxmind_state.clone(),
+            elasticsearch_data.clone(),
+            dns_follow_up.clone(),
+            system_maintenance_state.clone(),
+            ser_con.encrypt_key.clone(),
+            security.scanner_token_pepper.clone(),
+        ),
+    );
+    background.spawn(
         "threat-intelligence",
         crate::threat_intel::run(
             pool.clone(),
@@ -820,6 +835,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             .app_data(web::Data::new(scanner_latency_history.clone()))
             .app_data(frontend_assets.clone())
             .app_data(scanner_diagnostics_data.clone())
+            .app_data(web::Data::new(data_import_config.clone()))
             .app_data(web::JsonConfig::default().limit(server_max_body))
             .wrap(CsrfMiddleware)
             .wrap(SHeaderM)

@@ -323,6 +323,11 @@ pub async fn init_database_table(
             "../../source/database/migrate_syslog_backfill.sql"
         ))
         .await?;
+    transaction
+        .batch_execute(include_str!(
+            "../../source/database/migrate_data_import.sql"
+        ))
+        .await?;
     transaction.commit().await?;
 
     Ok(())

@@ -4,6 +4,8 @@
 
 ## 未发布
 
+- **数据管理 · 外部导入**：新增「数据管理 → 导入」导航与服务器 CLI `network_mapping_server import`，支持上传/指定 CSV 将外部资产端点数据批量导入现有 Elasticsearch 资产库。必须头部 `ip/port/protocol/observed_at`，可选 `service/banner/source/asn/as_org/位置/os/os_confidence/tech/title`；Web 端只读 CSV 头部（64KB 切片）自动配对 + 手动映射，核对必须头部后才上传。后台流式解析、完整性与类型校验、文件内去重汇聚，经现有 `result_ingest` 管道写入（复用投影/OS/Web 检测/分析/情报），不另建资产表。任务全生命周期管理：8 态状态机、进度计数、暂停/继续（可调整批次大小与并发）/取消、试运行、错误报告 CSV 下载、崩溃租约续传。ASN/位置 CSV 优先、缺省 MaxMind 补全；OS/Web/title CSV 优先、缺省检测派生；默认 `fill` 不覆盖扫描结果（仅新增/补缺、保留标签），可选 `overwrite` 按时间新者胜，导入数据不直接作为最新结果。管理员专属，写审计；新增 `data_import_task`、`data_import_batch` 表与 `[data_import]` 配置，升级零行为变化。详见[数据导入](DATA_IMPORT.md)。
+
 - **Syslog 转发**：新增系统运行日志、审计事件、IP 访问日志与扫描器诊断事件的远程 syslog 转发，仅适配现代产品（RFC 5424，TCP/TLS 使用 RFC 6587 octet-counting 帧）。最多 10 个目标，各自独立选择 UDP/TCP/TLS 与自定义端口、订阅日志类型（默认全部）；配置存于运行时配置（namespace `syslog`），Web 发布与 CLI 变更均在数秒内热生效，无需重启。Web 管理入口位于「日志」导航，CLI `networkm syslog` 与 Web 功能对等（配置/状态/历史/测试/统计/通知策略/回填）。分钟级转发统计支撑 Web 图表与 CLI 终端图（malevich）；通知策略支持整体失败率、发送耗时 P95/P99 三条独立开关，经健康告警渠道通知。默认关闭，升级零行为变化；新增 `syslog_target_status`、`syslog_metric_minute` 表。
 - **Syslog 历史日志回填**：管理员可手动下发回填任务，把数据库留存的审计事件、IP 访问日志与扫描器诊断重放到已启用目标，默认最近 7 天，支持「N 天前至今」或自定义时间段（最长 31 天）；保留原始事件时间戳，带进度计数、取消与重启恢复，不计入实时统计。新增 `syslog_backfill_job` 表与 `networkm syslog backfill create/list/cancel`。
 - **Syslog SOCKS5 代理与自动回退**：转发跟随全局网络代理，但仅 SOCKS5（`socks5`/`socks5h`，支持用户名密码认证与代理侧 DNS）生效，作用于 TCP/TLS 目标；全局代理为 HTTP/HTTPS 等其他类型、直连或未配置时自动回退直连，UDP 目标始终直连。代理配置变更热生效，状态接口与 CLI 展示当前代理或回退结果。

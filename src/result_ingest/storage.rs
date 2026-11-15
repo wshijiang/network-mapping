@@ -376,27 +376,43 @@ async fn save_scanner_results_inner(
                 ip: observation.ip.clone(),
                 source: source_error,
             })?;
-        let observation_key = serde_json::to_string(&serde_json::json!([
-            observation.kind,
-            ip_network,
-            observation.port,
-            observation.protocol,
-            observation.service,
-            observation.source,
-            observation
-                .data
-                .as_ref()
-                .and_then(|value| value.get("template_id")),
-            observation
-                .data
-                .as_ref()
-                .and_then(|value| value.get("matcher_name")),
-            observation
-                .data
-                .as_ref()
-                .and_then(|value| value.get("matched_at"))
-        ]))
-        .map_err(scanner_result_database_error)?;
+        let mut key_parts = vec![
+            serde_json::json!(observation.kind),
+            serde_json::json!(ip_network),
+            serde_json::json!(observation.port),
+            serde_json::json!(observation.protocol),
+            serde_json::json!(observation.service),
+            serde_json::json!(observation.source),
+            serde_json::json!(
+                observation
+                    .data
+                    .as_ref()
+                    .and_then(|value| value.get("template_id"))
+            ),
+            serde_json::json!(
+                observation
+                    .data
+                    .as_ref()
+                    .and_then(|value| value.get("matcher_name"))
+            ),
+            serde_json::json!(
+                observation
+                    .data
+                    .as_ref()
+                    .and_then(|value| value.get("matched_at"))
+            ),
+        ];
+        // 导入观察追加内容+时间判别符，使同端点不同时间/内容拥有独立文档身份以保留历史；
+        // 扫描器上传 enrichment=None，不追加，observation_key 与既有行为完全一致。
+        if let Some(discriminator) = observation
+            .enrichment
+            .as_ref()
+            .and_then(|e| e.observation_discriminator.as_ref())
+        {
+            key_parts.push(serde_json::json!(discriminator));
+        }
+        let observation_key =
+            serde_json::to_string(&key_parts).map_err(scanner_result_database_error)?;
         let endpoint_id = openssl::sha::sha256(
             format!(
                 "{}\0{}\0{}\0{}",
@@ -433,7 +449,7 @@ async fn save_scanner_results_inner(
             "protocol": observation.protocol,
             "service": observation.service,
             "banner": observation.banner,
-            "title": search_content.title,
+            "title": observation.enrichment.as_ref().and_then(|e| e.title.clone()).or(search_content.title),
             "http_body": search_content.http_body,
             "http_body_truncated": search_content.http_body_truncated,
             "tls_mode": search_content.tls_mode,
@@ -451,15 +467,19 @@ async fn save_scanner_results_inner(
             "source": observation.source,
             "data": observation.data,
             "observed_at": observed_at,
-            "asn": intel.asn,
-            "isp": intel.isp,
-            "as_org": intel.as_org,
-            "country_code": intel.country_code,
-            "country_name": intel.country_name,
-            "region_name": intel.region_name,
-            "city_name": intel.city_name,
-            "latitude": intel.latitude,
-            "longitude": intel.longitude,
+            // CSV 导入携带的富化字段优先；扫描器上传 enrichment=None，回退 MaxMind，行为不变。
+            "asn": observation.enrichment.as_ref().and_then(|e| e.asn.clone()).or(intel.asn),
+            "isp": observation.enrichment.as_ref().and_then(|e| e.isp.clone().or_else(|| e.as_org.clone())).or(intel.isp),
+            "as_org": observation.enrichment.as_ref().and_then(|e| e.as_org.clone()).or(intel.as_org),
+            "country_code": observation.enrichment.as_ref().and_then(|e| e.country_code.clone()).or(intel.country_code),
+            "country_name": observation.enrichment.as_ref().and_then(|e| e.country_name.clone()).or(intel.country_name),
+            "region_name": observation.enrichment.as_ref().and_then(|e| e.region_name.clone()).or(intel.region_name),
+            "city_name": observation.enrichment.as_ref().and_then(|e| e.city_name.clone()).or(intel.city_name),
+            "latitude": observation.enrichment.as_ref().and_then(|e| e.latitude).or(intel.latitude),
+            "longitude": observation.enrichment.as_ref().and_then(|e| e.longitude).or(intel.longitude),
+            "os": observation.enrichment.as_ref().and_then(|e| e.os.clone()),
+            "web": observation.enrichment.as_ref().and_then(|e| e.web.clone()),
+            "import_policy": observation.enrichment.as_ref().and_then(|e| e.import_policy.clone()),
         }));
     }
     stage.finish(true);

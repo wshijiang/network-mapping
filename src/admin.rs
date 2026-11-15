@@ -2060,8 +2060,9 @@ fn scanner_info_from_row(row: &Row) -> ScannerInfo {
 pub async fn get_scanners(pool: &Pool) -> Result<Vec<ScannerInfo>, Box<dyn std::error::Error>> {
     let connection = pool.get().await?;
     let query = format!(
-        "{} WHERE s.deleted_at IS NULL ORDER BY s.create_time DESC NULLS LAST, s.id DESC;",
-        scanner_info_select()
+        "{} WHERE s.deleted_at IS NULL AND s.scanner_id <> '{}' ORDER BY s.create_time DESC NULLS LAST, s.id DESC;",
+        scanner_info_select(),
+        crate::data_import::IMPORT_SCANNER_ID
     );
     let rows = connection.query(&query, &[]).await?;
     Ok(rows.iter().map(scanner_info_from_row).collect())

@@ -32,7 +32,8 @@ const UPDATE_OS: &str = r#"
         ctx._source.execution_id == params.execution_id && ctx._source.user_id == params.user_id &&
         ctx._source.service_observed_at_ms == params.observed_at &&
         ctx._source.service == params.service && ctx._source.banner == params.banner;
-    if ((matches || legacy) && (ctx._source.os == null ||
+    boolean importLocked = ctx._source.os != null && ctx._source.os.inference_scope == 'csv_import';
+    if (!importLocked && (matches || legacy) && (ctx._source.os == null ||
         ctx._source.os.ruleset_revision == null || ctx._source.os.ruleset_revision <= params.revision)) {
         ctx._source.os = params.os;
         ctx._source.service_observation_ref = params.reference;

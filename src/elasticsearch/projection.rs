@@ -37,9 +37,9 @@ impl ElasticsearchService {
     async fn claim_projection(&self, pool: &Pool) -> Result<Option<ProjectionJob>, String> {
         let token = Uuid::new_v4();
         let lease_seconds = self.inner.config.projection_lease_seconds as i64;
-        let mut connection = crate::db::acquire_write_connection(pool, "scan_projection_control")
-            .await
-            .map_err(|e| e.to_string())?;
+        // 空闲轮询每 poll_interval_ms 触发一次，使用普通连接以避免 INFO 级租约日志刷屏；
+        // 实际写入路径仍经 acquire_write_connection 记录租约。
+        let mut connection = pool.get().await.map_err(|e| e.to_string())?;
         let transaction = connection.transaction().await.map_err(|e| e.to_string())?;
         transaction
             .batch_execute("SET LOCAL lock_timeout = '1500ms'; SET LOCAL statement_timeout = '5s';")

@@ -21,7 +21,8 @@ const UPDATE_WEB: &str = r#"
         ctx._source.user_id == params.user_id &&
         ctx._source.service_observed_at_ms == params.observed_at &&
         ctx._source.service == params.service && ctx._source.banner == params.banner;
-    if ((matches || legacy) && (ctx._source.web == null ||
+    boolean importLocked = ctx._source.web != null && ctx._source.web.inference_scope == 'csv_import';
+    if (!importLocked && (matches || legacy) && (ctx._source.web == null ||
         ctx._source.web.ruleset_revision == null || ctx._source.web.ruleset_revision <= params.revision)) {
         ctx._source.web = params.web;
         ctx._source.service_observation_ref = params.reference;

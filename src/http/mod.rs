@@ -15,6 +15,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     configuration(cfg);
     assets(cfg);
     scanning(cfg);
+    data_import(cfg);
     cfg.service(handlers::modules::status)
         .service(handlers::modules::publish);
     #[cfg(feature = "rir")]
@@ -141,6 +142,19 @@ fn configuration(cfg: &mut web::ServiceConfig) {
     cfg.service(handlers::syslog::syslog_backfill_create);
     cfg.service(handlers::syslog::syslog_backfill_list);
     cfg.service(handlers::syslog::syslog_backfill_cancel);
+}
+
+fn data_import(cfg: &mut web::ServiceConfig) {
+    cfg.service(handlers::data_import::get_schema)
+        .service(handlers::data_import::list_tasks)
+        .service(handlers::data_import::create_task)
+        .service(handlers::data_import::get_task)
+        .service(handlers::data_import::get_errors)
+        .service(handlers::data_import::get_errors_csv)
+        .service(handlers::data_import::pause_task)
+        .service(handlers::data_import::resume_task)
+        .service(handlers::data_import::cancel_task)
+        .service(handlers::data_import::delete_task);
 }
 
 fn assets(cfg: &mut web::ServiceConfig) {

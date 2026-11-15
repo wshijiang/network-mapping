@@ -58,6 +58,7 @@ nav:
       - Web 技术目录: WEB_TECHNOLOGY_CATALOG.md
       - Web 技术标签图标: https://github.com/wshijiang/network-mapping-vue/blob/feat/web-technology-detection/docs/WEB_TECHNOLOGY_ICONS.md
       - 资产搜索: SEARCH_SYNTAX.md
+      - 数据导入: DATA_IMPORT.md
       - 统计分析: STATISTICS.md
       - 周报与月报: reports.md
       - 业务时区与常规设置: SYSTEM_TIME.md
