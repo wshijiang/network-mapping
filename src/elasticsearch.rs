@@ -3717,6 +3717,9 @@ fn immutable_scan_observation(value: &Value) -> Value {
             "latitude",
             "longitude",
             "tags",
+            "os",
+            "web",
+            "import_policy",
         ] {
             object.remove(field);
         }
@@ -3884,7 +3887,10 @@ fn scan_observation_template(prefix: &str, replicas: u32) -> Value {
                     "city_name": {"type": "keyword"},
                     "latitude": {"type": "double"},
                     "longitude": {"type": "double"},
-                    "tags": {"type": "object", "properties": scan_observation_tag_mapping_properties()}
+                    "tags": {"type": "object", "properties": scan_observation_tag_mapping_properties()},
+                    "os": crate::os_detection::mapping(),
+                    "web": crate::web_detection::mapping(),
+                    "import_policy": {"type": "keyword"}
                 }
             }
         }
@@ -3906,7 +3912,10 @@ fn scan_observation_compatibility_mapping() -> Value {
         "tls_not_after": {"type": "date"},
         "tls_fingerprint_sha256": {"type": "keyword", "normalizer": "lowercase_normalizer", "ignore_above": 128},
         "tls_self_signed": {"type": "boolean"},
-        "tags": {"properties": scan_observation_tag_mapping_properties()}
+        "tags": {"properties": scan_observation_tag_mapping_properties()},
+        "os": crate::os_detection::mapping(),
+        "web": crate::web_detection::mapping(),
+        "import_policy": {"type": "keyword"}
     }})
 }
 
@@ -4218,6 +4227,7 @@ fn scan_endpoint_index_definition(replicas: u32) -> Value {
                 "service_observation_ref": {"type": "object", "enabled": false},
                 "os": crate::os_detection::mapping(),
             "web": crate::web_detection::mapping(),
+                "import_policy": {"type": "keyword"},
                 "asn": {"type": "keyword", "normalizer": "lowercase_normalizer"},
                 "asn_number": {"type": "long"},
                 "isp": {"type": "wildcard"},
@@ -4302,6 +4312,7 @@ fn endpoint_projection_document(
         "execution_id": context.execution_id,
         "user_id": context.user_id,
         "task_source": context.task_source,
+        "import_policy": observation.get("import_policy").cloned().unwrap_or(Value::Null),
         "scanner_id": context.scanner_id,
         "scanner_name": context.scanner_name,
         "ip": ip,
@@ -4331,8 +4342,8 @@ fn endpoint_projection_document(
         "observed_at_ms": observed_at_ms,
         "service_observed_at_ms": if is_service { json!(observed_at_ms) } else { Value::Null },
         "service_observation_ref": if is_service { service_observation_reference(context, observation, observed_at_ms) } else { Value::Null },
-        "os": if is_service { json!(crate::os_detection::OsInference::pending(observed_at_ms)) } else { Value::Null },
-        "web": if is_service { json!(crate::web_detection::WebInference::pending(observed_at_ms)) } else { Value::Null },
+        "os": observation.get("os").filter(|value| !value.is_null()).cloned().unwrap_or_else(|| if is_service { json!(crate::os_detection::OsInference::pending(observed_at_ms)) } else { Value::Null }),
+        "web": observation.get("web").filter(|value| !value.is_null()).cloned().unwrap_or_else(|| if is_service { json!(crate::web_detection::WebInference::pending(observed_at_ms)) } else { Value::Null }),
         "asn": asn,
         "asn_number": asn_number,
         "isp": observation.get("isp").cloned().unwrap_or(Value::Null),
@@ -4353,11 +4364,24 @@ fn append_projection_update(
     document: &Value,
 ) -> Result<(), String> {
     const SCRIPT: &str = r#"
+        boolean incomingImport = params.doc.task_source == 'import';
+        boolean importFill = incomingImport && params.doc.import_policy == 'fill';
+        boolean scanAuthoritative = ctx._source.service_observed_at_ms != null && ctx._source.task_source != null && ctx._source.task_source != 'import';
         if (ctx._source.observed_at_ms == null) {
             ctx._source.putAll(params.doc);
+        } else if (importFill && scanAuthoritative) {
+            def coalesceFields = ['service','banner','title','http_body','http_body_truncated','tls_mode','tls_version','tls_cipher_suite','tls_subject','tls_issuer','tls_names','tls_serial_number','tls_not_before','tls_not_after','tls_fingerprint_sha256','tls_self_signed','os','web','asn','asn_number','isp','as_org','country_code','country_name','region_name','city_name'];
+            for (def f : coalesceFields) {
+                if (ctx._source[f] == null && params.doc[f] != null) { ctx._source[f] = params.doc[f]; }
+            }
+            if (params.doc.first_seen_ms != null && (ctx._source.first_seen_ms == null || params.doc.first_seen_ms < ctx._source.first_seen_ms)) {
+                ctx._source.first_seen = params.doc.first_seen;
+                ctx._source.first_seen_ms = params.doc.first_seen_ms;
+            }
         } else {
             def firstSeen = ctx._source.first_seen;
             def firstSeenMs = ctx._source.first_seen_ms;
+            def tags = ctx._source.tags;
             def service = ctx._source.service;
             def banner = ctx._source.banner;
             def title = ctx._source.title;
@@ -4436,6 +4460,7 @@ fn append_projection_update(
                 ctx._source.os = sameEvidence && os != null && os.status != 'pending' && (params.doc.os == null || params.doc.os.status == 'pending' || os.ruleset_revision >= params.doc.os.ruleset_revision) ? os : params.doc.os;
                 ctx._source.web = sameEvidence && web != null && web.status != 'pending' && (params.doc.web == null || params.doc.web.status == 'pending' || web.ruleset_revision >= params.doc.web.ruleset_revision) ? web : params.doc.web;
             }
+            if (incomingImport) { ctx._source.tags = tags; }
         }
     "#;
     body.push_str(
@@ -4474,6 +4499,7 @@ fn index_mapping_update() -> Value {
             "service_observation_ref": {"type":"object", "enabled":false},
             "os": crate::os_detection::mapping(),
             "web": crate::web_detection::mapping(),
+            "import_policy": {"type": "keyword"},
             "tls_mode": {"type": "keyword", "normalizer": "lowercase_normalizer"},
             "tls_version": {"type": "keyword", "normalizer": "lowercase_normalizer"},
             "tls_cipher_suite": {"type": "keyword", "normalizer": "lowercase_normalizer"},

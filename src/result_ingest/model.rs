@@ -49,6 +49,9 @@ pub enum ScannerObservation {
         data: Option<Value>,
         #[serde(default)]
         observed_at: Option<i64>,
+        /// CSV 导入携带的优先富化字段；扫描器上传不设置（None），行为不变。
+        #[serde(default)]
+        enrichment: Option<ImportEnrichment>,
     },
     Dns {
         #[serde(flatten)]
@@ -99,6 +102,42 @@ pub(crate) struct NormalizedObservation {
     pub(crate) source: String,
     pub(crate) data: Option<Value>,
     pub(crate) observed_at: Option<i64>,
+    pub(crate) enrichment: Option<ImportEnrichment>,
+}
+
+/// CSV 导入的优先富化字段（CSV 指定值优先，缺失由 MaxMind/检测管道补全）。
+/// 全部可选；扫描器上传路径不携带，故对既有行为零影响。
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ImportEnrichment {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub asn: Option<String>,
+    #[serde(default)]
+    pub as_org: Option<String>,
+    #[serde(default)]
+    pub isp: Option<String>,
+    #[serde(default)]
+    pub country_code: Option<String>,
+    #[serde(default)]
+    pub country_name: Option<String>,
+    #[serde(default)]
+    pub region_name: Option<String>,
+    #[serde(default)]
+    pub city_name: Option<String>,
+    #[serde(default)]
+    pub latitude: Option<f64>,
+    #[serde(default)]
+    pub longitude: Option<f64>,
+    /// 预设 `OsInference` JSON（status=identified，evidence 标记 csv-import）。
+    #[serde(default)]
+    pub os: Option<Value>,
+    /// 预设 `WebInference` JSON。
+    #[serde(default)]
+    pub web: Option<Value>,
+    /// 导入覆盖策略（fill/overwrite），随观察文档进入当前态合并脚本；扫描器上传为 None。
+    #[serde(default)]
+    pub import_policy: Option<String>,
 }
 
 #[derive(Debug)]

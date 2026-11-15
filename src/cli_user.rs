@@ -28,6 +28,7 @@ pub async fn execute(
     pool: &Pool,
     password_config: PasswordHashConfig,
     encrypt_key: &str,
+    data_import: &crate::data_import::DataImportConfig,
 ) -> CliResult {
     match command {
         ServerCommand::Intel { command } => crate::threat_intel::cli::execute(command, pool).await,
@@ -37,6 +38,9 @@ pub async fn execute(
                 .await
                 .map_err(|error| error as Box<dyn std::error::Error>)
         }
+        ServerCommand::Import { command } => crate::data_import::cli::execute(command, pool, data_import)
+            .await
+            .map_err(|error| -> Box<dyn std::error::Error> { error }),
     }
 }
 

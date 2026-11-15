@@ -30,6 +30,8 @@ pub struct Config {
     pub report_renderer: crate::reports::service::ReportRendererConfig,
     #[serde(default)]
     pub scanner_diagnostics: crate::scanner_diagnostics::DiagnosticsConfig,
+    #[serde(default)]
+    pub data_import: crate::data_import::DataImportConfig,
     pub server: ServerConfig,
     pub tls: TlsConfig,
     pub log: LogConfig,
@@ -122,6 +124,9 @@ impl SelfChecking for Config {
         self.scanner_diagnostics
             .validate()
             .expect("invalid scanner diagnostics configuration");
+        self.data_import
+            .validate()
+            .expect("invalid data import configuration");
         let _ = &self.server.check();
         let _ = &self.database.check();
         let _ = &self.security.check();
@@ -147,6 +152,7 @@ impl SelfChecking for Config {
         self.scanner_diagnostics
             .validate()
             .map_err(|e| e.to_string())?;
+        self.data_import.validate()?;
         match self.server.try_check() {
             Ok(true) => (),
             Ok(false) => return Ok(false),
@@ -1643,6 +1649,12 @@ impl Config {
                 .unwrap_or_else(|| Path::new(""))
                 .join(&config.scanner_diagnostics.directory);
         }
+        if config.data_import.directory.is_relative() {
+            config.data_import.directory = path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(&config.data_import.directory);
+        }
         config.tls.resolve_relative_to(path);
         config.frontend.resolve_relative_to(path);
         config.maxmind.resolve_relative_to(path);
@@ -2625,6 +2637,11 @@ pub enum ServerCommand {
     Syslog {
         #[command(subcommand)]
         command: crate::syslog::cli::SyslogCommand,
+    },
+    /// 数据管理 · 外部导入（check 纯本地；其余仅需 PostgreSQL，由运行中的服务器执行）
+    Import {
+        #[command(subcommand)]
+        command: crate::data_import::cli::ImportCommand,
     },
 }
 

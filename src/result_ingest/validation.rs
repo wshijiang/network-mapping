@@ -67,6 +67,7 @@ pub(crate) fn normalize_upload_observations(
                         source,
                         data: Some(serde_json::json!({"state": state})),
                         observed_at: *observed_at,
+                        enrichment: None,
                     }
                 }
                 ScannerObservation::Service {
@@ -78,6 +79,7 @@ pub(crate) fn normalize_upload_observations(
                     source,
                     data,
                     observed_at,
+                    enrichment,
                 } => {
                     let source = sanitize_text(source);
                     let data = data.clone().map(sanitize_json_value);
@@ -91,6 +93,7 @@ pub(crate) fn normalize_upload_observations(
                         source,
                         data,
                         observed_at: *observed_at,
+                        enrichment: enrichment.clone(),
                     }
                 }
                 ScannerObservation::Dns { .. } => {
@@ -135,6 +138,7 @@ pub(crate) fn normalize_upload_observations(
                         "extracted_results": extracted_results,
                     }))),
                     observed_at: *observed_at,
+                    enrichment: None,
                 },
             })
             .collect()
@@ -180,6 +184,7 @@ pub(crate) fn normalize_upload_observations(
                     source,
                     data,
                     observed_at: None,
+                    enrichment: None,
                 }
             })
             .collect()
