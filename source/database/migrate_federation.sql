@@ -73,3 +73,22 @@ CREATE INDEX IF NOT EXISTS idx_federation_run_lease
 INSERT INTO scanner_info (name, scanner_id, create_user, runtime_token_hash, is_enable, is_run, remark, create_time, register_time)
 VALUES ('联测', '00000000-0000-7000-8000-00000000fed0', 0, '', true, false, '__system_federation__', NOW(), NOW())
 ON CONFLICT (scanner_id) DO NOTHING;
+
+-- 联测审计事件分类：旧库的 audit_event_category_check 可能不含 federation，
+-- 启动时幂等补齐，避免联测审计写入被数据库约束拒绝。
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = to_regclass('audit_event')
+          AND conname = 'audit_event_category_check'
+          AND POSITION('federation' IN pg_get_constraintdef(oid)) = 0
+    ) THEN
+        ALTER TABLE audit_event DROP CONSTRAINT audit_event_category_check;
+        ALTER TABLE audit_event ADD CONSTRAINT audit_event_category_check CHECK (category IN (
+            'authentication', 'authorization', 'user_security', 'task', 'scanner',
+            'automatic_target', 'configuration', 'data_access', 'audit', 'backup', 'data_import', 'federation'
+        ));
+    END IF;
+END $$;

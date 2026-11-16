@@ -657,7 +657,7 @@ CREATE TABLE IF NOT EXISTS audit_event (
 	occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	category TEXT NOT NULL CONSTRAINT audit_event_category_check CHECK (category IN (
 		'authentication', 'authorization', 'user_security', 'task', 'scanner',
-		'automatic_target', 'configuration', 'data_access', 'audit', 'backup', 'data_import'
+		'automatic_target', 'configuration', 'data_access', 'audit', 'backup', 'data_import', 'federation'
 	)),
 	action TEXT NOT NULL,
 	outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failure', 'denied')),
@@ -690,6 +690,7 @@ BEGIN
               POSITION('automatic_target' IN pg_get_constraintdef(oid)) = 0
               OR POSITION('backup' IN pg_get_constraintdef(oid)) = 0
               OR POSITION('data_import' IN pg_get_constraintdef(oid)) = 0
+              OR POSITION('federation' IN pg_get_constraintdef(oid)) = 0
           )
     ) THEN
         ALTER TABLE audit_event DROP CONSTRAINT audit_event_category_check;
@@ -703,7 +704,7 @@ BEGIN
     ) THEN
         ALTER TABLE audit_event ADD CONSTRAINT audit_event_category_check CHECK (category IN (
             'authentication', 'authorization', 'user_security', 'task', 'scanner',
-            'automatic_target', 'configuration', 'data_access', 'audit', 'backup', 'data_import'
+            'automatic_target', 'configuration', 'data_access', 'audit', 'backup', 'data_import', 'federation'
         ));
     END IF;
 END $$;
