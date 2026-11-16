@@ -322,6 +322,11 @@ fn add_text(
         if rule == "http_iis" && module != "http" {
             continue;
         }
+        // "Oracle" alone names many application servers (Oracle HTTP Server,
+        // WebLogic, ...); only classify Oracle Linux when Linux context exists.
+        if rule == "explicit_oracle" && !token(&lower, "linux") {
+            continue;
+        }
         // Explicit family names are hints, not proof of the host kernel. Do
         // not infer Linux from Samba/OpenSSH or Windows from SMB/RDP alone.
         if out.iter().any(|e| {
@@ -805,5 +810,40 @@ mod tests {
         );
         assert!(os.evidence.iter().all(|e| e.probe_method.is_none()));
         assert!(!serde_json::to_string(&os).unwrap().contains("probe_method"));
+    }
+
+    #[test]
+    fn oracle_application_servers_are_not_oracle_linux() {
+        // Bare "Oracle" product names carry no Linux context.
+        for (service, banner, result) in [
+            (
+                "http",
+                "",
+                json!({"response":{"headers":{"server":"Oracle HTTP Server"}}}),
+            ),
+            (
+                "http",
+                "",
+                json!({"response":{"headers":{"server":"Oracle-WebLogic-Server"}}}),
+            ),
+            ("https", "Oracle Application Server", json!({})),
+        ] {
+            let os = detect(service, banner, service, result.clone());
+            assert!(
+                !os.evidence
+                    .iter()
+                    .any(|e| e.distribution.as_deref() == Some("oraclelinux")),
+                "{banner} {result}"
+            );
+        }
+        // With Linux context the distribution and release are identified.
+        let os = detect(
+            "smb",
+            "",
+            "smb",
+            json!({"native_os":"Oracle Linux Server 8.9"}),
+        );
+        assert_eq!(os.distribution.as_deref(), Some("oraclelinux"));
+        assert_eq!(os.version.as_deref(), Some("8.9"));
     }
 }
