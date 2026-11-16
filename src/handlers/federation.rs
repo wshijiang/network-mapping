@@ -381,10 +381,12 @@ pub(crate) async fn test_source(
         let client =
             adapters::http_client(&effective, Duration::from_secs(15)).map_err(|e| e.code)?;
         let adapter = Adapter::for_kind(source.kind);
-        let mut capabilities = adapter
+        let probed = adapter
             .probe(&client, &credential)
             .await
             .map_err(|e| e.code)?;
+        // 最小暴露面：账号接口附带的手机号/邮箱/token 等不入库也不回显。
+        let mut capabilities = storage::public_capabilities(source.kind, &probed);
         capabilities["quota_updated_at"] = json!(chrono::Utc::now().timestamp_millis());
         storage::update_capabilities(pool.get_ref(), id, &capabilities)
             .await

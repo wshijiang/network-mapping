@@ -368,6 +368,63 @@ pub async fn update_capabilities(pool: &Pool, id: Uuid, capabilities: &Value) ->
     Ok(())
 }
 
+/// 账号能力信息白名单脱敏（最小暴露面）。
+///
+/// 平台账号接口会连带返回手机号、邮箱、昵称甚至 API token 等与联测无关的敏感信息；
+/// 入库与回显前只保留额度/会员相关字段，其余一律丢弃。
+pub fn public_capabilities(kind: SourceKind, capabilities: &Value) -> Value {
+    let Some(object) = capabilities.as_object() else {
+        return Value::Null;
+    };
+    let keys: &[&str] = match kind {
+        SourceKind::Hunter => &[
+            "type",
+            "rest_equity_point",
+            "rest_free_point",
+            "day_free_point",
+            "rest_export_quota",
+            "day_export_quota",
+            "once_export_quota",
+            "quota_updated_at",
+        ],
+        SourceKind::Quake => &[
+            "credit",
+            "persistent_credit",
+            "baned",
+            "ban_status",
+            "personal_information_status",
+            "quota_updated_at",
+        ],
+        SourceKind::Fofa => &[
+            "remain_api_query",
+            "remain_api_data",
+            "fofa_point",
+            "isvip",
+            "vip_level",
+            "quota_updated_at",
+        ],
+        SourceKind::Shodan => &["query_credits", "scan_credits", "plan", "quota_updated_at"],
+    };
+    let mut sanitized = serde_json::Map::new();
+    for key in keys {
+        if let Some(value) = object.get(*key) {
+            sanitized.insert((*key).to_owned(), value.clone());
+        }
+    }
+    // Quake 会员判定与展示只需要角色名；角色对象里的其余字段不回显。
+    if kind == SourceKind::Quake
+        && let Some(roles) = object.get("role").and_then(Value::as_array)
+    {
+        let names: Vec<Value> = roles
+            .iter()
+            .filter_map(|role| role.get("fullname").cloned())
+            .map(|fullname| json!({"fullname": fullname}))
+            .collect();
+        sanitized.insert("role".to_owned(), Value::Array(names));
+    }
+    Value::Object(sanitized)
+}
+
 /// 脱敏公开视图（API/CLI 共用）。
 pub fn source_public(source: &Source, encrypt_key: &str) -> Value {
     let proxy_endpoint = source
@@ -394,7 +451,10 @@ pub fn source_public(source: &Source, encrypt_key: &str) -> Value {
         "window_days": source.window_days,
         "timeout_seconds": source.timeout_seconds,
         "rate_limit_qps": source.rate_limit_qps,
-        "capabilities": source.detected_capabilities,
+        "capabilities": source
+            .detected_capabilities
+            .as_ref()
+            .map(|capabilities| public_capabilities(source.kind, capabilities)),
         "revision": source.revision,
     })
 }
@@ -794,4 +854,60 @@ pub fn run_public(run: &Run, include_cache: bool) -> Value {
         value["result_cache"] = run.result_cache.clone().unwrap_or(Value::Null);
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capabilities_whitelist_drops_personal_data() {
+        let hunter = json!({
+            "type": "个人账号",
+            "rest_equity_point": 1000,
+            "rest_free_point": 499,
+            "day_free_point": 500,
+            "personal_info": {"username": "大牛", "phone": "13700001111", "is_charge": true}
+        });
+        let sanitized = public_capabilities(SourceKind::Hunter, &hunter);
+        assert_eq!(sanitized["rest_equity_point"], json!(1000));
+        assert_eq!(sanitized["type"], json!("个人账号"));
+        assert!(sanitized.get("personal_info").is_none());
+
+        let quake = json!({
+            "id": "5ea7e45147bc09xxxxxxxxcb",
+            "user": {"username": "u", "fullname": "n", "email": "u@360.cn"},
+            "token": "xxxx-xxxx",
+            "mobile_phone": "13700001111",
+            "credit": 5000,
+            "persistent_credit": 1000,
+            "personal_information_status": false,
+            "role": [{"fullname": "高级会员", "priority": 4, "credit": 3000}],
+            "enterprise_information": {"name": null, "email": null}
+        });
+        let sanitized = public_capabilities(SourceKind::Quake, &quake);
+        assert_eq!(sanitized["credit"], json!(5000));
+        assert_eq!(sanitized["role"], json!([{"fullname": "高级会员"}]));
+        for key in [
+            "user",
+            "token",
+            "mobile_phone",
+            "id",
+            "enterprise_information",
+        ] {
+            assert!(sanitized.get(key).is_none(), "{key} 不应回显");
+        }
+
+        let fofa = json!({
+            "email": "u@example.com", "username": "u", "fofacli_ver": "x",
+            "remain_api_query": 100, "remain_api_data": 1000,
+            "fofa_point": 50, "isvip": true, "vip_level": 2
+        });
+        let sanitized = public_capabilities(SourceKind::Fofa, &fofa);
+        assert_eq!(sanitized["remain_api_query"], json!(100));
+        assert!(sanitized.get("email").is_none());
+        assert!(sanitized.get("username").is_none());
+
+        assert!(public_capabilities(SourceKind::Shodan, &Value::Null).is_null());
+    }
 }
