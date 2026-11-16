@@ -162,10 +162,10 @@ fn default_proxy_mode() -> String {
     "system".into()
 }
 fn default_page_size() -> u32 {
-    100
+    10
 }
 fn default_max_pages() -> u32 {
-    5
+    1
 }
 fn default_window_days() -> u32 {
     30

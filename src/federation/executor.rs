@@ -291,6 +291,20 @@ fn strip_unselected_fields(record: &mut NormalizedRecord, fields: &FieldSelectio
     }
 }
 
+/// 期望页大小：固定分页用配置值；跟随本地搜索用本地页大小，
+/// 但同样受数据源“每页条数”上限约束，避免单次请求消耗过多平台额度。
+fn desired_page_size(
+    mode: PaginationMode,
+    local_limit: u32,
+    configured: u32,
+    max_size: u32,
+) -> u32 {
+    match mode {
+        PaginationMode::FollowLocal => local_limit.min(configured).clamp(1, max_size),
+        PaginationMode::Fixed => configured.clamp(1, max_size),
+    }
+}
+
 /// follow-local 分页需裁掉 offset 前的整页记录，并限制在本页窗口内。
 fn local_page_window(
     pagination_mode: PaginationMode,
@@ -394,10 +408,12 @@ async fn run_source(
 
     // 5. 分页计划（先按平台允许的页大小收敛，再计算页区间）。
     let max_size = capabilities.max_page_size;
-    let desired_size = match source.pagination_mode {
-        PaginationMode::FollowLocal => run.local_limit.clamp(1, max_size),
-        PaginationMode::Fixed => source.page_size.clamp(1, max_size),
-    };
+    let desired_size = desired_page_size(
+        source.pagination_mode,
+        run.local_limit,
+        source.page_size,
+        max_size,
+    );
     let page_size = match capabilities.page_size_choices {
         Some(choices) => choices
             .iter()
@@ -1010,6 +1026,21 @@ mod tests {
             Some(&json!({"isvip": true}))
         ));
         assert!(membership_allows_time(SourceKind::Hunter, None));
+    }
+
+    #[test]
+    fn follow_local_page_size_capped_by_source_config() {
+        // 跟随本地搜索也受“每页条数”上限约束，避免一次拉满 100 条消耗额度。
+        assert_eq!(
+            desired_page_size(PaginationMode::FollowLocal, 100, 10, 100),
+            10
+        );
+        assert_eq!(
+            desired_page_size(PaginationMode::FollowLocal, 5, 10, 100),
+            5
+        );
+        assert_eq!(desired_page_size(PaginationMode::Fixed, 100, 10, 100), 10);
+        assert_eq!(desired_page_size(PaginationMode::Fixed, 100, 500, 100), 100);
     }
 
     #[test]
