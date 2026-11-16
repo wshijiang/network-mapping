@@ -205,7 +205,10 @@ pub const WEB_OPERATIONS: &[(&str, &str)] = &[
     ("POST /api/federation/runs", "创建手动联测 run"),
     ("POST /api/federation/runs/{id}/cancel", "取消联测 run"),
     ("POST /api/federation/sources", "创建联测数据源"),
-    ("POST /api/federation/sources/{id}/test", "测试联测数据源连接"),
+    (
+        "POST /api/federation/sources/{id}/test",
+        "测试联测数据源连接",
+    ),
     ("POST /api/login", "提交账户登录"),
     ("POST /api/mail/smtp/test", "系统设置 · 提交"),
     (
