@@ -20,10 +20,16 @@ pub(crate) struct PlatformQuery {
 struct Ctx {
     version_ignored: bool,
     residual: Option<Expr>,
+    /// OR 分支内产生的残余谓词无法提升为全局 AND 条件。
+    or_depth: usize,
+    residual_in_or: bool,
 }
 
 impl Ctx {
     fn add_residual(&mut self, expr: Expr) {
+        if self.or_depth > 0 {
+            self.residual_in_or = true;
+        }
         self.residual = Some(match self.residual.take() {
             Some(existing) => Expr::And(Box::new(existing), Box::new(expr)),
             None => expr,
@@ -45,6 +51,9 @@ pub(crate) fn translate(
     };
     if text.trim().is_empty() {
         return Err("unsupported: empty query".into());
+    }
+    if ctx.residual_in_or {
+        return Err("unsupported: residual predicate inside OR".into());
     }
     if kind == SourceKind::Hunter && text.chars().count() > 2048 {
         return Err("unsupported: hunter query exceeds 2048 chars".into());
@@ -163,7 +172,13 @@ fn shodan_product(service: &str) -> Option<&'static str> {
 fn hunter(expr: &Expr, ctx: &mut Ctx) -> Result<String, String> {
     match expr {
         Expr::And(l, r) => Ok(format!("({} && {})", hunter(l, ctx)?, hunter(r, ctx)?)),
-        Expr::Or(l, r) => Ok(format!("({} || {})", hunter(l, ctx)?, hunter(r, ctx)?)),
+        Expr::Or(l, r) => {
+            ctx.or_depth += 1;
+            let left = hunter(l, ctx);
+            let right = hunter(r, ctx);
+            ctx.or_depth -= 1;
+            Ok(format!("({} || {})", left?, right?))
+        }
         Expr::Not(inner) => match inner.as_ref() {
             Expr::Predicate(p) => {
                 let negated = negate(p).ok_or("unsupported: hunter NOT operator")?;
@@ -238,7 +253,13 @@ fn hunter_predicate(p: &Predicate, ctx: &mut Ctx) -> Result<String, String> {
 fn quake(expr: &Expr, ctx: &mut Ctx) -> Result<String, String> {
     match expr {
         Expr::And(l, r) => Ok(format!("({} AND {})", quake(l, ctx)?, quake(r, ctx)?)),
-        Expr::Or(l, r) => Ok(format!("({} OR {})", quake(l, ctx)?, quake(r, ctx)?)),
+        Expr::Or(l, r) => {
+            ctx.or_depth += 1;
+            let left = quake(l, ctx);
+            let right = quake(r, ctx);
+            ctx.or_depth -= 1;
+            Ok(format!("({} OR {})", left?, right?))
+        }
         Expr::Not(inner) => Ok(format!("(NOT {})", quake(inner, ctx)?)),
         Expr::Predicate(p) => quake_predicate(p, ctx),
         Expr::HasEndpoint(_) => Err("unsupported: has_endpoint".into()),
@@ -291,7 +312,13 @@ fn quake_predicate(p: &Predicate, ctx: &mut Ctx) -> Result<String, String> {
 fn fofa(expr: &Expr, ctx: &mut Ctx) -> Result<String, String> {
     match expr {
         Expr::And(l, r) => Ok(format!("({} && {})", fofa(l, ctx)?, fofa(r, ctx)?)),
-        Expr::Or(l, r) => Ok(format!("({} || {})", fofa(l, ctx)?, fofa(r, ctx)?)),
+        Expr::Or(l, r) => {
+            ctx.or_depth += 1;
+            let left = fofa(l, ctx);
+            let right = fofa(r, ctx);
+            ctx.or_depth -= 1;
+            Ok(format!("({} || {})", left?, right?))
+        }
         Expr::Not(inner) => match inner.as_ref() {
             Expr::Predicate(p) => {
                 let negated = negate(p).ok_or("unsupported: fofa NOT operator")?;
@@ -593,6 +620,18 @@ mod tests {
         let mut other = record();
         other.domain = Some("api.example.com".into());
         assert!(!eval_residual(&residual, &other));
+    }
+
+    #[test]
+    fn boolean_or_with_residual_is_skipped() {
+        let expr = parse_query_ast("domain = \"example.com\" OR ip = \"1.1.1.1\"").unwrap();
+        assert!(translate(SourceKind::Quake, &expr, &FieldSelection::default()).is_err());
+        assert!(translate(SourceKind::Fofa, &expr, &FieldSelection::default()).is_err());
+        let expr = parse_query_ast("domain != \"example.com\" OR ip = \"1.1.1.1\"").unwrap();
+        assert!(translate(SourceKind::Hunter, &expr, &FieldSelection::default()).is_err());
+        // 平台可精确表达、无残余谓词的布尔组合不受影响。
+        let expr = parse_query_ast("ip = \"1.1.1.1\" AND port = 443").unwrap();
+        assert!(translate(SourceKind::Quake, &expr, &FieldSelection::default()).is_ok());
     }
 
     #[test]

@@ -207,6 +207,25 @@ fn error_detail(source: &Source, code: &str, started: Instant) -> SourceOutcome 
     }
 }
 
+/// Shodan 免费 host 端点一次返回该 IP 的全部服务，只能表达“仅该 IP”的查询；
+/// 带其他过滤条件的查询必须走 search 端点，否则会把不匹配的记录带回来。
+fn free_single_ip(query: &str) -> Option<String> {
+    use crate::handlers::search_dsl::{Expr, Field, Operator, parse_query_ast};
+    let Expr::Predicate(predicate) = parse_query_ast(query).ok()? else {
+        return None;
+    };
+    if !matches!(predicate.field, Field::Ip)
+        || !matches!(predicate.operator, Operator::Eq | Operator::Colon)
+        || predicate.values.len() != 1
+    {
+        return None;
+    }
+    predicate.values[0]
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .map(|ip| ip.to_string())
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run_source(
     services: &Services,
@@ -324,9 +343,7 @@ async fn run_source(
     let tolerance_ms = services.config.observed_at_future_tolerance_seconds as i64 * 1000;
     let time_cutoff = window.map(|days| now_ms - i64::from(days) * 86_400_000);
     let single_ip = if capabilities.single_ip_free_endpoint {
-        crate::handlers::search_dsl::extract_search_target(&run.query_text)
-            .filter(|target| target.kind == "ip")
-            .map(|target| target.key)
+        free_single_ip(&run.query_text)
     } else {
         None
     };
@@ -658,6 +675,21 @@ mod tests {
             longitude: None,
             sources: vec![source.into()],
         }
+    }
+
+    #[test]
+    fn free_single_ip_only_for_exact_ip_queries() {
+        assert_eq!(
+            free_single_ip("ip = \"1.1.1.1\"").as_deref(),
+            Some("1.1.1.1")
+        );
+        assert_eq!(
+            free_single_ip("ip = \"2001:0db8::1\"").as_deref(),
+            Some("2001:db8::1")
+        );
+        assert_eq!(free_single_ip("ip = \"1.1.1.1\" AND port = 443"), None);
+        assert_eq!(free_single_ip("domain = \"example.com\""), None);
+        assert_eq!(free_single_ip("ip IN (\"1.1.1.1\", \"1.1.1.2\")"), None);
     }
 
     #[test]
