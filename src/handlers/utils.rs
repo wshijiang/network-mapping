@@ -18,12 +18,13 @@ use crate::config::{
 use crate::monitor::MonitorHandle;
 use crate::runtime_config::{
     ANALYTICS_SNAPSHOT_NAMESPACE, AUTOMATIC_TARGET_NAMESPACE, DNS_FOLLOW_UP_NAMESPACE,
-    DNS_RESOLVERS_NAMESPACE, GENERAL_NAMESPACE, MONITOR_NAMESPACE, PersistError,
-    REPORT_MAIL_NAMESPACE, REQUESTS_NAMESPACE, RuntimeConfigResponse, RuntimeSettings,
-    SCAN_ROUTING_NAMESPACE, SCANNER_HEALTH_NAMESPACE, SYSLOG_NAMESPACE, UpdateRuntimeConfigRequest,
-    parse_analytics_snapshot, parse_automatic_target, parse_dns_follow_up, parse_dns_resolvers,
-    parse_general, parse_monitor, parse_report_mail, parse_requests, parse_scan_routing,
-    parse_scanner_health, parse_syslog, persist,
+    DNS_RESOLVERS_NAMESPACE, FEDERATION_NAMESPACE, GENERAL_NAMESPACE, MONITOR_NAMESPACE,
+    PersistError, REPORT_MAIL_NAMESPACE, REQUESTS_NAMESPACE, RuntimeConfigResponse,
+    RuntimeSettings, SCAN_ROUTING_NAMESPACE, SCANNER_HEALTH_NAMESPACE, SYSLOG_NAMESPACE,
+    UpdateRuntimeConfigRequest, parse_analytics_snapshot, parse_automatic_target,
+    parse_dns_follow_up, parse_dns_resolvers, parse_federation, parse_general, parse_monitor,
+    parse_report_mail, parse_requests, parse_scan_routing, parse_scanner_health, parse_syslog,
+    persist,
 };
 use crate::statistics::{
     NAMESPACE as STATISTICS_CACHE_NAMESPACE, parse_config as parse_statistics_cache,
@@ -210,6 +211,10 @@ async fn get_runtime_config_h(
             let value = settings.syslog.get().await;
             HttpResponse::Ok().json(json!({"success": true, "data": RuntimeConfigResponse { namespace: SYSLOG_NAMESPACE, revision: value.revision, document: value.value }}))
         }
+        FEDERATION_NAMESPACE => {
+            let value = settings.federation.get().await;
+            HttpResponse::Ok().json(json!({"success": true, "data": RuntimeConfigResponse { namespace: FEDERATION_NAMESPACE, revision: value.revision, document: value.value }}))
+        }
         _ => {
             HttpResponse::NotFound().json(json!({"success": false, "message": "未知运行时配置域"}))
         }
@@ -383,6 +388,9 @@ async fn save_runtime_config_h(
             |_| {}
         ),
         SYSLOG_NAMESPACE => publish!(SYSLOG_NAMESPACE, parse_syslog, syslog, |_| {}),
+        FEDERATION_NAMESPACE => {
+            publish!(FEDERATION_NAMESPACE, parse_federation, federation, |_| {})
+        }
         _ => {
             HttpResponse::NotFound().json(json!({"success": false, "message": "未知运行时配置域"}))
         }

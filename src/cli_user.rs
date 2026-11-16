@@ -43,6 +43,11 @@ pub async fn execute(
                 .await
                 .map_err(|error| -> Box<dyn std::error::Error> { error })
         }
+        ServerCommand::Federation { command } => {
+            crate::federation::cli::execute(command, pool, encrypt_key)
+                .await
+                .map_err(|error| -> Box<dyn std::error::Error> { error })
+        }
     }
 }
 

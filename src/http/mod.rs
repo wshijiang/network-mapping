@@ -16,6 +16,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     assets(cfg);
     scanning(cfg);
     data_import(cfg);
+    federation(cfg);
     cfg.service(handlers::modules::status)
         .service(handlers::modules::publish);
     #[cfg(feature = "rir")]
@@ -155,6 +156,20 @@ fn data_import(cfg: &mut web::ServiceConfig) {
         .service(handlers::data_import::resume_task)
         .service(handlers::data_import::cancel_task)
         .service(handlers::data_import::delete_task);
+}
+
+fn federation(cfg: &mut web::ServiceConfig) {
+    cfg.service(handlers::federation::get_schema)
+        .service(handlers::federation::list_sources)
+        .service(handlers::federation::create_source)
+        .service(handlers::federation::update_source)
+        .service(handlers::federation::delete_source)
+        .service(handlers::federation::test_source)
+        .service(handlers::federation::create_run)
+        .service(handlers::federation::list_runs)
+        .service(handlers::federation::get_run)
+        .service(handlers::federation::cancel_run)
+        .service(handlers::federation::delete_run);
 }
 
 fn assets(cfg: &mut web::ServiceConfig) {

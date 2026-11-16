@@ -33,6 +33,8 @@ pub const ANALYTICS_SNAPSHOT_NAMESPACE: &str = "analytics_snapshot";
 
 pub const SYSLOG_NAMESPACE: &str = crate::syslog::config::NAMESPACE;
 
+pub const FEDERATION_NAMESPACE: &str = crate::federation::policy::NAMESPACE;
+
 #[derive(Clone, Debug)]
 pub struct Versioned<T> {
     pub value: T,
@@ -85,6 +87,7 @@ pub struct RuntimeSettings {
     pub analytics_snapshot: RuntimeConfig<AnalyticsSnapshotConfig>,
     pub report_mail: RuntimeConfig<crate::reports::mail_config::ReportMailConfig>,
     pub syslog: RuntimeConfig<crate::syslog::SyslogConfig>,
+    pub federation: RuntimeConfig<crate::federation::policy::FederationPolicy>,
 }
 
 #[derive(Clone)]
@@ -123,7 +126,7 @@ impl RuntimeSettings {
         pool: &Pool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let client = pool.get().await?;
-        let rows = client.query("SELECT namespace, document, revision FROM runtime_configuration WHERE namespace IN ('monitor', 'scanner_health', 'scan_routing', 'automatic_target');", &[]).await?;
+        let rows = client.query("SELECT namespace, document, revision FROM runtime_configuration WHERE namespace IN ('monitor', 'scanner_health', 'scan_routing', 'automatic_target', 'federation');", &[]).await?;
         for row in rows {
             let namespace: String = row.get("namespace");
             let document: Value = row.get("document");
@@ -157,6 +160,14 @@ impl RuntimeSettings {
                     self.automatic_target
                         .replace(
                             parse_automatic_target(document).map_err(std::io::Error::other)?,
+                            revision,
+                        )
+                        .await
+                }
+                FEDERATION_NAMESPACE => {
+                    self.federation
+                        .replace(
+                            parse_federation(document).map_err(std::io::Error::other)?,
                             revision,
                         )
                         .await
@@ -269,6 +280,14 @@ impl RuntimeSettings {
                 Default::default(),
                 Default::default(),
                 crate::syslog::SyslogConfig::validate,
+            )
+            .await?,
+            federation: load_namespace(
+                pool,
+                FEDERATION_NAMESPACE,
+                Default::default(),
+                Default::default(),
+                crate::federation::policy::FederationPolicy::validate,
             )
             .await?,
         })
@@ -514,6 +533,12 @@ pub fn parse_analytics_snapshot(value: Value) -> Result<AnalyticsSnapshotConfig,
 
 pub fn parse_syslog(value: Value) -> Result<crate::syslog::SyslogConfig, String> {
     parse(value, crate::syslog::SyslogConfig::validate)
+}
+
+pub fn parse_federation(
+    value: Value,
+) -> Result<crate::federation::policy::FederationPolicy, String> {
+    parse(value, crate::federation::policy::FederationPolicy::validate)
 }
 
 fn parse<T>(value: Value, validate: fn(&T) -> Result<(), String>) -> Result<T, String>

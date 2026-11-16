@@ -21,13 +21,13 @@ pub(crate) enum Expr {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Predicate {
-    field: Field,
-    operator: Operator,
-    values: Vec<String>,
+    pub(crate) field: Field,
+    pub(crate) operator: Operator,
+    pub(crate) values: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Field {
+pub(crate) enum Field {
     Ip,
     Domain,
     Asn,
@@ -71,7 +71,7 @@ enum Field {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Operator {
+pub(crate) enum Operator {
     Eq,
     NotEq,
     Contains,
@@ -132,6 +132,11 @@ pub(crate) enum ElasticsearchCompilation {
     Supported(Value),
     RequiresElasticsearch(Value),
     Unsupported,
+}
+
+/// 联测查询翻译入口：仅解析 AST，不做 ES 编译（第二个编译目标见 federation::translate）。
+pub(crate) fn parse_query_ast(query: &str) -> Result<Expr, SearchSyntaxError> {
+    parse_expression(query).map(|(expression, _)| expression)
 }
 
 pub(crate) fn parse_and_compile_elasticsearch(

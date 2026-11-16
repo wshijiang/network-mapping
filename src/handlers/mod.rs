@@ -4,6 +4,7 @@ pub mod audit;
 pub mod backup;
 pub mod data_import; //数据管理 · 外部导入
 pub mod data_saa; //数据统计与分析
+pub mod federation; //数据管理 · 联测
 pub mod health;
 pub mod login_allowlist;
 pub mod login_record;
