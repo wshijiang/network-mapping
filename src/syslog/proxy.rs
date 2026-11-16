@@ -2,9 +2,9 @@
 //!
 //! syslog 转发跟随全局网络代理，但**仅当代理为 SOCKS5（socks5/socks5h）时使用**；
 //! 其他类型（HTTP/HTTPS 等）或直连/未配置一律自动回退直连。
-//! 代理作用于 TCP/TLS 目标；UDP 目标始终直连（SOCKS5 UDP ASSOCIATE 不在支持范围）。
+//! TCP/TLS 走 CONNECT；UDP 走 UDP ASSOCIATE（数据报经代理中继转发）。
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use reqwest::Url;
@@ -105,13 +105,143 @@ pub async fn connect_tcp(
     .map_err(|_| "SOCKS5 代理连接超时".to_owned())?
 }
 
+/// 经 SOCKS5 代理建立 UDP 关联（UDP ASSOCIATE 命令）。
+///
+/// 返回代理侧 UDP 中继地址与目标数据报头；TCP 控制连接必须保持存活，
+/// 关联存续期间代理才接受该客户端发往中继的数据报。
+pub async fn connect_udp(
+    proxy: &Socks5Proxy,
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<UdpAssociation, String> {
+    tokio::time::timeout(timeout, async {
+        let address = tokio::net::lookup_host((proxy.host.as_str(), proxy.port))
+            .await
+            .map_err(|error| format!("代理地址解析失败: {error}"))?
+            .next()
+            .ok_or_else(|| "代理地址解析结果为空".to_owned())?;
+        let mut stream = TcpStream::connect(address)
+            .await
+            .map_err(|error| format!("代理连接失败: {error}"))?;
+        let _ = stream.set_nodelay(true);
+        negotiate(&mut stream, proxy).await?;
+        // UDP ASSOCIATE：客户端源地址填 0.0.0.0:0，由代理接受任意来源。
+        let request = [0x05u8, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        stream
+            .write_all(&request)
+            .await
+            .map_err(|error| format!("SOCKS5 UDP ASSOCIATE 写入失败: {error}"))?;
+        let mut head = [0u8; 4];
+        stream
+            .read_exact(&mut head)
+            .await
+            .map_err(|error| format!("SOCKS5 UDP ASSOCIATE 读取失败: {error}"))?;
+        if head[0] != 0x05 {
+            return Err("SOCKS5 代理响应版本无效".to_owned());
+        }
+        if head[1] != 0x00 {
+            return Err(format!("SOCKS5 代理拒绝 UDP 关联（代码 {}）", head[1]));
+        }
+        let bound = read_bound_address(&mut stream, head[3]).await?;
+        let bound_port = read_bound_port(&mut stream).await?;
+        let relay_ip = match bound {
+            BoundAddress::Ip(ip) if !ip.is_unspecified() => ip,
+            BoundAddress::Domain(domain) => tokio::net::lookup_host((domain.as_str(), bound_port))
+                .await
+                .map_err(|error| format!("SOCKS5 中继地址解析失败: {error}"))?
+                .next()
+                .ok_or_else(|| "SOCKS5 中继地址解析结果为空".to_owned())?
+                .ip(),
+            // 部分代理返回 0.0.0.0：中继与控制连接同主机。
+            _ => stream
+                .peer_addr()
+                .map_err(|error| format!("SOCKS5 代理地址无效: {error}"))?
+                .ip(),
+        };
+        let mut header = vec![0x00, 0x00, 0x00]; // RSV(2) + FRAG(1)，不支持分片。
+        header.extend(encode_target(proxy, host, port).await?);
+        Ok(UdpAssociation {
+            relay: SocketAddr::new(relay_ip, bound_port),
+            header,
+            control: stream,
+        })
+    })
+    .await
+    .map_err(|_| "SOCKS5 代理 UDP 关联超时".to_owned())?
+}
+
+/// 一次 UDP 关联：中继地址 + 固定目标的 SOCKS5 UDP 数据报头 + 保活控制连接。
+pub struct UdpAssociation {
+    pub relay: SocketAddr,
+    pub header: Vec<u8>,
+    pub control: TcpStream,
+}
+
+/// 目标地址编码（ATYP + DST.ADDR + DST.PORT）；socks5h 发域名，否则本地解析。
+async fn encode_target(proxy: &Socks5Proxy, host: &str, port: u16) -> Result<Vec<u8>, String> {
+    let mut request = Vec::new();
+    if proxy.remote_dns {
+        if host.len() > 255 {
+            return Err("目标域名过长".to_owned());
+        }
+        request.push(0x03);
+        request.push(host.len() as u8);
+        request.extend_from_slice(host.as_bytes());
+    } else {
+        let address = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|error| format!("目标地址解析失败: {error}"))?
+            .next()
+            .ok_or_else(|| "目标地址解析结果为空".to_owned())?;
+        match address.ip() {
+            IpAddr::V4(v4) => {
+                request.push(0x01);
+                request.extend_from_slice(&v4.octets());
+            }
+            IpAddr::V6(v6) => {
+                request.push(0x04);
+                request.extend_from_slice(&v6.octets());
+            }
+        }
+    }
+    request.extend_from_slice(&port.to_be_bytes());
+    Ok(request)
+}
+
 async fn handshake(
     stream: &mut TcpStream,
     proxy: &Socks5Proxy,
     host: &str,
     port: u16,
 ) -> Result<(), String> {
-    // 方法协商：无认证，必要时提供用户名/密码认证。
+    negotiate(stream, proxy).await?;
+    // CONNECT 请求。
+    let mut request = vec![0x05, 0x01, 0x00];
+    request.extend(encode_target(proxy, host, port).await?);
+    stream
+        .write_all(&request)
+        .await
+        .map_err(|error| format!("SOCKS5 CONNECT 写入失败: {error}"))?;
+    let mut head = [0u8; 4];
+    stream
+        .read_exact(&mut head)
+        .await
+        .map_err(|error| format!("SOCKS5 CONNECT 读取失败: {error}"))?;
+    if head[0] != 0x05 {
+        return Err("SOCKS5 代理响应版本无效".to_owned());
+    }
+    if head[1] != 0x00 {
+        return Err(format!("SOCKS5 代理拒绝连接（代码 {}）", head[1]));
+    }
+    // 跳过绑定地址。
+    let _ = read_bound_address(stream, head[3]).await?;
+    let _ = read_bound_port(stream).await?;
+    Ok(())
+}
+
+/// 方法协商：无认证，必要时提供用户名/密码认证。
+async fn negotiate(stream: &mut TcpStream, proxy: &Socks5Proxy) -> Result<(), String> {
     let mut methods = vec![0x00u8];
     if proxy.username.is_some() {
         methods.push(0x02);
@@ -158,54 +288,32 @@ async fn handshake(
         0xFF => return Err("SOCKS5 代理无可接受的认证方法".to_owned()),
         _ => return Err("SOCKS5 代理选择了不支持的认证方法".to_owned()),
     }
+    Ok(())
+}
 
-    // CONNECT 请求。
-    let mut request = vec![0x05, 0x01, 0x00];
-    if proxy.remote_dns {
-        if host.len() > 255 {
-            return Err("目标域名过长".to_owned());
-        }
-        request.push(0x03);
-        request.push(host.len() as u8);
-        request.extend_from_slice(host.as_bytes());
-    } else {
-        let address = tokio::net::lookup_host((host, port))
-            .await
-            .map_err(|error| format!("目标地址解析失败: {error}"))?
-            .next()
-            .ok_or_else(|| "目标地址解析结果为空".to_owned())?;
-        match address.ip() {
-            IpAddr::V4(v4) => {
-                request.push(0x01);
-                request.extend_from_slice(&v4.octets());
-            }
-            IpAddr::V6(v6) => {
-                request.push(0x04);
-                request.extend_from_slice(&v6.octets());
-            }
-        }
-    }
-    request.extend_from_slice(&port.to_be_bytes());
-    stream
-        .write_all(&request)
-        .await
-        .map_err(|error| format!("SOCKS5 CONNECT 写入失败: {error}"))?;
-    let mut head = [0u8; 4];
-    stream
-        .read_exact(&mut head)
-        .await
-        .map_err(|error| format!("SOCKS5 CONNECT 读取失败: {error}"))?;
-    if head[0] != 0x05 {
-        return Err("SOCKS5 代理响应版本无效".to_owned());
-    }
-    if head[1] != 0x00 {
-        return Err(format!("SOCKS5 代理拒绝连接（代码 {}）", head[1]));
-    }
-    // 跳过绑定地址。
-    match head[3] {
+enum BoundAddress {
+    Ip(IpAddr),
+    Domain(String),
+}
+
+/// 读取回复中的绑定地址（ATYP 已由调用方读取）。
+async fn read_bound_address(stream: &mut TcpStream, atyp: u8) -> Result<BoundAddress, String> {
+    match atyp {
         0x01 => {
-            let mut bound = [0u8; 6];
-            stream.read_exact(&mut bound).await.ok();
+            let mut octets = [0u8; 4];
+            stream
+                .read_exact(&mut octets)
+                .await
+                .map_err(|error| format!("SOCKS5 绑定地址读取失败: {error}"))?;
+            Ok(BoundAddress::Ip(IpAddr::V4(octets.into())))
+        }
+        0x04 => {
+            let mut octets = [0u8; 16];
+            stream
+                .read_exact(&mut octets)
+                .await
+                .map_err(|error| format!("SOCKS5 绑定地址读取失败: {error}"))?;
+            Ok(BoundAddress::Ip(IpAddr::V6(octets.into())))
         }
         0x03 => {
             let mut len = [0u8; 1];
@@ -213,19 +321,26 @@ async fn handshake(
                 .read_exact(&mut len)
                 .await
                 .map_err(|error| format!("SOCKS5 绑定地址读取失败: {error}"))?;
-            let mut bound = vec![0u8; len[0] as usize + 2];
+            let mut domain = vec![0u8; len[0] as usize];
             stream
-                .read_exact(&mut bound)
+                .read_exact(&mut domain)
                 .await
                 .map_err(|error| format!("SOCKS5 绑定地址读取失败: {error}"))?;
+            Ok(BoundAddress::Domain(
+                String::from_utf8_lossy(&domain).into_owned(),
+            ))
         }
-        0x04 => {
-            let mut bound = [0u8; 18];
-            stream.read_exact(&mut bound).await.ok();
-        }
-        _ => return Err("SOCKS5 代理绑定地址类型无效".to_owned()),
+        _ => Err("SOCKS5 代理绑定地址类型无效".to_owned()),
     }
-    Ok(())
+}
+
+async fn read_bound_port(stream: &mut TcpStream) -> Result<u16, String> {
+    let mut port = [0u8; 2];
+    stream
+        .read_exact(&mut port)
+        .await
+        .map_err(|error| format!("SOCKS5 绑定地址读取失败: {error}"))?;
+    Ok(u16::from_be_bytes(port))
 }
 
 #[cfg(test)]
@@ -371,5 +486,124 @@ mod tests {
         };
         let result = connect_tcp(&proxy, "siem.example.com", 514, Duration::from_secs(5)).await;
         assert!(result.is_err_and(|error| error.contains("代码 2")));
+    }
+
+    /// 最小 SOCKS5 服务端：接受 UDP ASSOCIATE，把中继数据报去掉请求头后转发到目标。
+    async fn mock_udp_socks5(listener: tokio::net::TcpListener, target: std::net::SocketAddr) {
+        use tokio::net::UdpSocket;
+        let (mut client, _) = listener.accept().await.unwrap();
+        let mut greeting = [0u8; 2];
+        client.read_exact(&mut greeting).await.unwrap();
+        let mut methods = vec![0u8; greeting[1] as usize];
+        client.read_exact(&mut methods).await.unwrap();
+        client.write_all(&[0x05, 0x00]).await.unwrap();
+        let mut request = [0u8; 10];
+        client.read_exact(&mut request).await.unwrap();
+        assert_eq!(request[1], 0x03, "必须为 UDP ASSOCIATE 命令");
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_port = relay.local_addr().unwrap().port();
+        let mut reply = vec![0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1];
+        reply.extend_from_slice(&relay_port.to_be_bytes());
+        client.write_all(&reply).await.unwrap();
+        // 控制连接保持存活；中继一个数据报后校验目标地址并转发负载。
+        let mut buffer = vec![0u8; 2048];
+        let (size, _) = tokio::time::timeout(Duration::from_secs(5), relay.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        let datagram = &buffer[..size];
+        assert_eq!(&datagram[..3], &[0x00, 0x00, 0x00], "RSV/FRAG 头");
+        assert_eq!(datagram[3], 0x01, "目标为 IPv4 地址类型");
+        assert_eq!(&datagram[4..8], &[127, 0, 0, 1]);
+        assert_eq!(
+            u16::from_be_bytes([datagram[8], datagram[9]]),
+            target.port()
+        );
+        let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        upstream.send_to(&datagram[10..], target).await.unwrap();
+        // 控制连接关闭前关联必须一直有效。
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn udp_target_reaches_server_through_socks5_associate() {
+        use crate::syslog::config::{Protocol, TargetConfig, TlsOptions};
+        use crate::syslog::transport;
+        use tokio::net::UdpSocket;
+
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = receiver.local_addr().unwrap();
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        tokio::spawn(mock_udp_socks5(proxy_listener, target_addr));
+
+        let target = TargetConfig {
+            id: uuid::Uuid::now_v7(),
+            name: "udp-via-proxy".into(),
+            host: "127.0.0.1".into(),
+            port: target_addr.port(),
+            protocol: Protocol::Udp,
+            enabled: true,
+            tls: TlsOptions::default(),
+            sources: crate::syslog::config::default_sources(),
+        };
+        let proxy = Socks5Proxy {
+            host: proxy_addr.ip().to_string(),
+            port: proxy_addr.port(),
+            username: None,
+            password: None,
+            remote_dns: false,
+        };
+        let mut connection = transport::connect(&target, Duration::from_secs(5), Some(&proxy))
+            .await
+            .unwrap();
+        transport::send(&mut connection, b"hello udp", Duration::from_secs(5))
+            .await
+            .unwrap();
+        let mut buffer = [0u8; 9];
+        let (size, _) =
+            tokio::time::timeout(Duration::from_secs(5), receiver.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&buffer[..size], b"hello udp");
+    }
+
+    #[tokio::test]
+    async fn udp_associate_socks5h_keeps_domain_in_datagram_header() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut client, _) = listener.accept().await.unwrap();
+            let mut greeting = [0u8; 2];
+            client.read_exact(&mut greeting).await.unwrap();
+            let mut methods = vec![0u8; greeting[1] as usize];
+            client.read_exact(&mut methods).await.unwrap();
+            client.write_all(&[0x05, 0x00]).await.unwrap();
+            let mut request = [0u8; 10];
+            client.read_exact(&mut request).await.unwrap();
+            // 中继地址返回 0.0.0.0：客户端应回退到控制连接对端地址。
+            client
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0x04, 0x38])
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        let proxy = Socks5Proxy {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            username: None,
+            password: None,
+            remote_dns: true,
+        };
+        let association = connect_udp(&proxy, "siem.example.com", 514, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(association.relay.ip(), addr.ip());
+        assert_eq!(association.relay.port(), 1080);
+        let mut expected = vec![0x00, 0x00, 0x00, 0x03, b"siem.example.com".len() as u8];
+        expected.extend_from_slice(b"siem.example.com");
+        expected.extend_from_slice(&514u16.to_be_bytes());
+        assert_eq!(association.header, expected);
     }
 }

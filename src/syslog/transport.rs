@@ -13,11 +13,17 @@ pub const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub enum Connection {
     Udp(UdpSocket),
+    /// UDP 经 SOCKS5 UDP ASSOCIATE 中继；控制连接须保活。
+    UdpSocks5 {
+        socket: UdpSocket,
+        header: Vec<u8>,
+        _control: TcpStream,
+    },
     Tcp(TcpStream),
     Tls(tokio_native_tls::TlsStream<TcpStream>),
 }
 
-/// 建立到目标的连接。`proxy` 仅作用于 TCP/TLS（SOCKS5）；UDP 始终直连。
+/// 建立到目标的连接。SOCKS5 代理对 TCP/TLS 走 CONNECT、对 UDP 走 UDP ASSOCIATE；
 /// 非 SOCKS5 代理由调用方解析为 None，即自动回退直连。
 pub async fn connect(
     target: &TargetConfig,
@@ -26,6 +32,27 @@ pub async fn connect(
 ) -> Result<Connection, String> {
     match target.protocol {
         Protocol::Udp => {
+            if let Some(proxy) = proxy {
+                let association =
+                    crate::syslog::proxy::connect_udp(proxy, &target.host, target.port, timeout)
+                        .await
+                        .map_err(|error| sanitize_error(&error))?;
+                let socket = if association.relay.is_ipv4() {
+                    UdpSocket::bind("0.0.0.0:0").await
+                } else {
+                    UdpSocket::bind("[::]:0").await
+                }
+                .map_err(|error| sanitize_error(&format!("UDP 绑定失败: {error}")))?;
+                socket
+                    .connect(association.relay)
+                    .await
+                    .map_err(|error| sanitize_error(&format!("UDP 连接失败: {error}")))?;
+                return Ok(Connection::UdpSocks5 {
+                    socket,
+                    header: association.header,
+                    _control: association.control,
+                });
+            }
             let address = tokio::time::timeout(
                 timeout,
                 tokio::net::lookup_host((target.host.as_str(), target.port)),
@@ -124,6 +151,20 @@ pub async fn send(
                 .map_err(|_| "UDP 发送超时".to_owned())?
                 .map_err(|error| sanitize_error(&format!("UDP 发送失败: {error}")))?;
             if sent != payload.len() {
+                return Err("UDP 报文部分发送".to_owned());
+            }
+            Ok(())
+        }
+        Connection::UdpSocks5 { socket, header, .. } => {
+            // SOCKS5 UDP 请求头 + RFC 5424 负载，发往代理中继。
+            let mut datagram = Vec::with_capacity(header.len() + payload.len());
+            datagram.extend_from_slice(header);
+            datagram.extend_from_slice(payload);
+            let sent = tokio::time::timeout(timeout, socket.send(&datagram))
+                .await
+                .map_err(|_| "UDP 发送超时".to_owned())?
+                .map_err(|error| sanitize_error(&format!("UDP 发送失败: {error}")))?;
+            if sent != datagram.len() {
                 return Err("UDP 报文部分发送".to_owned());
             }
             Ok(())

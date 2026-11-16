@@ -661,7 +661,7 @@ async fn show_status(pool: &Pool, encrypt_key: &str, as_json: bool) -> CliResult
     println!(
         "代理：{}",
         match &proxy {
-            Some(p) => format!("SOCKS5 {}:{}（仅 TCP/TLS；UDP 直连）", p.host, p.port),
+            Some(p) => format!("SOCKS5 {}:{}（TCP/TLS/UDP 均生效）", p.host, p.port),
             None => "直连（全局代理非 SOCKS5 或未配置，已自动回退）".to_owned(),
         }
     );
