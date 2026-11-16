@@ -591,6 +591,25 @@ async fn run_source(
     }
 }
 
+/// run 终态判定：全部源均不支持该语句时记为“未查询”（unsupported），不是执行错误。
+fn run_status(
+    any_completed: bool,
+    any_error: bool,
+    all_unsupported: bool,
+    total_persisted: usize,
+    persist_failed: bool,
+) -> &'static str {
+    if any_completed && !any_error && !persist_failed {
+        "completed"
+    } else if any_completed || total_persisted > 0 {
+        "partial"
+    } else if all_unsupported && !persist_failed {
+        "unsupported"
+    } else {
+        "failed"
+    }
+}
+
 /// 执行一个 run（调用方已置 running + 租约）。
 pub async fn execute_run(
     services: &Services,
@@ -685,13 +704,17 @@ pub async fn execute_run(
         }
     }
 
-    let status = if any_completed && !any_error && persist_error.is_none() {
-        "completed"
-    } else if any_completed || total_persisted > 0 {
-        "partial"
-    } else {
-        "failed"
-    };
+    let all_unsupported = !details.is_empty()
+        && details
+            .iter()
+            .all(|d| d.get("status").and_then(Value::as_str) == Some("unsupported"));
+    let status = run_status(
+        any_completed,
+        any_error,
+        all_unsupported,
+        total_persisted,
+        persist_error.is_some(),
+    );
     let cache = serde_json::to_value(&merged)?;
     storage::finish_run(
         &services.pool,
@@ -987,6 +1010,17 @@ mod tests {
             Some(&json!({"isvip": true}))
         ));
         assert!(membership_allows_time(SourceKind::Hunter, None));
+    }
+
+    #[test]
+    fn unsupported_query_is_not_an_error() {
+        // 全部源不支持 → 未查询；有真实错误或入库失败仍按原口径。
+        assert_eq!(run_status(false, false, true, 0, false), "unsupported");
+        assert_eq!(run_status(false, true, false, 0, false), "failed");
+        assert_eq!(run_status(true, false, false, 0, false), "completed");
+        assert_eq!(run_status(true, true, false, 0, false), "partial");
+        assert_eq!(run_status(true, false, false, 3, true), "partial");
+        assert_eq!(run_status(false, false, false, 0, false), "failed");
     }
 
     #[test]

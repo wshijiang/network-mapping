@@ -742,7 +742,7 @@ pub async fn delete_run(pool: &Pool, id: Uuid) -> std::result::Result<(), Storag
         .await
         .map_err(|e| StorageError::Invalid(e.to_string()))?
         .execute(
-            "DELETE FROM federation_run WHERE id=$1 AND status IN ('completed','partial','failed','cancelled')",
+            "DELETE FROM federation_run WHERE id=$1 AND status IN ('completed','partial','failed','cancelled','unsupported')",
             &[&id],
         )
         .await
@@ -758,7 +758,7 @@ pub async fn purge_expired(pool: &Pool, retention_days: u32) -> Result<u64> {
         .get()
         .await?
         .execute(
-            "DELETE FROM federation_run WHERE status IN ('completed','partial','failed','cancelled') \
+            "DELETE FROM federation_run WHERE status IN ('completed','partial','failed','cancelled','unsupported') \
              AND finished_at < NOW() - ($1 || ' days')::INTERVAL",
             &[&retention_days.to_string()],
         )

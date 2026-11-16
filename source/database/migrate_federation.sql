@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS federation_run (
     trigger          TEXT NOT NULL CHECK (trigger IN ('search','manual')),
     mode             TEXT NOT NULL CHECK (mode IN ('async','blocking')),
     status           TEXT NOT NULL DEFAULT 'pending'
-                     CHECK (status IN ('pending','running','completed','partial','failed','cancelled')),
+                     CHECK (status IN ('pending','running','completed','partial','failed','cancelled','unsupported')),
     requested_by     INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     window_days      INT NOT NULL DEFAULT 30 CHECK (window_days BETWEEN 1 AND 60),
     local_state      TEXT NOT NULL DEFAULT 'unknown' CHECK (local_state IN ('empty','stale','fresh','unknown')),
@@ -73,6 +73,24 @@ CREATE INDEX IF NOT EXISTS idx_federation_run_lease
 INSERT INTO scanner_info (name, scanner_id, create_user, runtime_token_hash, is_enable, is_run, remark, create_time, register_time)
 VALUES ('联测', '00000000-0000-7000-8000-00000000fed0', 0, '', true, false, '__system_federation__', NOW(), NOW())
 ON CONFLICT (scanner_id) DO NOTHING;
+
+-- run 状态：旧库的 federation_run_status_check 可能不含 unsupported（全部源不支持该语句），
+-- 启动时幂等补齐，避免“未查询”run 被数据库约束拒绝。
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = to_regclass('federation_run')
+          AND conname = 'federation_run_status_check'
+          AND POSITION('unsupported' IN pg_get_constraintdef(oid)) = 0
+    ) THEN
+        ALTER TABLE federation_run DROP CONSTRAINT federation_run_status_check;
+        ALTER TABLE federation_run ADD CONSTRAINT federation_run_status_check CHECK (status IN (
+            'pending','running','completed','partial','failed','cancelled','unsupported'
+        ));
+    END IF;
+END $$;
 
 -- 联测审计事件分类：旧库的 audit_event_category_check 可能不含 federation，
 -- 启动时幂等补齐，避免联测审计写入被数据库约束拒绝。

@@ -475,7 +475,7 @@ async fn wait_run(pool: &Pool, run_id: Uuid) -> CliResult {
     loop {
         let run = storage::get_run(pool, run_id).await?.ok_or("run 不存在")?;
         match run.status.as_str() {
-            "completed" | "partial" | "failed" | "cancelled" => {
+            "completed" | "partial" | "failed" | "cancelled" | "unsupported" => {
                 println!(
                     "run {}：fetched={} merged={} persisted={}",
                     run.status, run.total_fetched, run.total_merged, run.total_persisted
