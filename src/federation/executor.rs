@@ -3,7 +3,8 @@
 //! 流程：翻译 AST → 每源并发拉取（限速/重试/会员降级）→ 归一化 + 残余过滤
 //! → 跨源聚合去重（新者胜 + COALESCE + tech 并集）→ 入库决策 → ingest 写入。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use deadpool_postgres::Pool;
@@ -14,18 +15,44 @@ use crate::dns_follow_up::DnsFollowUpConfig;
 use crate::elasticsearch::ElasticsearchService;
 use crate::federation::adapters::{self, Adapter, SearchRequest};
 use crate::federation::model::{
-    FieldSelection, NormalizedRecord, PageRequest, SourceKind, WindowMode,
+    FieldSelection, NormalizedRecord, PageRequest, PaginationMode, SourceKind, WindowMode,
 };
 use crate::federation::policy::FederationPolicy;
 use crate::federation::storage::{self, Run, Source};
 use crate::federation::translate::{self, PlatformQuery};
 use crate::federation::{FederationConfig, ingest};
-use crate::handlers::search_dsl::{Expr, parse_query_ast};
+use crate::handlers::search_dsl::{Expr, Field, parse_query_ast};
 use crate::maxmind::MaxMindState;
 use crate::network_proxy::GlobalProxyState;
 use crate::outbound_proxy::{ProxyConfig, ProxyMode};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// 跨并发 run 共享的每源限速槽（source id → 下次可请求时刻）。
+static SOURCE_SLOTS: LazyLock<Mutex<HashMap<Uuid, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn reserve_source_slot(source_id: Uuid, interval: Duration) -> Instant {
+    let mut slots = SOURCE_SLOTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let now = Instant::now();
+    let slot = slots
+        .get(&source_id)
+        .copied()
+        .map_or(now, |next| next.max(now));
+    slots.insert(source_id, slot + interval);
+    slot
+}
+
+/// 同一数据源在多个并发 run 之间也必须满足 1/QPS，避免同时打满平台限速。
+async fn wait_for_source_slot(source_id: Uuid, interval: Duration) {
+    let slot = reserve_source_slot(source_id, interval);
+    let delay = slot.saturating_duration_since(Instant::now());
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+}
 
 pub struct Services {
     pub pool: Pool,
@@ -226,6 +253,62 @@ fn free_single_ip(query: &str) -> Option<String> {
         .map(|ip| ip.to_string())
 }
 
+/// 残余谓词依赖的字段即使未配置输出，也必须归一化后才能本地过滤。
+fn include_residual_fields(expr: &Expr, fields: &mut FieldSelection) {
+    match expr {
+        Expr::Predicate(predicate) => match predicate.field {
+            Field::Domain => fields.domain = true,
+            Field::Service => fields.service = true,
+            Field::Technology => fields.tech = true,
+            Field::Title => fields.title = true,
+            Field::Banner => fields.banner = true,
+            _ => {}
+        },
+        Expr::And(left, right) | Expr::Or(left, right) => {
+            include_residual_fields(left, fields);
+            include_residual_fields(right, fields);
+        }
+        Expr::Not(inner) | Expr::HasEndpoint(inner) => include_residual_fields(inner, fields),
+    }
+}
+
+/// 仅用于残余过滤的字段在合并前清除，保持数据源字段配置语义。
+fn strip_unselected_fields(record: &mut NormalizedRecord, fields: &FieldSelection) {
+    if !fields.domain {
+        record.domain = None;
+    }
+    if !fields.service {
+        record.service = None;
+    }
+    if !fields.tech {
+        record.tech.clear();
+    }
+    if !fields.title {
+        record.title = None;
+    }
+    if !fields.banner {
+        record.banner = None;
+    }
+}
+
+/// follow-local 分页需裁掉 offset 前的整页记录，并限制在本页窗口内。
+fn local_page_window(
+    pagination_mode: PaginationMode,
+    local_offset: u32,
+    local_limit: u32,
+    first_page: u32,
+    page_size: u32,
+) -> (usize, usize) {
+    match pagination_mode {
+        PaginationMode::FollowLocal => {
+            let page_start = u64::from(first_page) * u64::from(page_size);
+            let trim = u64::from(local_offset).saturating_sub(page_start) as usize;
+            (trim, local_limit as usize)
+        }
+        PaginationMode::Fixed => (0, usize::MAX),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run_source(
     services: &Services,
@@ -238,10 +321,10 @@ async fn run_source(
     let started = Instant::now();
     let adapter = Adapter::for_kind(source.kind);
     let capabilities = adapter.capabilities();
-    let fields = FieldSelection::from_names(&source.fields);
+    let output_fields = FieldSelection::from_names(&source.fields);
 
     // 1. 翻译（不支持 → 跳过，不请求）。
-    let query: PlatformQuery = match translate::translate(source.kind, expr, &fields) {
+    let query: PlatformQuery = match translate::translate(source.kind, expr, &output_fields) {
         Ok(query) => query,
         Err(reason) => {
             return SourceOutcome {
@@ -255,6 +338,12 @@ async fn run_source(
             };
         }
     };
+
+    // 残余谓词依赖的字段即使不输出，也要拉取并归一化后用于本地过滤。
+    let mut fields = output_fields.clone();
+    if let Some(residual) = &query.residual {
+        include_residual_fields(residual, &mut fields);
+    }
 
     // 2. 凭据解密。
     let credential = match storage::decrypt_json(
@@ -303,30 +392,36 @@ async fn run_source(
         time_filter = "local_only";
     }
 
-    // 5. 分页计划。
+    // 5. 分页计划（先按平台允许的页大小收敛，再计算页区间）。
     let max_size = capabilities.max_page_size;
-    let (page_size, first_page, page_count) = match source.pagination_mode {
-        crate::federation::model::PaginationMode::FollowLocal => {
-            let size = run.local_limit.clamp(1, max_size);
-            let first = run.local_offset / size;
-            let last = (run.local_offset + run.local_limit - 1) / size;
-            let count = (last - first + 1).min(source.max_pages);
-            (size, first, count)
-        }
-        crate::federation::model::PaginationMode::Fixed => {
-            let size = source.page_size.clamp(1, max_size);
-            (size, 0, source.max_pages)
-        }
+    let desired_size = match source.pagination_mode {
+        PaginationMode::FollowLocal => run.local_limit.clamp(1, max_size),
+        PaginationMode::Fixed => source.page_size.clamp(1, max_size),
     };
     let page_size = match capabilities.page_size_choices {
         Some(choices) => choices
             .iter()
             .copied()
-            .filter(|c| *c <= page_size)
+            .filter(|c| *c <= desired_size)
             .max()
             .unwrap_or(1),
-        None => page_size,
+        None => desired_size,
     };
+    let (first_page, page_count) = match source.pagination_mode {
+        PaginationMode::FollowLocal => {
+            let first = run.local_offset / page_size;
+            let last = (run.local_offset + run.local_limit - 1) / page_size;
+            (first, (last - first + 1).min(source.max_pages))
+        }
+        PaginationMode::Fixed => (0, source.max_pages),
+    };
+    let (trim_leading, take_limit) = local_page_window(
+        source.pagination_mode,
+        run.local_offset,
+        run.local_limit,
+        first_page,
+        page_size,
+    );
 
     // 6. 逐页拉取（源内串行 + QPS 限速 + 重试/降级）。
     let interval = Duration::from_secs_f64(1.0 / source.rate_limit_qps.max(0.01));
@@ -347,6 +442,8 @@ async fn run_source(
     } else {
         None
     };
+    let mut skipped = 0usize;
+    let mut consumed = 0usize;
 
     'pages: for page_index in first_page..first_page + page_count {
         // 取消检查点。
@@ -362,9 +459,7 @@ async fn run_source(
             services.config.lease_seconds as i64 * 1000,
         )
         .await;
-        if page_index > first_page {
-            tokio::time::sleep(interval).await;
-        }
+        wait_for_source_slot(source.id, interval).await;
         let request = SearchRequest {
             query: &query,
             page: PageRequest {
@@ -429,7 +524,16 @@ async fn run_source(
         }
         let empty = page.records.is_empty();
         for raw in &page.records {
-            let Some(record) = adapter.normalize(raw, &fields, now_ms, tolerance_ms) else {
+            // follow-local：整页结果裁掉 offset 前的记录，并限制在本页窗口内。
+            if skipped < trim_leading {
+                skipped += 1;
+                continue;
+            }
+            if consumed >= take_limit {
+                break;
+            }
+            consumed += 1;
+            let Some(mut record) = adapter.normalize(raw, &fields, now_ms, tolerance_ms) else {
                 filtered_out += 1;
                 continue;
             };
@@ -449,7 +553,12 @@ async fn run_source(
                 filtered_out += 1;
                 continue;
             }
+            // 仅用于残余过滤的字段不参与合并。
+            strip_unselected_fields(&mut record, &output_fields);
             records.push(record);
+        }
+        if consumed >= take_limit {
+            break 'pages;
         }
         // 单 IP host 端点一次返回全部；空页即止。
         if single_ip.is_some() || empty {
@@ -690,6 +799,53 @@ mod tests {
         assert_eq!(free_single_ip("ip = \"1.1.1.1\" AND port = 443"), None);
         assert_eq!(free_single_ip("domain = \"example.com\""), None);
         assert_eq!(free_single_ip("ip IN (\"1.1.1.1\", \"1.1.1.2\")"), None);
+    }
+
+    #[test]
+    fn source_slots_are_shared_and_spaced() {
+        let source_id = Uuid::new_v4();
+        let interval = Duration::from_millis(50);
+        let first = reserve_source_slot(source_id, interval);
+        let second = reserve_source_slot(source_id, interval);
+        assert!(second.duration_since(first) >= interval);
+    }
+
+    #[test]
+    fn residual_fields_are_normalized_then_stripped() {
+        let expr = parse_query_ast("domain = \"example.com\" OR service = \"https\"").unwrap();
+        let mut fields = FieldSelection {
+            domain: false,
+            service: false,
+            tech: false,
+            title: false,
+            banner: false,
+        };
+        let output = fields.clone();
+        include_residual_fields(&expr, &mut fields);
+        assert!(fields.domain && fields.service);
+
+        let mut record = record("1.1.1.1", 443, 100, "quake");
+        record.domain = Some("example.com".into());
+        record.service = Some("https".into());
+        strip_unselected_fields(&mut record, &output);
+        assert!(record.domain.is_none());
+        assert!(record.service.is_none());
+    }
+
+    #[test]
+    fn follow_local_window_trims_offset_and_limits_page() {
+        assert_eq!(
+            local_page_window(PaginationMode::FollowLocal, 25, 50, 0, 50),
+            (25, 50)
+        );
+        assert_eq!(
+            local_page_window(PaginationMode::FollowLocal, 50, 50, 1, 50),
+            (0, 50)
+        );
+        assert_eq!(
+            local_page_window(PaginationMode::Fixed, 25, 50, 0, 50),
+            (0, usize::MAX)
+        );
     }
 
     #[test]

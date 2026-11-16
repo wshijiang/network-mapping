@@ -497,6 +497,17 @@ pub(crate) async fn create_run(
         .map(|s| (s.id, executor::resolve_source_window(s, window_days)))
         .collect();
     let query_hash = executor::compute_query_hash(&query, &resolved, 100, 0);
+    // 手动提交与搜索触发共用并发上限，避免绕过 max_concurrent_runs。
+    if let Ok(active) = storage::count_active_runs(&service.pool).await
+        && active >= i64::from(policy.max_concurrent_runs)
+    {
+        return HttpResponse::TooManyRequests()
+            .json(json!({"success": false, "message": "并发联测 run 已达上限，请稍后再试"}));
+    }
+    let Ok(run_permit) = service.run_gate.clone().try_acquire_owned() else {
+        return HttpResponse::TooManyRequests()
+            .json(json!({"success": false, "message": "并发联测 run 已达上限，请稍后再试"}));
+    };
     let worker_id = Uuid::new_v4();
     let run = match storage::create_run(
         &service.pool,
@@ -547,6 +558,7 @@ pub(crate) async fn create_run(
     let run_id = run.id;
     let run_clone = run.clone();
     tokio::spawn(async move {
+        let _permit = run_permit;
         if let Err(error) = executor::execute_run(&services, &run_clone, worker_id, &policy).await {
             tracing::warn!(event = "FederationRunFailed", run_id = %run_id, %error, "手动联测 run 执行失败");
             let _ = storage::finish_run(

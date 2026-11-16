@@ -597,19 +597,22 @@ fn merge_federation_items(
             added += 1;
         }
     }
-    let descending = sort.order_name() == "desc";
-    items.sort_by(|a, b| {
-        let ordering = match sort.field_name() {
-            "ip" => a.ip_address.cmp(&b.ip_address),
-            "port" => a.port.unwrap_or(0).cmp(&b.port.unwrap_or(0)),
-            _ => a.scan_time.unwrap_or(0).cmp(&b.scan_time.unwrap_or(0)),
-        };
-        if descending {
-            ordering.reverse()
-        } else {
-            ordering
-        }
-    });
+    // first_seen 顺序由 ES 决定；联测合并后保持本地顺序，新端点追加在末尾。
+    if sort.field_name() != "first_seen" {
+        let descending = sort.order_name() == "desc";
+        items.sort_by(|a, b| {
+            let ordering = match sort.field_name() {
+                "ip" => a.ip_address.cmp(&b.ip_address),
+                "port" => a.port.unwrap_or(0).cmp(&b.port.unwrap_or(0)),
+                _ => a.scan_time.unwrap_or(0).cmp(&b.scan_time.unwrap_or(0)),
+            };
+            if descending {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        });
+    }
     items.truncate(limit.max(0) as usize);
     added
 }
@@ -825,6 +828,21 @@ mod tests {
         assert_eq!(added, 2);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].ip_address, "2.2.2.2");
+    }
+
+    #[test]
+    fn merge_preserves_first_seen_order() {
+        let mut items = vec![
+            local_item("3.3.3.3", 443, 300),
+            local_item("1.1.1.1", 80, 100),
+        ];
+        let sort =
+            crate::elasticsearch::SearchSort::parse(Some("first_seen"), Some("desc")).unwrap();
+        super::merge_federation_items(&mut items, &[fed_record("2.2.2.2", 80, 200)], sort, 50);
+        // 本地 first_seen 顺序不变，新端点追加在末尾。
+        assert_eq!(items[0].ip_address, "3.3.3.3");
+        assert_eq!(items[1].ip_address, "1.1.1.1");
+        assert_eq!(items[2].ip_address, "2.2.2.2");
     }
 
     #[test]
