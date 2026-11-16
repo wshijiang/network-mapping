@@ -132,6 +132,11 @@ pub struct SourceInput {
 
 impl SourceInput {
     pub fn validate(&self) -> std::result::Result<(), String> {
+        self.validate_inner(true)
+    }
+
+    /// `check_proxy_url` 为 false 时跳过自定义代理地址校验（更新时留空沿用已保存代理）。
+    fn validate_inner(&self, check_proxy_url: bool) -> std::result::Result<(), String> {
         let name = self.name.trim();
         if name.is_empty() || name.chars().count() > 64 {
             return Err("数据源名称须为 1..64 字符".into());
@@ -139,7 +144,7 @@ impl SourceInput {
         if !matches!(self.proxy_mode.as_str(), "system" | "direct" | "custom") {
             return Err("proxy_mode 须为 system/direct/custom".into());
         }
-        if self.proxy_mode == "custom" {
+        if self.proxy_mode == "custom" && check_proxy_url {
             let url = self.proxy_url.as_deref().unwrap_or("");
             crate::outbound_proxy::validate_url(url).map_err(|_| "代理 URL 无效")?;
         }
@@ -244,11 +249,27 @@ pub async fn update_source(
     input: &SourceInput,
     encrypt_key: &str,
 ) -> std::result::Result<Source, StorageError> {
-    input.validate().map_err(StorageError::Invalid)?;
     let existing = get_source(pool, id)
         .await
         .map_err(|e| StorageError::Invalid(e.to_string()))?
         .ok_or(StorageError::NotFound)?;
+    // 自定义代理留空表示沿用已保存地址；首次指定代理必须填写完整 URL。
+    let proxy_url = input
+        .proxy_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty());
+    let keep_existing_proxy = input.proxy_mode == "custom" && proxy_url.is_none();
+    if keep_existing_proxy
+        && !(existing.proxy_mode == "custom" && existing.proxy_ciphertext.is_some())
+    {
+        return Err(StorageError::Invalid(
+            "首次指定代理须填写完整代理地址".into(),
+        ));
+    }
+    input
+        .validate_inner(!keep_existing_proxy)
+        .map_err(StorageError::Invalid)?;
     let credential_cipher = if input.clear_credential {
         None
     } else {
@@ -260,7 +281,7 @@ pub async fn update_source(
             None => existing.credential_ciphertext.clone(),
         }
     };
-    let proxy_cipher = match (&input.proxy_mode[..], &input.proxy_url) {
+    let proxy_cipher = match (&input.proxy_mode[..], proxy_url) {
         ("custom", Some(url)) => {
             Some(crate::notification::encrypt(url, encrypt_key).map_err(|_| {
                 StorageError::Invalid("凭据加密切换失败（encrypt_key 无效）".into())
