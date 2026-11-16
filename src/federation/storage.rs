@@ -357,12 +357,19 @@ pub async fn delete_source(
     Ok(())
 }
 
-pub async fn update_capabilities(pool: &Pool, id: Uuid, capabilities: &Value) -> Result<()> {
+/// 能力信息入库唯一入口：无论 HTTP 测试、周期刷新还是 CLI，都先白名单脱敏。
+pub async fn update_capabilities(
+    pool: &Pool,
+    id: Uuid,
+    kind: SourceKind,
+    capabilities: &Value,
+) -> Result<()> {
+    let sanitized = public_capabilities(kind, capabilities);
     pool.get()
         .await?
         .execute(
             "UPDATE federation_source SET detected_capabilities=$1, updated_at=NOW() WHERE id=$2",
-            &[capabilities, &id],
+            &[&sanitized, &id],
         )
         .await?;
     Ok(())

@@ -287,7 +287,14 @@ pub async fn resolve(service: &FederationService, prepared: Prepared) -> Option<
             let run = storage::get_run(&service.pool, run_id).await.ok().flatten();
             let (status, records) = match run {
                 Some(run) if completed => (run.status.clone(), records_from_run(&run)),
-                Some(run) if run.status == "completed" || run.status == "partial" => {
+                // 终态（含 unsupported/failed/cancelled）即使 join 尚未完成也按持久化状态返回，
+                // 避免异步竞态下把已结束的 run 报成 running/timeout。
+                Some(run)
+                    if matches!(
+                        run.status.as_str(),
+                        "completed" | "partial" | "unsupported" | "failed" | "cancelled"
+                    ) =>
+                {
                     (run.status.clone(), records_from_run(&run))
                 }
                 Some(_) if mode == FederationMode::Blocking => ("timeout".into(), Vec::new()),

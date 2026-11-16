@@ -135,10 +135,12 @@ async fn refresh_quotas(pool: &Pool, network_proxy: &GlobalProxyState, encrypt_k
         };
         let adapter = Adapter::for_kind(source.kind);
         match adapter.probe(&client, &credential).await {
-            Ok(mut capabilities) => {
+            Ok(capabilities) => {
+                let mut capabilities = storage::public_capabilities(source.kind, &capabilities);
                 capabilities["quota_updated_at"] =
                     serde_json::json!(chrono::Utc::now().timestamp_millis());
-                let _ = storage::update_capabilities(pool, source.id, &capabilities).await;
+                let _ =
+                    storage::update_capabilities(pool, source.id, source.kind, &capabilities).await;
             }
             Err(error) => {
                 warn!(

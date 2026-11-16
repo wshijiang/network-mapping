@@ -698,9 +698,12 @@ async fn execute_source(command: &SourceCommand, pool: &Pool, encrypt_key: &str)
             let started = std::time::Instant::now();
             let adapter = Adapter::for_kind(source.kind);
             match adapter.probe(&client, &credential).await {
-                Ok(mut capabilities) => {
+                Ok(capabilities) => {
+                    // 回显与入库同样走白名单，避免 CLI 泄露手机号/token 等。
+                    let mut capabilities = storage::public_capabilities(source.kind, &capabilities);
                     capabilities["quota_updated_at"] = json!(chrono::Utc::now().timestamp_millis());
-                    let _ = storage::update_capabilities(pool, *id, &capabilities).await;
+                    let _ =
+                        storage::update_capabilities(pool, *id, source.kind, &capabilities).await;
                     let value = json!({
                         "ok": true, "latency_ms": started.elapsed().as_millis() as i64,
                         "capabilities": capabilities,
