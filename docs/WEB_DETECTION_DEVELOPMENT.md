@@ -1,4 +1,4 @@
-# Web 技术栈识别开发与维护
+# 技术栈识别开发与维护
 
 [使用说明](WEB_DETECTION.md) · [扫描协议](SCAN_PIPELINE.md) · [Elasticsearch 存储](ELASTICSEARCH.md)
 

@@ -1,4 +1,4 @@
-# Web 框架与组件识别
+# 技术栈识别
 
 [功能概览](FEATURES.md) · [搜索语法](SEARCH_SYNTAX.md) · [开发与维护](WEB_DETECTION_DEVELOPMENT.md)
 
@@ -37,11 +37,11 @@
 
 ## 覆盖范围与边界
 
-当前内置 88 条规则，覆盖 53 种技术。完整类别、组件 ID、MinIO/S3 区分及分批状态见
-[Web 技术目录](WEB_TECHNOLOGY_CATALOG.md)。规则清单以 [rules.json](../src/web_detection/rules.json) 为准；
+当前内置 136 条规则，覆盖 100 种技术。完整类别、组件 ID、MinIO/S3 区分及分批状态见
+[技术栈目录](WEB_TECHNOLOGY_CATALOG.md)。规则清单以 [rules.json](../src/web_detection/rules.json) 为准；
 列表不代表每个产品在所有部署下都可被识别。
 
-识别来源包括白名单响应头、Cookie **名称**、HTML generator、明确 DOM 标记及脚本/样式资源路径；通用 S3 和 Git 服务还校验限定的协议响应结构。
+识别来源包括白名单响应头、Cookie **名称**、HTML generator、页面标题、HTML class 标记、明确 DOM 标记及脚本/样式资源路径；通用 S3 和 Git 服务还校验限定的协议响应结构。
 MinIO 产品身份、S3 兼容性、GitLab 产品与 Git smart HTTP 服务分别判断，详见[技术目录](WEB_TECHNOLOGY_CATALOG.md)。
 普通正文中提及产品名称、注释、未知协议内容、资源 URL 的主机名及查询参数不参与技术匹配。
 版本仅来自明确的版本捕获；缺少版本返回 `null`，存在多个版本时 `version_conflict=true`，

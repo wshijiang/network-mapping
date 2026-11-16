@@ -103,3 +103,19 @@ OS_TEST_ELASTICSEARCH_URL='http://127.0.0.1:9200' \
 接口字段更新后运行 `cargo run --locked --example export_openapi > docs/open-api/openapi.json`，
 并执行 OpenAPI 一致性测试。新增规则需覆盖通用软件、非标准端口、伪造正文、未知 schema、
 不同系统冲突、软件包版本与系统版本混淆、重复证据及过期证据。
+
+## 后续阶段：主动 TCP/IP 指纹（预留，尚未实现）
+
+当前实现完全被动：只读取扫描器已上传的握手字段，不额外探测目标。为未来主动 OS 指纹
+（p0f/nmap 式 TCP/IP 栈特征）预留如下契约，本期不实现探测、不改扫描器：
+
+- `OsEvidence.probe_method: Option<String>` 已预留（`serde(default)`，`None` 时序列化省略）。
+  `None` 表示被动 banner/header 推断；未来主动探测证据置如 `tcp_ip_fingerprint`，以便区分
+  证据来源并单独评估置信度。被动结果保持字节级不变。
+- 主动证据应经 `extract()` 新增的白名单路径喂入（例如扫描器新探测模块的结构化结果），
+  复用现有 `module` / `scanner_id` / `field_path` 标记，不扫描任意 JSON 或正文。
+- `inference_scope` 目前为 `service_environment` / `host_estimate`（另有 `csv_import` 写入锁）；
+  主动宿主机指纹可引入新的 scope，并在 `summarize()` 中单独处理冲突与置信度。
+- ES `mapping()` 为 `dynamic: strict`：`evidence` 对象 `enabled: false`，故 `probe_method`
+  无需新增索引映射；若未来增加顶层字段，须同步扩展 `mapping()`。
+- 主动探测会改变扫描计划与目标交互，须另行评估授权、限速与隐私边界，不在被动回填管道内启用。
