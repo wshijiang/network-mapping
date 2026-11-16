@@ -70,8 +70,13 @@ CREATE INDEX IF NOT EXISTS idx_federation_run_lease
 
 -- 预留系统扫描器身份：联测观察以该扫描器名义经 result_ingest 写入。
 -- 由 worker 启动时确保存在（runtime_token_hash 由服务端密钥派生），扫描器管理列表排除此行。
+-- 未派发 token 用 NULL（与应用代码一致）：runtime_token_hash 为 UNIQUE，空串会与其他系统扫描器冲突。
+-- 旧库若已用空串占位，幂等归一为 NULL，避免后续种子/重注册再次撞约束。
+UPDATE scanner_info SET runtime_token_hash = NULL
+WHERE scanner_id IN ('00000000-0000-7000-8000-00000000d1a0', '00000000-0000-7000-8000-00000000fed0')
+  AND runtime_token_hash = '';
 INSERT INTO scanner_info (name, scanner_id, create_user, runtime_token_hash, is_enable, is_run, remark, create_time, register_time)
-VALUES ('联测', '00000000-0000-7000-8000-00000000fed0', 0, '', true, false, '__system_federation__', NOW(), NOW())
+VALUES ('联测', '00000000-0000-7000-8000-00000000fed0', 0, NULL, true, false, '__system_federation__', NOW(), NOW())
 ON CONFLICT (scanner_id) DO NOTHING;
 
 -- 联测审计事件分类：旧库的 audit_event_category_check 可能不含 federation，
