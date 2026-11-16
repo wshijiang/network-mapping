@@ -21,7 +21,14 @@
     "confidence": "high",
     "usage": "response_marker",
     "field": "server",
-    "version_group": 1
+    "version_group": 1,
+    "not": [
+      {
+        "source": "header",
+        "field": "server",
+        "pattern": "(?i)apache[ -](?:tomcat|coyote)"
+      }
+    ]
   },
   {
     "id": "openresty-server",
@@ -1206,5 +1213,591 @@
     "version_group": 1,
     "confidence": "high",
     "usage": "response_marker"
+  },
+  {
+    "id": "tomcat-server",
+    "technology": "tomcat",
+    "name": "Apache Tomcat",
+    "category": "web_server",
+    "source": "header",
+    "field": "server",
+    "pattern": "(?i)apache tomcat(?:/([0-9]+(?:\\.[0-9]+){0,3}(?:[-+][A-Za-z0-9.-]+)?))?",
+    "confidence": "high",
+    "usage": "response_marker",
+    "version_group": 1
+  },
+  {
+    "id": "tomcat-coyote",
+    "technology": "tomcat",
+    "name": "Apache Tomcat",
+    "category": "web_server",
+    "source": "header",
+    "field": "server",
+    "pattern": "(?i)apache-coyote",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "undertow-server",
+    "technology": "undertow",
+    "name": "Undertow",
+    "category": "web_server",
+    "source": "header",
+    "field": "server",
+    "pattern": "(?i)undertow(?:/([0-9]+(?:\\.[0-9]+){0,3}(?:\\.[A-Za-z][A-Za-z0-9]*)?(?:[-+][A-Za-z0-9.-]+)?))?",
+    "confidence": "high",
+    "usage": "response_marker",
+    "version_group": 1
+  },
+  {
+    "id": "kong-server",
+    "technology": "kong",
+    "name": "Kong",
+    "category": "web_server",
+    "source": "header",
+    "field": "server",
+    "pattern": "(?i)kong(?:/([0-9]+(?:\\.[0-9]+){0,3}(?:[-+][A-Za-z0-9.-]+)?))?",
+    "confidence": "high",
+    "usage": "response_marker",
+    "version_group": 1
+  },
+  {
+    "id": "apisix-server",
+    "technology": "apisix",
+    "name": "Apache APISIX",
+    "category": "web_server",
+    "source": "header",
+    "field": "server",
+    "pattern": "(?i)apisix(?:/([0-9]+(?:\\.[0-9]+){0,3}(?:[-+][A-Za-z0-9.-]+)?))?",
+    "confidence": "high",
+    "usage": "response_marker",
+    "version_group": 1
+  },
+  {
+    "id": "envoy-server",
+    "technology": "envoy",
+    "name": "Envoy",
+    "category": "web_server",
+    "source": "header",
+    "field": "server",
+    "pattern": "(?i)^envoy$",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "varnish-markers",
+    "technology": "varnish",
+    "name": "Varnish",
+    "category": "web_server",
+    "source": "composite",
+    "confidence": "medium",
+    "usage": "response_marker",
+    "any": [
+      {
+        "source": "header",
+        "field": "via",
+        "pattern": "(?i)\\bvarnish\\b"
+      },
+      {
+        "source": "header_name",
+        "field": "x-varnish",
+        "pattern": "^x-varnish$"
+      }
+    ]
+  },
+  {
+    "id": "f5-bigip-server",
+    "technology": "f5-bigip",
+    "name": "F5 BIG-IP",
+    "category": "web_server",
+    "source": "header",
+    "field": "server",
+    "pattern": "(?i)^big-?ip$",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "cloudflare-markers",
+    "technology": "cloudflare",
+    "name": "Cloudflare",
+    "category": "cdn",
+    "source": "composite",
+    "confidence": "medium",
+    "usage": "response_marker",
+    "any": [
+      {
+        "source": "header",
+        "field": "server",
+        "pattern": "(?i)^cloudflare$"
+      },
+      {
+        "source": "header_name",
+        "field": "cf-ray",
+        "pattern": "^cf-ray$"
+      }
+    ]
+  },
+  {
+    "id": "cloudfront-markers",
+    "technology": "cloudfront",
+    "name": "Amazon CloudFront",
+    "category": "cdn",
+    "source": "composite",
+    "confidence": "medium",
+    "usage": "response_marker",
+    "any": [
+      {
+        "source": "header",
+        "field": "via",
+        "pattern": "(?i)cloudfront"
+      },
+      {
+        "source": "header_name",
+        "field": "x-amz-cf-id",
+        "pattern": "^x-amz-cf-id$"
+      }
+    ]
+  },
+  {
+    "id": "django-csrftoken",
+    "technology": "django",
+    "name": "Django",
+    "category": "backend_framework",
+    "source": "cookie_name",
+    "pattern": "(?i)^csrftoken$",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "rails-csrf-param",
+    "technology": "rails",
+    "name": "Ruby on Rails",
+    "category": "backend_framework",
+    "source": "selector",
+    "selector": "meta[name=\"csrf-param\" i]",
+    "attribute": "content",
+    "pattern": "(?i)^authenticity_token$",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "codeigniter-session",
+    "technology": "codeigniter",
+    "name": "CodeIgniter",
+    "category": "backend_framework",
+    "source": "cookie_name",
+    "pattern": "(?i)^ci_session$",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "passenger-server",
+    "technology": "phusion-passenger",
+    "name": "Phusion Passenger",
+    "category": "runtime",
+    "source": "header",
+    "field": "server",
+    "pattern": "(?i)phusion[ _]passenger(?:/([0-9]+(?:\\.[0-9]+){0,3}(?:[-+][A-Za-z0-9.-]+)?))?",
+    "confidence": "high",
+    "usage": "response_marker",
+    "version_group": 1
+  },
+  {
+    "id": "magento-markers",
+    "technology": "magento",
+    "name": "Magento",
+    "category": "cms",
+    "source": "composite",
+    "confidence": "medium",
+    "usage": "response_marker",
+    "any": [
+      {
+        "source": "resource",
+        "selector": "script[src]",
+        "attribute": "src",
+        "pattern": "(?i)/mage/cookies\\.js$"
+      },
+      {
+        "source": "header_name",
+        "field": "x-magento-vary",
+        "pattern": "^x-magento-vary$"
+      }
+    ]
+  },
+  {
+    "id": "prestashop-generator",
+    "technology": "prestashop",
+    "name": "PrestaShop",
+    "category": "cms",
+    "source": "selector",
+    "selector": "meta[name=\"generator\" i]",
+    "attribute": "content",
+    "pattern": "(?i)^prestashop$",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "opencart-session",
+    "technology": "opencart",
+    "name": "OpenCart",
+    "category": "cms",
+    "source": "cookie_name",
+    "pattern": "(?i)^ocsessid$",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "typo3-resource",
+    "technology": "typo3",
+    "name": "TYPO3",
+    "category": "cms",
+    "source": "selector",
+    "selector": "script[src]",
+    "attribute": "src",
+    "pattern": "(?i)/typo3conf/",
+    "confidence": "medium",
+    "usage": "referenced_resource"
+  },
+  {
+    "id": "roundcube-session",
+    "technology": "roundcube",
+    "name": "Roundcube Webmail",
+    "category": "application",
+    "source": "cookie_name",
+    "pattern": "(?i)^roundcube_sessid$",
+    "confidence": "high",
+    "usage": "response_marker"
+  },
+  {
+    "id": "zimbra-cookie",
+    "technology": "zimbra",
+    "name": "Zimbra",
+    "category": "application",
+    "source": "cookie_name",
+    "pattern": "(?i)^zm_test$",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "kibana-version",
+    "technology": "kibana",
+    "name": "Kibana",
+    "category": "application",
+    "source": "header",
+    "field": "kbn-version",
+    "pattern": "(?i)^([0-9]+(?:\\.[0-9]+){0,3}(?:[-+][A-Za-z0-9.-]+)?)$",
+    "confidence": "high",
+    "usage": "response_marker",
+    "version_group": 1
+  },
+  {
+    "id": "prometheus-title",
+    "technology": "prometheus",
+    "name": "Prometheus",
+    "category": "application",
+    "source": "title",
+    "pattern": "(?i)^prometheus\\b",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "sonarqube-title",
+    "technology": "sonarqube",
+    "name": "SonarQube",
+    "category": "application",
+    "source": "title",
+    "pattern": "(?i)^sonarqube\\b",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "portainer-title",
+    "technology": "portainer",
+    "name": "Portainer",
+    "category": "application",
+    "source": "title",
+    "pattern": "(?i)^portainer\\b",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "nacos-title",
+    "technology": "nacos",
+    "name": "Nacos",
+    "category": "application",
+    "source": "title",
+    "pattern": "(?i)^nacos\\b",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "zabbix-session",
+    "technology": "zabbix",
+    "name": "Zabbix",
+    "category": "application",
+    "source": "cookie_name",
+    "pattern": "(?i)^zbx_session$",
+    "confidence": "high",
+    "usage": "response_marker"
+  },
+  {
+    "id": "gitea-cookie",
+    "technology": "gitea",
+    "name": "Gitea",
+    "category": "application",
+    "source": "cookie_name",
+    "pattern": "^i_like_gitea$",
+    "confidence": "high",
+    "usage": "response_marker"
+  },
+  {
+    "id": "couchdb-server",
+    "technology": "couchdb",
+    "name": "Apache CouchDB",
+    "category": "database",
+    "source": "header",
+    "field": "server",
+    "pattern": "(?i)couchdb(?:/([0-9]+(?:\\.[0-9]+){0,3}(?:[-+][A-Za-z0-9.-]+)?))?",
+    "confidence": "high",
+    "usage": "response_marker",
+    "version_group": 1
+  },
+  {
+    "id": "influxdb-version",
+    "technology": "influxdb",
+    "name": "InfluxDB",
+    "category": "database",
+    "source": "header",
+    "field": "x-influxdb-version",
+    "pattern": "(?i)^([0-9]+(?:\\.[0-9]+){0,3}(?:[-+][A-Za-z0-9.-]+)?)",
+    "confidence": "high",
+    "usage": "response_marker",
+    "version_group": 1
+  },
+  {
+    "id": "neo4j-title",
+    "technology": "neo4j",
+    "name": "Neo4j",
+    "category": "database",
+    "source": "title",
+    "pattern": "(?i)^neo4j\\b",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "pgadmin-title",
+    "technology": "pgadmin",
+    "name": "pgAdmin",
+    "category": "database",
+    "source": "title",
+    "pattern": "(?i)^pgadmin\\b",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "redis-insight-title",
+    "technology": "redis-insight",
+    "name": "RedisInsight",
+    "category": "database",
+    "source": "title",
+    "pattern": "(?i)^redisinsight\\b",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "svelte-class",
+    "technology": "svelte",
+    "name": "Svelte",
+    "category": "frontend_framework",
+    "source": "selector",
+    "selector": "[class]",
+    "attribute": "class",
+    "pattern": "(?i)\\bsvelte-[a-z0-9]{6,}\\b",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "preact-resource",
+    "technology": "preact",
+    "name": "Preact",
+    "category": "frontend_framework",
+    "source": "selector",
+    "selector": "script[src]",
+    "attribute": "src",
+    "pattern": "(?i)/preact(?:\\.min)?\\.js$",
+    "confidence": "medium",
+    "usage": "referenced_resource"
+  },
+  {
+    "id": "mui-class",
+    "technology": "mui",
+    "name": "Material UI",
+    "category": "ui_library",
+    "source": "selector",
+    "selector": "[class]",
+    "attribute": "class",
+    "pattern": "(?i)\\bMui[A-Z][a-zA-Z]+-",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "chakra-class",
+    "technology": "chakra-ui",
+    "name": "Chakra UI",
+    "category": "ui_library",
+    "source": "selector",
+    "selector": "[class]",
+    "attribute": "class",
+    "pattern": "(?i)\\bchakra-[a-z]+",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "naive-class",
+    "technology": "naive-ui",
+    "name": "Naive UI",
+    "category": "ui_library",
+    "source": "selector",
+    "selector": "[class]",
+    "attribute": "class",
+    "pattern": "(?i)\\bn-(?:button|input|config-provider|card|modal)\\b",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "arco-class",
+    "technology": "arco-design",
+    "name": "Arco Design",
+    "category": "ui_library",
+    "source": "selector",
+    "selector": "[class]",
+    "attribute": "class",
+    "pattern": "(?i)\\barco-[a-z]+",
+    "confidence": "medium",
+    "usage": "response_marker"
+  },
+  {
+    "id": "lodash-resource",
+    "technology": "lodash",
+    "name": "Lodash",
+    "category": "javascript_library",
+    "source": "selector",
+    "selector": "script[src]",
+    "attribute": "src",
+    "pattern": "(?i)/lodash(?:\\.min)?\\.js$",
+    "confidence": "medium",
+    "usage": "referenced_resource"
+  },
+  {
+    "id": "dayjs-resource",
+    "technology": "dayjs",
+    "name": "Day.js",
+    "category": "javascript_library",
+    "source": "selector",
+    "selector": "script[src]",
+    "attribute": "src",
+    "pattern": "(?i)/dayjs(?:\\.min)?\\.js$",
+    "confidence": "medium",
+    "usage": "referenced_resource"
+  },
+  {
+    "id": "socketio-resource",
+    "technology": "socket-io",
+    "name": "Socket.IO",
+    "category": "javascript_library",
+    "source": "selector",
+    "selector": "script[src]",
+    "attribute": "src",
+    "pattern": "(?i)/socket\\.io(?:\\.min)?\\.js$",
+    "confidence": "medium",
+    "usage": "referenced_resource"
+  },
+  {
+    "id": "matomo-resource",
+    "technology": "matomo",
+    "name": "Matomo",
+    "category": "javascript_library",
+    "source": "selector",
+    "selector": "script[src]",
+    "attribute": "src",
+    "pattern": "(?i)/(?:matomo|piwik)\\.js$",
+    "confidence": "medium",
+    "usage": "referenced_resource"
+  },
+  {
+    "id": "hugo-generator",
+    "technology": "hugo",
+    "name": "Hugo",
+    "category": "site_generator",
+    "source": "selector",
+    "selector": "meta[name=\"generator\" i]",
+    "attribute": "content",
+    "pattern": "(?i)^hugo(?:[ /]([0-9]+(?:\\.[0-9]+){0,3}(?:[-+][A-Za-z0-9.-]+)?))?",
+    "confidence": "high",
+    "usage": "response_marker",
+    "version_group": 1
+  },
+  {
+    "id": "jekyll-generator",
+    "technology": "jekyll",
+    "name": "Jekyll",
+    "category": "site_generator",
+    "source": "selector",
+    "selector": "meta[name=\"generator\" i]",
+    "attribute": "content",
+    "pattern": "(?i)^jekyll(?: v?([0-9]+(?:\\.[0-9]+){0,3}(?:[-+][A-Za-z0-9.-]+)?))?",
+    "confidence": "high",
+    "usage": "response_marker",
+    "version_group": 1
+  },
+  {
+    "id": "hexo-generator",
+    "technology": "hexo",
+    "name": "Hexo",
+    "category": "site_generator",
+    "source": "selector",
+    "selector": "meta[name=\"generator\" i]",
+    "attribute": "content",
+    "pattern": "(?i)^hexo(?:[ /]([0-9]+(?:\\.[0-9]+){0,3}(?:[-+][A-Za-z0-9.-]+)?))?",
+    "confidence": "high",
+    "usage": "response_marker",
+    "version_group": 1
+  },
+  {
+    "id": "mkdocs-generator",
+    "technology": "mkdocs",
+    "name": "MkDocs",
+    "category": "site_generator",
+    "source": "selector",
+    "selector": "meta[name=\"generator\" i]",
+    "attribute": "content",
+    "pattern": "(?i)^(?:material for )?mkdocs(?:[ /]([0-9]+(?:\\.[0-9]+){0,3}(?:[-+][A-Za-z0-9.-]+)?))?",
+    "confidence": "high",
+    "usage": "response_marker",
+    "version_group": 1
+  },
+  {
+    "id": "redoc-resource",
+    "technology": "redoc",
+    "name": "Redoc",
+    "category": "api_documentation",
+    "source": "selector",
+    "selector": "script[src]",
+    "attribute": "src",
+    "pattern": "(?i)/redoc(?:\\.standalone)?(?:\\.min)?\\.js$",
+    "confidence": "medium",
+    "usage": "referenced_resource"
+  },
+  {
+    "id": "graphiql-resource",
+    "technology": "graphiql",
+    "name": "GraphiQL",
+    "category": "api_documentation",
+    "source": "selector",
+    "selector": "script[src]",
+    "attribute": "src",
+    "pattern": "(?i)/graphiql(?:\\.min)?\\.js$",
+    "confidence": "medium",
+    "usage": "referenced_resource"
   }
 ]

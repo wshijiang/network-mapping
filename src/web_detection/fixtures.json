@@ -372,5 +372,424 @@
     "expected": {
       "elasticsearch": "8.19.0"
     }
+  },
+  {
+    "id": "tomcat",
+    "headers": {
+      "Server": "Apache Tomcat/9.0.80"
+    },
+    "body": "",
+    "expected": {
+      "tomcat": "9.0.80"
+    }
+  },
+  {
+    "id": "undertow",
+    "headers": {
+      "Server": "Undertow/2.3.10.Final"
+    },
+    "body": "",
+    "expected": {
+      "undertow": "2.3.10.Final"
+    }
+  },
+  {
+    "id": "kong",
+    "headers": {
+      "Server": "kong/3.6.1"
+    },
+    "body": "",
+    "expected": {
+      "kong": "3.6.1"
+    }
+  },
+  {
+    "id": "apisix",
+    "headers": {
+      "Server": "APISIX/3.9.0"
+    },
+    "body": "",
+    "expected": {
+      "apisix": "3.9.0"
+    }
+  },
+  {
+    "id": "envoy",
+    "headers": {
+      "Server": "envoy"
+    },
+    "body": "",
+    "expected": {
+      "envoy": null
+    }
+  },
+  {
+    "id": "varnish",
+    "headers": {
+      "Via": "1.1 varnish-v5",
+      "X-Varnish": "12345"
+    },
+    "body": "",
+    "expected": {
+      "varnish": null
+    }
+  },
+  {
+    "id": "f5-bigip",
+    "headers": {
+      "Server": "BigIP"
+    },
+    "body": "",
+    "expected": {
+      "f5-bigip": null
+    }
+  },
+  {
+    "id": "cloudflare",
+    "headers": {
+      "Server": "cloudflare",
+      "CF-RAY": "7abc123"
+    },
+    "body": "",
+    "expected": {
+      "cloudflare": null
+    }
+  },
+  {
+    "id": "cloudfront",
+    "headers": {
+      "Via": "1.1 abc.cloudfront.net (CloudFront)",
+      "X-Amz-Cf-Id": "PRIVATE"
+    },
+    "body": "",
+    "expected": {
+      "cloudfront": null
+    }
+  },
+  {
+    "id": "django",
+    "headers": {
+      "Set-Cookie": "csrftoken=PRIVATE; Path=/; HttpOnly"
+    },
+    "body": "",
+    "expected": {
+      "django": null
+    }
+  },
+  {
+    "id": "rails",
+    "headers": {},
+    "body": "<html><head><meta name=\"csrf-param\" content=\"authenticity_token\" /></head><body></body></html>",
+    "expected": {
+      "rails": null
+    }
+  },
+  {
+    "id": "codeigniter",
+    "headers": {
+      "Set-Cookie": "ci_session=PRIVATE; path=/"
+    },
+    "body": "",
+    "expected": {
+      "codeigniter": null
+    }
+  },
+  {
+    "id": "phusion-passenger",
+    "headers": {
+      "Server": "Phusion_Passenger/6.0.20"
+    },
+    "body": "",
+    "expected": {
+      "phusion-passenger": "6.0.20"
+    }
+  },
+  {
+    "id": "magento",
+    "headers": {},
+    "body": "<script src=\"/static/version1700000000/frontend/Magento/luma/en_US/mage/cookies.js\"></script>",
+    "expected": {
+      "magento": null
+    }
+  },
+  {
+    "id": "prestashop",
+    "headers": {},
+    "body": "<meta name=\"generator\" content=\"PrestaShop\" />",
+    "expected": {
+      "prestashop": null
+    }
+  },
+  {
+    "id": "opencart",
+    "headers": {
+      "Set-Cookie": "OCSESSID=PRIVATE; path=/"
+    },
+    "body": "",
+    "expected": {
+      "opencart": null
+    }
+  },
+  {
+    "id": "typo3",
+    "headers": {},
+    "body": "<script src=\"/typo3conf/ext/site/Resources/Public/Js/app.js\"></script>",
+    "expected": {
+      "typo3": null
+    }
+  },
+  {
+    "id": "roundcube",
+    "headers": {
+      "Set-Cookie": "roundcube_sessid=PRIVATE; path=/; HttpOnly"
+    },
+    "body": "",
+    "expected": {
+      "roundcube": null
+    }
+  },
+  {
+    "id": "zimbra",
+    "headers": {
+      "Set-Cookie": "ZM_TEST=true; Path=/"
+    },
+    "body": "",
+    "expected": {
+      "zimbra": null
+    }
+  },
+  {
+    "id": "kibana",
+    "headers": {
+      "kbn-version": "8.19.0"
+    },
+    "body": "",
+    "expected": {
+      "kibana": "8.19.0"
+    }
+  },
+  {
+    "id": "prometheus",
+    "headers": {},
+    "body": "<title>Prometheus Time Series Collection and Processing Server</title>",
+    "expected": {
+      "prometheus": null
+    }
+  },
+  {
+    "id": "sonarqube",
+    "headers": {},
+    "body": "<title>SonarQube</title>",
+    "expected": {
+      "sonarqube": null
+    }
+  },
+  {
+    "id": "portainer",
+    "headers": {},
+    "body": "<title>Portainer</title>",
+    "expected": {
+      "portainer": null
+    }
+  },
+  {
+    "id": "nacos",
+    "headers": {},
+    "body": "<title>Nacos</title>",
+    "expected": {
+      "nacos": null
+    }
+  },
+  {
+    "id": "zabbix",
+    "headers": {
+      "Set-Cookie": "zbx_session=PRIVATE; path=/; HttpOnly"
+    },
+    "body": "",
+    "expected": {
+      "zabbix": null
+    }
+  },
+  {
+    "id": "gitea",
+    "headers": {
+      "Set-Cookie": "i_like_gitea=PRIVATE; Path=/"
+    },
+    "body": "",
+    "expected": {
+      "gitea": null
+    }
+  },
+  {
+    "id": "couchdb",
+    "headers": {
+      "Server": "CouchDB/3.3.3"
+    },
+    "body": "",
+    "expected": {
+      "couchdb": "3.3.3"
+    }
+  },
+  {
+    "id": "influxdb",
+    "headers": {
+      "X-Influxdb-Version": "2.7.5"
+    },
+    "body": "",
+    "expected": {
+      "influxdb": "2.7.5"
+    }
+  },
+  {
+    "id": "neo4j",
+    "headers": {},
+    "body": "<title>Neo4j Browser</title>",
+    "expected": {
+      "neo4j": null
+    }
+  },
+  {
+    "id": "pgadmin",
+    "headers": {},
+    "body": "<title>pgAdmin 4</title>",
+    "expected": {
+      "pgadmin": null
+    }
+  },
+  {
+    "id": "redis-insight",
+    "headers": {},
+    "body": "<title>RedisInsight</title>",
+    "expected": {
+      "redis-insight": null
+    }
+  },
+  {
+    "id": "svelte",
+    "headers": {},
+    "body": "<div class=\"svelte-1abc2de\">x</div>",
+    "expected": {
+      "svelte": null
+    }
+  },
+  {
+    "id": "preact",
+    "headers": {},
+    "body": "<script src=\"/js/preact.min.js\"></script>",
+    "expected": {
+      "preact": null
+    }
+  },
+  {
+    "id": "mui",
+    "headers": {},
+    "body": "<button class=\"MuiButton-root MuiButton-contained\">x</button>",
+    "expected": {
+      "mui": null
+    }
+  },
+  {
+    "id": "chakra-ui",
+    "headers": {},
+    "body": "<div class=\"chakra-stack css-1abc\">x</div>",
+    "expected": {
+      "chakra-ui": null
+    }
+  },
+  {
+    "id": "naive-ui",
+    "headers": {},
+    "body": "<button class=\"n-button\">x</button>",
+    "expected": {
+      "naive-ui": null
+    }
+  },
+  {
+    "id": "arco-design",
+    "headers": {},
+    "body": "<div class=\"arco-btn arco-btn-primary\">x</div>",
+    "expected": {
+      "arco-design": null
+    }
+  },
+  {
+    "id": "lodash",
+    "headers": {},
+    "body": "<script src=\"/js/lodash.min.js\"></script>",
+    "expected": {
+      "lodash": null
+    }
+  },
+  {
+    "id": "dayjs",
+    "headers": {},
+    "body": "<script src=\"/js/dayjs.min.js\"></script>",
+    "expected": {
+      "dayjs": null
+    }
+  },
+  {
+    "id": "socket-io",
+    "headers": {},
+    "body": "<script src=\"/socket.io/socket.io.js\"></script>",
+    "expected": {
+      "socket-io": null
+    }
+  },
+  {
+    "id": "matomo",
+    "headers": {},
+    "body": "<script src=\"/matomo.js\"></script>",
+    "expected": {
+      "matomo": null
+    }
+  },
+  {
+    "id": "hugo",
+    "headers": {},
+    "body": "<meta name=\"generator\" content=\"Hugo 0.120.4\" />",
+    "expected": {
+      "hugo": "0.120.4"
+    }
+  },
+  {
+    "id": "jekyll",
+    "headers": {},
+    "body": "<meta name=\"generator\" content=\"Jekyll v4.3.3\" />",
+    "expected": {
+      "jekyll": "4.3.3"
+    }
+  },
+  {
+    "id": "hexo",
+    "headers": {},
+    "body": "<meta name=\"generator\" content=\"Hexo 7.1.0\" />",
+    "expected": {
+      "hexo": "7.1.0"
+    }
+  },
+  {
+    "id": "mkdocs",
+    "headers": {},
+    "body": "<meta name=\"generator\" content=\"MkDocs 1.5.3\" />",
+    "expected": {
+      "mkdocs": "1.5.3"
+    }
+  },
+  {
+    "id": "redoc",
+    "headers": {},
+    "body": "<script src=\"/redoc.standalone.js\"></script>",
+    "expected": {
+      "redoc": null
+    }
+  },
+  {
+    "id": "graphiql",
+    "headers": {},
+    "body": "<script src=\"/graphiql.js\"></script>",
+    "expected": {
+      "graphiql": null
+    }
   }
 ]

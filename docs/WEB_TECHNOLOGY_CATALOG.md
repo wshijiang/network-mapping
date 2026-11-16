@@ -1,10 +1,10 @@
-# Web 技术目录与规则扩展
+# 技术栈目录与规则扩展
 
 [识别使用说明](WEB_DETECTION.md) · [规则开发与维护](WEB_DETECTION_DEVELOPMENT.md)
 
 ## 当前支持目录
 
-当前内置 **88 条规则、53 种技术**，规则版本 `2026-10-22.6`。以下名称是识别对象，命中取决于保留的具体响应。
+当前内置 **136 条规则、100 种技术**，规则版本 `2026-11-16.7`。以下名称是识别对象，命中取决于保留的具体响应。
 
 | 组件 ID | 技术 | 类别 | 证据类型 |
 | --- | --- | --- | --- |
@@ -13,54 +13,101 @@
 | `antd` | Ant Design | `ui_library` | HTML 标记或资源路径 |
 | `apache` | Apache | `web_server` | 指定响应头 |
 | `apexcharts` | ApexCharts | `javascript_library` | HTML 标记或资源路径 |
+| `apisix` | Apache APISIX | `web_server` | 指定响应头 |
+| `arco-design` | Arco Design | `ui_library` | HTML class 标记 |
 | `aspnet` | ASP.NET | `backend_framework` | 指定响应头 |
 | `astro` | Astro | `frontend_framework` | HTML 标记或资源路径 |
 | `bootstrap` | Bootstrap | `ui_library` | HTML 标记或资源路径 |
 | `caddy` | Caddy | `web_server` | 指定响应头 |
+| `chakra-ui` | Chakra UI | `ui_library` | HTML class 标记 |
 | `chartjs` | Chart.js | `javascript_library` | HTML 标记或资源路径 |
+| `cloudflare` | Cloudflare | `cdn` | 指定响应头、响应头名称 |
+| `cloudfront` | Amazon CloudFront | `cdn` | 指定响应头、响应头名称 |
+| `codeigniter` | CodeIgniter | `backend_framework` | 专用 Cookie 名称 |
+| `couchdb` | Apache CouchDB | `database` | 指定响应头 |
+| `dayjs` | Day.js | `javascript_library` | 资源路径 |
 | `discuz` | Discuz! | `cms` | HTML 标记或资源路径 |
+| `django` | Django | `backend_framework` | 专用 Cookie 名称 |
 | `docusaurus` | Docusaurus | `site_generator` | HTML 标记或资源路径 |
 | `drupal` | Drupal | `cms` | HTML 标记或资源路径 |
 | `echarts` | ECharts | `javascript_library` | HTML 标记或资源路径 |
-| `element-plus` | Element Plus | `ui_library` | HTML 标记或资源路径 |
 | `elasticsearch` | Elasticsearch | `database` | 产品响应头、结构化根 JSON |
+| `element-plus` | Element Plus | `ui_library` | HTML 标记或资源路径 |
+| `envoy` | Envoy | `web_server` | 指定响应头 |
 | `express` | Express | `backend_framework` | 指定响应头 |
+| `f5-bigip` | F5 BIG-IP | `web_server` | 指定响应头 |
 | `gatsby` | Gatsby | `site_generator` | HTML 标记或资源路径 |
 | `ghost` | Ghost | `cms` | HTML 标记或资源路径 |
 | `git` | Git smart HTTP | `version_control` | Git smart HTTP 协议、指定响应头 |
+| `gitea` | Gitea | `application` | 专用 Cookie 名称 |
 | `gitlab` | GitLab | `application` | HTML 标记或资源路径 |
 | `grafana` | Grafana | `application` | HTML 标记或资源路径 |
+| `graphiql` | GraphiQL | `api_documentation` | 资源路径 |
 | `gunicorn` | Gunicorn | `web_server` | 指定响应头 |
+| `hexo` | Hexo | `site_generator` | HTML generator 标记 |
 | `highcharts` | Highcharts | `javascript_library` | HTML 标记或资源路径 |
 | `htmx` | htmx | `javascript_library` | HTML 标记或资源路径 |
+| `hugo` | Hugo | `site_generator` | HTML generator 标记 |
+| `influxdb` | InfluxDB | `database` | 指定响应头 |
+| `jekyll` | Jekyll | `site_generator` | HTML generator 标记 |
 | `jenkins` | Jenkins | `application` | 指定响应头 |
 | `jetty` | Jetty | `web_server` | 指定响应头 |
 | `joomla` | Joomla | `cms` | HTML 标记或资源路径 |
 | `jquery` | jQuery | `javascript_library` | HTML 标记或资源路径 |
+| `kibana` | Kibana | `application` | 指定响应头 |
+| `kong` | Kong | `web_server` | 指定响应头 |
 | `laravel` | Laravel | `backend_framework` | 专用 Cookie 名称 |
 | `layui` | Layui | `ui_library` | HTML 标记或资源路径 |
 | `lighttpd` | lighttpd | `web_server` | 指定响应头 |
 | `litespeed` | LiteSpeed | `web_server` | 指定响应头 |
+| `lodash` | Lodash | `javascript_library` | 资源路径 |
+| `magento` | Magento | `cms` | 资源路径、响应头名称 |
+| `matomo` | Matomo | `javascript_library` | 资源路径 |
 | `microsoft-iis` | Microsoft IIS | `web_server` | 指定响应头 |
 | `minio` | MinIO | `object_storage` | HTML 标记或资源路径、指定响应头、响应头名称、限定页面标题 |
+| `mkdocs` | MkDocs | `site_generator` | HTML generator 标记 |
+| `mui` | Material UI | `ui_library` | HTML class 标记 |
+| `nacos` | Nacos | `application` | 限定页面标题 |
+| `naive-ui` | Naive UI | `ui_library` | HTML class 标记 |
+| `neo4j` | Neo4j | `database` | 限定页面标题 |
 | `nextjs` | Next.js | `frontend_framework` | HTML 标记或资源路径 |
 | `nginx` | Nginx | `web_server` | 指定响应头 |
 | `nuxt` | Nuxt | `frontend_framework` | HTML 标记或资源路径 |
+| `opencart` | OpenCart | `cms` | 专用 Cookie 名称 |
 | `openresty` | OpenResty | `web_server` | 指定响应头 |
+| `pgadmin` | pgAdmin | `database` | 限定页面标题 |
 | `php` | PHP | `runtime` | 指定响应头 |
 | `phpmyadmin` | phpMyAdmin | `application` | HTML 标记或资源路径 |
+| `phusion-passenger` | Phusion Passenger | `runtime` | 指定响应头 |
+| `portainer` | Portainer | `application` | 限定页面标题 |
+| `preact` | Preact | `frontend_framework` | 资源路径 |
+| `prestashop` | PrestaShop | `cms` | HTML generator 标记 |
+| `prometheus` | Prometheus | `application` | 限定页面标题 |
+| `rails` | Ruby on Rails | `backend_framework` | HTML 标记 |
 | `react` | React | `frontend_framework` | HTML 标记或资源路径 |
+| `redis-insight` | RedisInsight | `database` | 限定页面标题 |
+| `redoc` | Redoc | `api_documentation` | 资源路径 |
+| `roundcube` | Roundcube Webmail | `application` | 专用 Cookie 名称 |
 | `s3` | S3-compatible storage | `object_storage` | S3 XML 结构、指定响应头、响应头名称 |
+| `socket-io` | Socket.IO | `javascript_library` | 资源路径 |
+| `sonarqube` | SonarQube | `application` | 限定页面标题 |
+| `svelte` | Svelte | `frontend_framework` | HTML class 标记 |
 | `sveltekit` | SvelteKit | `frontend_framework` | HTML 标记或资源路径 |
 | `swagger-ui` | Swagger UI | `api_documentation` | HTML 标记或资源路径、资源路径 |
 | `thinkphp` | ThinkPHP | `backend_framework` | 指定响应头 |
+| `tomcat` | Apache Tomcat | `web_server` | 指定响应头 |
 | `tornado` | Tornado | `web_server` | 指定响应头 |
+| `typo3` | TYPO3 | `cms` | 资源路径 |
+| `undertow` | Undertow | `web_server` | 指定响应头 |
 | `uvicorn` | Uvicorn | `web_server` | 指定响应头 |
+| `varnish` | Varnish | `web_server` | 指定响应头、响应头名称 |
 | `vitepress` | VitePress | `site_generator` | HTML 标记或资源路径 |
 | `vue` | Vue | `frontend_framework` | HTML 标记或资源路径 |
 | `vuetify` | Vuetify | `ui_library` | HTML 标记或资源路径 |
 | `werkzeug` | Werkzeug | `web_server` | 指定响应头 |
 | `wordpress` | WordPress | `cms` | HTML 标记或资源路径、专用 Cookie 名称 |
+| `zabbix` | Zabbix | `application` | 专用 Cookie 名称 |
+| `zimbra` | Zimbra | `application` | 专用 Cookie 名称 |
 
 ## 本轮分批交付
 
@@ -68,8 +115,9 @@
 | --- | --- | --- |
 | 第一批（规则版本 2） | Jetty、lighttpd、Gunicorn、Uvicorn、Werkzeug、Tornado、ThinkPHP、Astro、SvelteKit、Gatsby、Docusaurus、VitePress、ECharts、Chart.js、ApexCharts、Highcharts、Vuetify、Layui、Ghost、Discuz!、MinIO、通用 S3、GitLab | 47 |
 | 第二批（规则版本 3） | Alpine.js、htmx、phpMyAdmin、Swagger UI、Git 服务；增强 MinIO 控制台和 S3 结构识别，增加 all/any/not 组合条件 | 52 |
+| 第三批（规则版本 7） | Apache APISIX、Arco Design、Chakra UI、Cloudflare、Amazon CloudFront、CodeIgniter、Apache CouchDB、Day.js、Django、Envoy、F5 BIG-IP、Gitea、GraphiQL、Hexo、Hugo、InfluxDB、Jekyll、Kibana、Kong、Lodash、Magento、Matomo、MkDocs、Material UI、Nacos、Naive UI、Neo4j、OpenCart、pgAdmin、Phusion Passenger、Portainer、Preact、PrestaShop、Prometheus、Ruby on Rails、RedisInsight、Redoc、Roundcube Webmail、Socket.IO、SonarQube、Svelte、Apache Tomcat、TYPO3、Undertow、Varnish、Zabbix、Zimbra；首次启用页面标题与 HTML class 证据，修正 Apache 对 Tomcat/Coyote 的误判 | 100 |
 
-两批均继续在服务端处理已有证据，不增加目标探测请求，前端沿用既有技术栈组件。
+各批均继续在服务端处理已有证据，不增加目标探测请求，前端沿用既有技术栈组件。
 
 ## MinIO、S3、GitLab 与 Git 服务
 

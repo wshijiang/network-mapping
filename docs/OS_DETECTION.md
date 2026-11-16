@@ -25,7 +25,10 @@
 
 当前读取 SSH 标识、HTTP/HTTPS 的 `Server` 响应头，以及 SMB/RDP 返回的明确系统字段。
 FTP、SMTP 中的明确系统标识可作为补充。支持 Windows、Linux、BSD、macOS 和宽泛的 Unix
-类别；Ubuntu、Debian、CentOS、FreeBSD、OpenBSD、NetBSD 的明确标识可显示发行版线索。
+类别；Ubuntu、Debian、CentOS、Fedora、RHEL、Rocky Linux、AlmaLinux、Alpine、openSUSE/SLES、
+Amazon Linux、Arch、Gentoo、Oracle Linux、Deepin、统信 UOS、麒麟 Kylin、Linux Mint、Kali、
+OpenWrt 以及 FreeBSD、OpenBSD、NetBSD 的明确标识可显示发行版线索。`native_os` / `server_os`
+文案中的发行版本号（如 «Debian GNU/Linux 12»、«Alpine Linux v3.19»、«Rocky Linux 9.3»）可被提取。
 
 普通 OpenSSH、nginx、Apache 或 Samba 名称不会直接产生系统结论，SMB/RDP 连接成功也不
 代表 Windows。SSH 软件包后缀、IIS 版本、协议版本和 NTLM 构建字段不会被直接转换为系统

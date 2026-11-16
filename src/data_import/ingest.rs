@@ -130,6 +130,7 @@ fn os_preset(row: &ImportRow) -> Option<serde_json::Value> {
             port: row.port,
             observation_ref: None,
             scanner_id: None,
+            probe_method: None,
         }],
         ruleset_revision: crate::os_detection::RULESET_REVISION,
         ruleset_version: crate::os_detection::RULESET_VERSION.into(),

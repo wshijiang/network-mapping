@@ -562,3 +562,41 @@ fn oversized_bodies_and_multibyte_values_are_bounded() {
     assert_eq!(web.technologies[0].id, "nginx");
     assert_eq!(mapping()["properties"]["technologies"]["type"], "nested");
 }
+
+#[test]
+fn expanded_catalog_avoids_false_positives() {
+    // Apache Tomcat / Coyote are Tomcat, never Apache HTTP Server.
+    for (server, version) in [
+        ("Apache Tomcat/9.0.80", Some("9.0.80")),
+        ("Apache-Coyote/1.1", None),
+    ] {
+        let web = identify(json!({"server":server}), "");
+        assert_eq!(web.technologies.len(), 1, "{server}");
+        assert_eq!(web.technologies[0].id, "tomcat");
+        assert_eq!(web.technologies[0].version.as_deref(), version);
+    }
+    let apache = identify(json!({"server":"Apache/2.4.62 (Ubuntu)"}), "");
+    assert!(apache.technologies.iter().any(|t| t.id == "apache"));
+    assert!(!apache.technologies.iter().any(|t| t.id == "tomcat"));
+
+    // Generic class names, titles, resource paths and cookies identify nothing new.
+    let generic = identify(
+        json!({"set-cookie":"session=PRIVATE; Path=/", "server":"nginx"}),
+        r#"<html><head><title>Welcome</title></head><body><div class="container btn btn-primary"><script src="/js/app.min.js"></script></div></body></html>"#,
+    );
+    assert_eq!(generic.technologies.len(), 1);
+    assert_eq!(generic.technologies[0].id, "nginx");
+
+    // A meta generator for an unrelated product does not match the site generators.
+    let other = identify(
+        json!({}),
+        r#"<meta name="generator" content="SomeOtherCMS 1.0" />"#,
+    );
+    assert!(other.technologies.is_empty());
+
+    // UI class prefixes require their distinctive token, not a bare substring.
+    for class in ["button", "n-", "chakra", "arco", "svelte-12", "Mui"] {
+        let web = identify(json!({}), &format!(r#"<div class="{class}">x</div>"#));
+        assert!(web.technologies.is_empty(), "{class}");
+    }
+}

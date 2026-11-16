@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) const RULESET_REVISION: i64 = 1;
-pub(crate) const RULESET_VERSION: &str = "2026-10-17.1";
+pub(crate) const RULESET_REVISION: i64 = 2;
+pub(crate) const RULESET_VERSION: &str = "2026-11-16.2";
 const MAX_EVIDENCE: usize = 32;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -20,6 +20,12 @@ pub(crate) struct OsEvidence {
     pub observation_ref: Option<String>,
     #[serde(default)]
     pub scanner_id: Option<String>,
+    /// Reserved for future active TCP/IP fingerprinting probes (e.g.
+    /// "tcp_ip_fingerprint"). `None` marks passive banner/header inference.
+    /// No active probing is implemented yet; the field only reserves the
+    /// contract so passive results stay byte-identical (omitted when None).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_method: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -82,16 +88,25 @@ fn explicit_version(text: &str, marker: &str, path: &str) -> Option<String> {
     if marker == "windows" && suffix.chars().any(|c| c.is_ascii_digit()) {
         return Some(suffix.chars().take(120).collect());
     }
-    let release = suffix.split_whitespace().next()?;
-    if release.len() <= 24
-        && release
-            .split('.')
-            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
-    {
-        Some(release.into())
-    } else {
-        None
-    }
+    // Scan the first few tokens for a release number so qualifiers like
+    // "Debian GNU/Linux 12", "Alpine Linux v3.19" or "Rocky Linux 9.3" yield the
+    // release rather than a leading product word. A leading "v"/"V" is stripped;
+    // package/kernel suffixes containing hyphens still do not qualify.
+    suffix.split_whitespace().take(6).find_map(|token| {
+        let candidate = token
+            .strip_prefix('v')
+            .or_else(|| token.strip_prefix('V'))
+            .unwrap_or(token);
+        if candidate.len() <= 24
+            && candidate
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        {
+            Some(candidate.to_owned())
+        } else {
+            None
+        }
+    })
 }
 
 impl OsInference {
@@ -260,6 +275,35 @@ fn add_text(
         ("ubuntu", "linux", Some("ubuntu"), "explicit_ubuntu"),
         ("debian", "linux", Some("debian"), "explicit_debian"),
         ("centos", "linux", Some("centos"), "explicit_centos"),
+        ("fedora", "linux", Some("fedora"), "explicit_fedora"),
+        ("red hat", "linux", Some("rhel"), "explicit_rhel"),
+        ("rhel", "linux", Some("rhel"), "explicit_rhel_abbr"),
+        ("rocky", "linux", Some("rocky"), "explicit_rocky"),
+        (
+            "almalinux",
+            "linux",
+            Some("almalinux"),
+            "explicit_almalinux",
+        ),
+        ("alpine", "linux", Some("alpine"), "explicit_alpine"),
+        ("opensuse", "linux", Some("opensuse"), "explicit_opensuse"),
+        ("suse", "linux", Some("sles"), "explicit_suse"),
+        ("amazon", "linux", Some("amazon"), "explicit_amazon"),
+        ("arch", "linux", Some("arch"), "explicit_arch"),
+        ("gentoo", "linux", Some("gentoo"), "explicit_gentoo"),
+        ("oracle", "linux", Some("oraclelinux"), "explicit_oracle"),
+        ("deepin", "linux", Some("deepin"), "explicit_deepin"),
+        ("uniontech", "linux", Some("uos"), "explicit_uniontech"),
+        ("uos", "linux", Some("uos"), "explicit_uos"),
+        ("kylin", "linux", Some("kylin"), "explicit_kylin"),
+        (
+            "linux mint",
+            "linux",
+            Some("linuxmint"),
+            "explicit_linuxmint",
+        ),
+        ("kali", "linux", Some("kali"), "explicit_kali"),
+        ("openwrt", "linux", Some("openwrt"), "explicit_openwrt"),
         ("freebsd", "bsd", Some("freebsd"), "explicit_freebsd"),
         ("openbsd", "bsd", Some("openbsd"), "explicit_openbsd"),
         ("netbsd", "bsd", Some("netbsd"), "explicit_netbsd"),
@@ -299,6 +343,7 @@ fn add_text(
             port,
             observation_ref: reference.map(str::to_owned),
             scanner_id: None,
+            probe_method: None,
         });
         if out.len() == MAX_EVIDENCE {
             break;
@@ -716,5 +761,49 @@ mod tests {
                     .any(|item| item.family == candidate.family)
             );
         }
+    }
+
+    #[test]
+    fn expanded_os_signatures_detect_distros_and_native_versions() {
+        // SSH banners establish the distribution but never a release version.
+        for (banner, distro) in [
+            ("SSH-2.0-OpenSSH_9.6p1 Fedora-39", "fedora"),
+            ("SSH-2.0-OpenSSH_9.6 Rocky-Linux", "rocky"),
+            ("SSH-2.0-OpenSSH_9.6 Alpine", "alpine"),
+        ] {
+            let os = detect("ssh", banner, "ssh", json!({}));
+            assert_eq!(os.family.as_deref(), Some("linux"), "{banner}");
+            assert_eq!(os.distribution.as_deref(), Some(distro), "{banner}");
+            assert_eq!(os.version, None);
+        }
+        // native_os release strings yield the release past leading product words.
+        for (native, distro, version) in [
+            ("Debian GNU/Linux 12 (bookworm)", "debian", "12"),
+            ("Alpine Linux v3.19", "alpine", "3.19"),
+            ("Rocky Linux 9.3", "rocky", "9.3"),
+            ("Amazon Linux 2023", "amazon", "2023"),
+            ("openSUSE Leap 15.5", "opensuse", "15.5"),
+            ("Kylin Linux Advanced Server V10", "kylin", "10"),
+            ("Ubuntu 22.04.3 LTS", "ubuntu", "22.04.3"),
+        ] {
+            let os = detect("smb", "", "smb", json!({"native_os":native}));
+            assert_eq!(os.family.as_deref(), Some("linux"), "{native}");
+            assert_eq!(os.distribution.as_deref(), Some(distro), "{native}");
+            assert_eq!(os.version.as_deref(), Some(version), "{native}");
+        }
+        let windows = detect("smb", "", "smb", json!({"native_os":"Windows Server 2019"}));
+        assert_eq!(windows.version.as_deref(), Some("Server 2019"));
+    }
+
+    #[test]
+    fn passive_evidence_omits_the_reserved_probe_method() {
+        let os = detect(
+            "ssh",
+            "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu0.11",
+            "ssh",
+            json!({}),
+        );
+        assert!(os.evidence.iter().all(|e| e.probe_method.is_none()));
+        assert!(!serde_json::to_string(&os).unwrap().contains("probe_method"));
     }
 }
