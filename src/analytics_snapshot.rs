@@ -107,9 +107,9 @@ pub async fn run_worker(
     let mut changes = config.subscribe();
     let mut reconcile_at = tokio::time::Instant::now();
     let mut reconcile_failures = 0u32;
-    // 永久挂起执行的自愈：旧版去重上限错误在新代码中不再出现，worker 激活时
-    // 自动重新排队一次；暂存容量挂起则在上限提升后自动接续。
-    let mut legacy_recovered = false;
+    // 永久挂起执行的自愈：旧版去重上限挂起在每轮 reconcile 中重新排队
+    // （滚动部署期间旧实例再次挂起的行也会在下一轮收敛）；暂存容量挂起
+    // 则在上限提升后自动接续。
     let mut staging_limit = 0u64;
     loop {
         let settings = config.get().await.value;
@@ -119,25 +119,6 @@ pub async fn run_worker(
                 changed = changes.changed() => if changed.is_err() { return; }
             }
             continue;
-        }
-        if !legacy_recovered {
-            match requeue_parked_executions(&pool, LEGACY_DEDUP_LIMIT_PREFIX).await {
-                Ok(count) => {
-                    legacy_recovered = true;
-                    if count > 0 {
-                        info!(
-                            event = "AnalyticsSnapshotLegacyParkedRecovered",
-                            count, "旧版去重上限挂起的执行已自动重新排队"
-                        );
-                    }
-                }
-                Err(error) => warn!(
-                    event = "AnalyticsSnapshotParkedRecoveryError",
-                    operation = "requeue_legacy_parked",
-                    reason = %error,
-                    "旧版挂起执行重新排队失败，稍后重试"
-                ),
-            }
         }
         if settings.max_staging_mib != staging_limit {
             match requeue_staging_parked_below(&pool, settings.max_staging_mib).await {
@@ -263,6 +244,17 @@ async fn reconcile(pool: &Pool) -> Result<(), String> {
          WHERE o.status = 'completed' AND EXISTS(SELECT 1 FROM analytics_discovery_fact f WHERE f.execution_id = o.execution_id AND f.first_observed_at IS NULL);",
         &[],
     ).await.map_err(|error| crate::logs::write::error_chain_diagnostics(&error))?;
+    // 旧版去重上限（新代码不再产生该错误）永久挂起的执行每轮自动重新排队，
+    // 升级后无需手动 SQL；只影响 pending+infinity 行，不覆盖运行中的领取。
+    let legacy_requeued = transaction
+        .execute(
+            "UPDATE analytics_outbox SET available_at = NOW(), attempts = 0, updated_at = NOW() \
+             WHERE status = 'pending' AND available_at = 'infinity'::TIMESTAMPTZ \
+             AND last_error LIKE $1 || '%';",
+            &[&LEGACY_DEDUP_LIMIT_PREFIX],
+        )
+        .await
+        .map_err(|error| crate::logs::write::error_chain_diagnostics(&error))?;
     // Membership is immutable until published, even when its last execution was
     // deleted. An empty membership table alone must not admit new arrivals.
     if inserted > 0
@@ -292,7 +284,15 @@ async fn reconcile(pool: &Pool) -> Result<(), String> {
     transaction
         .commit()
         .await
-        .map_err(|error| crate::logs::write::error_chain_diagnostics(&error))
+        .map_err(|error| crate::logs::write::error_chain_diagnostics(&error))?;
+    if legacy_requeued > 0 {
+        info!(
+            event = "AnalyticsSnapshotLegacyParkedRecovered",
+            count = legacy_requeued,
+            "旧版去重上限挂起的执行已自动重新排队"
+        );
+    }
+    Ok(())
 }
 
 async fn publish_build(transaction: &deadpool_postgres::Transaction<'_>) -> Result<(), String> {
@@ -1021,6 +1021,8 @@ pub(crate) const STAGING_LIMIT_PREFIX: &str = "statistics_resource_limit: 统计
 ///
 /// 只影响 pending 且挂起的行，不覆盖正在运行的领取；保留 last_error 供排查，
 /// 处理成功后由完成路径清除。返回重新排队的行数。
+/// worker 的周期扫描在 reconcile 事务内执行同款 SQL；此入口供测试与报告层复用。
+#[cfg(test)]
 pub(crate) async fn requeue_parked_executions(
     pool: &Pool,
     error_prefix: &str,
@@ -1579,8 +1581,10 @@ mod tests {
         client
             .batch_execute(
                 "SET search_path TO pg_temp; \
-                 CREATE TEMP TABLE scan_task_execution(id INT PRIMARY KEY); \
-                 INSERT INTO scan_task_execution VALUES (1),(2),(3),(4),(5);",
+                 CREATE TEMP TABLE scan_task(id INT PRIMARY KEY, task_kind TEXT); \
+                 CREATE TEMP TABLE scan_task_execution(id INT PRIMARY KEY, execution_status TEXT, task_id INT); \
+                 INSERT INTO scan_task VALUES (1, 'ip'); \
+                 INSERT INTO scan_task_execution VALUES (1,'succeeded',1),(2,'succeeded',1),(3,'succeeded',1),(4,'succeeded',1),(5,'succeeded',1);",
             )
             .await
             .unwrap();
@@ -1641,5 +1645,27 @@ mod tests {
         );
         assert_eq!(rows[3].get::<_, String>(1), "running");
         assert_eq!(rows[4].get::<_, String>(1), "completed");
+
+        // 滚动部署：旧实例把执行再次挂起后，下一轮 reconcile 应自动收敛，
+        // 不依赖进程重启。
+        client
+            .execute(
+                "UPDATE analytics_outbox SET status='pending', available_at='infinity'::TIMESTAMPTZ WHERE execution_id=1;",
+                &[],
+            )
+            .await
+            .unwrap();
+        drop(client);
+        reconcile(&pool).await.unwrap();
+        let client = pool.get().await.unwrap();
+        let due: bool = client
+            .query_one(
+                "SELECT available_at <= NOW() FROM analytics_outbox WHERE execution_id=1;",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(due, "reconcile 应周期性地重新排队旧版挂起");
     }
 }

@@ -85,11 +85,12 @@ worker 每批最多处理 100 个 execution，有积压时只让出 1 秒后继�
 与下述挂起任务自动接续。
 
 旧版因 `statistics_resource_limit: 执行去重集合超过 200000` 被设置为 `infinity` 的任务，会在
-worker 激活（`shadow` / `snapshot` 模式）时**自动重新排队**，无需手动 SQL：新版已改为临时表
-分批去重，不再受该上限约束。重新排队只影响 `pending` 且 `available_at = infinity` 的匹配行，
-不覆盖正在运行的领取，`last_error` 保留供排查、处理成功后清除（事件
-`AnalyticsSnapshotLegacyParkedRecovered`）。混跑期间旧实例可能把重新排队的任务再次挂起，
-全部实例升级并重启后即收敛；源 observation 仍需保留且 PostgreSQL 有足够磁盘。
+每轮 reconcile（`shadow` / `snapshot` 模式，默认 30 分钟，含启动首轮）**自动重新排队**，
+无需手动 SQL：新版已改为临时表分批去重，不再受该上限约束。重新排队只影响 `pending` 且
+`available_at = infinity` 的匹配行，不覆盖正在运行的领取，`last_error` 保留供排查、处理成功
+后清除（事件 `AnalyticsSnapshotLegacyParkedRecovered`）。混跑期间旧实例可能把重新排队的任务
+再次挂起，下一轮 reconcile 会继续收敛，无需重启；源 observation 仍需保留且 PostgreSQL 有
+足够磁盘。
 
 因 `statistics_resource_limit: 统计暂存空间超过 N MiB` 挂起的任务，在运行时配置把
 `max_staging_mib` 调大到超过挂起时的上限 N 后自动重新排队（事件
