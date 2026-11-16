@@ -1005,6 +1005,92 @@ async fn reports_wait_for_missing_facts_without_admitting_later_executions() {
     cleanup(&pool, schema).await;
 }
 
+/// 复现生产故障：旧版去重上限把执行永久挂起（available_at=infinity），
+/// 包含该执行的报告等待超过 24 小时后失败；自动重新排队并完成回填后报告可生成。
+#[tokio::test]
+#[ignore = "requires disposable REPORT_TEST_DATABASE_URL"]
+async fn legacy_parked_execution_fails_report_then_recovers() {
+    let (pool, schema) = isolated_pool().await;
+    let period = Period::last_closed(PeriodType::Weekly, Utc::now()).expect("period");
+    let input = execution(
+        &pool,
+        period.start.timestamp_millis() + 7_200_000,
+        "succeeded",
+        false,
+        "192.0.2.1",
+    )
+    .await;
+    let client = pool.get().await.expect("client");
+    client.execute(
+        "UPDATE analytics_outbox SET status='pending', available_at='infinity'::TIMESTAMPTZ, attempts=1, \
+         last_error='statistics_resource_limit: 执行去重集合超过 200000 条，需拆分扫描任务或离线处理' \
+         WHERE execution_id=$1;",
+        &[&input],
+    ).await.expect("park");
+    let id = storage::create(&pool, &period, Some(1), "manual", None)
+        .await
+        .expect("report");
+    // 等待 deadline 置为过去，复现“统计快照等待已超过 24 小时”的终态失败。
+    client
+        .execute(
+            "UPDATE report_job SET wait_deadline = NOW() - INTERVAL '1 minute' WHERE report_id=$1;",
+            &[&id],
+        )
+        .await
+        .expect("deadline");
+    drop(client);
+    worker::process_one(&pool, &config()).await.expect("wait");
+    let failed = report(&pool, id).await;
+    assert_eq!(failed.get::<_, String>("status"), "failed");
+    assert_eq!(
+        failed.get::<_, Option<String>>("last_error").as_deref(),
+        Some("统计快照等待已超过 24 小时，请检查回填任务后重试")
+    );
+
+    // 升级后的自愈：旧版挂起执行自动重新排队，回填完成后报告恢复生成。
+    let requeued = crate::analytics_snapshot::requeue_parked_executions(
+        &pool,
+        crate::analytics_snapshot::LEGACY_DEDUP_LIMIT_PREFIX,
+    )
+    .await
+    .expect("recover");
+    assert_eq!(requeued, 1);
+    let client = pool.get().await.expect("client");
+    let due: bool = client
+        .query_one(
+            "SELECT available_at <= NOW() FROM analytics_outbox WHERE execution_id=$1;",
+            &[&input],
+        )
+        .await
+        .expect("due")
+        .get(0);
+    assert!(due, "重新排队后应可被领取");
+    // 模拟新版 worker 完成回填（临时表分批去重不再受旧上限约束）。
+    client
+        .execute(
+            "UPDATE analytics_outbox SET status='completed', completed_at=NOW(), last_error=NULL WHERE execution_id=$1;",
+            &[&input],
+        )
+        .await
+        .expect("backfill");
+    client
+        .execute(
+            "UPDATE report_job SET status='retry_wait', available_at=NOW(), wait_deadline=NOW() + INTERVAL '24 hours', last_error=NULL WHERE report_id=$1;",
+            &[&id],
+        )
+        .await
+        .expect("retry");
+    drop(client);
+    worker::process_one(&pool, &config()).await.expect("ready");
+    let ready = report(&pool, id).await;
+    assert_eq!(ready.get::<_, String>("status"), "ready");
+    assert_eq!(
+        ready.get::<_, Value>("payload")["scan_output"]["unique_ips"],
+        1
+    );
+    cleanup(&pool, schema).await;
+}
+
 #[tokio::test]
 #[ignore = "requires disposable REPORT_TEST_DATABASE_URL"]
 async fn disabled_plans_do_not_send_legacy_weekly_notifications_and_reclaimed_jobs_recover() {

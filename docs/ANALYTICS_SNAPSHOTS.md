@@ -80,26 +80,22 @@ worker 每批最多处理 100 个 execution，有积压时只让出 1 秒后继�
 水位 SQL 出错与回填未完成使用不同错误码，不再把数据库错误伪装成未回填。
 
 升级时部署更新后的 `source/database/init.sql`，服务初始化会幂等创建回填范围表并迁移心跳字段。
-**先升级全部服务实例，再恢复大执行**：旧 worker 不识别新心跳，混跑时可能把处理超过 60 分钟的
+**先升级全部服务实例**：旧 worker 不识别新心跳，混跑时可能把处理超过 60 分钟的
 任务视为失效。无需清空统计表或重新运行全量重建；开启 `shadow` / `snapshot` 后普通待重试任务
-自动接续。
+与下述挂起任务自动接续。
 
-旧版因 `statistics_resource_limit: 执行去重集合超过 200000` 被设置为 `infinity` 的任务不会自动
-恢复。确认全部实例已升级、源 observation 仍保留且 PostgreSQL 有足够磁盘后，先记录任务原状态，
-针对核实过的执行逐个重新排队，例如：
+旧版因 `statistics_resource_limit: 执行去重集合超过 200000` 被设置为 `infinity` 的任务，会在
+worker 激活（`shadow` / `snapshot` 模式）时**自动重新排队**，无需手动 SQL：新版已改为临时表
+分批去重，不再受该上限约束。重新排队只影响 `pending` 且 `available_at = infinity` 的匹配行，
+不覆盖正在运行的领取，`last_error` 保留供排查、处理成功后清除（事件
+`AnalyticsSnapshotLegacyParkedRecovered`）。混跑期间旧实例可能把重新排队的任务再次挂起，
+全部实例升级并重启后即收敛；源 observation 仍需保留且 PostgreSQL 有足够磁盘。
 
-```sql
-UPDATE analytics_outbox
-   SET available_at = NOW(), updated_at = NOW()
- WHERE execution_id = 51983 -- 替换成已核实的执行数据库 ID
-   AND status = 'pending'
-   AND available_at = 'infinity'::timestamptz
-   AND last_error LIKE 'statistics_resource_limit: 执行去重集合超过 200000%'
-RETURNING execution_id, status, available_at;
-```
-
-没有返回行时先检查当前状态，不要覆盖正在运行的领取。查看日志 `AnalyticsSnapshotProgress`、
-`AnalyticsSnapshotExecutionFailed` 和队列 `last_error`；资源不足时先处理容量，不能仅反复排队。
+因 `statistics_resource_limit: 统计暂存空间超过 N MiB` 挂起的任务，在运行时配置把
+`max_staging_mib` 调大到超过挂起时的上限 N 后自动重新排队（事件
+`AnalyticsSnapshotStagingParkedRecovered`）；上限未变时不会反复重试容量不足的任务。
+资源不足时先处理容量，不能仅反复排队。查看日志 `AnalyticsSnapshotProgress`、
+`AnalyticsSnapshotExecutionFailed` 和队列 `last_error`。
 待报告的全部本期执行都完成后，在报告详情点击重试；报告输入计数已变化时核实后创建修订版。
 不应为了单个失败执行运行 `--rebuild-analytics-snapshots`，该命令会重新排队全部成功的 IP 执行。
 
