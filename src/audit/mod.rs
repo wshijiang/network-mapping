@@ -309,11 +309,13 @@ mod tests {
         let initialization_sql = include_str!("../../source/database/init.sql");
 
         assert!(
-            initialization_sql.contains("'data_access', 'audit', 'backup', 'data_import'\n\t))")
+            initialization_sql
+                .contains("'data_access', 'audit', 'backup', 'data_import', 'federation'\n\t))")
         );
         assert!(
-            initialization_sql
-                .contains("'data_access', 'audit', 'backup', 'data_import'\n        ))")
+            initialization_sql.contains(
+                "'data_access', 'audit', 'backup', 'data_import', 'federation'\n        ))"
+            )
         );
         assert!(
             initialization_sql.contains("OR POSITION('backup' IN pg_get_constraintdef(oid)) = 0")
@@ -321,6 +323,10 @@ mod tests {
         assert!(
             initialization_sql
                 .contains("OR POSITION('data_import' IN pg_get_constraintdef(oid)) = 0")
+        );
+        assert!(
+            initialization_sql
+                .contains("OR POSITION('federation' IN pg_get_constraintdef(oid)) = 0")
         );
     }
 }
