@@ -332,6 +332,44 @@ pub(crate) struct ElasticsearchSearchPage {
     pub(crate) total: i64,
 }
 
+#[cfg(test)]
+impl ElasticsearchSearchItem {
+    /// 单元测试用的空壳端点（仅 ip/port/scan_time 有意义）。
+    pub(crate) fn test_stub(ip: &str, port: i32) -> Self {
+        Self {
+            ip_address: ip.to_owned(),
+            port,
+            protocol: Some("tcp".to_owned()),
+            service: None,
+            banner: None,
+            title: None,
+            tls_mode: None,
+            tls_version: None,
+            tls_cipher_suite: None,
+            tls_subject: None,
+            tls_issuer: None,
+            tls_names: Vec::new(),
+            tls_serial_number: None,
+            tls_not_before: None,
+            tls_not_after: None,
+            tls_fingerprint_sha256: None,
+            tls_self_signed: None,
+            os: None,
+            web: None,
+            scanner_name: None,
+            scan_time: 0,
+            asn: None,
+            isp: None,
+            as_org: None,
+            country_code: None,
+            country_name: None,
+            region_name: None,
+            city_name: None,
+            tags: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct OutboxEvent {
     id: i64,
@@ -2033,18 +2071,31 @@ impl ElasticsearchService {
         offset: i64,
         sort: SearchSort,
     ) -> Result<ElasticsearchSearchPage, String> {
-        if !self.can_read() {
-            return Err("Elasticsearch 搜索读路径尚未就绪".to_owned());
-        }
         let (scope_type, scope_id) = if role == 1 {
             ("global", 0)
         } else {
             ("user", user_id)
         };
+        self.search_with_scope(scope_type, scope_id, filter, limit, offset, sort)
+            .await
+    }
+
+    /// 与 `search` 相同，但直接使用给定的数据范围（后台导出任务使用创建时快照）。
+    pub(crate) async fn search_with_scope(
+        &self,
+        scope_type: &str,
+        scope_id: i32,
+        filter: Value,
+        limit: i64,
+        offset: i64,
+        sort: SearchSort,
+    ) -> Result<ElasticsearchSearchPage, String> {
+        if !self.can_read() {
+            return Err("Elasticsearch 搜索读路径尚未就绪".to_owned());
+        }
         let filter = self
-            .resolve_has_endpoint_filters(scope_type, scope_id, filter)
+            .resolve_search_filter(scope_type, scope_id, filter)
             .await?;
-        let filter = self.resolve_domain_filters(filter).await?;
         let body = json!({
             "from": offset,
             "size": limit,
@@ -2085,56 +2136,160 @@ impl ElasticsearchService {
             .pointer("/hits/hits")
             .and_then(Value::as_array)
             .ok_or_else(|| "Elasticsearch 搜索响应缺少 hits.hits".to_owned())?;
-        let mut items = Vec::with_capacity(hits.len());
-        for hit in hits {
-            let source: SearchSource = serde_json::from_value(
-                hit.get("_source")
-                    .cloned()
-                    .ok_or_else(|| "Elasticsearch hit 缺少 _source".to_owned())?,
-            )
-            .map_err(|error| format!("Elasticsearch hit 解析失败：{error}"))?;
-            items.push(ElasticsearchSearchItem {
-                ip_address: source.ip,
-                port: source.port,
-                protocol: source.protocol,
-                service: source.service,
-                banner: source.banner,
-                title: source.title,
-                tls_mode: source.tls_mode,
-                tls_version: source.tls_version,
-                tls_cipher_suite: source.tls_cipher_suite,
-                tls_subject: source.tls_subject,
-                tls_issuer: source.tls_issuer,
-                tls_names: source.tls_names,
-                tls_serial_number: source.tls_serial_number,
-                tls_not_before: source.tls_not_before.map(|value| value.timestamp_millis()),
-                tls_not_after: source.tls_not_after.map(|value| value.timestamp_millis()),
-                tls_fingerprint_sha256: source.tls_fingerprint_sha256,
-                tls_self_signed: source.tls_self_signed,
-                os: crate::os_detection::endpoint_view(
-                    source.os,
-                    source.last_seen.timestamp_millis(),
-                    Utc::now().timestamp_millis(),
-                ),
-                web: crate::web_detection::endpoint_view(
-                    source.web,
-                    source.last_seen.timestamp_millis(),
-                    Utc::now().timestamp_millis(),
-                ),
-                scanner_name: source.scanner_name,
-                scan_time: source.last_seen.timestamp_millis(),
-                asn: source.asn,
-                isp: source.isp,
-                as_org: source.as_org,
-                country_code: source.country_code,
-                country_name: source.country_name,
-                region_name: source.region_name,
-                city_name: source.city_name,
-                tags: source.tags,
-            });
-        }
+        let items = parse_search_hits(hits)?;
         self.mark_success();
         Ok(ElasticsearchSearchPage { items, total })
+    }
+
+    /// has_endpoint / domain 过滤解析（搜索与导出共用）。
+    pub(crate) async fn resolve_search_filter(
+        &self,
+        scope_type: &str,
+        scope_id: i32,
+        filter: Value,
+    ) -> Result<Value, String> {
+        let filter = self
+            .resolve_has_endpoint_filters(scope_type, scope_id, filter)
+            .await?;
+        self.resolve_domain_filters(filter).await
+    }
+
+    /// 匹配条数预览（导出 modal 与创建校验用）。
+    pub(crate) async fn search_count(
+        &self,
+        scope_type: &str,
+        scope_id: i32,
+        filter: Value,
+    ) -> Result<i64, String> {
+        if !self.can_read() {
+            return Err("Elasticsearch 搜索读路径尚未就绪".to_owned());
+        }
+        let filter = self
+            .resolve_search_filter(scope_type, scope_id, filter)
+            .await?;
+        let body = json!({
+            "size": 0,
+            "track_total_hits": true,
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"term": {"scope_type": scope_type}},
+                        {"term": {"scope_id": scope_id}},
+                        filter
+                    ]
+                }
+            }
+        });
+        let search_index = { &self.inner.config.current_endpoint_index };
+        let result = self
+            .send_json_request(
+                ElasticsearchOperation::AssetSearch,
+                Method::POST,
+                &format!("{search_index}/_search"),
+                |request| request.json(&body),
+            )
+            .await
+            .inspect_err(|message| self.mark_error(message))?;
+        self.mark_success();
+        Ok(result
+            .pointer("/hits/total/value")
+            .and_then(Value::as_i64)
+            .unwrap_or(0))
+    }
+
+    /// 为「全部」导出打开稳定视图（突破 from/size 的 10k 窗口限制）。
+    pub(crate) async fn open_search_pit(&self) -> Result<String, String> {
+        if !self.can_read() {
+            return Err("Elasticsearch 搜索读路径尚未就绪".to_owned());
+        }
+        let search_index = { &self.inner.config.current_endpoint_index };
+        let result = self
+            .send_json_request(
+                ElasticsearchOperation::AssetSearch,
+                Method::POST,
+                &format!("/{search_index}/_pit?keep_alive=5m"),
+                |request| request,
+            )
+            .await
+            .inspect_err(|message| self.mark_error(message))?;
+        result
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "Elasticsearch 导出 PIT 缺少 id".to_owned())
+    }
+
+    /// PIT + search_after 分批遍历（排序含 endpoint_key tie-breaker，全序稳定）。
+    /// 返回 (端点, total, 下一页 search_after)；search_after 为 None 表示已到末尾。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn search_export_page(
+        &self,
+        pit_id: &str,
+        scope_type: &str,
+        scope_id: i32,
+        filter: &Value,
+        sort: SearchSort,
+        search_after: Option<&Value>,
+        size: i64,
+        track_total: bool,
+    ) -> Result<(Vec<ElasticsearchSearchItem>, i64, Option<Value>), String> {
+        let mut body = json!({
+            "size": size,
+            "track_total_hits": track_total,
+            "pit": {"id": pit_id, "keep_alive": "5m"},
+            "_source": {"excludes": ["http_body"]},
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"term": {"scope_type": scope_type}},
+                        {"term": {"scope_id": scope_id}},
+                        filter
+                    ]
+                }
+            },
+            "sort": sort.clauses()
+        });
+        if let Some(after) = search_after {
+            body.as_object_mut()
+                .expect("export search body is an object")
+                .insert("search_after".to_owned(), after.clone());
+        }
+        let result = self
+            .send_json_request(
+                ElasticsearchOperation::AssetSearch,
+                Method::POST,
+                "/_search?allow_partial_search_results=false",
+                |request| request.json(&body),
+            )
+            .await
+            .inspect_err(|message| self.mark_error(message))?;
+        validate_scan_search_response(&result)?;
+        let total = result
+            .pointer("/hits/total/value")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let hits = result
+            .pointer("/hits/hits")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "Elasticsearch 导出响应缺少 hits.hits".to_owned())?;
+        let next = hits.last().and_then(|hit| hit.get("sort")).cloned();
+        let items = parse_search_hits(hits)?;
+        self.mark_success();
+        Ok((items, total, next))
+    }
+
+    pub(crate) async fn close_search_pit(&self, id: &str) {
+        if let Err(error) = self
+            .send_json_request(
+                ElasticsearchOperation::AssetSearch,
+                Method::DELETE,
+                "/_pit",
+                |request| request.json(&json!({"id": id})),
+            )
+            .await
+        {
+            warn!(event = "DataExportPitCloseFailed", %error);
+        }
     }
 
     async fn resolve_has_endpoint_filters(
@@ -3069,6 +3224,59 @@ fn elasticsearch_request_error(
         path.split('?').next().unwrap_or_default(),
         started.elapsed().as_millis()
     )
+}
+
+/// ES hits → 端点视图（搜索与导出共用；OS/Web 证据按当前时刻评估过期）。
+fn parse_search_hits(hits: &[Value]) -> Result<Vec<ElasticsearchSearchItem>, String> {
+    let mut items = Vec::with_capacity(hits.len());
+    for hit in hits {
+        let source: SearchSource = serde_json::from_value(
+            hit.get("_source")
+                .cloned()
+                .ok_or_else(|| "Elasticsearch hit 缺少 _source".to_owned())?,
+        )
+        .map_err(|error| format!("Elasticsearch hit 解析失败：{error}"))?;
+        items.push(ElasticsearchSearchItem {
+            ip_address: source.ip,
+            port: source.port,
+            protocol: source.protocol,
+            service: source.service,
+            banner: source.banner,
+            title: source.title,
+            tls_mode: source.tls_mode,
+            tls_version: source.tls_version,
+            tls_cipher_suite: source.tls_cipher_suite,
+            tls_subject: source.tls_subject,
+            tls_issuer: source.tls_issuer,
+            tls_names: source.tls_names,
+            tls_serial_number: source.tls_serial_number,
+            tls_not_before: source.tls_not_before.map(|value| value.timestamp_millis()),
+            tls_not_after: source.tls_not_after.map(|value| value.timestamp_millis()),
+            tls_fingerprint_sha256: source.tls_fingerprint_sha256,
+            tls_self_signed: source.tls_self_signed,
+            os: crate::os_detection::endpoint_view(
+                source.os,
+                source.last_seen.timestamp_millis(),
+                Utc::now().timestamp_millis(),
+            ),
+            web: crate::web_detection::endpoint_view(
+                source.web,
+                source.last_seen.timestamp_millis(),
+                Utc::now().timestamp_millis(),
+            ),
+            scanner_name: source.scanner_name,
+            scan_time: source.last_seen.timestamp_millis(),
+            asn: source.asn,
+            isp: source.isp,
+            as_org: source.as_org,
+            country_code: source.country_code,
+            country_name: source.country_name,
+            region_name: source.region_name,
+            city_name: source.city_name,
+            tags: source.tags,
+        });
+    }
+    Ok(items)
 }
 
 fn validate_scan_refresh_response(result: &Value) -> Result<(), String> {

@@ -193,6 +193,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             config.pwd_hash.clone(),
             &ser_con.encrypt_key,
             &data_import_config,
+            &config.data_export,
         )
         .await
         .map_err(|error| io::Error::other(format!("管理命令失败：{error}")))?;
@@ -787,6 +788,16 @@ pub async fn run(args: Clis) -> io::Result<()> {
             security.scanner_token_pepper.clone(),
         ),
     );
+    background.spawn(
+        "data-export",
+        crate::data_export::worker::run_worker(
+            pool.clone(),
+            config.data_export.clone(),
+            elasticsearch_data.clone(),
+            system_maintenance_state.clone(),
+            runtime_settings.general.clone(),
+        ),
+    );
     let federation_config = config.federation.clone();
     let federation_policy = web::Data::new(runtime_settings.federation.clone());
     background.spawn(
@@ -866,6 +877,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             .app_data(frontend_assets.clone())
             .app_data(scanner_diagnostics_data.clone())
             .app_data(web::Data::new(data_import_config.clone()))
+            .app_data(web::Data::new(config.data_export.clone()))
             .app_data(federation_service.clone())
             .app_data(web::JsonConfig::default().limit(server_max_body))
             .wrap(CsrfMiddleware)
