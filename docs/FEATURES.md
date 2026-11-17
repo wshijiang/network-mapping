@@ -89,7 +89,8 @@ repeat_after_seconds = 604800
 地址夹带进扫描任务。排除项默认值在代码层为空，示例配置显式排除了常见私网、回环和
 链路本地范围。
 生成游标存储在数据库中，服务重启后继续；同一目标在冷却期内不会重复生成。管理员可通过
-`GET /api/automatic-target/status` 查看两个地址族各自的队列、游标和可用扫描器数量。
+`GET /api/automatic-target/status` 查看两个地址族各自的队列、游标和可用扫描器数量，
+并通过 `POST /api/automatic-target/cursor` 或「自动扫描策略」设置页手动调整游标位置。
 
 完整的心跳载荷、数据库字段、调度规则、升级兼容和故障排查参见
 [双栈扫描与自动目标文档](DUAL_STACK_SCANNING.md)。
