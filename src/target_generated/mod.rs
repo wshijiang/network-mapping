@@ -959,8 +959,12 @@ fn target_at(generator: &FamilyGenerator, position: u128) -> GeneratedTarget {
                     )
                 }
                 IpNet::V6(pool) => {
-                    let base =
-                        u128::from(pool.network()) + (remaining << (128 - generator.task_prefix));
+                    // At /0 the pool is a single whole-space task, so the offset
+                    // is always zero and a 128-bit shift would overflow.
+                    let offset = remaining
+                        .checked_shl(u32::from(128 - generator.task_prefix))
+                        .unwrap_or(0);
+                    let base = u128::from(pool.network()) + offset;
                     IpNet::V6(
                         Ipv6Net::new(Ipv6Addr::from(base), generator.task_prefix)
                             .expect("validated IPv6 prefix"),
@@ -1013,8 +1017,13 @@ fn position_of_cidr(generator: &FamilyGenerator, cidr: &str) -> Option<u128> {
                 ),
                 _ => return None,
             };
-            let size = 1_u128 << (bits - u32::from(generator.task_prefix));
-            return Some(pool_start + (address - pool_base) / size);
+            let index = match 1_u128.checked_shl(bits - u32::from(generator.task_prefix)) {
+                Some(size) => (address - pool_base) / size,
+                // A /0 task prefix makes the whole space one subnet; the only
+                // matching CIDR is the pool itself, at index 0.
+                None => 0,
+            };
+            return Some(pool_start + index);
         }
         pool_start += count;
     }
@@ -1093,7 +1102,7 @@ fn position_after_exclusions(generator: &FamilyGenerator, position: u128, cidr: 
                 128_u32,
             ),
         };
-        let size = 1_u128 << (bits - u32::from(generator.task_prefix));
+        let size = 1_u128.checked_shl(bits - u32::from(generator.task_prefix));
         for excluded in &generator.excluded {
             if !(target.contains(&excluded.network()) || excluded.contains(&target.network())) {
                 continue;
@@ -1104,7 +1113,12 @@ fn position_after_exclusions(generator: &FamilyGenerator, position: u128, cidr: 
                 _ => continue,
             };
             let end = excluded_broadcast.min(pool_broadcast);
-            let index_after = (end - pool_base) / size + 1;
+            let index_after = match size {
+                Some(size) => (end - pool_base) / size + 1,
+                // /0 task: the single whole-space subnet is excluded, so the
+                // jump leaves the pool entirely.
+                None => count,
+            };
             next = next.max(pool_start + index_after.min(count));
         }
         break;
@@ -1427,6 +1441,38 @@ mod tests {
             128
         );
         assert!(service.resolve_position("ipv6", Some(256), None).is_err());
+    }
+
+    #[test]
+    fn zero_task_prefix_resolves_and_jumps_without_overflow() {
+        let service = AutomaticTargetService::new(AutomaticTargetConfig {
+            ipv6_enabled: true,
+            ipv6_authorized_cidrs: vec!["::/0".to_owned()],
+            ipv6_excluded_cidrs: vec!["fc00::/7".to_owned()],
+            ipv6_task_prefix: 0,
+            ..AutomaticTargetConfig::default()
+        })
+        .unwrap();
+        let generator = &service.generators[1];
+        assert_eq!(generator.total_subnets, 1);
+        assert_eq!(target_at(generator, 0).cidr, "::/0");
+        assert_eq!(position_of_cidr(generator, "::/0"), Some(0));
+        assert!(is_excluded(generator, "::/0"));
+        // The whole-space task is excluded: the jump leaves the single-subnet pool.
+        assert_eq!(position_after_exclusions(generator, 0, "::/0"), 1);
+
+        let service = AutomaticTargetService::new(AutomaticTargetConfig {
+            enabled: true,
+            authorized_cidrs: vec!["0.0.0.0/0".to_owned()],
+            ipv4_task_prefix: 0,
+            ..AutomaticTargetConfig::default()
+        })
+        .unwrap();
+        let generator = &service.generators[0];
+        assert_eq!(generator.total_subnets, 1);
+        assert_eq!(target_at(generator, 0).cidr, "0.0.0.0/0");
+        assert_eq!(position_of_cidr(generator, "0.0.0.0/0"), Some(0));
+        assert_eq!(position_after_exclusions(generator, 0, "0.0.0.0/0"), 1);
     }
 
     #[test]
