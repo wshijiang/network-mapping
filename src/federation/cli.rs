@@ -113,9 +113,9 @@ pub enum SourceCommand {
         fields: Option<Vec<String>>,
         #[arg(long, value_enum, default_value = "follow-local")]
         pagination: CliPagination,
-        #[arg(long, default_value = "100", value_parser = clap::value_parser!(u32).range(1..=1000))]
+        #[arg(long, default_value = "10", value_parser = clap::value_parser!(u32).range(1..=1000))]
         page_size: u32,
-        #[arg(long, default_value = "5", value_parser = clap::value_parser!(u32).range(1..=50))]
+        #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..=50))]
         max_pages: u32,
         /// 时间窗单独设置（1..=60 天）
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=60), conflicts_with_all = ["window_follow", "window_none"])]
