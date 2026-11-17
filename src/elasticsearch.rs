@@ -330,6 +330,8 @@ pub(crate) struct ElasticsearchSearchItem {
 pub(crate) struct ElasticsearchSearchPage {
     pub(crate) items: Vec<ElasticsearchSearchItem>,
     pub(crate) total: i64,
+    /// Elasticsearch 自报的查询耗时（`took`，毫秒）。
+    pub(crate) took_ms: i64,
 }
 
 #[derive(Debug)]
@@ -2081,6 +2083,7 @@ impl ElasticsearchService {
             .pointer("/hits/total/value")
             .and_then(Value::as_i64)
             .unwrap_or(0);
+        let took_ms = result.get("took").and_then(Value::as_i64).unwrap_or(0);
         let hits = result
             .pointer("/hits/hits")
             .and_then(Value::as_array)
@@ -2134,7 +2137,11 @@ impl ElasticsearchService {
             });
         }
         self.mark_success();
-        Ok(ElasticsearchSearchPage { items, total })
+        Ok(ElasticsearchSearchPage {
+            items,
+            total,
+            took_ms,
+        })
     }
 
     async fn resolve_has_endpoint_filters(

@@ -58,6 +58,10 @@ struct SearchResponse {
     offset: i64,
     sort_field: &'static str,
     sort_order: &'static str,
+    /// 服务端处理本次搜索的总耗时（毫秒，含情报标注与联测合流）。
+    took_ms: i64,
+    /// Elasticsearch 自报的查询耗时（`took`，毫秒）。
+    es_took_ms: i64,
 }
 
 #[derive(Serialize)]
@@ -255,6 +259,7 @@ async fn respond_search_elasticsearch(
     federation: Option<&crate::federation::search::FederationService>,
     federation_query: Option<String>,
 ) -> HttpResponse {
+    let started = std::time::Instant::now();
     let (limit, offset) = pagination;
     // 联测触发评估（含新鲜度探测），run 与本地搜索并行执行（§7/§8）。
     let prepared = match (federation, federation_query.as_deref()) {
@@ -277,6 +282,7 @@ async fn respond_search_elasticsearch(
         .await
     {
         Ok(page) => {
+            let es_took_ms = page.took_ms;
             let keys = page
                 .items
                 .iter()
@@ -413,6 +419,8 @@ async fn respond_search_elasticsearch(
                 offset,
                 sort_field: sort.field_name(),
                 sort_order: sort.order_name(),
+                took_ms: started.elapsed().as_millis() as i64,
+                es_took_ms,
             })
         }
         Err(error_value) if error_value.starts_with("DOMAIN_RESULT_TOO_BROAD:") => {
