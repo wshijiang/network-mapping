@@ -219,11 +219,12 @@ impl AutomaticTargetService {
             .await?;
         let stored_policy_hash: String = state.get("policy_hash");
         let cursor: Value = state.get("cursor");
-        let mut position = if stored_policy_hash == generator.policy_hash {
-            parse_cursor_position(&cursor)
-        } else {
-            0
-        };
+        let mut position = resume_position(
+            &stored_policy_hash,
+            &generator.policy_hash,
+            &cursor,
+            generator.total_subnets,
+        );
         let scanner_available: bool = transaction
             .query_one(
                 &ready_scanner_exists_query(generator.family),
@@ -279,6 +280,7 @@ impl AutomaticTargetService {
         while report.generated < to_generate as usize
             && attempts < generator.total_subnets.min(256) + 256
         {
+            let mut from_cursor = false;
             let target = if let Some((generation_key, cidr)) = due.next() {
                 let Ok(net) = cidr.parse::<IpNet>() else {
                     continue;
@@ -303,11 +305,30 @@ impl AutomaticTargetService {
                 }
                 let target = target_at(generator, position);
                 position = (position + 1) % generator.total_subnets;
+                from_cursor = true;
                 target
             };
             attempts += 1;
             if is_excluded(generator, &target.cidr) {
                 report.skipped_excluded += 1;
+                if from_cursor {
+                    // Jump over the whole excluded block instead of crawling one
+                    // task subnet per attempt: large exclusions (e.g. 0.0.0.0/8)
+                    // would otherwise stall generation for hours without a log.
+                    let after = position_after_exclusions(generator, target.position, &target.cidr);
+                    if after > target.position + 1 {
+                        info!(
+                            target: "server::automatic_target",
+                            event = "AutomaticTargetExcludedBlockSkipped",
+                            address_family = generator.family,
+                            from = %target.cidr,
+                            to = %target_at(generator, after % generator.total_subnets).cidr,
+                            skipped_subnets = %(after - target.position),
+                            "自动目标游标整段跳过排除网段"
+                        );
+                    }
+                    position = after % generator.total_subnets;
+                }
                 continue;
             }
             let recent_exists: bool = if self.policy.strategy == "smart_refresh" {
@@ -742,6 +763,70 @@ fn is_excluded(generator: &FamilyGenerator, cidr: &str) -> bool {
     })
 }
 
+/// Cursor position to resume from after a policy change. The cursor is a
+/// coverage pointer into the ordered subnet space, so a policy change (e.g.
+/// editing `common_ports`) must not restart the walk at zero: that would
+/// re-walk already covered space and stall inside mandatory exclusion blocks.
+/// The stored position is kept, normalized into the new subnet space.
+fn resume_position(
+    stored_policy_hash: &str,
+    policy_hash: &str,
+    cursor: &Value,
+    total_subnets: u128,
+) -> u128 {
+    let position = parse_cursor_position(cursor);
+    if stored_policy_hash == policy_hash || total_subnets == 0 {
+        position
+    } else {
+        position % total_subnets
+    }
+}
+
+/// First cursor position after every exclusion block overlapping the subnet
+/// generated at `position`. Longer exclusions inside the task subnet still
+/// skip only that one subnet (task-level safety skip). Returns at most
+/// `generator.total_subnets`; the caller wraps around.
+fn position_after_exclusions(generator: &FamilyGenerator, position: u128, cidr: &str) -> u128 {
+    let target: IpNet = cidr.parse().expect("generated target is a valid CIDR");
+    let mut next = position + 1;
+    let mut pool_start = 0_u128;
+    for pool in &generator.pools {
+        let count = subnet_count(*pool, generator.task_prefix);
+        if position < pool_start || position >= pool_start + count {
+            pool_start += count;
+            continue;
+        }
+        let (pool_base, pool_broadcast, bits) = match pool {
+            IpNet::V4(net) => (
+                u128::from(u32::from(net.network())),
+                u128::from(u32::from(net.broadcast())),
+                32_u32,
+            ),
+            IpNet::V6(net) => (
+                u128::from(net.network()),
+                u128::from(net.broadcast()),
+                128_u32,
+            ),
+        };
+        let size = 1_u128 << (bits - u32::from(generator.task_prefix));
+        for excluded in &generator.excluded {
+            if !(target.contains(&excluded.network()) || excluded.contains(&target.network())) {
+                continue;
+            }
+            let excluded_broadcast = match (pool, excluded) {
+                (IpNet::V4(_), IpNet::V4(net)) => u128::from(u32::from(net.broadcast())),
+                (IpNet::V6(_), IpNet::V6(net)) => u128::from(net.broadcast()),
+                _ => continue,
+            };
+            let end = excluded_broadcast.min(pool_broadcast);
+            let index_after = (end - pool_base) / size + 1;
+            next = next.max(pool_start + index_after.min(count));
+        }
+        break;
+    }
+    next
+}
+
 pub(crate) fn ready_scanner_exists_query(family: &str) -> String {
     format!(
         "SELECT EXISTS(SELECT 1 FROM scanner_info WHERE is_enable = true AND deleted_at IS NULL AND accepting_tasks \
@@ -853,7 +938,7 @@ fn generated_target_audit_event(
 mod tests {
     use super::{
         AutomaticTargetService, generated_target_audit_event, is_excluded, parse_cursor_position,
-        target_at,
+        position_after_exclusions, resume_position, target_at,
     };
     use crate::config::AutomaticTargetConfig;
     use serde_json::json;
@@ -917,6 +1002,98 @@ mod tests {
         assert!(is_excluded(generator, &target_at(generator, 17).cidr));
         assert_eq!(target_at(generator, 65_536).cidr, "1.0.0.0/24");
         assert!(!is_excluded(generator, &target_at(generator, 65_536).cidr));
+    }
+
+    #[test]
+    fn exclusion_jump_skips_the_whole_zero_block_in_one_step() {
+        let service = AutomaticTargetService::new(AutomaticTargetConfig {
+            enabled: true,
+            authorized_cidrs: vec!["0.0.0.0/0".to_owned()],
+            ..AutomaticTargetConfig::default()
+        })
+        .unwrap();
+        let generator = &service.generators[0];
+
+        let start = target_at(generator, 24_832);
+        assert!(is_excluded(generator, &start.cidr));
+        let after = position_after_exclusions(generator, 24_832, &start.cidr);
+        assert_eq!(after, 65_536);
+        assert_eq!(target_at(generator, after).cidr, "1.0.0.0/24");
+        assert!(!is_excluded(generator, &target_at(generator, after).cidr));
+    }
+
+    #[test]
+    fn exclusion_jump_lands_on_the_next_pool() {
+        let service = AutomaticTargetService::new(AutomaticTargetConfig {
+            enabled: true,
+            authorized_cidrs: vec!["0.0.0.0/8".to_owned(), "1.0.0.0/23".to_owned()],
+            ..AutomaticTargetConfig::default()
+        })
+        .unwrap();
+        let generator = &service.generators[0];
+
+        let start = target_at(generator, 0);
+        let after = position_after_exclusions(generator, 0, &start.cidr);
+        assert_eq!(after, 65_536);
+        assert_eq!(target_at(generator, after).cidr, "1.0.0.0/24");
+        assert!(!is_excluded(generator, &target_at(generator, after).cidr));
+    }
+
+    #[test]
+    fn exclusion_jump_respects_task_level_skip_and_block_end() {
+        let service = AutomaticTargetService::new(AutomaticTargetConfig {
+            enabled: true,
+            authorized_cidrs: vec!["1.0.0.0/22".to_owned()],
+            excluded_cidrs: vec!["1.0.0.128/25".to_owned(), "1.0.2.0/23".to_owned()],
+            ..AutomaticTargetConfig::default()
+        })
+        .unwrap();
+        let generator = &service.generators[0];
+
+        // A /25 inside 1.0.0.0/24 skips the whole /24 task, but only one position.
+        assert!(is_excluded(generator, "1.0.0.0/24"));
+        assert_eq!(position_after_exclusions(generator, 0, "1.0.0.0/24"), 1);
+        // A /23 covering positions 2..=3 jumps straight to the end of the pool.
+        assert!(is_excluded(generator, "1.0.2.0/24"));
+        assert_eq!(position_after_exclusions(generator, 2, "1.0.2.0/24"), 4);
+        assert_eq!(generator.total_subnets, 4);
+    }
+
+    #[test]
+    fn exclusion_jump_handles_ipv6_blocks() {
+        let service = AutomaticTargetService::new(AutomaticTargetConfig {
+            ipv6_enabled: true,
+            ipv6_authorized_cidrs: vec!["2001:db8::/112".to_owned()],
+            ipv6_excluded_cidrs: vec!["2001:db8::/113".to_owned()],
+            ipv6_task_prefix: 120,
+            ..AutomaticTargetConfig::default()
+        })
+        .unwrap();
+        let generator = &service.generators[1];
+        assert_eq!(generator.total_subnets, 256);
+
+        let start = target_at(generator, 100);
+        assert!(is_excluded(generator, &start.cidr));
+        let after = position_after_exclusions(generator, 100, &start.cidr);
+        assert_eq!(after, 128);
+        assert_eq!(target_at(generator, after).cidr, "2001:db8::8000/120");
+        assert!(!is_excluded(generator, &target_at(generator, after).cidr));
+    }
+
+    #[test]
+    fn policy_change_preserves_the_coverage_cursor() {
+        let cursor = json!({"position": "129540"});
+        // Same policy: position is kept as stored.
+        assert_eq!(resume_position("same", "same", &cursor, 65_536), 129_540);
+        // Changed policy: keep coverage, normalized into the new subnet space.
+        assert_eq!(resume_position("old", "new", &cursor, 1 << 24), 129_540);
+        assert_eq!(
+            resume_position("old", "new", &cursor, 65_536),
+            129_540 % 65_536
+        );
+        // Missing cursor still starts at zero; empty space never divides by zero.
+        assert_eq!(resume_position("old", "new", &json!(null), 65_536), 0);
+        assert_eq!(resume_position("old", "new", &cursor, 0), 129_540);
     }
 
     #[test]
