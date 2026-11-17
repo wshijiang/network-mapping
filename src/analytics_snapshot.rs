@@ -107,6 +107,10 @@ pub async fn run_worker(
     let mut changes = config.subscribe();
     let mut reconcile_at = tokio::time::Instant::now();
     let mut reconcile_failures = 0u32;
+    // 永久挂起执行的自愈：旧版去重上限挂起在每轮 reconcile 中重新排队
+    // （滚动部署期间旧实例再次挂起的行也会在下一轮收敛）；暂存容量挂起
+    // 则在上限提升后自动接续。
+    let mut staging_limit = 0u64;
     loop {
         let settings = config.get().await.value;
         if !settings.mode.runs_worker() {
@@ -115,6 +119,27 @@ pub async fn run_worker(
                 changed = changes.changed() => if changed.is_err() { return; }
             }
             continue;
+        }
+        if settings.max_staging_mib != staging_limit {
+            match requeue_staging_parked_below(&pool, settings.max_staging_mib).await {
+                Ok(count) => {
+                    staging_limit = settings.max_staging_mib;
+                    if count > 0 {
+                        info!(
+                            event = "AnalyticsSnapshotStagingParkedRecovered",
+                            count,
+                            max_staging_mib = settings.max_staging_mib,
+                            "暂存上限提升，挂起的执行已自动重新排队"
+                        );
+                    }
+                }
+                Err(error) => warn!(
+                    event = "AnalyticsSnapshotParkedRecoveryError",
+                    operation = "requeue_staging_parked",
+                    reason = %error,
+                    "暂存挂起执行重新排队失败，稍后重试"
+                ),
+            }
         }
         if tokio::time::Instant::now() >= reconcile_at {
             if let Err(error) = reconcile(&pool).await {
@@ -219,6 +244,17 @@ async fn reconcile(pool: &Pool) -> Result<(), String> {
          WHERE o.status = 'completed' AND EXISTS(SELECT 1 FROM analytics_discovery_fact f WHERE f.execution_id = o.execution_id AND f.first_observed_at IS NULL);",
         &[],
     ).await.map_err(|error| crate::logs::write::error_chain_diagnostics(&error))?;
+    // 旧版去重上限（新代码不再产生该错误）永久挂起的执行每轮自动重新排队，
+    // 升级后无需手动 SQL；只影响 pending+infinity 行，不覆盖运行中的领取。
+    let legacy_requeued = transaction
+        .execute(
+            "UPDATE analytics_outbox SET available_at = NOW(), attempts = 0, updated_at = NOW() \
+             WHERE status = 'pending' AND available_at = 'infinity'::TIMESTAMPTZ \
+             AND last_error LIKE $1 || '%';",
+            &[&LEGACY_DEDUP_LIMIT_PREFIX],
+        )
+        .await
+        .map_err(|error| crate::logs::write::error_chain_diagnostics(&error))?;
     // Membership is immutable until published, even when its last execution was
     // deleted. An empty membership table alone must not admit new arrivals.
     if inserted > 0
@@ -248,7 +284,15 @@ async fn reconcile(pool: &Pool) -> Result<(), String> {
     transaction
         .commit()
         .await
-        .map_err(|error| crate::logs::write::error_chain_diagnostics(&error))
+        .map_err(|error| crate::logs::write::error_chain_diagnostics(&error))?;
+    if legacy_requeued > 0 {
+        info!(
+            event = "AnalyticsSnapshotLegacyParkedRecovered",
+            count = legacy_requeued,
+            "旧版去重上限挂起的执行已自动重新排队"
+        );
+    }
+    Ok(())
 }
 
 async fn publish_build(transaction: &deadpool_postgres::Transaction<'_>) -> Result<(), String> {
@@ -968,6 +1012,57 @@ fn snapshot_retry_seconds(attempts: i32) -> i64 {
     (30_i64.saturating_mul(2_i64.saturating_pow(attempts.clamp(1, 7) as u32 - 1))).min(1800)
 }
 
+/// 旧版内存去重上限的错误前缀；新版改为临时表分批去重，不再产生该错误。
+pub(crate) const LEGACY_DEDUP_LIMIT_PREFIX: &str = "statistics_resource_limit: 执行去重集合超过";
+/// 暂存容量上限的错误前缀；调大 max_staging_mib 后应自动接续。
+pub(crate) const STAGING_LIMIT_PREFIX: &str = "statistics_resource_limit: 统计暂存空间超过";
+
+/// 重新排队被资源上限永久挂起（`available_at = infinity`）的执行。
+///
+/// 只影响 pending 且挂起的行，不覆盖正在运行的领取；保留 last_error 供排查，
+/// 处理成功后由完成路径清除。返回重新排队的行数。
+/// worker 的周期扫描在 reconcile 事务内执行同款 SQL；此入口供测试与报告层复用。
+#[cfg(test)]
+pub(crate) async fn requeue_parked_executions(
+    pool: &Pool,
+    error_prefix: &str,
+) -> Result<u64, String> {
+    let connection = pool
+        .get()
+        .await
+        .map_err(|error| crate::logs::write::error_chain_diagnostics(&error))?;
+    let changed = connection
+        .execute(
+            "UPDATE analytics_outbox SET available_at = NOW(), attempts = 0, updated_at = NOW() \
+             WHERE status = 'pending' AND available_at = 'infinity'::TIMESTAMPTZ \
+             AND last_error LIKE $1 || '%';",
+            &[&error_prefix],
+        )
+        .await
+        .map_err(|error| crate::logs::write::error_chain_diagnostics(&error))?;
+    Ok(changed)
+}
+
+/// 重新排队在更低暂存上限下被挂起的执行（错误信息记录了挂起时的上限）。
+/// 当前上限未变时不会反复重试容量不足的执行；调大后自动接续，无需手动 SQL。
+async fn requeue_staging_parked_below(pool: &Pool, limit_mib: u64) -> Result<u64, String> {
+    let connection = pool
+        .get()
+        .await
+        .map_err(|error| crate::logs::write::error_chain_diagnostics(&error))?;
+    let changed = connection
+        .execute(
+            "UPDATE analytics_outbox SET available_at = NOW(), attempts = 0, updated_at = NOW() \
+             WHERE status = 'pending' AND available_at = 'infinity'::TIMESTAMPTZ \
+             AND last_error LIKE $1 || ' %' \
+             AND substring(last_error from '超过 ([0-9]+) MiB')::BIGINT < $2;",
+            &[&STAGING_LIMIT_PREFIX, &(limit_mib as i64)],
+        )
+        .await
+        .map_err(|error| crate::logs::write::error_chain_diagnostics(&error))?;
+    Ok(changed)
+}
+
 async fn fail_execution(
     pool: &Pool,
     context: &ExecutionContext,
@@ -1464,5 +1559,113 @@ mod tests {
         assert_eq!(first.timestamp_millis(), 1_788_266_400_000_i64 - 5000);
         let state = fixture.state.lock().unwrap();
         assert_eq!(state.closed_pit_ids, ["pit-3", "pit-6"]);
+    }
+
+    /// 永久挂起（available_at=infinity）的执行按错误类别自动重新排队，
+    /// 不覆盖运行中/已完成/普通待重试的行。
+    #[tokio::test]
+    #[ignore = "requires ANALYTICS_TEST_DATABASE_URL pointing at a disposable PostgreSQL instance"]
+    async fn parked_executions_requeue_by_error_class_and_staging_limit() {
+        let config: tokio_postgres::Config = std::env::var("ANALYTICS_TEST_DATABASE_URL")
+            .expect("test database URL")
+            .parse()
+            .unwrap();
+        let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+        let pool = Pool::builder(manager).max_size(1).build().unwrap();
+        let client = pool.get().await.unwrap();
+        let schema = include_str!("../source/database/init.sql");
+        let start = schema
+            .find("CREATE TABLE IF NOT EXISTS analytics_outbox")
+            .unwrap();
+        let end = schema[start..].find("-- 表 session").unwrap() + start;
+        client
+            .batch_execute(
+                "SET search_path TO pg_temp; \
+                 CREATE TEMP TABLE scan_task(id INT PRIMARY KEY, task_kind TEXT); \
+                 CREATE TEMP TABLE scan_task_execution(id INT PRIMARY KEY, execution_status TEXT, task_id INT); \
+                 INSERT INTO scan_task VALUES (1, 'ip'); \
+                 INSERT INTO scan_task_execution VALUES (1,'succeeded',1),(2,'succeeded',1),(3,'succeeded',1),(4,'succeeded',1),(5,'succeeded',1);",
+            )
+            .await
+            .unwrap();
+        client
+            .batch_execute(&schema[start..end].replace(
+                "CREATE TABLE IF NOT EXISTS",
+                "CREATE TEMP TABLE IF NOT EXISTS",
+            ))
+            .await
+            .unwrap();
+        client
+            .batch_execute(
+                "INSERT INTO analytics_outbox(execution_id, status, available_at, attempts, last_error) VALUES \
+                 (1, 'pending', 'infinity', 1, 'statistics_resource_limit: 执行去重集合超过 200000 条，需拆分扫描任务或离线处理'), \
+                 (2, 'pending', 'infinity', 1, 'statistics_resource_limit: 统计暂存空间超过 4096 MiB，请检查容量并调整限制'), \
+                 (3, 'pending', NOW() + INTERVAL '1 hour', 2, 'timeout'), \
+                 (4, 'running', 'infinity', 1, 'statistics_resource_limit: 执行去重集合超过 200000 条'), \
+                 (5, 'completed', 'infinity', 1, 'statistics_resource_limit: 执行去重集合超过 200000 条');"
+            )
+            .await
+            .unwrap();
+        drop(client);
+
+        // 旧版去重挂起：仅重新排队 pending+infinity 的匹配行。
+        let requeued = requeue_parked_executions(&pool, LEGACY_DEDUP_LIMIT_PREFIX)
+            .await
+            .unwrap();
+        assert_eq!(requeued, 1);
+        // 暂存挂起：当前上限未提升时不重试；提升后自动接续。
+        assert_eq!(requeue_staging_parked_below(&pool, 4096).await.unwrap(), 0);
+        assert_eq!(requeue_staging_parked_below(&pool, 8192).await.unwrap(), 1);
+
+        let client = pool.get().await.unwrap();
+        let rows = client
+            .query(
+                "SELECT execution_id, status, available_at <= NOW() AS due, attempts, last_error \
+                 FROM analytics_outbox ORDER BY execution_id;",
+                &[],
+            )
+            .await
+            .unwrap();
+        let due = |id: i32| -> bool {
+            rows.iter()
+                .find(|r| r.get::<_, i32>(0) == id)
+                .map(|r| r.get(2))
+                .unwrap()
+        };
+        assert!(due(1), "旧版挂起应重新排队");
+        assert!(due(2), "暂存上限提升后应重新排队");
+        assert!(!due(3), "普通延迟重试不受影响");
+        assert!(!due(4), "运行中的领取不被覆盖");
+        assert!(!due(5), "已完成行不受影响");
+        let first = rows.iter().find(|r| r.get::<_, i32>(0) == 1).unwrap();
+        assert_eq!(first.get::<_, i32>(3), 0, "重新排队重置退避");
+        assert!(
+            first.get::<_, Option<String>>(4).is_some(),
+            "last_error 保留供排查"
+        );
+        assert_eq!(rows[3].get::<_, String>(1), "running");
+        assert_eq!(rows[4].get::<_, String>(1), "completed");
+
+        // 滚动部署：旧实例把执行再次挂起后，下一轮 reconcile 应自动收敛，
+        // 不依赖进程重启。
+        client
+            .execute(
+                "UPDATE analytics_outbox SET status='pending', available_at='infinity'::TIMESTAMPTZ WHERE execution_id=1;",
+                &[],
+            )
+            .await
+            .unwrap();
+        drop(client);
+        reconcile(&pool).await.unwrap();
+        let client = pool.get().await.unwrap();
+        let due: bool = client
+            .query_one(
+                "SELECT available_at <= NOW() FROM analytics_outbox WHERE execution_id=1;",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(due, "reconcile 应周期性地重新排队旧版挂起");
     }
 }
