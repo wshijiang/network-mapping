@@ -113,9 +113,9 @@ pub enum SourceCommand {
         fields: Option<Vec<String>>,
         #[arg(long, value_enum, default_value = "follow-local")]
         pagination: CliPagination,
-        #[arg(long, default_value = "100", value_parser = clap::value_parser!(u32).range(1..=1000))]
+        #[arg(long, default_value = "10", value_parser = clap::value_parser!(u32).range(1..=1000))]
         page_size: u32,
-        #[arg(long, default_value = "5", value_parser = clap::value_parser!(u32).range(1..=50))]
+        #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..=50))]
         max_pages: u32,
         /// 时间窗单独设置（1..=60 天）
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=60), conflicts_with_all = ["window_follow", "window_none"])]
@@ -475,7 +475,7 @@ async fn wait_run(pool: &Pool, run_id: Uuid) -> CliResult {
     loop {
         let run = storage::get_run(pool, run_id).await?.ok_or("run 不存在")?;
         match run.status.as_str() {
-            "completed" | "partial" | "failed" | "cancelled" => {
+            "completed" | "partial" | "failed" | "cancelled" | "unsupported" => {
                 println!(
                     "run {}：fetched={} merged={} persisted={}",
                     run.status, run.total_fetched, run.total_merged, run.total_persisted
@@ -698,9 +698,12 @@ async fn execute_source(command: &SourceCommand, pool: &Pool, encrypt_key: &str)
             let started = std::time::Instant::now();
             let adapter = Adapter::for_kind(source.kind);
             match adapter.probe(&client, &credential).await {
-                Ok(mut capabilities) => {
+                Ok(capabilities) => {
+                    // 回显与入库同样走白名单，避免 CLI 泄露手机号/token 等。
+                    let mut capabilities = storage::public_capabilities(source.kind, &capabilities);
                     capabilities["quota_updated_at"] = json!(chrono::Utc::now().timestamp_millis());
-                    let _ = storage::update_capabilities(pool, *id, &capabilities).await;
+                    let _ =
+                        storage::update_capabilities(pool, *id, source.kind, &capabilities).await;
                     let value = json!({
                         "ok": true, "latency_ms": started.elapsed().as_millis() as i64,
                         "capabilities": capabilities,

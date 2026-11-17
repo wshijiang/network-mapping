@@ -162,10 +162,10 @@ fn default_proxy_mode() -> String {
     "system".into()
 }
 fn default_page_size() -> u32 {
-    100
+    10
 }
 fn default_max_pages() -> u32 {
-    5
+    1
 }
 fn default_window_days() -> u32 {
     30
@@ -381,12 +381,14 @@ pub(crate) async fn test_source(
         let client =
             adapters::http_client(&effective, Duration::from_secs(15)).map_err(|e| e.code)?;
         let adapter = Adapter::for_kind(source.kind);
-        let mut capabilities = adapter
+        let probed = adapter
             .probe(&client, &credential)
             .await
             .map_err(|e| e.code)?;
+        // 最小暴露面：账号接口附带的手机号/邮箱/token 等不入库也不回显。
+        let mut capabilities = storage::public_capabilities(source.kind, &probed);
         capabilities["quota_updated_at"] = json!(chrono::Utc::now().timestamp_millis());
-        storage::update_capabilities(pool.get_ref(), id, &capabilities)
+        storage::update_capabilities(pool.get_ref(), id, source.kind, &capabilities)
             .await
             .map_err(|e| e.to_string())?;
         Ok::<Value, String>(capabilities)

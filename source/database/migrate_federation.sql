@@ -12,8 +12,8 @@ CREATE TABLE IF NOT EXISTS federation_source (
     proxy_ciphertext BYTEA,
     fields           JSONB NOT NULL DEFAULT '["ip","domain","port","service","tech"]'::JSONB,
     pagination_mode  TEXT NOT NULL DEFAULT 'follow_local' CHECK (pagination_mode IN ('follow_local','fixed')),
-    page_size        INT NOT NULL DEFAULT 100 CHECK (page_size BETWEEN 1 AND 1000),
-    max_pages        INT NOT NULL DEFAULT 5 CHECK (max_pages BETWEEN 1 AND 50),
+    page_size        INT NOT NULL DEFAULT 10 CHECK (page_size BETWEEN 1 AND 1000),
+    max_pages        INT NOT NULL DEFAULT 1 CHECK (max_pages BETWEEN 1 AND 50),
     window_mode      TEXT NOT NULL DEFAULT 'follow' CHECK (window_mode IN ('follow','none','custom')),
     window_days      INT NOT NULL DEFAULT 30 CHECK (window_days BETWEEN 1 AND 60),
     timeout_seconds  INT NOT NULL DEFAULT 15 CHECK (timeout_seconds BETWEEN 3 AND 120),
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS federation_run (
     trigger          TEXT NOT NULL CHECK (trigger IN ('search','manual')),
     mode             TEXT NOT NULL CHECK (mode IN ('async','blocking')),
     status           TEXT NOT NULL DEFAULT 'pending'
-                     CHECK (status IN ('pending','running','completed','partial','failed','cancelled')),
+                     CHECK (status IN ('pending','running','completed','partial','failed','cancelled','unsupported')),
     requested_by     INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     window_days      INT NOT NULL DEFAULT 30 CHECK (window_days BETWEEN 1 AND 60),
     local_state      TEXT NOT NULL DEFAULT 'unknown' CHECK (local_state IN ('empty','stale','fresh','unknown')),
@@ -70,9 +70,36 @@ CREATE INDEX IF NOT EXISTS idx_federation_run_lease
 
 -- 预留系统扫描器身份：联测观察以该扫描器名义经 result_ingest 写入。
 -- 由 worker 启动时确保存在（runtime_token_hash 由服务端密钥派生），扫描器管理列表排除此行。
+-- 未派发 token 用 NULL（与应用代码一致）：runtime_token_hash 为 UNIQUE，空串会与其他系统扫描器冲突。
+-- 旧库若已用空串占位，幂等归一为 NULL，避免后续种子/重注册再次撞约束。
+UPDATE scanner_info SET runtime_token_hash = NULL
+WHERE scanner_id IN ('00000000-0000-7000-8000-00000000d1a0', '00000000-0000-7000-8000-00000000fed0')
+  AND runtime_token_hash = '';
 INSERT INTO scanner_info (name, scanner_id, create_user, runtime_token_hash, is_enable, is_run, remark, create_time, register_time)
-VALUES ('联测', '00000000-0000-7000-8000-00000000fed0', 0, '', true, false, '__system_federation__', NOW(), NOW())
+VALUES ('联测', '00000000-0000-7000-8000-00000000fed0', 0, NULL, true, false, '__system_federation__', NOW(), NOW())
 ON CONFLICT (scanner_id) DO NOTHING;
+
+-- 分页默认值收敛（避免一次性消耗过多平台额度）：旧库列默认值幂等更新，已有数据源配置不变。
+ALTER TABLE federation_source ALTER COLUMN page_size SET DEFAULT 10;
+ALTER TABLE federation_source ALTER COLUMN max_pages SET DEFAULT 1;
+
+-- run 状态：旧库的 federation_run_status_check 可能不含 unsupported（全部源不支持该语句），
+-- 启动时幂等补齐，避免“未查询”run 被数据库约束拒绝。
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = to_regclass('federation_run')
+          AND conname = 'federation_run_status_check'
+          AND POSITION('unsupported' IN pg_get_constraintdef(oid)) = 0
+    ) THEN
+        ALTER TABLE federation_run DROP CONSTRAINT federation_run_status_check;
+        ALTER TABLE federation_run ADD CONSTRAINT federation_run_status_check CHECK (status IN (
+            'pending','running','completed','partial','failed','cancelled','unsupported'
+        ));
+    END IF;
+END $$;
 
 -- 联测审计事件分类：旧库的 audit_event_category_check 可能不含 federation，
 -- 启动时幂等补齐，避免联测审计写入被数据库约束拒绝。
