@@ -124,6 +124,119 @@ async fn due_window_filters_256_running_targets_before_refilling() {
 
 #[actix_web::test]
 #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn refill_jumps_the_mandatory_zero_exclusion_in_one_tick() {
+    let f = Fixture::new().await;
+    f.scanner().await;
+    let policy = crate::config::AutomaticTargetConfig {
+        enabled: true,
+        authorized_cidrs: vec!["0.0.0.0/0".into()],
+        pending_low_watermark: 1,
+        pending_high_watermark: 2,
+        common_ports: "443".into(),
+        ..Default::default()
+    };
+    let service = crate::target_generated::AutomaticTargetService::new(policy).unwrap();
+    // Cursor starts at 0 inside the mandatory 0.0.0.0/8 exclusion; a single
+    // refill must jump the whole block instead of stalling for hours.
+    let report = service.refill(&f.pool).await.unwrap();
+    assert_eq!(report.generated, 2);
+    let c = f.pool.get().await.unwrap();
+    let targets: Vec<String> = c
+        .query(
+            "SELECT task_target::TEXT[] AS targets FROM scan_task WHERE task_status='pending' ORDER BY task_target",
+            &[],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .flat_map(|r| r.get::<_, Vec<String>>("targets"))
+        .collect();
+    assert_eq!(targets, vec!["1.0.0.0/24", "1.0.1.0/24"]);
+    let cursor: String = c
+        .query_one(
+            "SELECT cursor->>'position' FROM automatic_target_state WHERE strategy='sequential_subnet'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(cursor, "65538");
+    drop(c);
+    f.finish().await;
+}
+
+#[actix_web::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+async fn manual_cursor_update_moves_generation_and_writes_audit() {
+    let f = Fixture::new().await;
+    f.scanner().await;
+    let policy = crate::config::AutomaticTargetConfig {
+        enabled: true,
+        authorized_cidrs: vec!["0.0.0.0/0".into()],
+        pending_low_watermark: 1,
+        pending_high_watermark: 2,
+        common_ports: "443".into(),
+        ..Default::default()
+    };
+    let service = crate::target_generated::AutomaticTargetService::new(policy).unwrap();
+    let user = crate::admin::UserBaseI {
+        id: f.owner,
+        username: "routing".into(),
+        role: 1,
+        email: None,
+        limit_login: false,
+        enable_2fa: false,
+    };
+    let audit = crate::audit::AuditContext::cli("routing-test");
+    let update = service
+        .set_cursor(&f.pool, "ipv4", 65_538, &audit, &user)
+        .await
+        .unwrap();
+    assert_eq!(update.target, "1.0.2.0/24");
+    assert_eq!(update.previous_position, json!(0));
+    // Out-of-range positions and unknown families are rejected.
+    assert!(
+        service
+            .set_cursor(&f.pool, "ipv4", 1 << 24, &audit, &user)
+            .await
+            .is_err()
+    );
+    assert!(
+        service
+            .set_cursor(&f.pool, "ipv5", 0, &audit, &user)
+            .await
+            .is_err()
+    );
+
+    let report = service.refill(&f.pool).await.unwrap();
+    assert_eq!(report.generated, 2);
+    let c = f.pool.get().await.unwrap();
+    let targets: Vec<String> = c
+        .query(
+            "SELECT task_target::TEXT[] AS targets FROM scan_task WHERE task_status='pending' ORDER BY task_target",
+            &[],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .flat_map(|r| r.get::<_, Vec<String>>("targets"))
+        .collect();
+    assert_eq!(targets, vec!["1.0.2.0/24", "1.0.3.0/24"]);
+    let audited: i64 = c
+        .query_one(
+            "SELECT COUNT(*) FROM audit_event WHERE category='automatic_target' AND action='cursor.manual_update' AND actor_id=$1",
+            &[&f.owner.to_string()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(audited, 1);
+    drop(c);
+    f.finish().await;
+}
+
+#[actix_web::test]
+#[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
 async fn dns_preview_and_creation_require_the_same_dual_stack_scanner() {
     use actix_web::{App, HttpMessage, dev::Service, http::StatusCode, test, web};
     let f = Fixture::new().await;

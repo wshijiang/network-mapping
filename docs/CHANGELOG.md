@@ -4,6 +4,10 @@
 
 ## 未发布
 
+- **自动目标生成 · 排除段跳跃与游标延续**：修复修改 `common_ports` 等策略字段后自动任务长时间停止生成目标的问题。原实现在策略哈希变化时把顺序游标重置为零，随后以每轮最多 256 个子网的速度爬行强制排除段 `0.0.0.0/8`（65536 个 `/24`，约 2 小时），期间不生成任务且无日志。现在游标命中排除网段时整段跳过（含跨授权池边界与 IPv6），并记录 `AutomaticTargetExcludedBlockSkipped` 日志；策略变更保留游标覆盖位置（按新子网空间取模归一），不再归零重扫已覆盖地址。详见[双栈与自动目标](DUAL_STACK_SCANNING.md#生成行为)。
+
+- **自动目标生成 · 手动游标调整**：管理员可在「设置 → 运行时配置 → 自动扫描策略」的生成游标卡片，或调用 `POST /api/automatic-target/cursor`，把生成游标移动到授权范围内任意位置，支持直接输入位置序号或任务 CIDR（自动换算），用于从指定网段继续扫描、跳过已覆盖区域或故障恢复后对齐进度。状态接口新增游标指向的下一个任务 CIDR（`next_target`）。游标写入与生成器补充事务共用行锁，下一个生成周期即从新位置继续，不立即创建或删除任务；越界、超出授权范围、前缀不一致或未知地址族返回 400 及中文原因，成功调整写入审计事件（`automatic_target` / `cursor.manual_update`，含操作者与新旧位置）。详见[双栈与自动目标](DUAL_STACK_SCANNING.md#手动调整生成游标)。
+
 - **技术栈识别 · 目录扩充**：「Web 技术栈」更名为「技术栈」（仅展示标签，响应字段 `web` 与搜索 DSL `tech` 保持不变）。内嵌规则由 88 条 / 53 种扩充至 **136 条 / 100 种**（规则版本 `2026-11-16.7`，修订 7），新增 Tomcat、Undertow、Kong、APISIX、Envoy、Varnish、F5 BIG-IP、Cloudflare、CloudFront、Django、Rails、CodeIgniter、Phusion Passenger、Magento、PrestaShop、OpenCart、TYPO3、Roundcube、Zimbra、Kibana、Prometheus、SonarQube、Portainer、Nacos、Zabbix、Gitea、CouchDB、InfluxDB、Neo4j、pgAdmin、RedisInsight、Svelte、Preact、Material UI、Chakra UI、Naive UI、Arco Design、Lodash、Day.js、Socket.IO、Matomo、Hugo、Jekyll、Hexo、MkDocs、Redoc、GraphiQL 等；首次启用页面标题与 HTML class 证据来源，并修正 Apache 对 «Apache Tomcat» / «Apache-Coyote» 的误判。提升修订后自动回填历史证据，无需重新扫描目标。详见[技术栈目录](WEB_TECHNOLOGY_CATALOG.md)。
 
 - **操作系统识别 · 被动增强**：扩充被动发行版签名（Fedora、RHEL、Rocky Linux、AlmaLinux、Alpine、openSUSE/SLES、Amazon Linux、Arch、Gentoo、Oracle Linux、Deepin、统信 UOS、麒麟 Kylin、Linux Mint、Kali、OpenWrt），增强 `native_os` / `server_os` 版本提取（跳过引导产品词、识别 `v` 前缀，如 «Debian GNU/Linux 12»→12、«Alpine Linux v3.19»→3.19、«Rocky Linux 9.3»→9.3）。仍只读取已上传的握手字段，不额外探测、不改扫描器；规则版本 `2026-11-16.2`（修订 2）触发历史回填。为未来主动 TCP/IP 指纹预留 `OsEvidence.probe_method` 字段与开发契约（本期不实现探测）。详见[操作系统识别](OS_DETECTION.md)。

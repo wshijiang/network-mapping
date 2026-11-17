@@ -200,6 +200,7 @@ fn scanning(cfg: &mut web::ServiceConfig) {
     cfg.service(handlers::scan_routing::placement_preview);
     cfg.service(handlers::scan_routing::report_performance);
     cfg.service(crate::target_generated::automatic_target_status);
+    cfg.service(crate::target_generated::automatic_target_set_cursor);
     cfg.service(handlers::task::create_task);
     cfg.service(handlers::task::create_dns_task);
     cfg.service(handlers::task::get_dns_resolver_presets);
