@@ -4,6 +4,8 @@
 
 ## 未发布
 
+- **扫描上传 · 心跳续租锁超时修复**：修复任务最终批次结果上传期间扫描器心跳偶发 503（`renew_task_lease_failed`，SQLSTATE 55P03）并触发 critical 健康告警的问题。上传确认事务对 `scan_task_execution` 行加 `FOR UPDATE` 锁后，在同一事务内执行搜索目标新鲜度更新（谱系 CTE + GiST 网段连接，生产 pg_stat_statements 均值约 600ms，随 `search_target_state` 增长实测可达 1.3–2s），而心跳续租的 `lock_timeout` 仅 1500ms，等锁超时即返回 503。现将搜索新鲜度更新移入新增的 `search_freshness_outbox` 表，由后台 worker 异步执行：上传确认事务（含 DNS 最终批次）只原子入队，执行行锁持有时间从约 1.7s 降至毫秒级；路由反馈与自动目标历史（防重复生成的刷新门，均为亚毫秒）仍留在原事务内，原子性与防重复生成语义不变。worker 以 `FOR UPDATE SKIP LOCKED` 认领并在同一事务内完成与标记，崩溃自动回滚重领，失败按指数退避（2–256s）重排并记录 `last_error`，任务删除级联清理；新鲜度 UPDATE 单调幂等，同一任务再次成功可重入队推进 `last_success_at`。上传响应同时提速约 1s。新增 `search_freshness_outbox` 表（幂等迁移，升级零行为变化，历史已完成任务无需回填）；新增延迟生效、重入队、失败退避、级联删除 4 个集成测试。
+
 - **搜索 · 情报标注性能**：修复多结果页搜索与资产详情端口列表的情报标注慢查询。原标注查询以 `kind||':'||value = ANY(keys)` 表达式谓词查 `intel_record_state` 视图，key 数稍多（≥13）时规划器对表达式索引选择率估算失真（110 key 估 8.6 万行，实际几十行），翻转为全视图 Hash Join + Sort + 双层 WindowAgg（cost ≈ 368 万）并每次执行触发 JIT，50 条页搜索服务端耗时 500+ms（limit=5 即出现 31→578ms 悬崖），资产详情端口列表（最多约 101 key）同样受累。现改为 `unnest` 拆分 key 后按裸列 `(kind,value)` join 视图，命中既有部分索引 `intel_record_published` 的参数化嵌套循环；视图来源过滤与过期计算语义不变，custom/generic plan 均稳定走索引、无 JIT，**零 DDL**。实测测试环境 `port = 443`：limit=1/5/50 总耗时 27–30/24–30/39–59ms，情报标注 3–6ms；EXPLAIN ANALYZE 110 key 2.5ms、500 key 37ms。搜索成功响应另增 `es_wall_ms`（ES 调用墙钟）与 `intel_took_ms`（情报标注累计）分阶段耗时，标注查询失败降级补 `IntelAnnotationUnavailable` 警告日志；新增多 key 批量标注回归测试（批量与逐 key 等价、rank 截断、三态、ASN 上下文不污染）。详见[资产搜索语法与 API](SEARCH_SYNTAX.md#82-成功响应)。
 
 - **搜索 · 耗时展示**：`/api/search/v2` 成功响应新增 `took_ms`（服务端处理本次搜索的总耗时，毫秒，含 Elasticsearch 查询、情报标注与联测合流）与 `es_took_ms`（本次搜索触发的全部 Elasticsearch 查询自报 `took` 之和，含 `has_endpoint`/`domain` 扩展解析查询），搜索页结果摘要展示耗时，悬停可见 Elasticsearch 查询耗时，便于用户判断慢查询来自索引还是服务端附加处理。详见[资产搜索语法与 API](SEARCH_SYNTAX.md#82-成功响应)。

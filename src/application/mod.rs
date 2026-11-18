@@ -528,6 +528,10 @@ pub async fn run(args: Clis) -> io::Result<()> {
             elasticsearch_service.clone(),
         ),
     );
+    background.spawn(
+        "search-freshness",
+        crate::target_generated::search::run_freshness_worker(db_pool.clone()),
+    );
 
     background.spawn_draining(
         "notification-worker",

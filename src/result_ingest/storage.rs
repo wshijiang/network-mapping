@@ -846,7 +846,10 @@ async fn save_scanner_results_inner(
         target_generated::history::record_result(&transaction, task_db_id)
             .await
             .map_err(scanner_result_database_error)?;
-        target_generated::search::record_success(&transaction, task_db_id)
+        // Search freshness is applied by the outbox worker: its SQL is slow and
+        // would otherwise keep the execution row lock past the heartbeat's
+        // 1500ms lease lock_timeout (55P03 -> 503 renew_task_lease_failed).
+        target_generated::search::enqueue_freshness(&transaction, task_db_id)
             .await
             .map_err(scanner_result_database_error)?;
         stage.finish(true);
