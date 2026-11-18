@@ -153,6 +153,7 @@ async fn run_export(
                 limit,
                 offset,
                 sort,
+                true,
             )
             .await?;
         matched_total = Some(page.total);
@@ -161,7 +162,7 @@ async fn run_export(
             exported += 1;
         }
     } else {
-        let pit_id = elasticsearch.open_search_pit().await?;
+        let mut pit_id = elasticsearch.open_search_pit().await?;
         let result: Result<Option<i64>> = async {
             let mut search_after: Option<serde_json::Value> = None;
             let mut total: Option<i64> = None;
@@ -169,7 +170,7 @@ async fn run_export(
                 if should_stop(pool, task.id).await? {
                     return Ok(None);
                 }
-                let (items, batch_total, next) = elasticsearch
+                let (items, batch_total, next, refreshed_pit) = elasticsearch
                     .search_export_page(
                         &pit_id,
                         &task.scope_type,
@@ -181,6 +182,7 @@ async fn run_export(
                         total.is_none(),
                     )
                     .await?;
+                pit_id = refreshed_pit;
                 if total.is_none() {
                     if batch_total > config.max_rows as i64 {
                         return Err(format!(

@@ -13,7 +13,8 @@
 - **单一执行者**：Web 与 CLI 都只在 PostgreSQL 创建任务（`data_export_task`），由服务器进程内的导出 worker 认领执行（租约模式，与数据导入一致）。服务器离线时任务保持待执行，启动后自动继续；租约过期的运行中任务从头重跑（导出只读、幂等）。
 - **与搜索同口径**：同一搜索 DSL（`parse_and_compile_elasticsearch`）、同一排序定义。创建任务时**快照数据范围**（管理员 `global`，普通用户 `user` 级），后台执行期间角色变化不影响结果口径。
 - **只读本地索引**：导出查询 `current_endpoint` 索引，**不触发联测**。联测完成的数据本就自动入库，会被后续导出自然覆盖；搜索页展示态中尚未入库的联测端点不在导出范围内。匹配条数以本地索引 count 为准（`POST /api/data-export/preview`），与搜索页 total（可能含联测合并新增）可能有差异。
-- **突破 10k 浏览窗口**：搜索页分页受 `offset + limit ≤ 10000` 限制；「全部」导出使用 Elasticsearch **PIT + search_after** 分批遍历（排序含 `endpoint_key` tie-breaker，全序稳定），不受该窗口限制，行数上限由 `max_rows` 约束。
+- **突破 10k 浏览窗口**：搜索页分页受 `offset + limit ≤ 10000` 限制；「全部」导出使用 Elasticsearch **PIT + search_after** 分批遍历（排序含 `endpoint_key` tie-breaker，全序稳定），不受该窗口限制，行数上限由 `max_rows` 约束。PIT id 若被 ES 轮换，逐批跟随最新 id 并在结束时清理。
+- **拒绝不完整结果**：「本页」与「全部」导出均校验 ES 响应的 `timed_out` 与失败分片（`allow_partial_search_results=false` + 响应校验），不完整响应直接使任务失败，不会写出半份 CSV 后标记完成。
 - **流式写入**：逐批拉取、逐行追加写文件，内存占用与结果规模无关；边写边累计 SHA-256 与文件大小。
 
 ## 导出范围与字段

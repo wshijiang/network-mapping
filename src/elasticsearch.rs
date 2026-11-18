@@ -2076,11 +2076,12 @@ impl ElasticsearchService {
         } else {
             ("user", user_id)
         };
-        self.search_with_scope(scope_type, scope_id, filter, limit, offset, sort)
+        self.search_with_scope(scope_type, scope_id, filter, limit, offset, sort, false)
             .await
     }
 
     /// 与 `search` 相同，但直接使用给定的数据范围（后台导出任务使用创建时快照）。
+    /// `reject_partial` 为 true 时拒绝超时/失败分片的不完整响应（导出不得写半份数据）。
     pub(crate) async fn search_with_scope(
         &self,
         scope_type: &str,
@@ -2089,6 +2090,7 @@ impl ElasticsearchService {
         limit: i64,
         offset: i64,
         sort: SearchSort,
+        reject_partial: bool,
     ) -> Result<ElasticsearchSearchPage, String> {
         if !self.can_read() {
             return Err("Elasticsearch 搜索读路径尚未就绪".to_owned());
@@ -2128,6 +2130,9 @@ impl ElasticsearchService {
                 return Err(message);
             }
         };
+        if reject_partial {
+            validate_scan_search_response(&result)?;
+        }
         let total = result
             .pointer("/hits/total/value")
             .and_then(Value::as_i64)
@@ -2220,7 +2225,7 @@ impl ElasticsearchService {
     }
 
     /// PIT + search_after 分批遍历（排序含 endpoint_key tie-breaker，全序稳定）。
-    /// 返回 (端点, total, 下一页 search_after)；search_after 为 None 表示已到末尾。
+    /// 返回 (端点, total, 下一页 search_after, 最新 pit_id)；search_after 为 None 表示已到末尾。
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn search_export_page(
         &self,
@@ -2232,7 +2237,7 @@ impl ElasticsearchService {
         search_after: Option<&Value>,
         size: i64,
         track_total: bool,
-    ) -> Result<(Vec<ElasticsearchSearchItem>, i64, Option<Value>), String> {
+    ) -> Result<(Vec<ElasticsearchSearchItem>, i64, Option<Value>, String), String> {
         let mut body = json!({
             "size": size,
             "track_total_hits": track_total,
@@ -2273,9 +2278,15 @@ impl ElasticsearchService {
             .and_then(Value::as_array)
             .ok_or_else(|| "Elasticsearch 导出响应缺少 hits.hits".to_owned())?;
         let next = hits.last().and_then(|hit| hit.get("sort")).cloned();
+        // ES 可能在每次 PIT 搜索时轮换 pit_id；后续批次与清理必须使用最新 id。
+        let refreshed_pit = result
+            .get("pit_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| pit_id.to_owned());
         let items = parse_search_hits(hits)?;
         self.mark_success();
-        Ok((items, total, next))
+        Ok((items, total, next, refreshed_pit))
     }
 
     pub(crate) async fn close_search_pit(&self, id: &str) {
