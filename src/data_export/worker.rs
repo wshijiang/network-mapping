@@ -99,8 +99,15 @@ async fn execute_task(
     let fields = fields::resolve_keys(&keys)?;
     let ctx = FormatCtx::new(timezone);
     let sort = SearchSort::parse(Some(&task.sort_field), Some(&task.sort_order))?;
+    // 导出不回显 ES 耗时；扩展查询 took 累加后丢弃。
+    let mut es_took_ms = 0;
     let filter = elasticsearch
-        .resolve_search_filter(&task.scope_type, task.scope_id, task.filter.clone())
+        .resolve_search_filter(
+            &task.scope_type,
+            task.scope_id,
+            task.filter.clone(),
+            &mut es_took_ms,
+        )
         .await?;
     tokio::fs::create_dir_all(&config.directory).await?;
     let path = config.directory.join(format!("{}.csv", task.id));

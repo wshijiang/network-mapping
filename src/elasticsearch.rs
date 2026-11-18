@@ -330,6 +330,8 @@ pub(crate) struct ElasticsearchSearchItem {
 pub(crate) struct ElasticsearchSearchPage {
     pub(crate) items: Vec<ElasticsearchSearchItem>,
     pub(crate) total: i64,
+    /// Elasticsearch 自报的查询耗时累加（`took`，毫秒；含 has_endpoint/domain 扩展查询）。
+    pub(crate) took_ms: i64,
 }
 
 #[cfg(test)]
@@ -452,7 +454,8 @@ impl ElasticsearchService {
         scope_id: i32,
         filter: Value,
     ) -> Result<Value, String> {
-        self.resolve_has_endpoint_filters(scope_type, scope_id, filter)
+        let mut es_took_ms = 0;
+        self.resolve_has_endpoint_filters(scope_type, scope_id, filter, &mut es_took_ms)
             .await
     }
     pub fn new(config: ElasticsearchConfig) -> Result<Self, Box<dyn std::error::Error>> {
@@ -2095,8 +2098,9 @@ impl ElasticsearchService {
         if !self.can_read() {
             return Err("Elasticsearch 搜索读路径尚未就绪".to_owned());
         }
+        let mut es_took_ms = 0;
         let filter = self
-            .resolve_search_filter(scope_type, scope_id, filter)
+            .resolve_search_filter(scope_type, scope_id, filter, &mut es_took_ms)
             .await?;
         let body = json!({
             "from": offset,
@@ -2137,26 +2141,34 @@ impl ElasticsearchService {
             .pointer("/hits/total/value")
             .and_then(Value::as_i64)
             .unwrap_or(0);
+        // 主查询与 has_endpoint/domain 扩展查询的 ES took 累加，避免扩展耗时被误读为服务端开销。
+        es_took_ms += result.get("took").and_then(Value::as_i64).unwrap_or(0);
+        let took_ms = es_took_ms;
         let hits = result
             .pointer("/hits/hits")
             .and_then(Value::as_array)
             .ok_or_else(|| "Elasticsearch 搜索响应缺少 hits.hits".to_owned())?;
         let items = parse_search_hits(hits)?;
         self.mark_success();
-        Ok(ElasticsearchSearchPage { items, total })
+        Ok(ElasticsearchSearchPage {
+            items,
+            total,
+            took_ms,
+        })
     }
 
-    /// has_endpoint / domain 过滤解析（搜索与导出共用）。
+    /// has_endpoint / domain 过滤解析（搜索与导出共用）；扩展查询的 ES took 累加进 `es_took_ms`。
     pub(crate) async fn resolve_search_filter(
         &self,
         scope_type: &str,
         scope_id: i32,
         filter: Value,
+        es_took_ms: &mut i64,
     ) -> Result<Value, String> {
         let filter = self
-            .resolve_has_endpoint_filters(scope_type, scope_id, filter)
+            .resolve_has_endpoint_filters(scope_type, scope_id, filter, es_took_ms)
             .await?;
-        self.resolve_domain_filters(filter).await
+        self.resolve_domain_filters(filter, es_took_ms).await
     }
 
     /// 匹配条数预览（导出 modal 与创建校验用）。
@@ -2169,8 +2181,9 @@ impl ElasticsearchService {
         if !self.can_read() {
             return Err("Elasticsearch 搜索读路径尚未就绪".to_owned());
         }
+        let mut es_took_ms = 0;
         let filter = self
-            .resolve_search_filter(scope_type, scope_id, filter)
+            .resolve_search_filter(scope_type, scope_id, filter, &mut es_took_ms)
             .await?;
         let body = json!({
             "size": 0,
@@ -2308,6 +2321,7 @@ impl ElasticsearchService {
         scope_type: &str,
         scope_id: i32,
         filter: Value,
+        es_took_ms: &mut i64,
     ) -> Result<Value, String> {
         let mut endpoint_filters = Vec::new();
         collect_has_endpoint_filters(&filter, &mut endpoint_filters);
@@ -2347,6 +2361,7 @@ impl ElasticsearchService {
                         },
                     )
                     .await?;
+                *es_took_ms += response.get("took").and_then(Value::as_i64).unwrap_or(0);
                 let buckets = response
                     .pointer("/aggregations/addresses/buckets")
                     .and_then(Value::as_array)
@@ -2374,7 +2389,11 @@ impl ElasticsearchService {
         Ok(replace_has_endpoint_filters(filter, &mut iterator))
     }
 
-    async fn resolve_domain_filters(&self, filter: Value) -> Result<Value, String> {
+    async fn resolve_domain_filters(
+        &self,
+        filter: Value,
+        es_took_ms: &mut i64,
+    ) -> Result<Value, String> {
         let mut domain_filters = Vec::new();
         collect_domain_filters(&filter, &mut domain_filters);
         if domain_filters.is_empty() {
@@ -2383,13 +2402,20 @@ impl ElasticsearchService {
 
         let mut replacements = Vec::with_capacity(domain_filters.len());
         for domain_filter in domain_filters {
-            replacements.push(self.resolve_domain_filter(&domain_filter).await?);
+            replacements.push(
+                self.resolve_domain_filter(&domain_filter, es_took_ms)
+                    .await?,
+            );
         }
         let mut iterator = replacements.into_iter();
         Ok(replace_domain_filters(filter, &mut iterator))
     }
 
-    async fn resolve_domain_filter(&self, filter: &Value) -> Result<Value, String> {
+    async fn resolve_domain_filter(
+        &self,
+        filter: &Value,
+        es_took_ms: &mut i64,
+    ) -> Result<Value, String> {
         let operator = filter
             .get("operator")
             .and_then(Value::as_str)
@@ -2460,6 +2486,7 @@ impl ElasticsearchService {
                     },
                 )
                 .await?;
+            *es_took_ms += response.get("took").and_then(Value::as_i64).unwrap_or(0);
             let hits = response
                 .pointer("/hits/hits")
                 .and_then(Value::as_array)
