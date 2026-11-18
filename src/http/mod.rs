@@ -16,6 +16,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     assets(cfg);
     scanning(cfg);
     data_import(cfg);
+    data_export(cfg);
     federation(cfg);
     cfg.service(handlers::modules::status)
         .service(handlers::modules::publish);
@@ -156,6 +157,17 @@ fn data_import(cfg: &mut web::ServiceConfig) {
         .service(handlers::data_import::resume_task)
         .service(handlers::data_import::cancel_task)
         .service(handlers::data_import::delete_task);
+}
+
+fn data_export(cfg: &mut web::ServiceConfig) {
+    cfg.service(handlers::data_export::get_schema)
+        .service(handlers::data_export::preview)
+        .service(handlers::data_export::create_task)
+        .service(handlers::data_export::list_tasks)
+        .service(handlers::data_export::get_task)
+        .service(handlers::data_export::download)
+        .service(handlers::data_export::cancel_task)
+        .service(handlers::data_export::delete_task);
 }
 
 fn federation(cfg: &mut web::ServiceConfig) {

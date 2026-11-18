@@ -12,6 +12,10 @@ const SPA_ROUTES: &[&str] = &[
     "/create_scan",
     "/task",
     "/scanner",
+    "/data",
+    "/data/import",
+    "/data/export",
+    "/data/federation",
     "/analysis",
     "/analysis/scan",
     "/analysis/statistics",
@@ -409,6 +413,9 @@ mod tests {
         assert!(is_spa_path("/analysis/scan"));
         assert!(is_spa_path("/analysis/statistics"));
         assert!(is_spa_path("/analysis/performance"));
+        assert!(is_spa_path("/data/import"));
+        assert!(is_spa_path("/data/export"));
+        assert!(is_spa_path("/data/federation"));
         assert!(is_spa_path("/setting/maintenance"));
         assert!(is_spa_path("/setting/runtime"));
         assert!(!is_spa_path("/asset"));

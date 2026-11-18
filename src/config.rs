@@ -33,6 +33,8 @@ pub struct Config {
     #[serde(default)]
     pub data_import: crate::data_import::DataImportConfig,
     #[serde(default)]
+    pub data_export: crate::data_export::DataExportConfig,
+    #[serde(default)]
     pub federation: crate::federation::FederationConfig,
     pub server: ServerConfig,
     pub tls: TlsConfig,
@@ -129,6 +131,9 @@ impl SelfChecking for Config {
         self.data_import
             .validate()
             .expect("invalid data import configuration");
+        self.data_export
+            .validate()
+            .expect("invalid data export configuration");
         self.federation
             .validate()
             .expect("invalid federation configuration");
@@ -158,6 +163,7 @@ impl SelfChecking for Config {
             .validate()
             .map_err(|e| e.to_string())?;
         self.data_import.validate()?;
+        self.data_export.validate()?;
         self.federation.validate()?;
         match self.server.try_check() {
             Ok(true) => (),
@@ -1661,6 +1667,12 @@ impl Config {
                 .unwrap_or_else(|| Path::new(""))
                 .join(&config.data_import.directory);
         }
+        if config.data_export.directory.is_relative() {
+            config.data_export.directory = path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(&config.data_export.directory);
+        }
         config.tls.resolve_relative_to(path);
         config.frontend.resolve_relative_to(path);
         config.maxmind.resolve_relative_to(path);
@@ -2648,6 +2660,11 @@ pub enum ServerCommand {
     Import {
         #[command(subcommand)]
         command: crate::data_import::cli::ImportCommand,
+    },
+    /// 数据管理 · 后台导出（仅需 PostgreSQL，由运行中的服务器执行；下载仅 Web）
+    Export {
+        #[command(subcommand)]
+        command: crate::data_export::cli::ExportCommand,
     },
     /// 数据管理 · 联测（source test 本地出站；其余仅需 PostgreSQL，由运行中的服务器执行）
     Federation {
