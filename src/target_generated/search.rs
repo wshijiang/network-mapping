@@ -350,8 +350,13 @@ const RECORD_SUCCESS_SQL: &str = r#"WITH completed AS MATERIALIZED (
         FROM candidates c WHERE s.owner_id=c.owner_id AND s.target_kind=c.target_kind
             AND s.target_key=c.target_key AND (s.last_success_at IS NULL OR s.last_success_at<=c.ended_at)"#;
 
-/// Called inside the successful-upload transaction, including zero-result
-/// executions. DNS freshness waits for any generated descendants to succeed.
+/// Refreshes search-target freshness. The SQL is expensive (lineage CTE plus
+/// GiST network joins, hundreds of milliseconds on large installations), so it
+/// must NOT run inside the upload confirm transaction: that transaction holds
+/// the scan_task_execution row lock, and scanner heartbeat lease renewals give
+/// up after a 1500ms lock_timeout. Upload paths enqueue a durable outbox row
+/// instead; `run_freshness_worker` applies this statement asynchronously.
+/// DNS freshness waits for any generated descendants to succeed.
 pub(crate) async fn record_success(
     tx: &deadpool_postgres::Transaction<'_>,
     completed_task_id: i32,
@@ -359,6 +364,93 @@ pub(crate) async fn record_success(
     tx.execute(RECORD_SUCCESS_SQL, &[&completed_task_id])
         .await?;
     Ok(())
+}
+
+/// Enqueued inside the successful-upload transaction (including zero-result
+/// executions). Re-enqueueing a processed task is safe: the freshness UPDATE is
+/// monotonic, so a later successful execution can advance last_success_at again.
+pub(crate) async fn enqueue_freshness(
+    tx: &deadpool_postgres::Transaction<'_>,
+    completed_task_id: i32,
+) -> Result<(), tokio_postgres::Error> {
+    tx.execute(
+        "INSERT INTO search_freshness_outbox(task_id) VALUES($1) \
+         ON CONFLICT (task_id) DO UPDATE SET processed_at = NULL, attempts = 0, \
+         available_at = clock_timestamp(), last_error = NULL, updated_at = clock_timestamp();",
+        &[&completed_task_id],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Claims one pending freshness job and applies it in the same transaction, so
+/// a crash rolls the claim back and the job becomes available again. Returns
+/// whether a job was processed.
+pub(crate) async fn process_freshness_outbox(pool: &Pool) -> Result<bool, Error> {
+    let mut client = pool.get().await?;
+    let tx = client.transaction().await?;
+    tx.batch_execute("SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '30s';")
+        .await?;
+    let Some(job) = tx
+        .query_opt(
+            "SELECT task_id FROM search_freshness_outbox \
+             WHERE processed_at IS NULL AND available_at <= clock_timestamp() \
+             ORDER BY available_at, task_id FOR UPDATE SKIP LOCKED LIMIT 1",
+            &[],
+        )
+        .await?
+    else {
+        tx.commit().await?;
+        return Ok(false);
+    };
+    let task_id: i32 = job.get("task_id");
+    if let Err(error) = record_success(&tx, task_id).await {
+        // Roll the claim back, then record the failure with exponential backoff.
+        tx.rollback().await?;
+        let message = error.to_string();
+        client
+            .execute(
+                "UPDATE search_freshness_outbox SET attempts = attempts + 1, \
+                 available_at = clock_timestamp() + (LEAST(300, 1 << LEAST(attempts + 1, 8))::BIGINT * INTERVAL '1 second'), \
+                 last_error = $2, updated_at = clock_timestamp() WHERE task_id = $1",
+                &[&task_id, &message],
+            )
+            .await?;
+        tracing::warn!(
+            event = "SearchFreshnessOutboxError",
+            operation = "record_search_freshness",
+            task_id,
+            error = %message,
+            "search freshness job failed; retry scheduled"
+        );
+        return Ok(true);
+    }
+    tx.execute(
+        "UPDATE search_freshness_outbox SET processed_at = clock_timestamp(), attempts = 0, \
+         last_error = NULL, updated_at = clock_timestamp() WHERE task_id = $1",
+        &[&task_id],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+pub(crate) async fn run_freshness_worker(pool: Pool) {
+    loop {
+        match process_freshness_outbox(&pool).await {
+            Ok(true) => {}
+            Ok(false) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
+            Err(error) => {
+                tracing::warn!(
+                    event = "SearchFreshnessOutboxError",
+                    operation = "claim_freshness_job",
+                    error = %error,
+                    "search freshness worker could not claim a job"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -799,6 +891,139 @@ mod tests {
             results.iter().filter(|r| r.status == "queue_full").count(),
             99
         );
+        f.cleanup().await;
+    }
+
+    impl Fixture {
+        /// Marks the execution succeeded and enqueues freshness the way the
+        /// upload confirm transaction does, without applying it synchronously.
+        async fn finish_and_enqueue(&self, id: &str) -> i32 {
+            let mut c = self.pool.get().await.unwrap();
+            let tx = c.transaction().await.unwrap();
+            let pk: i32 = tx
+                .query_one("SELECT id FROM scan_task WHERE task_id=$1", &[&id])
+                .await
+                .unwrap()
+                .get(0);
+            tx.execute("UPDATE scan_task_execution SET execution_status='succeeded', task_end_time=(EXTRACT(EPOCH FROM NOW())*1000)::BIGINT, result_ip_count=0,result_port_count=0 WHERE task_id=$1", &[&pk]).await.unwrap();
+            enqueue_freshness(&tx, pk).await.unwrap();
+            tx.commit().await.unwrap();
+            pk
+        }
+        async fn freshness_state(&self) -> (Option<i64>, Option<i64>, i64) {
+            let c = self.pool.get().await.unwrap();
+            let row = c
+                .query_one(
+                    "SELECT (SELECT last_success_at FROM search_target_state WHERE owner_id=1 AND target_kind='ip' AND target_key='192.0.2.1'), \
+                     (SELECT EXTRACT(EPOCH FROM processed_at)::BIGINT FROM search_freshness_outbox), \
+                     (SELECT COUNT(*) FROM search_freshness_outbox)",
+                    &[],
+                )
+                .await
+                .unwrap();
+            (row.get(0), row.get(1), row.get(2))
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+    async fn freshness_outbox_defers_then_applies_search_target_state() {
+        let f = Fixture::new().await;
+        let result = f.request("ip", "192.0.2.1", None).await;
+        assert_eq!(result.status, "created");
+        let id = result.task_id.unwrap();
+        f.finish_and_enqueue(&id).await;
+        // Enqueue must not apply freshness synchronously: the confirm
+        // transaction only records the outbox row.
+        let (last_success, processed, rows) = f.freshness_state().await;
+        assert_eq!(rows, 1);
+        assert!(last_success.is_none());
+        assert!(processed.is_none());
+        assert!(process_freshness_outbox(&f.pool).await.unwrap());
+        let (last_success, processed, _) = f.freshness_state().await;
+        assert!(last_success.is_some());
+        assert!(processed.is_some());
+        // Nothing left to do.
+        assert!(!process_freshness_outbox(&f.pool).await.unwrap());
+        f.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+    async fn freshness_outbox_reenqueue_reprocesses_monotonically() {
+        let f = Fixture::new().await;
+        let id = f.request("ip", "192.0.2.1", None).await.task_id.unwrap();
+        let pk = f.finish_and_enqueue(&id).await;
+        assert!(process_freshness_outbox(&f.pool).await.unwrap());
+        let (first, _, _) = f.freshness_state().await;
+        // A later successful execution of the same task re-enqueues the job.
+        let mut c = f.pool.get().await.unwrap();
+        let tx = c.transaction().await.unwrap();
+        tx.execute(
+            "UPDATE scan_task_execution SET task_end_time=task_end_time+60000 WHERE task_id=$1",
+            &[&pk],
+        )
+        .await
+        .unwrap();
+        enqueue_freshness(&tx, pk).await.unwrap();
+        tx.commit().await.unwrap();
+        let (_, processed, _) = f.freshness_state().await;
+        assert!(processed.is_none());
+        assert!(process_freshness_outbox(&f.pool).await.unwrap());
+        let (second, processed, _) = f.freshness_state().await;
+        assert!(processed.is_some());
+        assert!(second.unwrap() >= first.unwrap());
+        f.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+    async fn freshness_outbox_failure_schedules_backoff_retry() {
+        let f = Fixture::new().await;
+        let id = f.request("ip", "192.0.2.1", None).await.task_id.unwrap();
+        f.finish_and_enqueue(&id).await;
+        // Force the freshness statement to fail.
+        f.sql("ALTER TABLE search_target_state RENAME TO search_target_state_broken")
+            .await;
+        assert!(process_freshness_outbox(&f.pool).await.unwrap());
+        let row = f
+            .pool
+            .get()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT attempts, processed_at IS NULL, last_error IS NOT NULL, available_at > clock_timestamp() FROM search_freshness_outbox",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, i32>(0), 1);
+        assert!(row.get::<_, bool>(1));
+        assert!(row.get::<_, bool>(2));
+        assert!(row.get::<_, bool>(3));
+        // The failed job is not claimed again before its backoff elapses.
+        assert!(!process_freshness_outbox(&f.pool).await.unwrap());
+        f.sql("ALTER TABLE search_target_state_broken RENAME TO search_target_state")
+            .await;
+        f.sql("UPDATE search_freshness_outbox SET available_at=clock_timestamp()")
+            .await;
+        assert!(process_freshness_outbox(&f.pool).await.unwrap());
+        let (last_success, processed, _) = f.freshness_state().await;
+        assert!(last_success.is_some());
+        assert!(processed.is_some());
+        f.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+    async fn freshness_outbox_cascades_with_task_deletion() {
+        let f = Fixture::new().await;
+        let id = f.request("ip", "192.0.2.1", None).await.task_id.unwrap();
+        f.finish_and_enqueue(&id).await;
+        f.sql("DELETE FROM scan_task").await;
+        let (_, _, rows) = f.freshness_state().await;
+        assert_eq!(rows, 0);
+        assert!(!process_freshness_outbox(&f.pool).await.unwrap());
         f.cleanup().await;
     }
 }

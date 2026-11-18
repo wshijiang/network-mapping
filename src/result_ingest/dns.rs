@@ -516,7 +516,8 @@ pub(crate) async fn save_dns_scanner_results(
         target_generated::history::record_result(&transaction, task_db_id)
             .await
             .map_err(scanner_result_database_error)?;
-        target_generated::search::record_success(&transaction, task_db_id)
+        // Applied by the outbox worker to keep the execution row lock short.
+        target_generated::search::enqueue_freshness(&transaction, task_db_id)
             .await
             .map_err(scanner_result_database_error)?;
         stage.finish(true);

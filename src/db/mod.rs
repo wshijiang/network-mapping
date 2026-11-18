@@ -336,6 +336,11 @@ pub async fn init_database_table(
     transaction
         .batch_execute(include_str!("../../source/database/migrate_federation.sql"))
         .await?;
+    transaction
+        .batch_execute(include_str!(
+            "../../source/database/migrate_search_freshness.sql"
+        ))
+        .await?;
     transaction.commit().await?;
 
     Ok(())
