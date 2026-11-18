@@ -384,8 +384,11 @@ pub(crate) async fn enqueue_freshness(
 }
 
 /// Claims one pending freshness job and applies it in the same transaction, so
-/// a crash rolls the claim back and the job becomes available again. Returns
-/// whether a job was processed.
+/// a crash rolls the claim back and the job becomes available again. A failed
+/// apply rolls back to a savepoint instead of ending the transaction, keeping
+/// the claim's row lock until the retry backoff commits; otherwise another
+/// worker could re-claim the still-due row in the gap and duplicate the
+/// expensive failing query. Returns whether a job was processed.
 pub(crate) async fn process_freshness_outbox(pool: &Pool) -> Result<bool, Error> {
     let mut client = pool.get().await?;
     let tx = client.transaction().await?;
@@ -404,18 +407,21 @@ pub(crate) async fn process_freshness_outbox(pool: &Pool) -> Result<bool, Error>
         return Ok(false);
     };
     let task_id: i32 = job.get("task_id");
+    tx.batch_execute("SAVEPOINT freshness_apply").await?;
     if let Err(error) = record_success(&tx, task_id).await {
-        // Roll the claim back, then record the failure with exponential backoff.
-        tx.rollback().await?;
-        let message = error.to_string();
-        client
-            .execute(
-                "UPDATE search_freshness_outbox SET attempts = attempts + 1, \
-                 available_at = clock_timestamp() + (LEAST(300, 1 << LEAST(attempts + 1, 8))::BIGINT * INTERVAL '1 second'), \
-                 last_error = $2, updated_at = clock_timestamp() WHERE task_id = $1",
-                &[&task_id, &message],
-            )
+        // Undo only the failed apply; the claim's row lock stays held so the
+        // backoff below commits atomically with the claim.
+        tx.batch_execute("ROLLBACK TO SAVEPOINT freshness_apply")
             .await?;
+        let message = error.to_string();
+        tx.execute(
+            "UPDATE search_freshness_outbox SET attempts = attempts + 1, \
+             available_at = clock_timestamp() + (LEAST(300, 1 << LEAST(attempts + 1, 8))::BIGINT * INTERVAL '1 second'), \
+             last_error = $2, updated_at = clock_timestamp() WHERE task_id = $1",
+            &[&task_id, &message],
+        )
+        .await?;
+        tx.commit().await?;
         tracing::warn!(
             event = "SearchFreshnessOutboxError",
             operation = "record_search_freshness",
@@ -1011,6 +1017,37 @@ mod tests {
         let (last_success, processed, _) = f.freshness_state().await;
         assert!(last_success.is_some());
         assert!(processed.is_some());
+        f.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+    async fn freshness_outbox_concurrent_workers_claim_distinct_jobs() {
+        let f = Fixture::new().await;
+        let first = f.request("ip", "192.0.2.1", None).await.task_id.unwrap();
+        let second = f.request("ip", "192.0.2.2", None).await.task_id.unwrap();
+        f.finish_and_enqueue(&first).await;
+        f.finish_and_enqueue(&second).await;
+        let (a, b) = tokio::join!(
+            process_freshness_outbox(&f.pool),
+            process_freshness_outbox(&f.pool)
+        );
+        assert!(a.unwrap());
+        assert!(b.unwrap());
+        let remaining: i64 = f
+            .pool
+            .get()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT COUNT(*) FROM search_freshness_outbox WHERE processed_at IS NULL",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(remaining, 0);
+        assert!(!process_freshness_outbox(&f.pool).await.unwrap());
         f.cleanup().await;
     }
 
