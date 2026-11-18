@@ -3919,6 +3919,129 @@ async fn asn_context_never_publishes_or_marks_related_ips_and_keeps_expiry() {
 
 #[tokio::test]
 #[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn batch_annotation_many_keys_matches_single_key_semantics_without_row_multiplication() {
+    use chrono::{Months, Utc};
+    let (pool, c, schema) = database().await;
+    let source = local_source(&pool, false).await;
+    // 同 key 12 条记录：external_id 各异 → external_key 不同，避免 supersede
+    // 互相取代（同一 external_key 的 structured 记录只保留最新 approved）。
+    for n in 0..12 {
+        let mut i = Indicator::simple("ip", "203.0.113.10");
+        i.external_id = format!("batch-fixture-{n}");
+        storage::ingest(&pool, &source, i, storage::Origin::Structured, "")
+            .await
+            .unwrap();
+    }
+    let mut i = Indicator::simple("ip", "203.0.113.11");
+    i.verdict = "suspicious".into();
+    storage::ingest(&pool, &source, i, storage::Origin::Structured, "")
+        .await
+        .unwrap();
+    let mut i = Indicator::simple("ip", "203.0.113.12");
+    i.first_seen = Some((Utc::now() - Months::new(7)).to_rfc3339());
+    storage::ingest(&pool, &source, i, storage::Origin::Structured, "")
+        .await
+        .unwrap();
+    storage::ingest(
+        &pool,
+        &source,
+        Indicator::simple("ip_port", "203.0.113.10:443"),
+        storage::Origin::Structured,
+        "",
+    )
+    .await
+    .unwrap();
+    storage::ingest(
+        &pool,
+        &source,
+        Indicator::simple("asn", "AS64496"),
+        storage::Origin::Structured,
+        "",
+    )
+    .await
+    .unwrap();
+    let mut targets = vec![
+        endpoint_keys("203.0.113.10", Some(443)),
+        endpoint_keys("203.0.113.11", Some(443)),
+        endpoint_keys("203.0.113.12", None),
+    ];
+    for n in 0..21 {
+        targets.push(endpoint_keys(&format!("203.0.113.{}", 100 + n), Some(443)));
+    }
+    let asns: Vec<Option<&str>> = (0..targets.len())
+        .map(|index| match index {
+            0 | 3 => Some("64496"),
+            1 => Some("unknown"),
+            _ => None,
+        })
+        .collect();
+    let batch = annotate_assets(&pool, &targets, &asns).await;
+    assert_eq!(batch.len(), targets.len());
+    // 批量结果必须与逐 target 单独查询完全一致（unnest join 不得行倍增或串 key）。
+    for (index, target) in targets.iter().enumerate() {
+        let single = annotate_assets(&pool, std::slice::from_ref(target), &[asns[index]])
+            .await
+            .remove(0);
+        let got = &batch[index];
+        assert_eq!(got.available, single.available);
+        assert_eq!(got.risk, single.risk, "target {index}");
+        assert_eq!(got.matches, single.matches, "target {index}");
+        assert_eq!(
+            got.expired_matches, single.expired_matches,
+            "target {index}"
+        );
+        assert_eq!(got.asn_context.is_some(), single.asn_context.is_some());
+        if let (Some(a), Some(b)) = (&got.asn_context, &single.asn_context) {
+            assert_eq!(a.risk, b.risk);
+            assert_eq!(a.matches, b.matches);
+        }
+        let ids: std::collections::BTreeSet<&str> = got
+            .matches
+            .iter()
+            .chain(got.expired_matches.iter())
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), got.matches.len() + got.expired_matches.len());
+    }
+    // 三态与截断：malicious（ip 10 条 + ip_port 1 条）、suspicious、expired。
+    assert_eq!(batch[0].risk.as_deref(), Some("malicious"));
+    assert_eq!(batch[0].matches.len(), 11);
+    assert!(
+        batch[0]
+            .matches
+            .iter()
+            .all(|m| { m["value"] == "203.0.113.10" || m["value"] == "203.0.113.10:443" })
+    );
+    assert_eq!(batch[1].risk.as_deref(), Some("suspicious"));
+    assert!(batch[2].risk.is_none() && batch[2].matches.is_empty());
+    assert_eq!(batch[2].expired_matches.len(), 1);
+    // ASN 上下文不污染无匹配端点的风险。
+    assert!(batch[3].risk.is_none() && batch[3].matches.is_empty());
+    assert_eq!(
+        batch[3].asn_context.as_ref().unwrap().risk.as_deref(),
+        Some("malicious")
+    );
+    assert!(batch[1].asn_context.is_none());
+    // 同 key 多记录：rank<=10 截断且按 created_at DESC。
+    let many = annotate(&pool, &[vec![("ip".into(), "203.0.113.10".into())]])
+        .await
+        .remove(0);
+    assert_eq!(many.matches.len(), 10);
+    let dates: Vec<&str> = many
+        .matches
+        .iter()
+        .map(|m| m["created_at"].as_str().unwrap())
+        .collect();
+    let mut sorted = dates.clone();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    assert_eq!(dates, sorted);
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
 async fn manual_article_submission_preserves_snapshot_permissions_and_ai_gate() {
     use actix_web::{App, HttpMessage, dev::Service, test as http_test, web};
     let (pool, c, schema) = database().await;

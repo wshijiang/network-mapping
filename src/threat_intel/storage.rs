@@ -864,7 +864,10 @@ pub(crate) struct Annotation {
 pub(crate) async fn annotate(pool: &Pool, targets: &[Vec<(String, String)>]) -> Vec<Annotation> {
     match annotations(pool, targets).await {
         Ok(v) => v,
-        Err(_) => vec![Annotation::default(); targets.len()],
+        Err(e) => {
+            tracing::warn!(event = "IntelAnnotationUnavailable", error = ?e);
+            vec![Annotation::default(); targets.len()]
+        }
     }
 }
 // One batched read after asset authorization. ASN evidence is context only and
@@ -909,10 +912,14 @@ async fn annotations(pool: &Pool, targets: &[Vec<(String, String)>]) -> Result<V
         .await?
         .query(
             r#"
-WITH matches AS (
+WITH keys AS (
+ SELECT DISTINCT split_part(k,':',1) AS kind,substr(k,length(split_part(k,':',1))+2) AS value
+ FROM unnest($1::text[]) AS k
+), matches AS (
  SELECT r.*,ROW_NUMBER() OVER(PARTITION BY r.kind,r.value,r.expired ORDER BY r.created_at DESC,r.id) AS rank,
  BOOL_OR(r.payload->>'verdict'='malicious') OVER(PARTITION BY r.kind,r.value,r.expired) AS malicious
- FROM intel_record_state r WHERE r.status='approved' AND r.kind||':'||r.value=ANY($1)
+ FROM keys k JOIN intel_record_state r ON r.kind=k.kind AND r.value=k.value
+ WHERE r.status='approved'
 )
 SELECT r.*,COALESCE(rv.attribution,'{}'::JSONB) AS reviewed_attribution,e.attack_id AS canonical_actor_id,e.name AS canonical_actor_name,
  sw.attack_id AS canonical_software_id,sw.name AS canonical_software_name
