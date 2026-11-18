@@ -8,7 +8,7 @@
 
 ## 版本与升级
 
-本次版本 **服务端 0.1.30**，配套服务端 **0.1.30**、扫描器 **0.1.21**、控制台 **0.1.24**。2026-10-27 修复后重新发布，2026-10-26 同版本制品已撤回；更新内容见[CHANGELOG](docs/CHANGELOG.md)，升级顺序与合并后 tag 核对见[配套发布指南](https://github.com/wshijiang/network-mapping/blob/main/docs/RELEASING.md)。既有部署须先完成传输端点迁移，模块套件使用 IPC **3**。
+本次准备 **服务端 0.1.31**，配套服务端 **0.1.31**、扫描器 **0.1.22**、控制台 **0.1.25**。release PR 待审，tag 尚未推送；更新内容见[CHANGELOG](docs/CHANGELOG.md)，升级顺序与合并后 tag 核对见[配套发布指南](https://github.com/wshijiang/network-mapping/blob/main/docs/RELEASING.md)。自 0.1.30 升级为幂等增量迁移，更旧版本须先完成传输端点迁移；模块套件使用 IPC **3**。
 
 ## 核心能力
 
