@@ -518,9 +518,11 @@ Content-Type: application/json
 `scan_time` 是 `last_seen` 的 Unix 毫秒时间戳。`sort_field` 和 `sort_order` 回显实际使用的排序设置。
 
 `took_ms` 是服务端处理本次搜索的总耗时（毫秒），从进入搜索处理开始计时，包含
-Elasticsearch 查询、情报标注、自动目标生成评估与联测合流；`es_took_ms` 是
-Elasticsearch 自报的查询耗时（响应中的 `took` 字段，毫秒），两者差值可近似反映
-服务端附加处理与网络开销。搜索页在结果摘要中展示 `took_ms`，悬停可见
+Elasticsearch 查询、情报标注、自动目标生成评估与联测合流；`es_took_ms` 是本次
+搜索触发的**全部 Elasticsearch 查询**自报耗时（各响应 `took` 字段之和，毫秒），
+含主查询与 `has_endpoint(...)`/`domain` 条件的扩展解析查询（复合聚合分页、DNS
+记录检索可能发起多次 ES 请求）。两者差值可近似反映服务端附加处理（情报标注、
+生成评估等）与网络往返开销。搜索页在结果摘要中展示 `took_ms`，悬停可见
 `es_took_ms`。旧版服务端不返回这两个字段，前端自动隐藏耗时展示。
 
 ### 8.3 语法错误
