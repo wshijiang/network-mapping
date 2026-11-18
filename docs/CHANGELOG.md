@@ -4,6 +4,8 @@
 
 ## 未发布
 
+- **搜索 · 情报标注性能**：修复多结果页搜索与资产详情端口列表的情报标注慢查询。原标注查询以 `kind||':'||value = ANY(keys)` 表达式谓词查 `intel_record_state` 视图，key 数稍多（≥13）时规划器对表达式索引选择率估算失真（110 key 估 8.6 万行，实际几十行），翻转为全视图 Hash Join + Sort + 双层 WindowAgg（cost ≈ 368 万）并每次执行触发 JIT，50 条页搜索服务端耗时 500+ms（limit=5 即出现 31→578ms 悬崖），资产详情端口列表（最多约 101 key）同样受累。现改为 `unnest` 拆分 key 后按裸列 `(kind,value)` join 视图，命中既有部分索引 `intel_record_published` 的参数化嵌套循环；视图来源过滤与过期计算语义不变，custom/generic plan 均稳定走索引、无 JIT，**零 DDL**。实测测试环境 `port = 443`：limit=1/5/50 总耗时 27–30/24–30/39–59ms，情报标注 3–6ms；EXPLAIN ANALYZE 110 key 2.5ms、500 key 37ms。搜索成功响应另增 `es_wall_ms`（ES 调用墙钟）与 `intel_took_ms`（情报标注累计）分阶段耗时，标注查询失败降级补 `IntelAnnotationUnavailable` 警告日志；新增多 key 批量标注回归测试（批量与逐 key 等价、rank 截断、三态、ASN 上下文不污染）。详见[资产搜索语法与 API](SEARCH_SYNTAX.md#82-成功响应)。
+
 - **搜索 · 耗时展示**：`/api/search/v2` 成功响应新增 `took_ms`（服务端处理本次搜索的总耗时，毫秒，含 Elasticsearch 查询、情报标注与联测合流）与 `es_took_ms`（本次搜索触发的全部 Elasticsearch 查询自报 `took` 之和，含 `has_endpoint`/`domain` 扩展解析查询），搜索页结果摘要展示耗时，悬停可见 Elasticsearch 查询耗时，便于用户判断慢查询来自索引还是服务端附加处理。详见[资产搜索语法与 API](SEARCH_SYNTAX.md#82-成功响应)。
 
 - **数据管理 · 后台导出**：新增「数据管理 → 导出」导航与服务器 CLI `network_mapping_server export`，把搜索语句匹配的资产端点数据交给后台 worker 导出为 CSV。与资产搜索同一 DSL、同一数据范围规则（创建时快照管理员全局/普通用户个人口径），只读本地索引、不触发联测；「全部」导出经 Elasticsearch PIT + search_after 分批遍历，突破搜索页 10k 浏览窗口，单任务行数上限默认 100 万。搜索页「导出当前页 CSV」升级为「导出」modal：可选本页/全部、展示语句匹配条数、按字段目录勾选导出列（本页同样可调），提交后后台执行。字段目录为单一事实来源（`GET /api/data-export/schema`），列顺序与标签对齐原当前页 CSV；UTF-8 BOM + CRLF、公式注入防护，时间列按系统时区格式化。任务全生命周期管理：5 态状态机、进度计数、取消、删除、租约认领与崩溃重跑、保留期清理（默认 30 天）；Web 流式下载（仅所有者/管理员），CLI 仅创建/查看/取消。写操作与下载记审计；新增 `data_export_task` 表与 `[data_export]` 配置段，未配置时升级零行为变化。详见[数据导出](DATA_EXPORT.md)。

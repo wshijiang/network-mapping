@@ -511,7 +511,9 @@ Content-Type: application/json
   "sort_field": "last_seen",
   "sort_order": "desc",
   "took_ms": 42,
-  "es_took_ms": 18
+  "es_took_ms": 18,
+  "es_wall_ms": 24,
+  "intel_took_ms": 4
 }
 ```
 
@@ -522,8 +524,11 @@ Elasticsearch 查询、情报标注、自动目标生成评估与联测合流；
 搜索触发的**全部 Elasticsearch 查询**自报耗时（各响应 `took` 字段之和，毫秒），
 含主查询与 `has_endpoint(...)`/`domain` 条件的扩展解析查询（复合聚合分页、DNS
 记录检索可能发起多次 ES 请求）。两者差值可近似反映服务端附加处理（情报标注、
-生成评估等）与网络往返开销。搜索页在结果摘要中展示 `took_ms`，悬停可见
-`es_took_ms`。旧版服务端不返回这两个字段，前端自动隐藏耗时展示。
+生成评估等）与网络往返开销。`es_wall_ms` 是主 Elasticsearch 调用的墙钟耗时
+（毫秒，含网络往返与响应解析）；`intel_took_ms` 是威胁情报标注的累计耗时
+（毫秒，含联测新增端点的补充标注）。搜索页在结果摘要中展示 `took_ms`，悬停
+「· 耗时」可见总耗时 / ES 服务端 / ES 往返 / 情报标注四行分解。旧版服务端
+不返回这些字段，前端自动隐藏或回退单行展示。
 
 ### 8.3 语法错误
 
