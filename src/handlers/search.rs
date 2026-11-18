@@ -62,6 +62,10 @@ struct SearchResponse {
     took_ms: i64,
     /// Elasticsearch 自报的查询耗时（`took`，毫秒）。
     es_took_ms: i64,
+    /// Elasticsearch 调用墙钟耗时（毫秒，含网络往返与响应解析）。
+    es_wall_ms: i64,
+    /// 威胁情报标注累计耗时（毫秒，含联测新增端点的补充标注）。
+    intel_took_ms: i64,
 }
 
 #[derive(Serialize)]
@@ -277,11 +281,13 @@ async fn respond_search_elasticsearch(
         }
         _ => crate::federation::search::Prepared::NotTriggered,
     };
+    let es_started = std::time::Instant::now();
     match elasticsearch
         .search(user.role, user.id, filter, limit, offset, sort)
         .await
     {
         Ok(page) => {
+            let es_wall_ms = es_started.elapsed().as_millis() as i64;
             let es_took_ms = page.took_ms;
             let keys = page
                 .items
@@ -293,7 +299,9 @@ async fn respond_search_elasticsearch(
                 .iter()
                 .map(|item| item.asn.as_deref())
                 .collect::<Vec<_>>();
+            let intel_started = std::time::Instant::now();
             let intelligence = crate::threat_intel::annotate_assets(pool, &keys, &asns).await;
+            let mut intel_took_ms = intel_started.elapsed().as_millis() as i64;
             let auto_generation = if let Some(context) = generation {
                 let policy = context.settings.automatic_target.get().await;
                 let dns_policy = context.settings.dns_follow_up.get().await.value;
@@ -392,8 +400,10 @@ async fn respond_search_elasticsearch(
                                 .iter()
                                 .map(|&index| items[index].asn.as_deref())
                                 .collect();
+                            let intel_started = std::time::Instant::now();
                             let annotations =
                                 crate::threat_intel::annotate_assets(pool, &keys, &asns).await;
+                            intel_took_ms += intel_started.elapsed().as_millis() as i64;
                             for (&index, annotation) in new_indices.iter().zip(annotations) {
                                 items[index].intel = annotation;
                             }
@@ -421,6 +431,8 @@ async fn respond_search_elasticsearch(
                 sort_order: sort.order_name(),
                 took_ms: started.elapsed().as_millis() as i64,
                 es_took_ms,
+                es_wall_ms,
+                intel_took_ms,
             })
         }
         Err(error_value) if error_value.starts_with("DOMAIN_RESULT_TOO_BROAD:") => {
