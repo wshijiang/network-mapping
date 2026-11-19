@@ -281,7 +281,7 @@ sudo curl --fail --show-error --silent --cacert docker/runtime/tls/ca.pem \
 
 ## 升级与恢复
 
-1. 保存当前镜像 digest、`.env`、TLS、配置与数据卷清单；核对 schema、ES 和扫描协议变化。暂停自动任务及新任务分配，等待活动任务与上传完成。
+1. 保存当前镜像 digest、`.env`、TLS、配置与数据卷清单；核对 schema、ES 和扫描协议变化。暂停自动任务及新任务分配，等待活动任务与上传完成。文件模式（`--config-source file`）部署还需将 `runtime/config.toml` 与新版 `docker/config.example.toml` 对照，补齐新增段，尤其是 `[data_import]`/`[data_export]`：`directory` 指向 `/var/lib/network-mapping/` 下的可写目录（示例值 `data-import`/`data-export`）。旧配置省略这两段时，代码相对默认值会解析到只读的 `/etc/network-mapping` 挂载，升级镜像后导入/导出仍会报 `Read-only file system`；env 模式使用内嵌默认值，不受影响。
 2. 在 `.env` 中仅将 `SERVER_IMAGE` 改为待部署的固定版本/digest，先验证与拉取。升级应用时保持 PG/ES 版本、项目名和卷不变：
 
    ```sh

@@ -20,8 +20,13 @@ TOML 示例仍是程序内置默认配置的来源，新增示例保持注释，
 | `docker/.env` 中的 Compose 变量 | 镜像、端口、profile、可选 SQL 挂载 | Compose 解析并创建或重建容器 |
 | `docker/.env` 中的 `NM__…` | 服务端启动参数 | `server.env_file` 注入环境，服务端启动时加载 |
 | `compose.example.yml` | 服务定义、运行权限、卷、健康检查、PG/ES 容器参数 | 修改后重新执行 Compose `up` |
-| 容器内置默认配置 | 未显式覆盖的已支持字段 | 先加载 `docker/config.example.toml` 的内嵌副本，其余使用类型默认值 |
+| 容器内置默认配置 | env 模式未显式覆盖的已支持字段 | env 模式先加载 `docker/config.example.toml` 的内嵌副本，其余使用类型默认值；file 模式只读指定配置文件，不合并内嵌值 |
 | PostgreSQL 中的运行策略 | 请求日志、监控、自动目标等 | 已保存值优先；启动参数只为缺失记录提供初始值 |
+
+file 模式不会自动继承内嵌示例新增的段：升级既有 `runtime/config.toml` 时需对照新版
+`docker/config.example.toml` 手动补齐。例如 `[data_import]`/`[data_export]` 需将 `directory`
+指向 `/var/lib/network-mapping/` 下的可写目录（示例值 `data-import`/`data-export`）；省略时
+代码相对默认值解析到只读的 `/etc/network-mapping` 挂载，导入/导出仍会失败。
 
 `--env-file docker/.env` 用于 Compose `${…}` 插值；`server.env_file: ./.env` 用于容器环境注入，
 两者用途不同。Compose 的 `environment` 会覆盖 `env_file` 中同名项；执行 Compose 时 shell 中的
