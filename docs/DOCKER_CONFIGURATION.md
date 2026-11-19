@@ -199,6 +199,8 @@ docker compose --env-file docker/.env -f docker/compose.example.yml up -d --forc
 | `NM__FRONTEND__DIRECTORY` | 路径字符串 | `/opt/network-mapping/frontend/dist` | 已构建的前端目录，缺失页面或资源返回 404 |
 | `NM__MAXMIND__DIRECTORY` | 路径字符串 | `/var/lib/network-mapping/maxmind` | 可选 MMDB 数据目录；缺失时相关 IP 情报字段为空 |
 | `NM__SCANNER_DIAGNOSTICS__DIRECTORY` | 路径字符串 | `/var/lib/network-mapping/scanner-diagnostics` | 可写诊断存储；持有独占目录锁，部署限制见[诊断指南](SCANNER_DIAGNOSTICS.md) |
+| `NM__DATA_IMPORT__DIRECTORY` | 路径字符串 | `/var/lib/network-mapping/data-import` | 数据导入 CSV 落盘目录，必须可写；默认位于 server-data 卷 |
+| `NM__DATA_EXPORT__DIRECTORY` | 路径字符串 | `/var/lib/network-mapping/data-export` | 数据导出 CSV 落盘目录，必须可写；默认位于 server-data 卷，文件按保留期清理 |
 | `NM__PWD_HASH__M` | 整数，MiB | `64` | Argon2id 内存参数，代码换算为 KiB；需满足 Argon2 参数约束 |
 | `NM__PWD_HASH__T` | 整数 | `2` | Argon2id 迭代次数，需满足 Argon2 参数约束 |
 | `NM__PWD_HASH__P` | 整数 | `2` | Argon2id 并行度，需满足 Argon2 参数约束 |
@@ -391,7 +393,7 @@ services:
 | 来源 / 顶层声明 | 容器目标路径 | 用途 |
 | --- | --- | --- |
 | `./runtime/tls`（相对 `docker/`） | `/etc/network-mapping/tls`，只读 | `cert.pem`、`key.pem`、`ca.pem` 及可选 ES CA |
-| `volumes.server-data` | `/var/lib/network-mapping` | 可选 MaxMind 与扫描器诊断数据 |
+| `volumes.server-data` | `/var/lib/network-mapping` | 可选 MaxMind、扫描器诊断、导入/导出 CSV 与 IOC 导入缓存 |
 | `volumes.server-logs` | `/var/log/network-mapping` | 应用 JSON 文件日志 |
 | `volumes.postgres-data` | `/var/lib/postgresql` | PostgreSQL 数据 |
 | `volumes.elasticsearch-data` | `/usr/share/elasticsearch/data` | ES 数据 |
