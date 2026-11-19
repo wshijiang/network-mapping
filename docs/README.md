@@ -9,7 +9,7 @@
 
 ## 本次版本
 
-服务端 **0.1.31**；配套服务端 **0.1.31**、扫描器 **0.1.22**、控制台 **0.1.25**。变更见[更新日志](CHANGELOG.md)，迁移、IPC 3 与发布次序见[配套发布指南](https://github.com/wshijiang/network-mapping/blob/main/docs/RELEASING.md)。release PR 待审，不表示制品已发布。
+服务端 **0.1.31**；配套服务端 **0.1.31**、扫描器 **0.1.22**、控制台 **0.1.25**。变更见[更新日志](CHANGELOG.md)，迁移、IPC 3 与发布次序见[配套发布指南](https://github.com/wshijiang/network-mapping/blob/main/docs/RELEASING.md)。
 
 ## 版本更新
 
