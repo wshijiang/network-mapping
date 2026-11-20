@@ -8,6 +8,7 @@
 - **资产展示 · favicon 中继**：新增 `GET /api/assets/favicon?ip=&port=[&protocol=]`，按调用者数据范围读取 ES 存储的图标字节回传（`Content-Type` 白名单 image/*、`Cache-Control: private, max-age=86400`、`ETag=icon_md5`、支持 If-None-Match 304，无图标 404）；服务端零出站、浏览器不热链接目标。搜索响应新增 `icon_md5`/`favicon_url`/`favicon`(仅元数据)/`js_names`，base64 不进搜索响应（`_source` 排除）；资产详情端口列表同步返回 `icon_md5`/`favicon`/`js_names`/`js_md5s`。搜索页「网页 / TLS」列头部、资产详情、任务详情展示图标（没有则不占位）。
 - **配置管理 · 网页内容富化**：扫描器运行时配置新增 `service_detection.web_content`（enabled 默认 true、concurrency 16、fetch_timeout_seconds 10、max_redirects 3、max_stage_seconds 120、max_favicon_bytes 65536、max_js_files 10、max_js_bytes 524288、max_body_bytes 262144、user_agent），**Web 端扫描器配置页与服务器 CLI 均可管理**：新增 `network_mapping_server scanner-config show <ID>` / `scanner-config set-web-content <ID> [--enabled …] [--concurrency …] [--max-favicon-bytes …] …`，与 Web 写入同一文档（新修订 + 历史 + 审计，扫描器下次拉取生效，有效开关为本地 AND 远端）。创建扫描任务新增 `web_content_enabled` 可选覆盖（经 `scan_plan.web_content` 下发，无 DDL）。旧配置文档缺省该段时按默认值升级，零行为变化。
 - **联测 · 网页资产翻译**：`icon_md5` 翻译为 Hunter `web.icon==` / Quake `favicon.hash:`（同 MD5 算法）；`js_name`/`js_md5` 翻译为 FOFA `js_name`/`js_md5`（= 包含 / == 精确，2026-11-20 经官方语法资料核实）；不支持的字段×平台组合按既有保守策略跳过该源。
+- **网页资产 · 评审修复**：域名任务（统一域名模式 / DNS 后续）支持 `web_content_enabled`，经父任务 `generation_metadata.dns_follow_up` 传递到每个地址后续任务的 `scan_plan`；无富化证据的被动兜底正文截断改为 UTF-8 字符边界（修复多字节字符跨界时投影 panic）。
 - **数据导出 · 网页资产列**：字段目录新增「网页资产」组：Favicon MD5、Favicon 来源、JS 路径、JS MD5。详见[资产搜索语法与 API](SEARCH_SYNTAX.md#42-端点与服务字段)。
 
 ## v0.1.31（2026-11-18）

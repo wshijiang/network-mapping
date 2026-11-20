@@ -117,7 +117,13 @@ fn passive_from_body(data: &Value) -> WebAssets {
     let Some(body) = crate::search_content::find_string_by_key(data, &["body"], 0) else {
         return assets;
     };
-    let body = &body[..body.len().min(MAX_BODY)];
+    // Cut on a UTF-8 boundary: a mid-character slice would panic during
+    // projection and abort ingest/reprojection for the whole batch.
+    let mut end = body.len().min(MAX_BODY);
+    while !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    let body = &body[..end];
     let document = Html::parse_document(body);
     for element in document.select(&LINK_SELECTOR) {
         let rel = element
@@ -285,6 +291,29 @@ mod tests {
         assert!(body.contains("Hi"));
         assert!(truncated);
         assert!(landing(&json!({})).is_none());
+    }
+
+    #[test]
+    fn passive_body_cut_lands_on_a_utf8_boundary() {
+        // 262143 ASCII bytes + a 3-byte character straddles the 262144 cap.
+        let body = format!(
+            "{}中<script src=\"/tail.js\"></script>",
+            "a".repeat(MAX_BODY - 1)
+        );
+        let data =
+            json!({"evidence": [{"module": "http", "result": {"response": {"body": body}}}]});
+        let assets = extract(Some(&data));
+        assert!(
+            assets.js_names.is_empty(),
+            "tail beyond the cap is dropped, not panicked on"
+        );
+        let favicon_body = format!(
+            "<link rel=\"icon\" href=\"/x.ico\">{}",
+            "中".repeat(MAX_BODY)
+        );
+        let data = json!({"evidence": [{"module": "http", "result": {"response": {"body": favicon_body}}}]});
+        let assets = extract(Some(&data));
+        assert_eq!(assets.favicon_url.as_deref(), Some("/x.ico"));
     }
 
     #[test]

@@ -137,6 +137,10 @@ struct CreateDnsTask {
     follow_up_port_scan: bool,
     #[serde(default = "default_follow_up_scan_profile")]
     follow_up_scan_profile: String,
+    /// Per-task web content enrichment override, applied to the address
+    /// follow-up tasks (the DNS parent itself never fetches web content).
+    #[serde(default)]
+    web_content_enabled: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2599,10 +2603,14 @@ async fn create_dns_task(
     };
     let task_id = Uuid::now_v7().to_string();
     let generation_metadata = if let Some(follow_up_profile) = &resolved_scan.follow_up_profile {
-        json!({"dns_follow_up": {
+        let mut follow_up = json!({
             "enabled": true,
             "scan_profile": follow_up_profile,
-        }})
+        });
+        if let Some(enabled) = input.web_content_enabled {
+            follow_up["web_content_enabled"] = json!(enabled);
+        }
+        json!({"dns_follow_up": follow_up})
     } else {
         json!({})
     };
