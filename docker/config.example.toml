@@ -48,6 +48,14 @@ directory = "/var/lib/network-mapping/scanner-diagnostics"
 # max_storage_bytes = 10737418240
 # auto_collect = false
 
+[data_import]
+# CSV 上传落盘目录，必须可写；默认位于 server-data 卷。其余参数使用代码默认值。
+directory = "/var/lib/network-mapping/data-import"
+
+[data_export]
+# 导出 CSV 落盘目录，必须可写；默认位于 server-data 卷。其余参数使用代码默认值。
+directory = "/var/lib/network-mapping/data-export"
+
 [backup]
 enabled = false
 # 默认镜像没有 pgBackRest/sudo；需独立准备二进制、配置、账户与访问权限。

@@ -2002,6 +2002,28 @@ mod tests {
         let error = super::Config::from_env_pairs([]).unwrap_err();
         assert!(error.to_string().contains("server.encrypt_key"));
     }
+    #[test]
+    fn environment_data_directories_default_to_persistent_volume() {
+        let (config, _) = super::Config::from_env_pairs(environment_pairs(&[])).unwrap();
+        assert_eq!(
+            config.data_import.directory,
+            Path::new("/var/lib/network-mapping/data-import")
+        );
+        assert_eq!(
+            config.data_export.directory,
+            Path::new("/var/lib/network-mapping/data-export")
+        );
+    }
+    #[test]
+    fn environment_accepts_data_directory_overrides() {
+        let (config, _) = super::Config::from_env_pairs(environment_pairs(&[
+            ("NM__DATA_IMPORT__DIRECTORY", "/srv/nm/import"),
+            ("NM__DATA_EXPORT__DIRECTORY", "/srv/nm/export"),
+        ]))
+        .unwrap();
+        assert_eq!(config.data_import.directory, Path::new("/srv/nm/import"));
+        assert_eq!(config.data_export.directory, Path::new("/srv/nm/export"));
+    }
     use super::{
         AutomaticTargetConfig, BackupConfig, Clis, DatabaseConfig, ElasticsearchConfig,
         FrontendConfig, MaxMindConfig, MonitorConfig, NotificationPreferences, SecurityConfig,

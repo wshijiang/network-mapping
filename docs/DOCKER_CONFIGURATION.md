@@ -20,8 +20,13 @@ TOML 示例仍是程序内置默认配置的来源，新增示例保持注释，
 | `docker/.env` 中的 Compose 变量 | 镜像、端口、profile、可选 SQL 挂载 | Compose 解析并创建或重建容器 |
 | `docker/.env` 中的 `NM__…` | 服务端启动参数 | `server.env_file` 注入环境，服务端启动时加载 |
 | `compose.example.yml` | 服务定义、运行权限、卷、健康检查、PG/ES 容器参数 | 修改后重新执行 Compose `up` |
-| 容器内置默认配置 | 未显式覆盖的已支持字段 | 先加载 `docker/config.example.toml` 的内嵌副本，其余使用类型默认值 |
+| 容器内置默认配置 | env 模式未显式覆盖的已支持字段 | env 模式先加载 `docker/config.example.toml` 的内嵌副本，其余使用类型默认值；file 模式只读指定配置文件，不合并内嵌值 |
 | PostgreSQL 中的运行策略 | 请求日志、监控、自动目标等 | 已保存值优先；启动参数只为缺失记录提供初始值 |
+
+file 模式不会自动继承内嵌示例新增的段：升级既有 `runtime/config.toml` 时需对照新版
+`docker/config.example.toml` 手动补齐。例如 `[data_import]`/`[data_export]` 需将 `directory`
+指向 `/var/lib/network-mapping/` 下的可写目录（示例值 `data-import`/`data-export`）；省略时
+代码相对默认值解析到只读的 `/etc/network-mapping` 挂载，导入/导出仍会失败。
 
 `--env-file docker/.env` 用于 Compose `${…}` 插值；`server.env_file: ./.env` 用于容器环境注入，
 两者用途不同。Compose 的 `environment` 会覆盖 `env_file` 中同名项；执行 Compose 时 shell 中的
@@ -199,6 +204,8 @@ docker compose --env-file docker/.env -f docker/compose.example.yml up -d --forc
 | `NM__FRONTEND__DIRECTORY` | 路径字符串 | `/opt/network-mapping/frontend/dist` | 已构建的前端目录，缺失页面或资源返回 404 |
 | `NM__MAXMIND__DIRECTORY` | 路径字符串 | `/var/lib/network-mapping/maxmind` | 可选 MMDB 数据目录；缺失时相关 IP 情报字段为空 |
 | `NM__SCANNER_DIAGNOSTICS__DIRECTORY` | 路径字符串 | `/var/lib/network-mapping/scanner-diagnostics` | 可写诊断存储；持有独占目录锁，部署限制见[诊断指南](SCANNER_DIAGNOSTICS.md) |
+| `NM__DATA_IMPORT__DIRECTORY` | 路径字符串 | `/var/lib/network-mapping/data-import` | 数据导入 CSV 落盘目录，必须可写；默认位于 server-data 卷 |
+| `NM__DATA_EXPORT__DIRECTORY` | 路径字符串 | `/var/lib/network-mapping/data-export` | 数据导出 CSV 落盘目录，必须可写；默认位于 server-data 卷，文件按保留期清理 |
 | `NM__PWD_HASH__M` | 整数，MiB | `64` | Argon2id 内存参数，代码换算为 KiB；需满足 Argon2 参数约束 |
 | `NM__PWD_HASH__T` | 整数 | `2` | Argon2id 迭代次数，需满足 Argon2 参数约束 |
 | `NM__PWD_HASH__P` | 整数 | `2` | Argon2id 并行度，需满足 Argon2 参数约束 |
@@ -391,7 +398,7 @@ services:
 | 来源 / 顶层声明 | 容器目标路径 | 用途 |
 | --- | --- | --- |
 | `./runtime/tls`（相对 `docker/`） | `/etc/network-mapping/tls`，只读 | `cert.pem`、`key.pem`、`ca.pem` 及可选 ES CA |
-| `volumes.server-data` | `/var/lib/network-mapping` | 可选 MaxMind 与扫描器诊断数据 |
+| `volumes.server-data` | `/var/lib/network-mapping` | 可选 MaxMind、扫描器诊断、导入/导出 CSV 与 IOC 导入缓存 |
 | `volumes.server-logs` | `/var/log/network-mapping` | 应用 JSON 文件日志 |
 | `volumes.postgres-data` | `/var/lib/postgresql` | PostgreSQL 数据 |
 | `volumes.elasticsearch-data` | `/usr/share/elasticsearch/data` | ES 数据 |
