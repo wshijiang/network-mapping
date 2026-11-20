@@ -27,6 +27,10 @@ pub struct CreateTask {
     pub required_services: Vec<String>,
     #[serde(default)]
     pub service_probe_options: ServiceProbeOptions,
+    /// Per-task override of the web content enrichment switch (favicon / JS /
+    /// landing body). None keeps the scanner runtime configuration default.
+    #[serde(default)]
+    pub web_content_enabled: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]

@@ -195,6 +195,7 @@ fn assets(cfg: &mut web::ServiceConfig) {
     cfg.service(handlers::assets::get_asset_summary);
     cfg.service(handlers::assets::get_asset_ports);
     cfg.service(handlers::assets::get_asset_port_history);
+    cfg.service(handlers::assets::get_asset_favicon);
     cfg.service(handlers::tags::list_tag_categories);
     cfg.service(handlers::tags::create_tag_category);
     cfg.service(handlers::tags::update_tag_category);

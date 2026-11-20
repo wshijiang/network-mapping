@@ -54,6 +54,11 @@ pub async fn execute(
                 .await
                 .map_err(|error| -> Box<dyn std::error::Error> { error })
         }
+        ServerCommand::ScannerConfig { command } => {
+            crate::scanner_config_cli::execute(command, pool)
+                .await
+                .map_err(|error| error as Box<dyn std::error::Error>)
+        }
     }
 }
 

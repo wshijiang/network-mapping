@@ -41,11 +41,20 @@ pub(crate) fn extract_search_content(data: Option<&Value>) -> SearchContent {
         return SearchContent::default();
     };
     let body = find_string_by_key(data, &["body"], 0).map(|value| value.to_owned());
+    // A redirect/empty probe body is superseded by the enrichment landing page.
+    let body = match body {
+        Some(value) if !value.trim().is_empty() => Some(value),
+        other => crate::web_assets::landing(data)
+            .map(|(body, _)| body)
+            .or(other),
+    };
     let (http_body, http_body_truncated) = body
         .map(|value| truncate_utf8_bytes(&value, MAX_HTTP_BODY_BYTES))
         .map(|(value, truncated)| (Some(value), truncated))
         .unwrap_or((None, false));
-    let http_body_truncated = http_body_truncated || has_truncated_http_evidence(data);
+    let http_body_truncated = http_body_truncated
+        || has_truncated_http_evidence(data)
+        || crate::web_assets::landing(data).is_some_and(|(_, truncated)| truncated);
     let title = http_body
         .as_deref()
         .and_then(extract_html_title)
@@ -222,7 +231,11 @@ fn normalize_rfc3339(value: &str) -> Option<String> {
         .map(|value| value.to_rfc3339())
 }
 
-fn find_string_by_key<'a>(value: &'a Value, keys: &[&str], depth: usize) -> Option<&'a str> {
+pub(crate) fn find_string_by_key<'a>(
+    value: &'a Value,
+    keys: &[&str],
+    depth: usize,
+) -> Option<&'a str> {
     find_value_by_key(value, keys, depth).and_then(Value::as_str)
 }
 
@@ -310,6 +323,45 @@ mod tests {
         assert!(content.http_body.as_deref().unwrap().contains("<html>"));
         assert_eq!(content.tls_subject.as_deref(), Some("CN=camera.example"));
         assert!(!content.http_body_truncated);
+    }
+
+    #[test]
+    fn landing_body_supersedes_empty_probe_body() {
+        let data = json!({
+            "schema_version": 2,
+            "evidence": [
+                {"module": "https", "result": {"response": {"status_code": 302, "body": ""}}},
+                {"module": "web_assets", "status": "success", "result": {
+                    "landing": {"url": "https://192.0.2.1/login", "status_code": 200,
+                                "body": "<html><title> Camera Login </title></html>", "body_truncated": false}
+                }}
+            ]
+        });
+        let content = extract_search_content(Some(&data));
+        assert_eq!(content.title.as_deref(), Some("Camera Login"));
+        assert!(
+            content
+                .http_body
+                .as_deref()
+                .unwrap()
+                .contains("Camera Login")
+        );
+        assert!(!content.http_body_truncated);
+    }
+
+    #[test]
+    fn probe_body_wins_over_landing_when_present() {
+        let data = json!({
+            "schema_version": 2,
+            "evidence": [
+                {"module": "http", "result": {"response": {"status_code": 200, "body": "<title>Primary</title>"}}},
+                {"module": "web_assets", "status": "success", "result": {
+                    "landing": {"body": "<title>Landing</title>", "body_truncated": true}
+                }}
+            ]
+        });
+        let content = extract_search_content(Some(&data));
+        assert_eq!(content.title.as_deref(), Some("Primary"));
     }
 
     #[test]

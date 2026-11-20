@@ -98,6 +98,9 @@ pub(crate) fn federation_field(field: Field) -> Option<&'static str> {
         Field::Technology => Some("tech"),
         Field::Title => Some("title"),
         Field::Banner => Some("banner"),
+        Field::IconMd5 => Some("icon_md5"),
+        Field::JsName => Some("js_name"),
+        Field::JsMd5 => Some("js_md5"),
         _ => None,
     }
 }
@@ -241,6 +244,13 @@ fn hunter_predicate(p: &Predicate, ctx: &mut Ctx) -> Result<String, String> {
         }
         (Field::Title, Operator::Exists) => Ok("web.title!=\"\"".into()),
         (Field::Domain, Operator::Exists) => Ok("domain!=\"\"".into()),
+        // Hunter web.icon 即 favicon 内容 MD5，与本地 icon_md5 同算法。
+        (Field::IconMd5, Operator::Eq) => Ok(format!("web.icon=={}", quoted(first_value(p)?))),
+        (Field::IconMd5, Operator::NotEq) => {
+            ctx.add_residual(Expr::Predicate(p.clone()));
+            Ok(format!("web.icon!={}", quoted(first_value(p)?)))
+        }
+        (Field::IconMd5, Operator::Exists) => Ok("web.icon!=\"\"".into()),
         _ => Err(format!(
             "unsupported: hunter {:?} {:?}",
             p.field, p.operator
@@ -303,6 +313,10 @@ fn quake_predicate(p: &Predicate, ctx: &mut Ctx) -> Result<String, String> {
         (Field::Banner, Operator::Contains) => Ok(format!("response:{}", quoted(first_value(p)?))),
         (Field::Domain, Operator::Exists) => Ok("_exists_:domain".into()),
         (Field::Service, Operator::Exists) => Ok("_exists_:service.name".into()),
+        // Quake favicon.hash 即 favicon 内容 MD5，与本地 icon_md5 同算法。
+        (Field::IconMd5, Operator::Eq | Operator::Contains) => {
+            Ok(format!("favicon.hash:{}", quoted(first_value(p)?)))
+        }
         _ => Err(format!("unsupported: quake {:?} {:?}", p.field, p.operator)),
     }
 }
@@ -374,6 +388,11 @@ fn fofa_predicate(p: &Predicate, ctx: &mut Ctx) -> Result<String, String> {
         (Field::Title, Operator::Exists) => Ok("title!=\"\"".into()),
         (Field::Domain, Operator::Exists) => Ok("domain!=\"\"".into()),
         (Field::Service, Operator::Exists) => Ok("protocol!=\"\"".into()),
+        // FOFA js_name/js_md5（= 包含 / == 精确，2026-11-20 经官方语法资料核实）。
+        (Field::JsName, Operator::Eq) => Ok(format!("js_name=={}", quoted(first_value(p)?))),
+        (Field::JsName, Operator::Contains) => Ok(format!("js_name={}", quoted(first_value(p)?))),
+        (Field::JsMd5, Operator::Eq) => Ok(format!("js_md5=={}", quoted(first_value(p)?))),
+        (Field::JsMd5, Operator::Contains) => Ok(format!("js_md5={}", quoted(first_value(p)?))),
         _ => Err(format!("unsupported: fofa {:?} {:?}", p.field, p.operator)),
     }
 }

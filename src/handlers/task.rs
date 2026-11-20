@@ -2224,7 +2224,7 @@ pub(crate) async fn create_task(
             "message": "DNS scan profiles require the domain task endpoint"
         }));
     }
-    let scan_plan = match crate::scan_control::creation::build_service_scan_plan_with_options(
+    let mut scan_plan = match crate::scan_control::creation::build_service_scan_plan_with_options(
         &scan_profile,
         &create_data.required_services,
         &create_data.service_probe_options,
@@ -2235,6 +2235,9 @@ pub(crate) async fn create_task(
                 .json(serde_json::json!({"success": false, "message": message}));
         }
     };
+    if let Some(enabled) = create_data.web_content_enabled {
+        scan_plan["web_content"] = serde_json::json!({"enabled": enabled});
+    }
     if let Err(message) = crate::scan_control::creation::validate_udp_targets(
         &scan_profile,
         &task_info

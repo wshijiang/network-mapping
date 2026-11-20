@@ -2224,6 +2224,16 @@ dependencies = [
 
 [[package]]
 name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "md-5"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
@@ -2320,6 +2330,7 @@ dependencies = [
  "ammonia",
  "argon2",
  "async-openai",
+ "base64 0.22.1",
  "chrono",
  "chrono-tz 0.10.4",
  "cidr",
@@ -2337,6 +2348,7 @@ dependencies = [
  "lettre",
  "malevich",
  "maxminddb",
+ "md-5 0.10.6",
  "native-tls",
  "nm-module-runtime",
  "nm-report-renderer",
@@ -2932,7 +2944,7 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "hmac 0.13.0",
- "md-5",
+ "md-5 0.11.0",
  "memchr",
  "rand 0.10.2",
  "sha2 0.11.0",

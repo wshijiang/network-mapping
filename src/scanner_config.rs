@@ -54,6 +54,105 @@ pub struct ServiceDetectionRuntimeConfig {
     pub connect_timeout_seconds: u64,
     pub target_timeout_seconds: u64,
     pub max_result_bytes: usize,
+    /// Web content enrichment (favicon / JS / landing body). Absent in older
+    /// documents: defaults apply, so upgrades keep enrichment enabled.
+    #[serde(default)]
+    pub web_content: WebContentRuntimeConfig,
+}
+
+/// Server-published bounds for the scanner's web content enrichment pass.
+/// Every value is manageable from the web console and the server CLI.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct WebContentRuntimeConfig {
+    pub enabled: bool,
+    pub concurrency: usize,
+    pub fetch_timeout_seconds: u64,
+    pub max_redirects: usize,
+    pub max_stage_seconds: u64,
+    pub max_favicon_bytes: usize,
+    pub max_js_files: usize,
+    pub max_js_bytes: usize,
+    pub max_body_bytes: usize,
+    pub user_agent: Option<String>,
+}
+
+impl Default for WebContentRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            concurrency: 16,
+            fetch_timeout_seconds: 10,
+            max_redirects: 3,
+            max_stage_seconds: 120,
+            max_favicon_bytes: 65_536,
+            max_js_files: 10,
+            max_js_bytes: 524_288,
+            max_body_bytes: 262_144,
+            user_agent: None,
+        }
+    }
+}
+
+impl WebContentRuntimeConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        check_range(
+            "service_detection.web_content.concurrency",
+            self.concurrency,
+            1,
+            256,
+        )?;
+        check_range(
+            "service_detection.web_content.fetch_timeout_seconds",
+            self.fetch_timeout_seconds,
+            1,
+            120,
+        )?;
+        check_range(
+            "service_detection.web_content.max_redirects",
+            self.max_redirects,
+            0,
+            10,
+        )?;
+        check_range(
+            "service_detection.web_content.max_stage_seconds",
+            self.max_stage_seconds,
+            1,
+            3600,
+        )?;
+        check_range(
+            "service_detection.web_content.max_favicon_bytes",
+            self.max_favicon_bytes,
+            1_024,
+            1_048_576,
+        )?;
+        check_range(
+            "service_detection.web_content.max_js_files",
+            self.max_js_files,
+            0,
+            64,
+        )?;
+        check_range(
+            "service_detection.web_content.max_js_bytes",
+            self.max_js_bytes,
+            1_024,
+            4_194_304,
+        )?;
+        check_range(
+            "service_detection.web_content.max_body_bytes",
+            self.max_body_bytes,
+            1_024,
+            1_048_576,
+        )?;
+        if self.user_agent.as_ref().is_some_and(|value| {
+            value.is_empty()
+                || value.len() > 256
+                || value.bytes().any(|byte| byte.is_ascii_control())
+        }) {
+            return Err("service_detection.web_content.user_agent is invalid".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -95,6 +194,7 @@ impl Default for ScannerRuntimeConfig {
                 connect_timeout_seconds: 5,
                 target_timeout_seconds: 15,
                 max_result_bytes: 65_536,
+                web_content: WebContentRuntimeConfig::default(),
             },
             dns: DnsRuntimeConfig {
                 enabled: true,
@@ -192,6 +292,7 @@ impl ScannerRuntimeConfig {
             1_024,
             1_048_576,
         )?;
+        self.service_detection.web_content.validate()?;
         check_range(
             "dns.query_timeout_seconds",
             self.dns.query_timeout_seconds,
@@ -633,6 +734,33 @@ mod tests {
     #[test]
     fn defaults_are_valid() {
         ScannerRuntimeConfig::default().validate().unwrap();
+    }
+
+    #[test]
+    fn old_documents_without_web_content_use_enabled_defaults() {
+        let mut value = serde_json::to_value(ScannerRuntimeConfig::default()).unwrap();
+        value["service_detection"]
+            .as_object_mut()
+            .unwrap()
+            .remove("web_content");
+        let config: ScannerRuntimeConfig = serde_json::from_value(value).unwrap();
+        config.validate().unwrap();
+        assert!(config.service_detection.web_content.enabled);
+        assert_eq!(
+            config.service_detection.web_content.max_favicon_bytes,
+            65_536
+        );
+        assert_eq!(config.service_detection.web_content.max_js_files, 10);
+    }
+
+    #[test]
+    fn rejects_out_of_range_web_content_bounds() {
+        let mut config = ScannerRuntimeConfig::default();
+        config.service_detection.web_content.concurrency = 0;
+        assert!(config.validate().is_err());
+        config.service_detection.web_content.concurrency = 16;
+        config.service_detection.web_content.max_favicon_bytes = 2_000_000;
+        assert!(config.validate().is_err());
     }
 
     #[test]

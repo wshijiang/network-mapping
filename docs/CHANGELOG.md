@@ -2,6 +2,14 @@
 
 [文档中心](README.md) · [配套发布与升级](https://github.com/wshijiang/network-mapping/blob/main/docs/RELEASING.md)
 
+## 未发布
+
+- **搜索 · 网页资产（favicon / JS / 正文）**：新增 `icon_md5`（别名 `icon`、`web.icon`）、`js_name`（别名 `js.name`）、`js_md5`（别名 `js.md5`）三个端点级搜索字段，支持精确/包含/集合/否定/`EXISTS` 与 `has_endpoint(...)` 组合。数据来自扫描器新增的网页内容富化证据（`web_assets`，默认开启、并发异步抓取）：favicon 原始字节（默认上限 **64KB**）随证据入库，**MD5 在服务端投影时计算**（与 Hunter `web.icon` / 360 Quake `favicon.hash` 同算法，算法修复可重投影无需重扫）；同源外部 JS 默认每页最多 **10** 个，只存路径与 MD5（与 FOFA `js_md5` 一致），不存 JS 内容；原探测遇重定向/空正文时补抓的落地页正文自动接管 `http_body`/`title` 派生。历史数据无富化证据时 `js_name` 从已存正文被动提取路径兜底。ES 端点索引新增 `icon_md5`/`favicon_url`/`favicon`(不索引)/`js_name`(+text)/`js_md5` 字段（schema 9，启动时对存量索引 additive 升级，零 DDL）。
+- **资产展示 · favicon 中继**：新增 `GET /api/assets/favicon?ip=&port=[&protocol=]`，按调用者数据范围读取 ES 存储的图标字节回传（`Content-Type` 白名单 image/*、`Cache-Control: private, max-age=86400`、`ETag=icon_md5`、支持 If-None-Match 304，无图标 404）；服务端零出站、浏览器不热链接目标。搜索响应新增 `icon_md5`/`favicon_url`/`favicon`(仅元数据)/`js_names`，base64 不进搜索响应（`_source` 排除）；资产详情端口列表同步返回 `icon_md5`/`favicon`/`js_names`/`js_md5s`。搜索页「网页 / TLS」列头部、资产详情、任务详情展示图标（没有则不占位）。
+- **配置管理 · 网页内容富化**：扫描器运行时配置新增 `service_detection.web_content`（enabled 默认 true、concurrency 16、fetch_timeout_seconds 10、max_redirects 3、max_stage_seconds 120、max_favicon_bytes 65536、max_js_files 10、max_js_bytes 524288、max_body_bytes 262144、user_agent），**Web 端扫描器配置页与服务器 CLI 均可管理**：新增 `network_mapping_server scanner-config show <ID>` / `scanner-config set-web-content <ID> [--enabled …] [--concurrency …] [--max-favicon-bytes …] …`，与 Web 写入同一文档（新修订 + 历史 + 审计，扫描器下次拉取生效，有效开关为本地 AND 远端）。创建扫描任务新增 `web_content_enabled` 可选覆盖（经 `scan_plan.web_content` 下发，无 DDL）。旧配置文档缺省该段时按默认值升级，零行为变化。
+- **联测 · 网页资产翻译**：`icon_md5` 翻译为 Hunter `web.icon==` / Quake `favicon.hash:`（同 MD5 算法）；`js_name`/`js_md5` 翻译为 FOFA `js_name`/`js_md5`（= 包含 / == 精确，2026-11-20 经官方语法资料核实）；不支持的字段×平台组合按既有保守策略跳过该源。
+- **数据导出 · 网页资产列**：字段目录新增「网页资产」组：Favicon MD5、Favicon 来源、JS 路径、JS MD5。详见[资产搜索语法与 API](SEARCH_SYNTAX.md#42-端点与服务字段)。
+
 ## v0.1.31（2026-11-18）
 
 - **扫描上传 · 心跳续租锁超时修复**：修复任务最终批次结果上传期间扫描器心跳偶发 503（`renew_task_lease_failed`，SQLSTATE 55P03）并触发 critical 健康告警的问题。上传确认事务对 `scan_task_execution` 行加 `FOR UPDATE` 锁后，在同一事务内执行搜索目标新鲜度更新（谱系 CTE + GiST 网段连接，生产 pg_stat_statements 均值约 600ms，随 `search_target_state` 增长实测可达 1.3–2s），而心跳续租的 `lock_timeout` 仅 1500ms，等锁超时即返回 503。现将搜索新鲜度更新移入新增的 `search_freshness_outbox` 表，由后台 worker 异步执行：上传确认事务（含 DNS 最终批次）只原子入队，执行行锁持有时间从约 1.7s 降至毫秒级；路由反馈与自动目标历史（防重复生成的刷新门，均为亚毫秒）仍留在原事务内，原子性与防重复生成语义不变。worker 以 `FOR UPDATE SKIP LOCKED` 认领并在同一事务内完成与标记，崩溃自动回滚重领，失败按指数退避（2–256s）重排并记录 `last_error`，任务删除级联清理；新鲜度 UPDATE 单调幂等，同一任务再次成功可重入队推进 `last_success_at`。上传响应同时提速约 1s。新增 `search_freshness_outbox` 表（幂等迁移，升级零行为变化，历史已完成任务无需回填）；新增延迟生效、重入队、失败退避、级联删除 4 个集成测试。

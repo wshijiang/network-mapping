@@ -53,6 +53,9 @@ pub(crate) enum Field {
     WebStatus,
     Title,
     HttpBody,
+    IconMd5,
+    JsName,
+    JsMd5,
     TlsMode,
     TlsVersion,
     TlsCipherSuite,
@@ -592,6 +595,8 @@ impl ElasticsearchCompiler {
                 | Field::TlsNames
                 | Field::TlsSerialNumber
                 | Field::TlsFingerprintSha256
+                | Field::IconMd5
+                | Field::JsMd5
         );
         let normalized_values = values
             .iter()
@@ -718,6 +723,9 @@ fn es_field(field: Field) -> &'static str {
 
         Field::Title => "title",
         Field::HttpBody => "http_body",
+        Field::IconMd5 => "icon_md5",
+        Field::JsName => "js_name",
+        Field::JsMd5 => "js_md5",
         Field::TlsMode => "tls_mode",
         Field::TlsVersion => "tls_version",
         Field::TlsCipherSuite => "tls_cipher_suite",
@@ -780,6 +788,9 @@ impl Field {
 
             "title" | "http.title" => Some(Self::Title),
             "http_body" | "http.body" => Some(Self::HttpBody),
+            "icon_md5" | "icon" | "web.icon" => Some(Self::IconMd5),
+            "js_name" | "js.name" => Some(Self::JsName),
+            "js_md5" | "js.md5" => Some(Self::JsMd5),
             "tls.mode" => Some(Self::TlsMode),
             "tls.version" => Some(Self::TlsVersion),
             "tls.cipher" | "tls.cipher_suite" => Some(Self::TlsCipherSuite),
@@ -827,6 +838,9 @@ impl Field {
 
             Self::Title => "title",
             Self::HttpBody => "http_body",
+            Self::IconMd5 => "icon_md5",
+            Self::JsName => "js_name",
+            Self::JsMd5 => "js_md5",
             Self::TlsMode => "tls.mode",
             Self::TlsVersion => "tls.version",
             Self::TlsCipherSuite => "tls.cipher",
@@ -862,6 +876,9 @@ impl Field {
                 | Self::WebStatus
                 | Self::Title
                 | Self::HttpBody
+                | Self::IconMd5
+                | Self::JsName
+                | Self::JsMd5
                 | Self::TlsMode
                 | Self::TlsVersion
                 | Self::TlsCipherSuite
@@ -883,6 +900,7 @@ impl Field {
             | Self::Banner
             | Self::Title
             | Self::HttpBody
+            | Self::JsName
             | Self::TlsSubject
             | Self::TlsIssuer
             | Self::TlsNames
@@ -916,6 +934,8 @@ impl Field {
             | Self::TlsNotAfter
             | Self::TlsFingerprintSha256
             | Self::TlsSelfSigned
+            | Self::IconMd5
+            | Self::JsMd5
             | Self::Source
             | Self::FirstSeen
             | Self::LastSeen => Operator::Eq,
@@ -1473,6 +1493,37 @@ mod tests {
     fn supports_legacy_syntax_and_ipv6() {
         assert!(filter("service:https").to_string().contains("*https*"));
         assert!(filter("2001:db8::1").to_string().contains("2001:db8::1"));
+    }
+
+    #[test]
+    fn compiles_web_asset_fields() {
+        // icon_md5：keyword 精确（小写归一），别名 icon / web.icon 等价。
+        let text = filter("icon_md5 = \"22EEAB765346F14FAF564A4709F98548\"").to_string();
+        assert!(text.contains("\"term\""));
+        assert!(text.contains("22eeab765346f14faf564a4709f98548"));
+        assert_eq!(
+            filter("icon = \"22eeab765346f14faf564a4709f98548\""),
+            filter("web.icon = \"22eeab765346f14faf564a4709f98548\"")
+        );
+        // js_name：默认冒号语义为包含，精确用 =。
+        assert!(filter("js_name:jquery").to_string().contains("*jquery*"));
+        let exact = filter("js_name = \"/static/js/app.js\"").to_string();
+        assert!(exact.contains("js_name"));
+        assert!(!exact.contains("*jquery*"));
+        // js_md5：精确与集合。
+        let text = filter("js_md5 IN (\"82ac3f14327a8b7ba49baa208d4eaa15\", \"900150983cd24fb0d6963f7d28e17f72\")")
+            .to_string();
+        assert!(text.contains("terms"));
+        // exists 与否定。
+        assert!(filter("EXISTS(icon_md5)").to_string().contains("exists"));
+        let negated = filter("icon_md5 != \"22eeab765346f14faf564a4709f98548\"").to_string();
+        assert!(negated.contains("must_not"));
+        // 端点级字段可用于 has_endpoint。
+        assert!(
+            filter("has_endpoint(js_name ~ \"app.js\")")
+                .to_string()
+                .contains("network_mapping_has_endpoint")
+        );
     }
 
     #[test]
