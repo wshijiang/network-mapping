@@ -285,6 +285,30 @@ pub(crate) static CATALOG: &[FieldDef] = &[
         extract: |item, _| opt(&item.title),
     },
     FieldDef {
+        key: "icon_md5",
+        label: "Favicon MD5",
+        group: "网页资产",
+        extract: |item, _| opt(&item.icon_md5),
+    },
+    FieldDef {
+        key: "favicon_url",
+        label: "Favicon 来源",
+        group: "网页资产",
+        extract: |item, _| opt(&item.favicon_url),
+    },
+    FieldDef {
+        key: "js_name",
+        label: "JS 路径",
+        group: "网页资产",
+        extract: |item, _| item.js_names.join("、"),
+    },
+    FieldDef {
+        key: "js_md5",
+        label: "JS MD5",
+        group: "网页资产",
+        extract: |item, _| item.js_md5s.join("、"),
+    },
+    FieldDef {
         key: "tls_mode",
         label: "TLS 模式",
         group: "TLS",

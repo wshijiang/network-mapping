@@ -137,6 +137,10 @@ struct CreateDnsTask {
     follow_up_port_scan: bool,
     #[serde(default = "default_follow_up_scan_profile")]
     follow_up_scan_profile: String,
+    /// Per-task web content enrichment override, applied to the address
+    /// follow-up tasks (the DNS parent itself never fetches web content).
+    #[serde(default)]
+    web_content_enabled: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -669,6 +673,8 @@ pub struct TaskDetailQuery {
 struct TaskResultPort {
     os: Option<crate::os_detection::OsInference>,
     web: Option<crate::web_detection::WebInference>,
+    icon_md5: Option<String>,
+    favicon: Option<crate::web_assets::FaviconView>,
     port: i32,
     protocol: Option<String>,
     service: Option<String>,
@@ -810,6 +816,14 @@ async fn load_execution_results_from_elasticsearch(
                             .unwrap_or_default(),
                         chrono::Utc::now().timestamp_millis(),
                     ),
+                    icon_md5: source
+                        .get("icon_md5")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    favicon: source
+                        .get("favicon")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok()),
                     port: source.get("port").and_then(Value::as_i64).unwrap_or(0) as i32,
                     protocol: source
                         .get("protocol")
@@ -2224,7 +2238,7 @@ pub(crate) async fn create_task(
             "message": "DNS scan profiles require the domain task endpoint"
         }));
     }
-    let scan_plan = match crate::scan_control::creation::build_service_scan_plan_with_options(
+    let mut scan_plan = match crate::scan_control::creation::build_service_scan_plan_with_options(
         &scan_profile,
         &create_data.required_services,
         &create_data.service_probe_options,
@@ -2235,6 +2249,9 @@ pub(crate) async fn create_task(
                 .json(serde_json::json!({"success": false, "message": message}));
         }
     };
+    if let Some(enabled) = create_data.web_content_enabled {
+        scan_plan["web_content"] = serde_json::json!({"enabled": enabled});
+    }
     if let Err(message) = crate::scan_control::creation::validate_udp_targets(
         &scan_profile,
         &task_info
@@ -2586,10 +2603,14 @@ async fn create_dns_task(
     };
     let task_id = Uuid::now_v7().to_string();
     let generation_metadata = if let Some(follow_up_profile) = &resolved_scan.follow_up_profile {
-        json!({"dns_follow_up": {
+        let mut follow_up = json!({
             "enabled": true,
             "scan_profile": follow_up_profile,
-        }})
+        });
+        if let Some(enabled) = input.web_content_enabled {
+            follow_up["web_content_enabled"] = json!(enabled);
+        }
+        json!({"dns_follow_up": follow_up})
     } else {
         json!({})
     };

@@ -32,6 +32,7 @@ pub const WEB_OPERATIONS: &[(&str, &str)] = &[
     ("POST /api/analysis/statistics/details", "读取统计明细"),
     ("GET /api/analysis/statistics/cache", "读取统计缓存状态"),
     ("POST /api/analysis/statistics/cache/clear", "清空统计缓存"),
+    ("GET /api/assets/favicon", "读取资产 favicon 图标"),
     ("GET /api/assets/port-history", "读取资产端口历史"),
     ("GET /api/assets/ports", "读取资产端口列表"),
     ("GET /api/assets/summary", "资产汇总"),

@@ -2693,6 +2693,11 @@ pub enum ServerCommand {
         #[command(subcommand)]
         command: crate::federation::cli::FederationCommand,
     },
+    /// 扫描器运行时配置 · 网页内容富化（仅需 PostgreSQL，扫描器下次拉取生效）
+    ScannerConfig {
+        #[command(subcommand)]
+        command: crate::scanner_config_cli::ScannerConfigCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]

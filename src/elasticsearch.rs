@@ -41,7 +41,7 @@ struct BulkTiming {
 
 const OUTBOX_LOCK_TIMEOUT_MINUTES: i64 = 5;
 const SCAN_INDEX_SCHEMA_VERSION: &str = "5";
-const ENDPOINT_INDEX_SCHEMA_VERSION: &str = "8";
+const ENDPOINT_INDEX_SCHEMA_VERSION: &str = "9";
 // Leave headroom beneath Elasticsearch's default 4 KiB HTTP request-line limit.
 const SCAN_REQUEST_LINE_BUDGET: usize = 3 * 1024;
 const SCAN_INDEX_OPTIONS: &str = "allow_no_indices=true&ignore_unavailable=true";
@@ -278,6 +278,16 @@ struct SearchSource {
     tls_not_after: Option<DateTime<Utc>>,
     tls_fingerprint_sha256: Option<String>,
     tls_self_signed: Option<bool>,
+    #[serde(default)]
+    icon_md5: Option<String>,
+    #[serde(default)]
+    favicon_url: Option<String>,
+    #[serde(default)]
+    favicon: Option<crate::web_assets::FaviconView>,
+    #[serde(default)]
+    js_name: Vec<String>,
+    #[serde(default)]
+    js_md5: Vec<String>,
     os: Option<crate::os_detection::OsInference>,
     web: Option<crate::web_detection::WebInference>,
     scanner_name: Option<String>,
@@ -312,6 +322,11 @@ pub(crate) struct ElasticsearchSearchItem {
     pub(crate) tls_not_after: Option<i64>,
     pub(crate) tls_fingerprint_sha256: Option<String>,
     pub(crate) tls_self_signed: Option<bool>,
+    pub(crate) icon_md5: Option<String>,
+    pub(crate) favicon_url: Option<String>,
+    pub(crate) favicon: Option<crate::web_assets::FaviconView>,
+    pub(crate) js_names: Vec<String>,
+    pub(crate) js_md5s: Vec<String>,
     pub(crate) os: Option<crate::os_detection::OsInference>,
     pub(crate) web: Option<crate::web_detection::WebInference>,
     pub(crate) scanner_name: Option<String>,
@@ -356,6 +371,11 @@ impl ElasticsearchSearchItem {
             tls_not_after: None,
             tls_fingerprint_sha256: None,
             tls_self_signed: None,
+            icon_md5: None,
+            favicon_url: None,
+            favicon: None,
+            js_names: Vec::new(),
+            js_md5s: Vec::new(),
             os: None,
             web: None,
             scanner_name: None,
@@ -2106,7 +2126,7 @@ impl ElasticsearchService {
             "from": offset,
             "size": limit,
             "track_total_hits": true,
-            "_source": {"excludes": ["http_body"]},
+            "_source": {"excludes": ["http_body", "favicon.data_base64"]},
             "query": {
                 "bool": {
                     "filter": [
@@ -2255,7 +2275,7 @@ impl ElasticsearchService {
             "size": size,
             "track_total_hits": track_total,
             "pit": {"id": pit_id, "keep_alive": "5m"},
-            "_source": {"excludes": ["http_body"]},
+            "_source": {"excludes": ["http_body", "favicon.data_base64"]},
             "query": {
                 "bool": {
                     "filter": [
@@ -3292,6 +3312,11 @@ fn parse_search_hits(hits: &[Value]) -> Result<Vec<ElasticsearchSearchItem>, Str
             tls_not_after: source.tls_not_after.map(|value| value.timestamp_millis()),
             tls_fingerprint_sha256: source.tls_fingerprint_sha256,
             tls_self_signed: source.tls_self_signed,
+            icon_md5: source.icon_md5,
+            favicon_url: source.favicon_url,
+            favicon: source.favicon,
+            js_names: source.js_name,
+            js_md5s: source.js_md5,
             os: crate::os_detection::endpoint_view(
                 source.os,
                 source.last_seen.timestamp_millis(),
@@ -4420,7 +4445,7 @@ fn scan_index_settings(replicas: u32) -> Value {
 }
 
 fn scan_endpoint_index_definition(replicas: u32) -> Value {
-    json!({
+    let mut definition = json!({
         "settings": scan_index_settings(replicas),
         "mappings": {
             "dynamic": "strict",
@@ -4491,7 +4516,21 @@ fn scan_endpoint_index_definition(replicas: u32) -> Value {
                 "data": {"type": "object", "enabled": false}
             }
         }
-    })
+    });
+    merge_web_assets_mapping(definition.pointer_mut("/mappings/properties"));
+    definition
+}
+
+/// Web asset fields are shared by the index definition (new indices) and the
+/// additive startup mapping update (existing strict indices).
+fn merge_web_assets_mapping(properties: Option<&mut Value>) {
+    if let (Some(properties), Some(entries)) =
+        (properties, crate::web_assets::mapping().as_object())
+    {
+        for (key, value) in entries {
+            properties[key] = value.clone();
+        }
+    }
 }
 
 fn endpoint_protocol(observation: &Value) -> &str {
@@ -4552,6 +4591,10 @@ fn endpoint_projection_document(
         .iter()
         .filter_map(|tag| tag.get("kind").and_then(Value::as_str))
         .collect::<Vec<_>>();
+    // Web asset facts are derived from the immutable evidence at projection
+    // time (favicon MD5 from stored bytes), so every projection path — live
+    // ingest, migration and offline rebuild — produces the same fields.
+    let web_assets = crate::web_assets::extract(observation.get("data"));
     json!({
         "scope_type": "execution",
         "scope_id": 0,
@@ -4582,6 +4625,11 @@ fn endpoint_projection_document(
         "tls_not_after": observation.get("tls_not_after").cloned().unwrap_or(Value::Null),
         "tls_fingerprint_sha256": observation.get("tls_fingerprint_sha256").cloned().unwrap_or(Value::Null),
         "tls_self_signed": observation.get("tls_self_signed").cloned().unwrap_or(Value::Null),
+        "icon_md5": web_assets.icon_md5,
+        "favicon_url": web_assets.favicon_url,
+        "favicon": web_assets.favicon,
+        "js_name": web_assets.js_names,
+        "js_md5": web_assets.js_md5s,
         "source": observation.get("source").cloned().unwrap_or(Value::Null),
         "kind": kind,
         "first_seen": observed_at,
@@ -4746,7 +4794,7 @@ fn tag_mapping_properties() -> Value {
 }
 
 fn index_mapping_update() -> Value {
-    json!({
+    let mut update = json!({
         "properties": {
             "service_observation_ref": {"type":"object", "enabled":false},
             "os": crate::os_detection::mapping(),
@@ -4767,7 +4815,9 @@ fn index_mapping_update() -> Value {
             "tls_self_signed": {"type": "boolean"},
             "tags": {"properties": tag_mapping_properties()}
         }
-    })
+    });
+    merge_web_assets_mapping(update.pointer_mut("/properties"));
+    update
 }
 
 #[cfg(test)]
@@ -5400,6 +5450,35 @@ mod tests {
         assert_ne!(
             scan_batch_payload_checksum(&context, &[original]).unwrap(),
             scan_batch_payload_checksum(&context, &[changed]).unwrap()
+        );
+    }
+
+    #[test]
+    fn web_asset_fields_exist_in_definition_and_additive_update() {
+        let definition = scan_endpoint_index_definition(1);
+        let update = index_mapping_update();
+        for field in [
+            "icon_md5",
+            "favicon_url",
+            "favicon",
+            "js_name",
+            "js_name_text",
+            "js_md5",
+        ] {
+            assert!(
+                definition
+                    .pointer(&format!("/mappings/properties/{field}"))
+                    .is_some(),
+                "index definition missing {field}"
+            );
+            assert!(
+                update.pointer(&format!("/properties/{field}")).is_some(),
+                "additive mapping update missing {field}"
+            );
+        }
+        assert_eq!(
+            definition.pointer("/mappings/properties/favicon/enabled"),
+            Some(&serde_json::json!(false))
         );
     }
 

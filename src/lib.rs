@@ -49,6 +49,7 @@ pub mod request_log;
 pub mod runtime_config;
 pub mod scan_migration;
 pub mod scanner_config;
+pub mod scanner_config_cli;
 pub mod scanner_diagnostics;
 pub mod scanner_health;
 pub mod scanner_latency;
@@ -100,4 +101,5 @@ pub(crate) mod readiness;
 
 pub mod application;
 
+mod web_assets;
 mod web_detection;

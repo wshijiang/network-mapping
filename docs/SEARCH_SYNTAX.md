@@ -181,7 +181,7 @@ tag:生产环境
 
 冒号会根据字段转换为不同操作：
 
-- `service`、`banner`、`title`、`http_body`、`tls_subject`、`tls.issuer`、`tls.san`、`isp`、`org`、`city`、
+- `service`、`banner`、`title`、`http_body`、`js_name`、`tls_subject`、`tls.issuer`、`tls.san`、`isp`、`org`、`city`、
   `scanner`：转换为包含匹配 `~`；
 - 其他字段：转换为精确匹配 `=`；
 - `ip` 的值为 CIDR 时，按网段包含关系处理。
@@ -254,6 +254,9 @@ ip IN "2001:db8::/32"
 | `banner` | 文本 | `=`、`!=`、`~`、`!~`、`IN`、`NOT IN` | 最新服务 Banner |
 | `title`、`http.title` | 文本 | `=`、`!=`、`~`、`!~`、`IN`、`NOT IN` | 最新 HTTP 页面标题 |
 | `http_body`、`http.body` | 文本 | `=`、`!=`、`~`、`!~`、`IN`、`NOT IN` | 截断后的最新 HTTP 正文，仅用于搜索 |
+| `icon_md5`、`icon`、`web.icon` | 文本 | `=`、`!=`、`~`、`!~`、`IN`、`NOT IN`、`EXISTS` | favicon 内容 MD5（32 位十六进制，大小写不敏感），与 Hunter `web.icon` / 360 Quake `favicon.hash` 同算法 |
+| `js_name`、`js.name` | 文本 | `=`、`!=`、`~`、`!~`、`IN`、`NOT IN`、`EXISTS` | 页面引用的外部 JS 路径；冒号简写为包含匹配 |
+| `js_md5`、`js.md5` | 文本 | `=`、`!=`、`~`、`!~`、`IN`、`NOT IN`、`EXISTS` | 外部 JS 内容 MD5，与 FOFA `js_md5` 同算法 |
 | `tls_subject`、`tls.subject` | 文本 | `=`、`!=`、`~`、`!~`、`IN`、`NOT IN` | 最新 TLS 证书 Subject |
 | `tls.issuer` | 文本 | `=`、`!=`、`~`、`!~`、`IN`、`NOT IN` | 最新 TLS 证书签发者 |
 | `tls.names`、`tls.san` | 文本 | `=`、`!=`、`~`、`!~`、`IN`、`NOT IN` | 证书名称及 DNS/IP SAN |
@@ -273,6 +276,9 @@ port >= 8000 AND port <= 8999
 protocol = tcp AND port IN (22, 80, 443)
 service = "https" AND banner ~ "nginx"
 title ~ "camera" AND http.body ~ "hikvision"
+icon_md5 = "22eeab765346f14faf564a4709f98548"
+js_name ~ "jquery" AND port = 443
+js_md5 = "82ac3f14327a8b7ba49baa208d4eaa15"
 tls.subject ~ "example.com"
 service = "smtps" AND tls.self_signed = true
 service = "smtp" AND tls.mode = starttls
@@ -283,6 +289,14 @@ EXISTS(service) AND NOT EXISTS(banner)
 
 Banner、标题、HTTP Body 和 TLS Subject 查询值最少需要两个字符；其他文本值长度必须在
 1–128 个字符之间。搜索结果列表不会返回完整 HTTP Body。
+
+**网页资产字段的数据来源**：`icon_md5`、`js_name`、`js_md5` 来自扫描器的网页内容
+富化（`[service_detection.web_content]`，默认开启，可在扫描器配置页或服务器 CLI
+`scanner-config set-web-content` 调整开关与上限，创建任务时也可单独关闭）。扫描器
+对识别为 http/https 的端点并发抓取 favicon（原始字节上限默认 64KB，服务端计算
+MD5）、同源外部 JS（默认每页最多 10 个，只记录路径与 MD5，不保存 JS 内容），并在
+原探测遇到重定向或空正文时补抓落地页正文。历史数据没有富化证据时，`js_name` 仍可
+从已存正文被动提取路径（无哈希）；`icon_md5` 与图标展示需要重新扫描。
 
 ### 4.3 扫描器字段
 
@@ -382,7 +396,7 @@ port = 80 AND has_endpoint(port = 443 AND service = "https")
 `has_endpoint(...)` 内只允许使用端点字段：
 
 ```text
-port, protocol, service, banner, title, http_body, tls.*, source
+port, protocol, service, banner, title, http_body, icon_md5, js_name, js_md5, tls.*, source
 ```
 
 资产字段应写在函数外部：
@@ -439,6 +453,19 @@ has_endpoint(port = 22 AND service ~ "ssh")
 AND has_endpoint(port = 443 AND service ~ "https")
 ```
 
+### 7.7 按 favicon / JS 指纹找同类资产
+
+```text
+icon_md5 = "22eeab765346f14faf564a4709f98548" AND country = CN
+js_name ~ "jquery" AND js_name ~ "bootstrap"
+js_md5 IN ("82ac3f14327a8b7ba49baa208d4eaa15", "900150983cd24fb0d6963f7d28e17f72")
+EXISTS(icon_md5) AND port = 8443
+```
+
+`icon_md5` 可直接粘贴 Hunter `web.icon` / Quake `favicon.hash` 的值；`js_md5` 与
+FOFA `js_md5` 一致。搜索结果页「网页 / TLS」列头部、资产详情与任务详情会展示已抓取
+的 favicon（没有则不展示），悬停可复制哈希并一键发起 `icon_md5` 搜索。
+
 ## 8. HTTP API
 
 ### 8.1 请求
@@ -486,6 +513,10 @@ Content-Type: application/json
       "protocol": "tcp",
       "service": "https",
       "banner": "nginx",
+      "icon_md5": "22eeab765346f14faf564a4709f98548",
+      "favicon_url": "https://192.0.2.10/favicon.ico",
+      "favicon": { "content_type": "image/x-icon", "size": 1150 },
+      "js_names": ["/static/js/app.js"],
       "scanner_name": "scanner-east-1",
       "scan_time": 1787270400000,
       "asn": "4134",
@@ -518,6 +549,13 @@ Content-Type: application/json
 ```
 
 `scan_time` 是 `last_seen` 的 Unix 毫秒时间戳。`sort_field` 和 `sort_order` 回显实际使用的排序设置。
+
+`icon_md5` / `favicon_url` / `favicon` / `js_names` 为网页资产字段，无富化数据时省略或为空。
+`favicon` 只含元数据（`content_type`、`size`）；图标字节经
+`GET /api/assets/favicon?ip=<ip>&port=<port>[&protocol=<tcp|udp>]` 中继读取（服务端只读
+Elasticsearch 存储、不访问目标，`Cache-Control: private, max-age=86400`，`ETag` 为
+`icon_md5`，无图标返回 404），搜索响应不内联 base64 以控制体积。资产详情端口列表
+（`GET /api/assets/ports`）同样返回 `icon_md5`、`favicon`、`js_names`、`js_md5s`。
 
 `took_ms` 是服务端处理本次搜索的总耗时（毫秒），从进入搜索处理开始计时，包含
 Elasticsearch 查询、情报标注、自动目标生成评估与联测合流；`es_took_ms` 是本次

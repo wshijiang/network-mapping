@@ -37,6 +37,13 @@ pub(crate) struct AssetPortHistoryQuery {
     offset: Option<i64>,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct AssetFaviconQuery {
+    ip: String,
+    port: u16,
+    protocol: Option<String>,
+}
+
 #[derive(Serialize)]
 struct AssetPortCurrent {
     port: i32,
@@ -53,6 +60,11 @@ struct AssetPortCurrent {
     service_stale: bool,
     os: Option<crate::os_detection::OsInference>,
     web: Option<crate::web_detection::WebInference>,
+    icon_md5: Option<String>,
+    favicon_url: Option<String>,
+    favicon: Option<crate::web_assets::FaviconView>,
+    js_names: Vec<String>,
+    js_md5s: Vec<String>,
     execution_id: String,
     task_id: String,
 }
@@ -229,6 +241,114 @@ pub(crate) async fn get_asset_port_history(
         &user,
     )
     .await;
+}
+
+/// Serve the stored favicon bytes for an endpoint. Reads only Elasticsearch
+/// storage (no outbound fetch to the target); the browser never hotlinks the
+/// scanned host. Missing icons return 404 so the UI can hide the image.
+#[get("/api/assets/favicon")]
+pub(crate) async fn get_asset_favicon(
+    req: HttpRequest,
+    elasticsearch: web::Data<ElasticsearchService>,
+    query: web::Query<AssetFaviconQuery>,
+    user: UserBaseI,
+) -> impl Responder {
+    let ip = match normalize_ip(&query.ip) {
+        Ok(value) => value,
+        Err(message) => return bad_request(message),
+    };
+    if query.port == 0 {
+        return bad_request("端口必须在 1 到 65535 之间");
+    }
+    if query
+        .protocol
+        .as_ref()
+        .is_some_and(|p| !matches!(p.as_str(), "tcp" | "udp" | "unknown"))
+    {
+        return bad_request("传输协议无效");
+    }
+    let mut filters = current_scope_filters(&user);
+    filters.push(json!({"term": {"ip": ip}}));
+    filters.push(json!({"term": {"port": i32::from(query.port)}}));
+    if let Some(protocol) = &query.protocol {
+        filters.push(json!({"term": {"protocol": protocol}}));
+    }
+    filters.push(json!({"exists": {"field": "icon_md5"}}));
+    let result = match elasticsearch
+        .scan_query(
+            ScanQueryIndex::CurrentEndpoints,
+            &json!({
+                "size": 5,
+                "_source": ["favicon", "icon_md5"],
+                "query": {"bool": {"filter": filters}}
+            }),
+        )
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            error_logs(&req, "AssetFaviconElasticsearchError", &error);
+            return HttpResponse::ServiceUnavailable().finish();
+        }
+    };
+    let Some(source) = result
+        .pointer("/hits/hits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|hit| hit.get("_source"))
+        .find(|source| {
+            source
+                .pointer("/favicon/data_base64")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        })
+    else {
+        return HttpResponse::NotFound().finish();
+    };
+    use base64::Engine as _;
+    let encoded = source
+        .pointer("/favicon/data_base64")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+        return HttpResponse::NotFound().finish();
+    };
+    if bytes.is_empty() {
+        return HttpResponse::NotFound().finish();
+    }
+    let icon_md5 = source
+        .get("icon_md5")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let etag = format!("\"{icon_md5}\"");
+    if req
+        .headers()
+        .get("if-none-match")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == etag)
+    {
+        return HttpResponse::NotModified()
+            .insert_header(("ETag", etag))
+            .insert_header(("Cache-Control", "private, max-age=86400"))
+            .finish();
+    }
+    let stored_type = source
+        .pointer("/favicon/content_type")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let content_type = if stored_type.starts_with("image/")
+        && !stored_type.bytes().any(|byte| byte.is_ascii_control())
+    {
+        stored_type.to_owned()
+    } else {
+        "application/octet-stream".to_owned()
+    };
+    HttpResponse::Ok()
+        .content_type(content_type)
+        .insert_header(("ETag", etag))
+        .insert_header(("Cache-Control", "private, max-age=86400"))
+        .body(bytes)
 }
 
 fn current_scope_filters(user: &UserBaseI) -> Vec<Value> {
@@ -546,6 +666,40 @@ async fn get_asset_ports_from_elasticsearch(
                     last_seen_at,
                     chrono::Utc::now().timestamp_millis(),
                 ),
+                icon_md5: source
+                    .get("icon_md5")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                favicon_url: source
+                    .get("favicon_url")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                favicon: source
+                    .get("favicon")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok()),
+                js_names: source
+                    .get("js_name")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                js_md5s: source
+                    .get("js_md5")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 execution_id: source
                     .get("execution_id")
                     .and_then(Value::as_str)

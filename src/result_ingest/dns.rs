@@ -654,8 +654,16 @@ async fn create_dns_follow_up_tasks(
     let port: String = parent.get("task_port");
     let level: i32 = parent.get("task_level");
     let parent_public_execution_id: String = parent.get("public_execution_id");
-    let scan_plan =
+    let mut scan_plan =
         build_scan_plan(scan_profile).expect("stored DNS follow-up profile was validated");
+    // The domain task's web content override rides the parent metadata and
+    // applies to every address follow-up task.
+    if let Some(enabled) = follow_up
+        .get("web_content_enabled")
+        .and_then(Value::as_bool)
+    {
+        scan_plan["web_content"] = serde_json::json!({"enabled": enabled});
+    }
     let mut created_task_count = 0_i32;
     let group_id = Uuid::parse_str(&parent_public_execution_id).ok();
     for (family, family_targets) in targets {
