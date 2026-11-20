@@ -669,6 +669,8 @@ pub struct TaskDetailQuery {
 struct TaskResultPort {
     os: Option<crate::os_detection::OsInference>,
     web: Option<crate::web_detection::WebInference>,
+    icon_md5: Option<String>,
+    favicon: Option<crate::web_assets::FaviconView>,
     port: i32,
     protocol: Option<String>,
     service: Option<String>,
@@ -810,6 +812,14 @@ async fn load_execution_results_from_elasticsearch(
                             .unwrap_or_default(),
                         chrono::Utc::now().timestamp_millis(),
                     ),
+                    icon_md5: source
+                        .get("icon_md5")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    favicon: source
+                        .get("favicon")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok()),
                     port: source.get("port").and_then(Value::as_i64).unwrap_or(0) as i32,
                     protocol: source
                         .get("protocol")
