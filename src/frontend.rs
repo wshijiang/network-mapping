@@ -32,7 +32,6 @@ const SPA_ROUTES: &[&str] = &[
     "/reports",
     "/health",
     "/open-source",
-    "/testpage",
     "/setting",
     "/setting/maintenance",
     "/setting/scan",
