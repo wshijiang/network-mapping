@@ -1,0 +1,13 @@
+任务{{ status_label }}
+
+{{ system_name }} 扫描任务{{ status_label }}。
+任务 ID：{{ task_id }}
+发起人：{{ username }}
+目标：{{ targets }}
+扫描模式：{{ scan_profile }}
+开始时间：{{ started_at }}
+结束时间：{{ ended_at }}
+耗时：{{ duration_label }}
+尝试次数：{{ attempt_count }}
+{% if failure_reason %}失败原因：{{ failure_reason }}
+{% endif %}请登录平台查看任务详情：{{ detail_path }}

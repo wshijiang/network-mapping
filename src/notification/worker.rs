@@ -142,8 +142,8 @@ pub(super) async fn claim(pool: &Pool) -> Result<ClaimOutcome> {
         kind.starts_with("report.") && row.get::<_, Value>("context")["manual_report"] == true;
     let subscribed = manual_report
         || channel.get::<_, Vec<String>>("event_types").contains(&kind)
-            && (severity == "critical"
-                || channel.get::<_, String>("minimum_severity") == "warning");
+            && severity_rank(&severity)
+                >= severity_rank(&channel.get::<_, String>("minimum_severity"));
     let mut permitted = row.get::<_, i64>("destination_revision")
         == channel.get::<_, i64>("destination_revision")
         && (kind == "notification.test" || subscribed);

@@ -1429,6 +1429,9 @@ pub struct NotificationPreferences {
     pub login_notify_enabled: bool,
     pub notify_on_stuck: bool,
     pub notify_on_complete: bool,
+    /// 任务取消通知默认关闭，由管理员显式开启。
+    #[serde(default)]
+    pub notify_on_cancel: bool,
     pub report_daily: bool,
     pub report_weekly: bool,
     pub report_monthly: bool,
@@ -1440,6 +1443,21 @@ pub struct NotificationPreferences {
     pub scanner_offline_enabled: bool,
     #[serde(default = "default_scanner_recovery_enabled")]
     pub scanner_recovery_enabled: bool,
+    /// 站内通知总开关。
+    #[serde(default = "default_health_alert_enabled")]
+    pub in_app_enabled: bool,
+    /// 目标监控变化通知开关。
+    #[serde(default = "default_health_alert_enabled")]
+    pub monitor_notify_enabled: bool,
+    /// 是否允许普通用户自助创建监控规则。
+    #[serde(default)]
+    pub monitor_user_enabled: bool,
+    /// 站内通知保留天数（7–365）。
+    #[serde(default = "default_inbox_retention_days")]
+    pub inbox_retention_days: i32,
+    /// 每用户站内通知上限（100–10000），超限先清理最旧已读。
+    #[serde(default = "default_inbox_max_per_user")]
+    pub inbox_max_per_user: i32,
 }
 
 fn default_scanner_recovery_enabled() -> bool {
@@ -1450,18 +1468,32 @@ fn default_health_alert_enabled() -> bool {
     true
 }
 
+fn default_inbox_retention_days() -> i32 {
+    90
+}
+
+fn default_inbox_max_per_user() -> i32 {
+    2000
+}
+
 impl Default for NotificationPreferences {
     fn default() -> Self {
         Self {
             login_notify_enabled: true,
             notify_on_stuck: true,
             notify_on_complete: true,
+            notify_on_cancel: false,
             report_daily: false,
             report_weekly: true,
             report_monthly: false,
             health_alert_enabled: true,
             scanner_offline_enabled: false,
             scanner_recovery_enabled: true,
+            in_app_enabled: true,
+            monitor_notify_enabled: true,
+            monitor_user_enabled: false,
+            inbox_retention_days: default_inbox_retention_days(),
+            inbox_max_per_user: default_inbox_max_per_user(),
         }
     }
 }
@@ -2046,6 +2078,12 @@ mod tests {
         assert!(prefs.health_alert_enabled);
         assert!(!prefs.scanner_offline_enabled);
         assert!(prefs.scanner_recovery_enabled);
+        assert!(!prefs.notify_on_cancel);
+        assert!(prefs.in_app_enabled);
+        assert!(prefs.monitor_notify_enabled);
+        assert!(!prefs.monitor_user_enabled);
+        assert_eq!(prefs.inbox_retention_days, 90);
+        assert_eq!(prefs.inbox_max_per_user, 2000);
     }
 
     #[test]

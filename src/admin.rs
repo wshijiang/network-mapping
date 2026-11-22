@@ -1518,6 +1518,12 @@ pub async fn get_mail_settings_from_database(
             .and_then(|value| value.parse::<bool>().ok())
             .unwrap_or(default)
     };
+    let notification_number = |key: &str, default: i32| {
+        values
+            .get(&(NOTIFICATION_SETTING_TYPE.to_owned(), key.to_owned()))
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or(default)
+    };
     let defaults = NotificationPreferences::default();
 
     Ok(MailSettingsResponse {
@@ -1536,6 +1542,7 @@ pub async fn get_mail_settings_from_database(
                 "notify_on_complete",
                 defaults.notify_on_complete,
             ),
+            notify_on_cancel: notification_value("notify_on_cancel", defaults.notify_on_cancel),
             report_daily: notification_value("report_daily", defaults.report_daily),
             report_weekly: notification_value("report_weekly", defaults.report_weekly),
             report_monthly: notification_value("report_monthly", defaults.report_monthly),
@@ -1550,6 +1557,23 @@ pub async fn get_mail_settings_from_database(
             scanner_recovery_enabled: notification_value(
                 "scanner_recovery_enabled",
                 defaults.scanner_recovery_enabled,
+            ),
+            in_app_enabled: notification_value("in_app_enabled", defaults.in_app_enabled),
+            monitor_notify_enabled: notification_value(
+                "monitor_notify_enabled",
+                defaults.monitor_notify_enabled,
+            ),
+            monitor_user_enabled: notification_value(
+                "monitor_user_enabled",
+                defaults.monitor_user_enabled,
+            ),
+            inbox_retention_days: notification_number(
+                "inbox_retention_days",
+                defaults.inbox_retention_days,
+            ),
+            inbox_max_per_user: notification_number(
+                "inbox_max_per_user",
+                defaults.inbox_max_per_user,
             ),
         },
     })
@@ -1631,6 +1655,10 @@ pub async fn write_mail_settings_to_database(
             settings.notification_prefs.notify_on_complete.to_string(),
         ),
         (
+            "notify_on_cancel",
+            settings.notification_prefs.notify_on_cancel.to_string(),
+        ),
+        (
             "report_daily",
             settings.notification_prefs.report_daily.to_string(),
         ),
@@ -1658,6 +1686,37 @@ pub async fn write_mail_settings_to_database(
             settings
                 .notification_prefs
                 .scanner_recovery_enabled
+                .to_string(),
+        ),
+        (
+            "in_app_enabled",
+            settings.notification_prefs.in_app_enabled.to_string(),
+        ),
+        (
+            "monitor_notify_enabled",
+            settings
+                .notification_prefs
+                .monitor_notify_enabled
+                .to_string(),
+        ),
+        (
+            "monitor_user_enabled",
+            settings.notification_prefs.monitor_user_enabled.to_string(),
+        ),
+        (
+            "inbox_retention_days",
+            settings
+                .notification_prefs
+                .inbox_retention_days
+                .clamp(7, 365)
+                .to_string(),
+        ),
+        (
+            "inbox_max_per_user",
+            settings
+                .notification_prefs
+                .inbox_max_per_user
+                .clamp(100, 10_000)
                 .to_string(),
         ),
     ];

@@ -1461,6 +1461,9 @@ ALTER TABLE notification_channel ADD COLUMN IF NOT EXISTS settings JSONB NOT NUL
 ALTER TABLE notification_channel ADD COLUMN IF NOT EXISTS feishu_app_secret_ciphertext BYTEA;
 ALTER TABLE notification_channel ADD COLUMN IF NOT EXISTS legacy_email BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_legacy_email ON notification_channel(legacy_email) WHERE legacy_email;
+ALTER TABLE notification_channel DROP CONSTRAINT IF EXISTS notification_channel_minimum_severity_check;
+ALTER TABLE notification_channel ADD CONSTRAINT notification_channel_minimum_severity_check
+    CHECK (minimum_severity IN ('info', 'warning', 'critical'));
 
 CREATE TABLE IF NOT EXISTS notification_event (
     id UUID PRIMARY KEY,

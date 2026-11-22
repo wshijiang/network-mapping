@@ -208,3 +208,8 @@ BEGIN
     END IF;
 END $$;
 SELECT notification_transfer_legacy_mail();
+
+-- 任务/监控信息性事件需要 info 级别；存量 warning/critical 渠道行为不变。
+ALTER TABLE notification_channel DROP CONSTRAINT IF EXISTS notification_channel_minimum_severity_check;
+ALTER TABLE notification_channel ADD CONSTRAINT notification_channel_minimum_severity_check
+    CHECK (minimum_severity IN ('info', 'warning', 'critical'));

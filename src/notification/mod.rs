@@ -32,15 +32,29 @@ pub(crate) use feishu_ws::run as run_feishu_binding;
 pub use routes::configure;
 pub(crate) use worker::run;
 
-pub const EVENT_TYPES: [&str; 6] = [
+pub const EVENT_TYPES: [&str; 9] = [
     "health.alert",
     "scanner.offline",
     "scanner.recovered",
     "user.login",
     "report.weekly",
     "report.monthly",
+    "task.completed",
+    "task.failed",
+    "task.cancelled",
 ];
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// info < warning < critical；渠道按最低级别订阅，存量 warning 渠道不受 info 事件影响。
+pub(crate) fn severity_rank(severity: &str) -> i32 {
+    match severity {
+        "critical" => 2,
+        "warning" => 1,
+        _ => 0,
+    }
+}
+
+const SEVERITY_ADMITS_SQL: &str = "(CASE $2 WHEN 'critical' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END >= CASE minimum_severity WHEN 'critical' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END)";
 
 #[derive(Debug)]
 pub struct Error {
@@ -228,8 +242,8 @@ impl ChannelInput {
         {
             return Err(Error::bad("请选择有效且不重复的通知事件"));
         }
-        if !["warning", "critical"].contains(&self.minimum_severity.as_str()) {
-            return Err(Error::bad("通知级别须为 warning 或 critical"));
+        if !["info", "warning", "critical"].contains(&self.minimum_severity.as_str()) {
+            return Err(Error::bad("通知级别须为 info、warning 或 critical"));
         }
         match self.provider.as_str() {
             "feishu" => {
@@ -658,7 +672,7 @@ pub(crate) async fn enqueue_with_context(
         return Ok(());
     }
     // Lock matching channels against concurrent edits/deletion until fanout commits.
-    let rows = tx.query("SELECT id,destination_revision,legacy_email FROM notification_channel WHERE enabled AND deleted_at IS NULL AND $1=ANY(event_types) AND ($2='critical' OR minimum_severity='warning') FOR SHARE", &[&event_type,&severity]).await?;
+    let rows = tx.query(&format!("SELECT id,destination_revision,legacy_email FROM notification_channel WHERE enabled AND deleted_at IS NULL AND $1=ANY(event_types) AND {SEVERITY_ADMITS_SQL} FOR SHARE"), &[&event_type,&severity]).await?;
     for row in rows {
         let channel: Uuid = row.get("id");
         let destination: i64 = row.get("destination_revision");
@@ -696,6 +710,163 @@ pub(crate) async fn enqueue_report(
         ),
         None,
         json!({"report_id":report,"recipient_ids":row.get::<_,Vec<i32>>("recipient_ids")}),
+    )
+    .await
+}
+
+/// 任务终态跃迁通知所需字段，由 `refresh_task_aggregate` 的 RETURNING 行构造。
+pub(crate) struct TaskTerminal<'a> {
+    pub user_id: i32,
+    pub task_id: &'a str,
+    pub initiator: &'a str,
+    pub targets: Vec<String>,
+    pub dns_targets: Vec<String>,
+    pub ports: &'a str,
+    pub profile: &'a str,
+    pub kind: &'a str,
+    pub source: &'a str,
+    pub status: &'a str,
+    pub started_at: Option<i64>,
+    pub ended_at: Option<i64>,
+    pub attempts: i32,
+    pub failure_reason: Option<String>,
+}
+
+const TASK_TERMINAL_STATES: [&str; 4] = ["succeeded", "partial", "failed", "cancelled"];
+
+fn format_task_time(ms: Option<i64>) -> String {
+    ms.and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|at| at.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| "-".into())
+}
+
+fn format_task_duration(started_at: Option<i64>, ended_at: Option<i64>) -> String {
+    let Some((start, end)) = started_at.zip(ended_at) else {
+        return "-".into();
+    };
+    let seconds = (end - start).max(0) / 1000;
+    let (hours, minutes, secs) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours} 小时 {minutes} 分")
+    } else if minutes > 0 {
+        format!("{minutes} 分 {secs} 秒")
+    } else {
+        format!("{secs} 秒")
+    }
+}
+
+fn task_targets_summary(task: &TaskTerminal<'_>) -> String {
+    let values = if task.kind == "dns" {
+        &task.dns_targets
+    } else {
+        &task.targets
+    };
+    if values.is_empty() {
+        return task.ports.to_owned();
+    }
+    let head = values
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("、");
+    if values.len() > 5 {
+        format!("{head} 等 {} 个目标", values.len())
+    } else {
+        head
+    }
+}
+
+/// 仅在任务进入终态的跃迁时产生通知；全局开关决定是否产生事件，dedup_key 保证幂等。
+pub(crate) async fn enqueue_task_terminal(
+    tx: &Transaction<'_>,
+    previous_status: &str,
+    task: TaskTerminal<'_>,
+) -> std::result::Result<(), tokio_postgres::Error> {
+    if TASK_TERMINAL_STATES.contains(&previous_status)
+        || !TASK_TERMINAL_STATES.contains(&task.status)
+    {
+        return Ok(());
+    }
+    let (event_type, severity, status_label, pref_key, default_enabled) = match task.status {
+        "succeeded" => ("task.completed", "info", "完成", "notify_on_complete", true),
+        "partial" => (
+            "task.completed",
+            "warning",
+            "部分完成",
+            "notify_on_complete",
+            true,
+        ),
+        "failed" => ("task.failed", "warning", "失败", "notify_on_stuck", true),
+        "cancelled" => (
+            "task.cancelled",
+            "info",
+            "已取消",
+            "notify_on_cancel",
+            false,
+        ),
+        _ => return Ok(()),
+    };
+    let enabled: bool = tx
+        .query_opt(
+            "SELECT value::boolean FROM setting WHERE item_type='notification' AND key=$1",
+            &[&pref_key],
+        )
+        .await?
+        .map(|row| row.get::<_, bool>(0))
+        .unwrap_or(default_enabled);
+    if !enabled {
+        return Ok(());
+    }
+    let targets = task_targets_summary(&task);
+    let profile = crate::scan_control::creation::display_scan_profile(task.profile, None);
+    let started_at = format_task_time(task.started_at);
+    let ended_at = format_task_time(task.ended_at);
+    let duration = format_task_duration(task.started_at, task.ended_at);
+    let failure_reason = task.failure_reason.clone().unwrap_or_default();
+    let detail_path = format!("/task/{}", task.task_id);
+    let mail_template = if event_type == "task.failed" {
+        crate::mail_template::TASK_FAILED_TEMPLATE_KEY
+    } else {
+        crate::mail_template::TASK_COMPLETED_TEMPLATE_KEY
+    };
+    let mail_context = json!({
+        "system_name": "Network Mapping",
+        "task_id": task.task_id,
+        "status_label": status_label,
+        "username": task.initiator,
+        "targets": targets,
+        "scan_profile": profile,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "duration_label": duration,
+        "attempt_count": task.attempts,
+        "failure_reason": failure_reason,
+        "detail_path": detail_path,
+    });
+    let title = format!("扫描任务{status_label}");
+    let mut body = format!(
+        "任务 ID：{}\n目标：{targets}\n扫描模式：{profile}\n耗时：{duration}",
+        task.task_id
+    );
+    if !failure_reason.is_empty() {
+        body.push_str(&format!("\n失败原因：{failure_reason}"));
+    }
+    enqueue_with_context(
+        tx,
+        event_type,
+        severity,
+        &format!("task:{}:{}", task.task_id, task.status),
+        &title,
+        &body,
+        None,
+        json!({
+            "user_id": task.user_id,
+            "task_id": task.task_id,
+            "task_source": task.source,
+            "mail_template": mail_template,
+            "mail_context": mail_context,
+        }),
     )
     .await
 }
@@ -751,7 +922,7 @@ pub async fn deliveries(pool: &Pool, query: DeliveryQuery) -> Result<Value> {
 pub async fn retry(pool: &Pool, id: Uuid, user: &UserBaseI, context: &AuditContext) -> Result<()> {
     let mut conn = pool.get().await?;
     let tx = conn.transaction().await?;
-    let changed = tx.execute("UPDATE notification_delivery d SET status='pending',attempts=0,available_at=NOW(),finished_at=NULL,last_error=NULL FROM notification_channel c,notification_event e WHERE d.id=$1 AND d.channel_id=c.id AND d.event_id=e.id AND d.status='failed' AND c.enabled AND c.deleted_at IS NULL AND c.destination_revision=d.destination_revision AND (e.event_type='notification.test' OR (e.event_type LIKE 'report.%' AND e.context->>'manual_report'='true') OR (e.event_type=ANY(c.event_types) AND (e.severity='critical' OR c.minimum_severity='warning'))) AND (e.event_type<>'scanner.offline' OR EXISTS(SELECT 1 FROM scanner_outage o JOIN scanner_info s ON s.scanner_id=o.scanner_id WHERE o.id=e.outage_id AND o.recovered_at IS NULL AND s.deleted_at IS NULL AND s.is_enable))", &[&id]).await?;
+    let changed = tx.execute("UPDATE notification_delivery d SET status='pending',attempts=0,available_at=NOW(),finished_at=NULL,last_error=NULL FROM notification_channel c,notification_event e WHERE d.id=$1 AND d.channel_id=c.id AND d.event_id=e.id AND d.status='failed' AND c.enabled AND c.deleted_at IS NULL AND c.destination_revision=d.destination_revision AND (e.event_type='notification.test' OR (e.event_type LIKE 'report.%' AND e.context->>'manual_report'='true') OR (e.event_type=ANY(c.event_types) AND (CASE e.severity WHEN 'critical' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END >= CASE c.minimum_severity WHEN 'critical' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END))) AND (e.event_type<>'scanner.offline' OR EXISTS(SELECT 1 FROM scanner_outage o JOIN scanner_info s ON s.scanner_id=o.scanner_id WHERE o.id=e.outage_id AND o.recovered_at IS NULL AND s.deleted_at IS NULL AND s.is_enable))", &[&id]).await?;
     if changed != 1 {
         return Err(Error::conflict());
     }

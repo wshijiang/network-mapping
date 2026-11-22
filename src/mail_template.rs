@@ -3,7 +3,8 @@ use nm_report_renderer::sanitize_email_html;
 pub use nm_report_renderer::{
     HEALTH_ALERT_TEMPLATE_KEY, LOGIN_SUCCESS_TEMPLATE_KEY, MailTemplateSource,
     REPORT_MONTHLY_TEMPLATE_KEY, REPORT_WEEKLY_TEMPLATE_KEY, RenderedMailTemplate,
-    SCANNER_OUTAGE_TEMPLATE_KEY, render_template,
+    SCANNER_OUTAGE_TEMPLATE_KEY, TASK_COMPLETED_TEMPLATE_KEY, TASK_FAILED_TEMPLATE_KEY,
+    render_template,
 };
 
 use chrono::{DateTime, Utc};
@@ -31,6 +32,13 @@ const DEFAULT_SCANNER_OUTAGE_SUBJECT: &str =
     "{{ system_name }} 扫描器{{ event_label }}：{{ scanner_name }}";
 const DEFAULT_SCANNER_OUTAGE_HTML: &str = include_str!("../templates/mail/scanner_outage.html");
 const DEFAULT_SCANNER_OUTAGE_TEXT: &str = include_str!("../templates/mail/scanner_outage.txt");
+const DEFAULT_TASK_COMPLETED_SUBJECT: &str =
+    "{{ system_name }} 任务{{ status_label }}：{{ task_id }}";
+const DEFAULT_TASK_COMPLETED_HTML: &str = include_str!("../templates/mail/task_completed.html");
+const DEFAULT_TASK_COMPLETED_TEXT: &str = include_str!("../templates/mail/task_completed.txt");
+const DEFAULT_TASK_FAILED_SUBJECT: &str = "{{ system_name }} 任务失败：{{ task_id }}";
+const DEFAULT_TASK_FAILED_HTML: &str = include_str!("../templates/mail/task_failed.html");
+const DEFAULT_TASK_FAILED_TEXT: &str = include_str!("../templates/mail/task_failed.txt");
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,12 +138,30 @@ const REPORT_MONTHLY_DEFINITION: MailTemplateDefinition = MailTemplateDefinition
     ..REPORT_WEEKLY_DEFINITION
 };
 
+const TASK_COMPLETED_DEFINITION: MailTemplateDefinition = MailTemplateDefinition {
+    template_key: TASK_COMPLETED_TEMPLATE_KEY,
+    display_name: "任务完成与取消",
+    default_subject: DEFAULT_TASK_COMPLETED_SUBJECT,
+    default_html: DEFAULT_TASK_COMPLETED_HTML,
+    default_text: DEFAULT_TASK_COMPLETED_TEXT,
+};
+
+const TASK_FAILED_DEFINITION: MailTemplateDefinition = MailTemplateDefinition {
+    template_key: TASK_FAILED_TEMPLATE_KEY,
+    display_name: "任务失败",
+    default_subject: DEFAULT_TASK_FAILED_SUBJECT,
+    default_html: DEFAULT_TASK_FAILED_HTML,
+    default_text: DEFAULT_TASK_FAILED_TEXT,
+};
+
 const ALL_TEMPLATE_DEFINITIONS: &[MailTemplateDefinition] = &[
     LOGIN_SUCCESS_DEFINITION,
     HEALTH_ALERT_DEFINITION,
     SCANNER_OUTAGE_DEFINITION,
     REPORT_WEEKLY_DEFINITION,
     REPORT_MONTHLY_DEFINITION,
+    TASK_COMPLETED_DEFINITION,
+    TASK_FAILED_DEFINITION,
 ];
 
 fn template_definition(template_key: &str) -> Option<MailTemplateDefinition> {
@@ -145,6 +171,8 @@ fn template_definition(template_key: &str) -> Option<MailTemplateDefinition> {
         SCANNER_OUTAGE_TEMPLATE_KEY => Some(SCANNER_OUTAGE_DEFINITION),
         REPORT_WEEKLY_TEMPLATE_KEY => Some(REPORT_WEEKLY_DEFINITION),
         REPORT_MONTHLY_TEMPLATE_KEY => Some(REPORT_MONTHLY_DEFINITION),
+        TASK_COMPLETED_TEMPLATE_KEY => Some(TASK_COMPLETED_DEFINITION),
+        TASK_FAILED_TEMPLATE_KEY => Some(TASK_FAILED_DEFINITION),
         _ => None,
     }
 }
@@ -347,6 +375,68 @@ pub(crate) fn template_variables(template_key: &str) -> Vec<MailTemplateVariable
                 example: "https://平台地址/reports/报告ID",
             },
         ],
+        TASK_COMPLETED_TEMPLATE_KEY | TASK_FAILED_TEMPLATE_KEY => vec![
+            MailTemplateVariable {
+                key: "system_name",
+                label: "系统名称",
+                example: "Network Mapping",
+            },
+            MailTemplateVariable {
+                key: "task_id",
+                label: "任务 ID",
+                example: "01952f0c-0000-7000-8000-000000000001",
+            },
+            MailTemplateVariable {
+                key: "status_label",
+                label: "任务状态",
+                example: "完成 / 部分完成 / 失败 / 已取消",
+            },
+            MailTemplateVariable {
+                key: "username",
+                label: "任务发起人",
+                example: "admin",
+            },
+            MailTemplateVariable {
+                key: "targets",
+                label: "目标摘要",
+                example: "192.0.2.0/24 等 3 个目标",
+            },
+            MailTemplateVariable {
+                key: "scan_profile",
+                label: "扫描模式",
+                example: "服务识别",
+            },
+            MailTemplateVariable {
+                key: "started_at",
+                label: "开始时间",
+                example: "2026-11-22 10:00:00 UTC",
+            },
+            MailTemplateVariable {
+                key: "ended_at",
+                label: "结束时间",
+                example: "2026-11-22 10:05:00 UTC",
+            },
+            MailTemplateVariable {
+                key: "duration_label",
+                label: "耗时",
+                example: "5 分 0 秒",
+            },
+            MailTemplateVariable {
+                key: "attempt_count",
+                label: "尝试次数",
+                example: "1",
+            },
+            MailTemplateVariable {
+                key: "failure_reason",
+                label: "失败原因（无则为空）",
+                example: "scanner recovery limit exceeded",
+            },
+            MailTemplateVariable {
+                key: "detail_path",
+                label: "任务详情路径",
+                example: "/task/01952f0c-0000-7000-8000-000000000001",
+            },
+        ],
         _ => Vec::new(),
     }
 }
@@ -395,6 +485,26 @@ pub fn sample_context(template_key: &str) -> Result<Context, Box<dyn std::error:
             "last_seen_at": "2026-09-30 10:00:00 UTC",
             "event_at": "2026-09-30 10:02:00 UTC",
             "detail_path": "/scanner/01952f0c-0000-7000-8000-000000000001"
+        }))?);
+    }
+    if matches!(
+        template_key,
+        TASK_COMPLETED_TEMPLATE_KEY | TASK_FAILED_TEMPLATE_KEY
+    ) {
+        let failed = template_key == TASK_FAILED_TEMPLATE_KEY;
+        return Ok(Context::from_serialize(json!({
+            "system_name": "Network Mapping",
+            "task_id": "01952f0c-0000-7000-8000-000000000001",
+            "status_label": if failed { "失败" } else { "完成" },
+            "username": "admin",
+            "targets": "192.0.2.0/24",
+            "scan_profile": "服务识别",
+            "started_at": "2026-11-22 10:00:00 UTC",
+            "ended_at": "2026-11-22 10:05:00 UTC",
+            "duration_label": "5 分 0 秒",
+            "attempt_count": 1,
+            "failure_reason": if failed { "scanner recovery limit exceeded" } else { "" },
+            "detail_path": "/task/01952f0c-0000-7000-8000-000000000001"
         }))?);
     }
     Ok(Context::from_serialize(json!({

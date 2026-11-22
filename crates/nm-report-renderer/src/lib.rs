@@ -35,6 +35,10 @@ pub const REPORT_WEEKLY_TEMPLATE_KEY: &str = "report_weekly";
 
 pub const REPORT_MONTHLY_TEMPLATE_KEY: &str = "report_monthly";
 
+pub const TASK_COMPLETED_TEMPLATE_KEY: &str = "task_completed";
+
+pub const TASK_FAILED_TEMPLATE_KEY: &str = "task_failed";
+
 const MAX_SUBJECT_TEMPLATE_CHARS: usize = 500;
 
 const MAX_BODY_TEMPLATE_BYTES: usize = 256 * 1024;
@@ -139,6 +143,8 @@ pub fn render_template(
             | SCANNER_OUTAGE_TEMPLATE_KEY
             | REPORT_WEEKLY_TEMPLATE_KEY
             | REPORT_MONTHLY_TEMPLATE_KEY
+            | TASK_COMPLETED_TEMPLATE_KEY
+            | TASK_FAILED_TEMPLATE_KEY
     ) {
         return Err("未知邮件模板".into());
     }

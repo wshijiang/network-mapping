@@ -83,6 +83,15 @@ pub fn sample_context(event: &str) -> Context {
         "scanner.recovered" => ("Scanner 恢复连接", "扫描器：示例节点\n节点已恢复连接。"),
         "report.weekly" => ("周报已生成", "报告周期：示例周期\n请登录平台报告中心查看。"),
         "report.monthly" => ("月报已生成", "报告周期：示例周期\n请登录平台报告中心查看。"),
+        "task.completed" => (
+            "扫描任务完成",
+            "任务 ID：示例任务\n目标：192.0.2.0/24\n请登录平台查看任务详情。",
+        ),
+        "task.failed" => (
+            "扫描任务失败",
+            "任务 ID：示例任务\n失败原因：示例原因\n请检查扫描器状态后重试。",
+        ),
+        "task.cancelled" => ("扫描任务已取消", "任务 ID：示例任务\n任务已被取消。"),
         _ => ("系统健康告警", "告警类型：慢请求\n详情：示例告警内容。"),
     };
     let mut context = context(
@@ -481,11 +490,11 @@ pub fn render(provider: &str, source: &Source, c: &Context) -> Result<Rendered> 
             .get("event_type")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let color = if event == "scanner.recovered" {
+        let color = if event == "scanner.recovered" || event == "task.completed" {
             "green"
         } else if c.get("severity").and_then(Value::as_str) == Some("critical") {
             "red"
-        } else if matches!(event, "health.alert" | "scanner.offline") {
+        } else if matches!(event, "health.alert" | "scanner.offline" | "task.failed") {
             "orange"
         } else {
             "blue"
