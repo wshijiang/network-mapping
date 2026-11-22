@@ -31,7 +31,7 @@ pub struct PlacementRequest {
     service_probe_options: crate::scan_control::creation::ServiceProbeOptions,
 }
 fn default_ports() -> String {
-    "1-65535".into()
+    crate::scan_control::creation::DEFAULT_SCAN_PORTS.into()
 }
 fn empty_resolvers() -> Value {
     json!([])

@@ -225,7 +225,7 @@ fn resolve_dns_task_port(
     let port = port
         .map(str::trim)
         .filter(|port| !port.is_empty())
-        .unwrap_or("1-65535");
+        .unwrap_or(crate::scan_control::creation::DEFAULT_SCAN_PORTS);
     if !crate::scan_control::target::check_port(port) {
         return Err("invalid port range");
     }
@@ -3411,7 +3411,7 @@ mod tests {
         for port in [None, Some(""), Some("  ")] {
             assert_eq!(
                 resolve_dns_task_port("dns_records", true, port).unwrap(),
-                "1-65535"
+                crate::scan_control::creation::DEFAULT_SCAN_PORTS
             );
         }
         assert_eq!(
