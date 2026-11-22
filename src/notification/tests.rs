@@ -2978,3 +2978,57 @@ async fn task_terminal_notifications_gate_by_severity_preference_and_dedup() {
     drop(c);
     cleanup(pool, schema).await;
 }
+
+#[actix_web::test]
+async fn preferences_endpoints_require_administrator_and_csrf() {
+    let pool = Pool::builder(Manager::new(
+        "host=127.0.0.1 user=unused".parse().unwrap(),
+        NoTls,
+    ))
+    .build()
+    .unwrap();
+    let app = http_test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(user(2));
+                srv.call(req)
+            })
+            .configure(configure),
+    )
+    .await;
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::get()
+            .uri("/api/notifications/preferences")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let payload = json!({"loginNotifyEnabled":true,"notifyOnStuck":true,"notifyOnComplete":true,"reportDaily":false,"reportWeekly":true,"reportMonthly":false});
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::put()
+            .uri("/api/notifications/preferences")
+            .set_json(&payload)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let app = http_test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool))
+            .wrap(crate::middlewares::csrfmiddleware::CsrfMiddleware)
+            .configure(configure),
+    )
+    .await;
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::put()
+            .uri("/api/notifications/preferences")
+            .set_json(&payload)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}

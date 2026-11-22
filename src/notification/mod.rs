@@ -871,6 +871,39 @@ pub(crate) async fn enqueue_task_terminal(
     .await
 }
 
+/// 全局通知偏好（事件产生闸 + 站内通知配置），管理员在通知管理页维护。
+pub async fn preferences(pool: &Pool) -> Result<crate::config::NotificationPreferences> {
+    Ok(crate::admin::get_mail_settings_from_database(pool)
+        .await
+        .map_err(|_| Error::internal())?
+        .notification_prefs)
+}
+
+pub async fn save_preferences(
+    pool: &Pool,
+    prefs: crate::config::NotificationPreferences,
+    user: &UserBaseI,
+    context: &AuditContext,
+) -> Result<crate::config::NotificationPreferences> {
+    crate::admin::write_notification_preferences_to_database(pool, &prefs)
+        .await
+        .map_err(|_| Error::internal())?;
+    let mut conn = pool.get().await?;
+    let tx = conn.transaction().await?;
+    let mut event = AuditEvent::user(
+        "configuration",
+        "notification.preferences_save",
+        "success",
+        user,
+    )
+    .resource("notification", "preferences");
+    event.response_status = Some(200);
+    event.changes = Some(serde_json::to_value(&prefs).map_err(|_| Error::internal())?);
+    crate::audit::write(&tx, context, &event).await?;
+    tx.commit().await?;
+    preferences(pool).await
+}
+
 pub async fn test_send(
     pool: &Pool,
     id: Uuid,
