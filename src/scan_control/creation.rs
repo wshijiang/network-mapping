@@ -15,6 +15,44 @@ pub const DEFAULT_SCAN_PORTS: &str = "1-11000,11211,20000,27017,47808,11210,1130
 /// Historical full-port default; existing tasks keep it and stay reusable.
 pub const LEGACY_FULL_SCAN_PORTS: &str = "1-65535";
 
+/// Expands a comma-separated port expression (`80,443,8000-8010`) into a set.
+/// Returns `None` for malformed segments so callers can fail closed.
+pub(crate) fn expand_port_set(expression: &str) -> Option<std::collections::BTreeSet<u16>> {
+    let mut ports = std::collections::BTreeSet::new();
+    for segment in expression.split(',') {
+        let segment = segment.trim();
+        let (start, end) = match segment.split_once('-') {
+            Some((start, end)) => (start.parse::<u16>().ok()?, end.parse::<u16>().ok()?),
+            None => {
+                let value = segment.parse::<u16>().ok()?;
+                (value, value)
+            }
+        };
+        if start == 0 || start > end {
+            return None;
+        }
+        ports.extend(start..=end);
+    }
+    Some(ports)
+}
+
+/// Whether the default task port set covers every port in `expression`.
+/// Search freshness may only reuse a default-port task when it actually
+/// scanned the configured `automatic_target.common_ports`; a customized
+/// common_ports reaching outside the default set must not be treated as
+/// covered. The default set is expanded once and cached.
+pub fn default_scan_ports_cover(expression: &str) -> bool {
+    static DEFAULT_SET: std::sync::OnceLock<std::collections::BTreeSet<u16>> =
+        std::sync::OnceLock::new();
+    let Some(inner) = expand_port_set(expression) else {
+        return false;
+    };
+    let outer = DEFAULT_SET.get_or_init(|| {
+        expand_port_set(DEFAULT_SCAN_PORTS).expect("DEFAULT_SCAN_PORTS is a valid port set")
+    });
+    inner.is_subset(outer)
+}
+
 /// 该结构体用于接收用户创建任务时的数据
 /// 仅有三个参数
 #[derive(Deserialize)]
@@ -628,5 +666,25 @@ mod default_port_tests {
         for port in [11211, 27017, 47808, 34962, 34963, 34964, 64738] {
             assert!(default.contains(&port), "missing high port {port}");
         }
+    }
+
+    #[test]
+    fn default_port_coverage_gates_search_reuse() {
+        // The shipped common ports and any subset stay covered.
+        assert!(default_scan_ports_cover(
+            crate::config::DEFAULT_COMMON_SCAN_PORTS
+        ));
+        assert!(default_scan_ports_cover("80,443"));
+        assert!(default_scan_ports_cover("1-11000"));
+        assert!(default_scan_ports_cover("11211,27017,34962-34964"));
+        // A customized common port outside the default set is NOT covered, so a
+        // default-port task must not be reported fresh for it.
+        assert!(!default_scan_ports_cover("80,443,12345"));
+        assert!(!default_scan_ports_cover("11001"));
+        assert!(!default_scan_ports_cover("65535"));
+        // Malformed expressions fail closed.
+        assert!(!default_scan_ports_cover(""));
+        assert!(!default_scan_ports_cover("abc"));
+        assert!(!default_scan_ports_cover("443-80"));
     }
 }

@@ -169,19 +169,32 @@ async fn admit(
     let cooldown_until = last_generated.map(|at| at + i64::from(settings.cooldown_minutes) * 60000);
     // Only the owner's tasks are reusable. DNS descendants remain part of the
     // in-flight operation even after their DNS parent succeeds.
-    // Full-port legacy tasks and the current default port set both cover the
-    // configured common ports, so either stays reusable for search freshness.
+    // Full-port legacy tasks always cover the configured common ports. The
+    // current default port set only does so when common_ports stays inside it;
+    // a customized common_ports reaching outside the default set must not make
+    // a default-port task reusable (it never scanned those ports).
+    let port_clause =
+        if crate::scan_control::creation::default_scan_ports_cover(&policy.common_ports) {
+            format!(
+                "(t.task_port=$4 OR t.task_port='{}' OR t.task_port='{}')",
+                crate::scan_control::creation::LEGACY_FULL_SCAN_PORTS,
+                crate::scan_control::creation::DEFAULT_SCAN_PORTS,
+            )
+        } else {
+            format!(
+                "(t.task_port=$4 OR t.task_port='{}')",
+                crate::scan_control::creation::LEGACY_FULL_SCAN_PORTS,
+            )
+        };
     let matching = tx.query(
         &format!(
             "SELECT t.task_id, e.execution_status, GREATEST(e.task_end_time, (SELECT MAX(c.task_end_time) FROM scan_task_lineage l JOIN scan_task_execution c ON c.task_id=l.child_task_id WHERE l.parent_execution_id=e.id)) AS task_end_time, \
              EXISTS(SELECT 1 FROM scan_task_lineage l JOIN scan_task_execution c ON c.task_id=l.child_task_id WHERE l.parent_execution_id=e.id AND c.execution_status IN ('pending','running')) AS child_active, \
              EXISTS(SELECT 1 FROM scan_task_lineage l JOIN scan_task_execution c ON c.task_id=l.child_task_id WHERE l.parent_execution_id=e.id AND c.execution_status <> 'succeeded') AS child_incomplete \
              FROM scan_task t JOIN scan_task_execution e ON e.task_id=t.id \
-             WHERE t.user_id=$1 AND (t.task_port=$4 OR t.task_port='{}' OR t.task_port='{}') AND \
+             WHERE t.user_id=$1 AND {port_clause} AND \
              CASE WHEN $2='ip' THEN t.task_kind='ip' AND t.scan_profile=$5 AND EXISTS(SELECT 1 FROM unnest(t.task_target) a WHERE a >>= $3::text::inet) \
              ELSE t.task_kind='dns' AND $3=ANY(t.dns_targets) AND t.generation_metadata->'dns_follow_up'->>'scan_profile'=$5 END",
-            crate::scan_control::creation::LEGACY_FULL_SCAN_PORTS,
-            crate::scan_control::creation::DEFAULT_SCAN_PORTS,
         ),
         &[&user.id,&target.kind,&target.key,&policy.common_ports,&profile],
     ).await?;
