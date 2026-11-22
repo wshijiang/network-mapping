@@ -94,7 +94,7 @@ fn task_list_filter<'a>(
         conditions.push(format!("t.user_id = ${}", params.len()));
     }
     if !filters.include_system {
-        conditions.push("t.task_source NOT IN ('automatic', 'import')".to_owned());
+        conditions.push("t.task_source NOT IN ('automatic', 'import', 'monitor')".to_owned());
     }
     if let Some(task_id) = filters.task_id.as_ref() {
         params.push(task_id);
@@ -184,7 +184,7 @@ pub async fn get_task_item(
             if let Some(st) = start_id {
                 c.query(
                     "SELECT scan_task.*, CASE WHEN task_kind = 'dns' THEN dns_targets ELSE task_target::TEXT[] END AS display_targets, COUNT(*) OVER() AS total_count FROM scan_task \
-                     WHERE id <= $1 AND ($2::boolean OR task_source NOT IN ('automatic', 'import')) \
+                     WHERE id <= $1 AND ($2::boolean OR task_source NOT IN ('automatic', 'import', 'monitor')) \
                      ORDER BY id DESC LIMIT $3;",
                     &[&st, &include_system, &s_count],
                 )
@@ -202,14 +202,14 @@ pub async fn get_task_item(
             if let Some(st) = start_id {
                 c.query(
                     "SELECT scan_task.*, CASE WHEN task_kind = 'dns' THEN dns_targets ELSE task_target::TEXT[] END AS display_targets, COUNT(*) OVER() AS total_count FROM scan_task \
-                     WHERE user_id = $1 AND id <= $2 AND ($3::boolean OR task_source NOT IN ('automatic', 'import')) \
+                     WHERE user_id = $1 AND id <= $2 AND ($3::boolean OR task_source NOT IN ('automatic', 'import', 'monitor')) \
                      ORDER BY id DESC LIMIT $4;",
                     &[&u_id, &st, &include_system, &s_count]
                 ).await?
             } else {
                 c.query(
                     "SELECT scan_task.*, CASE WHEN task_kind = 'dns' THEN dns_targets ELSE task_target::TEXT[] END AS display_targets, COUNT(*) OVER() AS total_count FROM scan_task \
-                     WHERE user_id = $1 AND ($2::boolean OR task_source NOT IN ('automatic', 'import')) \
+                     WHERE user_id = $1 AND ($2::boolean OR task_source NOT IN ('automatic', 'import', 'monitor')) \
                      ORDER BY id DESC LIMIT $3;",
                     &[&u_id, &include_system, &s_count],
                 )
@@ -263,23 +263,7 @@ pub async fn get_filtered_task_page(
 ) -> Result<TaskListPage, Box<dyn std::error::Error>> {
     let mut connection = pool.get().await?;
     let transaction = connection.transaction().await?;
-    let expired = transaction
-        .query(
-            "UPDATE scan_task_execution SET execution_status = CASE WHEN cancel_requested THEN 'cancelled' ELSE 'pending' END, \
-             assigned_scanner_id = CASE WHEN cancel_requested THEN assigned_scanner_id ELSE NULL END, lease_expires_at = NULL, \
-             task_start_time = CASE WHEN cancel_requested THEN task_start_time ELSE NULL END, \
-             task_end_time = CASE WHEN cancel_requested THEN (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000)::BIGINT ELSE NULL END, \
-             cancel_requested = false, failure_reason = CASE WHEN cancel_requested THEN NULL ELSE 'task lease expired' END \
-             WHERE execution_status = 'running' AND lease_expires_at IS NOT NULL \
-               AND lease_expires_at < (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000)::BIGINT RETURNING task_id;",
-            &[],
-        )
-        .await?;
-    let expired_tasks: std::collections::HashSet<i32> =
-        expired.iter().map(|row| row.get("task_id")).collect();
-    for task_id in expired_tasks {
-        refresh_task_aggregate(&transaction, task_id).await?;
-    }
+    super::dispatch::sweep_expired_leases_tx(&transaction).await?;
     transaction.commit().await?;
 
     let owner_id = match permissions {
@@ -390,7 +374,7 @@ mod task_list_filter_tests {
 
         assert_eq!(params.len(), 4);
         assert!(sql.contains("t.user_id = $1"));
-        assert!(sql.contains("t.task_source NOT IN ('automatic', 'import')"));
+        assert!(sql.contains("t.task_source NOT IN ('automatic', 'import', 'monitor')"));
         assert!(sql.contains("t.task_status = $2"));
         assert!(sql.contains("assigned_scanner_id, '') ILIKE '%' || $3 || '%'"));
         assert!(sql.contains("t.id < $4"));

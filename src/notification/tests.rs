@@ -977,6 +977,11 @@ async fn database_with_max_size(max_size: usize) -> (Pool, String) {
         ))
         .await
         .unwrap();
+        c.batch_execute(include_str!(
+            "../../source/database/migrate_target_monitor.sql"
+        ))
+        .await
+        .unwrap();
     }
     c.batch_execute("INSERT INTO users(id,username,password,role) VALUES(1,'admin','test',1)")
         .await

@@ -33,7 +33,7 @@ pub(crate) use feishu_ws::run as run_feishu_binding;
 pub use routes::configure;
 pub(crate) use worker::run;
 
-pub const EVENT_TYPES: [&str; 9] = [
+pub const EVENT_TYPES: [&str; 12] = [
     "health.alert",
     "scanner.offline",
     "scanner.recovered",
@@ -43,6 +43,9 @@ pub const EVENT_TYPES: [&str; 9] = [
     "task.completed",
     "task.failed",
     "task.cancelled",
+    "monitor.change",
+    "monitor.availability",
+    "monitor.cert_expiring",
 ];
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -667,13 +670,53 @@ pub(crate) async fn enqueue_with_context(
     outage: Option<i64>,
     context: Value,
 ) -> std::result::Result<(), tokio_postgres::Error> {
+    enqueue_inner(
+        tx, event_type, severity, dedup, title, body, outage, context, true,
+    )
+    .await
+}
+
+/// 仅产生事件与站内扇出，不投递外部渠道（监控跳过等系统提示）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn enqueue_inbox_only(
+    tx: &Transaction<'_>,
+    event_type: &str,
+    severity: &str,
+    dedup: &str,
+    title: &str,
+    body: &str,
+    outage: Option<i64>,
+    context: Value,
+) -> std::result::Result<(), tokio_postgres::Error> {
+    enqueue_inner(
+        tx, event_type, severity, dedup, title, body, outage, context, false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn enqueue_inner(
+    tx: &Transaction<'_>,
+    event_type: &str,
+    severity: &str,
+    dedup: &str,
+    title: &str,
+    body: &str,
+    outage: Option<i64>,
+    context: Value,
+    channels: bool,
+) -> std::result::Result<(), tokio_postgres::Error> {
     let id = Uuid::now_v7();
     let inserted = tx.execute("INSERT INTO notification_event(id,dedup_key,event_type,severity,title,body,outage_id,context) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(dedup_key) DO NOTHING", &[&id,&dedup,&event_type,&severity,&title,&body,&outage,&context]).await?;
     if inserted == 0 {
         return Ok(());
     }
     // Lock matching channels against concurrent edits/deletion until fanout commits.
-    let rows = tx.query(&format!("SELECT id,destination_revision,legacy_email FROM notification_channel WHERE enabled AND deleted_at IS NULL AND $1=ANY(event_types) AND {SEVERITY_ADMITS_SQL} FOR SHARE"), &[&event_type,&severity]).await?;
+    let rows = if channels {
+        tx.query(&format!("SELECT id,destination_revision,legacy_email FROM notification_channel WHERE enabled AND deleted_at IS NULL AND $1=ANY(event_types) AND {SEVERITY_ADMITS_SQL} FOR SHARE"), &[&event_type,&severity]).await?
+    } else {
+        Vec::new()
+    };
     for row in rows {
         let channel: Uuid = row.get("id");
         let destination: i64 = row.get("destination_revision");

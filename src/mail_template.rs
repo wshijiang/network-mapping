@@ -1,10 +1,10 @@
 #[cfg(test)]
 use nm_report_renderer::sanitize_email_html;
 pub use nm_report_renderer::{
-    HEALTH_ALERT_TEMPLATE_KEY, LOGIN_SUCCESS_TEMPLATE_KEY, MailTemplateSource,
-    REPORT_MONTHLY_TEMPLATE_KEY, REPORT_WEEKLY_TEMPLATE_KEY, RenderedMailTemplate,
-    SCANNER_OUTAGE_TEMPLATE_KEY, TASK_COMPLETED_TEMPLATE_KEY, TASK_FAILED_TEMPLATE_KEY,
-    render_template,
+    HEALTH_ALERT_TEMPLATE_KEY, LOGIN_SUCCESS_TEMPLATE_KEY, MONITOR_ALERT_TEMPLATE_KEY,
+    MailTemplateSource, REPORT_MONTHLY_TEMPLATE_KEY, REPORT_WEEKLY_TEMPLATE_KEY,
+    RenderedMailTemplate, SCANNER_OUTAGE_TEMPLATE_KEY, TASK_COMPLETED_TEMPLATE_KEY,
+    TASK_FAILED_TEMPLATE_KEY, render_template,
 };
 
 use chrono::{DateTime, Utc};
@@ -39,6 +39,9 @@ const DEFAULT_TASK_COMPLETED_TEXT: &str = include_str!("../templates/mail/task_c
 const DEFAULT_TASK_FAILED_SUBJECT: &str = "{{ system_name }} 任务失败：{{ task_id }}";
 const DEFAULT_TASK_FAILED_HTML: &str = include_str!("../templates/mail/task_failed.html");
 const DEFAULT_TASK_FAILED_TEXT: &str = include_str!("../templates/mail/task_failed.txt");
+const DEFAULT_MONITOR_ALERT_SUBJECT: &str = "{{ system_name }} 目标监控：{{ rule_name }}";
+const DEFAULT_MONITOR_ALERT_HTML: &str = include_str!("../templates/mail/monitor_alert.html");
+const DEFAULT_MONITOR_ALERT_TEXT: &str = include_str!("../templates/mail/monitor_alert.txt");
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -154,6 +157,14 @@ const TASK_FAILED_DEFINITION: MailTemplateDefinition = MailTemplateDefinition {
     default_text: DEFAULT_TASK_FAILED_TEXT,
 };
 
+const MONITOR_ALERT_DEFINITION: MailTemplateDefinition = MailTemplateDefinition {
+    template_key: MONITOR_ALERT_TEMPLATE_KEY,
+    display_name: "目标监控变化",
+    default_subject: DEFAULT_MONITOR_ALERT_SUBJECT,
+    default_html: DEFAULT_MONITOR_ALERT_HTML,
+    default_text: DEFAULT_MONITOR_ALERT_TEXT,
+};
+
 const ALL_TEMPLATE_DEFINITIONS: &[MailTemplateDefinition] = &[
     LOGIN_SUCCESS_DEFINITION,
     HEALTH_ALERT_DEFINITION,
@@ -162,6 +173,7 @@ const ALL_TEMPLATE_DEFINITIONS: &[MailTemplateDefinition] = &[
     REPORT_MONTHLY_DEFINITION,
     TASK_COMPLETED_DEFINITION,
     TASK_FAILED_DEFINITION,
+    MONITOR_ALERT_DEFINITION,
 ];
 
 fn template_definition(template_key: &str) -> Option<MailTemplateDefinition> {
@@ -173,6 +185,7 @@ fn template_definition(template_key: &str) -> Option<MailTemplateDefinition> {
         REPORT_MONTHLY_TEMPLATE_KEY => Some(REPORT_MONTHLY_DEFINITION),
         TASK_COMPLETED_TEMPLATE_KEY => Some(TASK_COMPLETED_DEFINITION),
         TASK_FAILED_TEMPLATE_KEY => Some(TASK_FAILED_DEFINITION),
+        MONITOR_ALERT_TEMPLATE_KEY => Some(MONITOR_ALERT_DEFINITION),
         _ => None,
     }
 }
@@ -437,6 +450,48 @@ pub(crate) fn template_variables(template_key: &str) -> Vec<MailTemplateVariable
                 example: "/task/01952f0c-0000-7000-8000-000000000001",
             },
         ],
+        MONITOR_ALERT_TEMPLATE_KEY => vec![
+            MailTemplateVariable {
+                key: "system_name",
+                label: "系统名称",
+                example: "Network Mapping",
+            },
+            MailTemplateVariable {
+                key: "rule_name",
+                label: "监控规则名称",
+                example: "生产网段监控",
+            },
+            MailTemplateVariable {
+                key: "event_label",
+                label: "事件类型",
+                example: "端口开放 / 目标离线 / 证书即将到期",
+            },
+            MailTemplateVariable {
+                key: "severity",
+                label: "严重级别",
+                example: "info / warning / critical",
+            },
+            MailTemplateVariable {
+                key: "change_count",
+                label: "变化数量",
+                example: "3",
+            },
+            MailTemplateVariable {
+                key: "changes",
+                label: "变化明细列表",
+                example: "[{\"kind_label\":\"端口开放\",\"target\":\"192.0.2.1\",\"port\":443}]",
+            },
+            MailTemplateVariable {
+                key: "occurred_at",
+                label: "发生时间",
+                example: "2026-11-22 10:00:00",
+            },
+            MailTemplateVariable {
+                key: "detail_path",
+                label: "监控详情路径",
+                example: "/monitor?run=运行ID",
+            },
+        ],
         _ => Vec::new(),
     }
 }
@@ -505,6 +560,20 @@ pub fn sample_context(template_key: &str) -> Result<Context, Box<dyn std::error:
             "attempt_count": 1,
             "failure_reason": if failed { "scanner recovery limit exceeded" } else { "" },
             "detail_path": "/task/01952f0c-0000-7000-8000-000000000001"
+        }))?);
+    }
+    if template_key == MONITOR_ALERT_TEMPLATE_KEY {
+        return Ok(Context::from_serialize(json!({
+            "system_name": "Network Mapping",
+            "rule_name": "生产网段监控",
+            "event_label": "端口开放",
+            "severity": "warning",
+            "change_count": 1,
+            "changes": [
+                {"kind_label": "端口开放", "target": "192.0.2.1", "port": 443, "detail": {"after": {"service": "https"}}}
+            ],
+            "occurred_at": "2026-11-22 10:00:00",
+            "detail_path": "/monitor?run=01952f0c-0000-7000-8000-000000000001"
         }))?);
     }
     Ok(Context::from_serialize(json!({

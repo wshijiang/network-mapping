@@ -160,6 +160,41 @@ pub async fn refresh_task_aggregate(
     Ok(())
 }
 
+/// 过期租约清扫：置回 pending/failed 并刷新任务聚合（含终态通知）。
+pub(crate) async fn sweep_expired_leases_tx(
+    transaction: &tokio_postgres::Transaction<'_>,
+) -> Result<(), tokio_postgres::Error> {
+    let expired = transaction
+        .query(
+            "UPDATE scan_task_execution SET execution_status = CASE WHEN cancel_requested THEN 'cancelled' ELSE 'pending' END, \
+             assigned_scanner_id = CASE WHEN cancel_requested THEN assigned_scanner_id ELSE NULL END, lease_expires_at = NULL, \
+             task_start_time = CASE WHEN cancel_requested THEN task_start_time ELSE NULL END, \
+             task_end_time = CASE WHEN cancel_requested THEN (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000)::BIGINT ELSE NULL END, \
+             cancel_requested = false, failure_reason = CASE WHEN cancel_requested THEN NULL ELSE 'task lease expired' END \
+             WHERE execution_status = 'running' AND lease_expires_at IS NOT NULL \
+               AND lease_expires_at < (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000)::BIGINT RETURNING task_id;",
+            &[],
+        )
+        .await?;
+    let expired_tasks: std::collections::HashSet<i32> =
+        expired.iter().map(|row| row.get("task_id")).collect();
+    for task_id in expired_tasks {
+        refresh_task_aggregate(transaction, task_id).await?;
+    }
+    Ok(())
+}
+
+/// 独立事务版清扫，供目标监控 worker 周期调用，使失败通知不依赖页面访问。
+pub(crate) async fn sweep_expired_leases(
+    pool: &deadpool_postgres::Pool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut connection = pool.get().await?;
+    let transaction = connection.transaction().await?;
+    sweep_expired_leases_tx(&transaction).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
 fn assigned_task_from_row(
     row: &tokio_postgres::Row,
     lease_expires_at_ms: i64,

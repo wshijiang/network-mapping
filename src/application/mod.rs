@@ -619,6 +619,16 @@ pub async fn run(args: Clis) -> io::Result<()> {
     let system_resource_cache = SystemResourceCache::new();
     let system_resource_cache_data = web::Data::new(system_resource_cache.clone());
     let maxmind_state = web::Data::new(maxmind_state);
+    background.spawn_draining(
+        "target-monitor",
+        crate::target_monitor::run(
+            db_pool.clone(),
+            elasticsearch_service.clone(),
+            maxmind_state.clone(),
+            system_maintenance_state.clone(),
+            background.subscribe(),
+        ),
+    );
     background.spawn(
         "scan-routing",
         crate::scan_control::routing::run_planner(

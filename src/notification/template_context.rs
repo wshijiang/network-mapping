@@ -13,6 +13,9 @@ pub fn key(event: &str) -> Option<&'static str> {
         "report.monthly" => Some(mail::REPORT_MONTHLY_TEMPLATE_KEY),
         "task.completed" | "task.cancelled" => Some(mail::TASK_COMPLETED_TEMPLATE_KEY),
         "task.failed" => Some(mail::TASK_FAILED_TEMPLATE_KEY),
+        "monitor.change" | "monitor.availability" | "monitor.cert_expiring" => {
+            Some(mail::MONITOR_ALERT_TEMPLATE_KEY)
+        }
         _ => None,
     }
 }
