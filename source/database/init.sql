@@ -807,6 +807,10 @@ CREATE TABLE IF NOT EXISTS scan_task_lineage (
 );
 CREATE INDEX IF NOT EXISTS idx_scan_task_lineage_parent
 	ON scan_task_lineage (parent_task_id, parent_execution_id);
+-- 新鲜度/准入查询按 parent_execution_id 聚合子任务完成状态；上面的复合索引
+-- 前导列是 parent_task_id，无法服务该过滤条件（会退化为整表/整索引扫描）。
+CREATE INDEX IF NOT EXISTS idx_scan_task_lineage_parent_execution
+	ON scan_task_lineage (parent_execution_id, child_task_id);
 
 -- 表 ip_list 用于存储 IP 名单信息，这个 IP 名单可用于多处，如：扫描白名单，访问白名单（黑名单）等···
 CREATE TABLE IF NOT EXISTS ip_list (

@@ -14,3 +14,9 @@ CREATE TABLE IF NOT EXISTS search_freshness_outbox (
 CREATE INDEX IF NOT EXISTS search_freshness_outbox_pending_idx
     ON search_freshness_outbox (available_at, task_id)
     WHERE processed_at IS NULL;
+-- Freshness/admission aggregate child completion by parent_execution_id. The
+-- composite (parent_task_id, parent_execution_id) index cannot serve that
+-- filter, so deployments using a custom init_database_file (which skips the
+-- index in init.sql) still need it created here.
+CREATE INDEX IF NOT EXISTS idx_scan_task_lineage_parent_execution
+    ON scan_task_lineage (parent_execution_id, child_task_id);

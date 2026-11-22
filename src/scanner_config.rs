@@ -180,7 +180,7 @@ pub struct NucleiRuntimeConfig {
 impl Default for ScannerRuntimeConfig {
     fn default() -> Self {
         Self {
-            masscan: MasscanRuntimeConfig { rate: 100_000 },
+            masscan: MasscanRuntimeConfig { rate: 10_000 },
             service_detection: ServiceDetectionRuntimeConfig {
                 batch_endpoints: default_batch_endpoints(),
                 idle_timeout_seconds: default_idle_timeout(),
@@ -733,7 +733,9 @@ mod tests {
 
     #[test]
     fn defaults_are_valid() {
-        ScannerRuntimeConfig::default().validate().unwrap();
+        let config = ScannerRuntimeConfig::default();
+        config.validate().unwrap();
+        assert_eq!(config.masscan.rate, 10_000);
     }
 
     #[test]

@@ -9,6 +9,50 @@ use uuid::Uuid;
 use super::target::{TargetIP, check_port, parsing_target};
 use crate::{admin, audit};
 
+/// Default task port set when the caller leaves ports empty: the low 11000
+/// ports plus well-known service ports above that range.
+pub const DEFAULT_SCAN_PORTS: &str = "1-11000,11211,20000,27017,47808,11210,11300,11371,12174,13720,13721,16379,16992,16993,17185,19071,26379,27018,27019,28015,29015,34962-34964,37777,44818,50000,50090,51413,51820,60010,60030,61613,61616,62078,64738";
+/// Historical full-port default; existing tasks keep it and stay reusable.
+pub const LEGACY_FULL_SCAN_PORTS: &str = "1-65535";
+
+/// Expands a comma-separated port expression (`80,443,8000-8010`) into a set.
+/// Returns `None` for malformed segments so callers can fail closed.
+pub(crate) fn expand_port_set(expression: &str) -> Option<std::collections::BTreeSet<u16>> {
+    let mut ports = std::collections::BTreeSet::new();
+    for segment in expression.split(',') {
+        let segment = segment.trim();
+        let (start, end) = match segment.split_once('-') {
+            Some((start, end)) => (start.parse::<u16>().ok()?, end.parse::<u16>().ok()?),
+            None => {
+                let value = segment.parse::<u16>().ok()?;
+                (value, value)
+            }
+        };
+        if start == 0 || start > end {
+            return None;
+        }
+        ports.extend(start..=end);
+    }
+    Some(ports)
+}
+
+/// Whether the default task port set covers every port in `expression`.
+/// Search freshness may only reuse a default-port task when it actually
+/// scanned the configured `automatic_target.common_ports`; a customized
+/// common_ports reaching outside the default set must not be treated as
+/// covered. The default set is expanded once and cached.
+pub fn default_scan_ports_cover(expression: &str) -> bool {
+    static DEFAULT_SET: std::sync::OnceLock<std::collections::BTreeSet<u16>> =
+        std::sync::OnceLock::new();
+    let Some(inner) = expand_port_set(expression) else {
+        return false;
+    };
+    let outer = DEFAULT_SET.get_or_init(|| {
+        expand_port_set(DEFAULT_SCAN_PORTS).expect("DEFAULT_SCAN_PORTS is a valid port set")
+    });
+    inner.is_subset(outer)
+}
+
 /// 该结构体用于接收用户创建任务时的数据
 /// 仅有三个参数
 #[derive(Deserialize)]
@@ -284,7 +328,7 @@ pub struct STask<'a> {
     pub task_id: Option<uuid::Uuid>,
     pub task_initiator: &'a str,
     pub ip: Vec<IpNet>,
-    // u16 刚好 0~65535，如果不提供则默认为全端口，当然可以在配置文件中配置默认端口
+    // 未提供或非法时默认为 DEFAULT_SCAN_PORTS（低端口段加常用高端口）
     pub port: Option<&'a str>,
     pub start_at: Option<i64>,
     pub end_at: Option<i64>,
@@ -315,8 +359,8 @@ impl<'a> STask<'a> {
 
         let t_port = match port {
             Some(p) if check_port(p) => p,
-            Some(_) => "1-65535",
-            None => "1-65535",
+            Some(_) => DEFAULT_SCAN_PORTS,
+            None => DEFAULT_SCAN_PORTS,
         };
         Ok(Self {
             task_id: Some(Uuid::now_v7()),
@@ -577,5 +621,70 @@ mod protocol_options_tests {
             build_service_scan_plan("udp_inventory", &["opcua_pubsub".into(), "enip_io".into()])
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod default_port_tests {
+    use super::*;
+
+    fn expand_ports(expression: &str) -> std::collections::BTreeSet<u16> {
+        let mut ports = std::collections::BTreeSet::new();
+        for segment in expression.split(',') {
+            let (start, end) = match segment.split_once('-') {
+                Some((start, end)) => (start.parse::<u16>().unwrap(), end.parse::<u16>().unwrap()),
+                None => {
+                    let value = segment.parse::<u16>().unwrap();
+                    (value, value)
+                }
+            };
+            ports.extend(start..=end);
+        }
+        ports
+    }
+
+    #[test]
+    fn empty_or_invalid_ports_fall_back_to_the_default_set() {
+        for port in [None, Some(""), Some("abc")] {
+            let task = STask::new(TargetIP::S("192.0.2.1"), "test", port, None).unwrap();
+            assert_eq!(task.port, Some(DEFAULT_SCAN_PORTS));
+        }
+        let explicit = STask::new(TargetIP::S("192.0.2.1"), "test", Some("80,443"), None).unwrap();
+        assert_eq!(explicit.port, Some("80,443"));
+    }
+
+    #[test]
+    fn default_port_set_is_valid_and_covers_the_automatic_common_ports() {
+        assert!(check_port(DEFAULT_SCAN_PORTS));
+        let default = expand_ports(DEFAULT_SCAN_PORTS);
+        let common = expand_ports(crate::config::DEFAULT_COMMON_SCAN_PORTS);
+        assert!(
+            common.is_subset(&default),
+            "default ports must cover automatic-target common ports"
+        );
+        assert!(default.contains(&11000) && !default.contains(&11001));
+        for port in [11211, 27017, 47808, 34962, 34963, 34964, 64738] {
+            assert!(default.contains(&port), "missing high port {port}");
+        }
+    }
+
+    #[test]
+    fn default_port_coverage_gates_search_reuse() {
+        // The shipped common ports and any subset stay covered.
+        assert!(default_scan_ports_cover(
+            crate::config::DEFAULT_COMMON_SCAN_PORTS
+        ));
+        assert!(default_scan_ports_cover("80,443"));
+        assert!(default_scan_ports_cover("1-11000"));
+        assert!(default_scan_ports_cover("11211,27017,34962-34964"));
+        // A customized common port outside the default set is NOT covered, so a
+        // default-port task must not be reported fresh for it.
+        assert!(!default_scan_ports_cover("80,443,12345"));
+        assert!(!default_scan_ports_cover("11001"));
+        assert!(!default_scan_ports_cover("65535"));
+        // Malformed expressions fail closed.
+        assert!(!default_scan_ports_cover(""));
+        assert!(!default_scan_ports_cover("abc"));
+        assert!(!default_scan_ports_cover("443-80"));
     }
 }
