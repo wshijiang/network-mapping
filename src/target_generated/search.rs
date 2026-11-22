@@ -312,22 +312,33 @@ async fn admit(
     })
 }
 
-const RECORD_SUCCESS_SQL: &str = r#"WITH completed AS MATERIALIZED (
+// The driving set is the completed task plus its lineage parents, resolved
+// through primary keys before touching scan_task: an OR/IN-subquery filter on
+// t.id forces a sequential scan of the whole task table. Child completion is
+// one LATERAL aggregate per execution, served by
+// idx_scan_task_lineage_parent_execution (parent_execution_id, child_task_id).
+const RECORD_SUCCESS_SQL: &str = r#"WITH requested AS MATERIALIZED (
+            SELECT $1::int AS task_pk
+            UNION
+            SELECT parent_task_id FROM scan_task_lineage WHERE child_task_id=$1
+        ), completed AS MATERIALIZED (
             SELECT t.user_id, t.task_kind, t.task_target, t.dns_targets, t.generation_metadata,
-                GREATEST(e.task_end_time, (
-                    SELECT MAX(c.task_end_time) FROM scan_task_lineage l
-                    JOIN scan_task_execution c ON c.task_id=l.child_task_id
-                    WHERE l.parent_execution_id=e.id
-                )) AS ended_at,
+                GREATEST(e.task_end_time, ch.child_end) AS ended_at,
                 jsonb_build_object('profile', CASE WHEN t.task_kind='dns'
                     THEN t.generation_metadata->'dns_follow_up'->>'scan_profile'
                     ELSE t.scan_profile END, 'ports', t.task_port) AS plan
-            FROM scan_task t JOIN scan_task_execution e ON e.task_id=t.id
-            WHERE (t.id=$1 OR t.id IN (SELECT parent_task_id FROM scan_task_lineage WHERE child_task_id=$1))
-                AND e.execution_status='succeeded' AND e.task_end_time IS NOT NULL
-                AND NOT EXISTS (SELECT 1 FROM scan_task_lineage l
-                    JOIN scan_task_execution child ON child.task_id=l.child_task_id
-                    WHERE l.parent_execution_id=e.id AND child.execution_status<>'succeeded')
+            FROM requested r
+            JOIN scan_task t ON t.id=r.task_pk
+            JOIN scan_task_execution e ON e.task_id=t.id
+            LEFT JOIN LATERAL (
+                SELECT MAX(c.task_end_time) AS child_end,
+                       bool_and(c.execution_status='succeeded') AS children_succeeded
+                FROM scan_task_lineage l
+                JOIN scan_task_execution c ON c.task_id=l.child_task_id
+                WHERE l.parent_execution_id=e.id
+            ) ch ON TRUE
+            WHERE e.execution_status='succeeded' AND e.task_end_time IS NOT NULL
+                AND COALESCE(ch.children_succeeded, TRUE)
         ), matched AS (
             -- Single-host targets use the existing owner/kind/key primary key.
             SELECT s.owner_id,s.target_kind,s.target_key,t.ended_at,t.plan
@@ -356,13 +367,15 @@ const RECORD_SUCCESS_SQL: &str = r#"WITH completed AS MATERIALIZED (
         FROM candidates c WHERE s.owner_id=c.owner_id AND s.target_kind=c.target_kind
             AND s.target_key=c.target_key AND (s.last_success_at IS NULL OR s.last_success_at<=c.ended_at)"#;
 
-/// Refreshes search-target freshness. The SQL is expensive (lineage CTE plus
-/// GiST network joins, hundreds of milliseconds on large installations), so it
-/// must NOT run inside the upload confirm transaction: that transaction holds
-/// the scan_task_execution row lock, and scanner heartbeat lease renewals give
-/// up after a 1500ms lock_timeout. Upload paths enqueue a durable outbox row
-/// instead; `run_freshness_worker` applies this statement asynchronously.
-/// DNS freshness waits for any generated descendants to succeed.
+/// Refreshes search-target freshness. The statement is index-driven (primary
+/// keys plus the lineage parent-execution index) and normally finishes in a
+/// few milliseconds, but a network task covering many search targets still
+/// updates proportionally many rows. It must NOT run inside the upload confirm
+/// transaction: that transaction holds the scan_task_execution row lock, and
+/// scanner heartbeat lease renewals give up after a 1500ms lock_timeout.
+/// Upload paths enqueue a durable outbox row instead; `run_freshness_worker`
+/// applies this statement asynchronously. DNS freshness waits for any
+/// generated descendants to succeed.
 pub(crate) async fn record_success(
     tx: &deadpool_postgres::Transaction<'_>,
     completed_task_id: i32,
