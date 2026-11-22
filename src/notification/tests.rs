@@ -972,6 +972,11 @@ async fn database_with_max_size(max_size: usize) -> (Pool, String) {
         ))
         .await
         .unwrap();
+        c.batch_execute(include_str!(
+            "../../source/database/migrate_notification_inbox.sql"
+        ))
+        .await
+        .unwrap();
     }
     c.batch_execute("INSERT INTO users(id,username,password,role) VALUES(1,'admin','test',1)")
         .await
@@ -3031,4 +3036,156 @@ async fn preferences_endpoints_require_administrator_and_csrf() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn inbox_fanout_respects_recipients_preferences_and_retention() {
+    let (pool, schema) = database().await;
+    let mut c = pool.get().await.unwrap();
+    c.execute("INSERT INTO users(id,username,password,role,email) VALUES(2,'member','test',2,'member@example.com')", &[]).await.unwrap();
+    // 任务事件只发给任务 owner。
+    let tx = c.transaction().await.unwrap();
+    enqueue_with_context(
+        &tx,
+        "task.completed",
+        "info",
+        "inbox:task:1",
+        "扫描任务完成",
+        "任务 ID：t1",
+        None,
+        json!({"user_id":2,"task_id":"t1"}),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let rows = c
+        .query("SELECT user_id,category,link FROM notification_inbox", &[])
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, i32>(0), 2);
+    assert_eq!(rows[0].get::<_, String>(1), "task");
+    assert_eq!(
+        rows[0].get::<_, Option<String>>(2).as_deref(),
+        Some("/task/t1")
+    );
+    // 健康告警发给全部有效管理员，而非普通用户。
+    let tx = c.transaction().await.unwrap();
+    enqueue_with_context(
+        &tx,
+        "health.alert",
+        "warning",
+        "inbox:alert:1",
+        "健康告警",
+        "慢请求",
+        None,
+        json!({}),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let rows = c
+        .query(
+            "SELECT user_id FROM notification_inbox WHERE category='alert'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, i32>(0), 1);
+    // 个人关闭任务类别后不再接收该类站内通知。
+    c.execute(
+        "INSERT INTO notification_user_preference(user_id,category,enabled) VALUES(2,'task',false)",
+        &[],
+    )
+    .await
+    .unwrap();
+    let tx = c.transaction().await.unwrap();
+    enqueue_with_context(
+        &tx,
+        "task.failed",
+        "warning",
+        "inbox:task:2",
+        "扫描任务失败",
+        "任务 ID：t2",
+        None,
+        json!({"user_id":2,"task_id":"t2"}),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let count: i64 = c
+        .query_one(
+            "SELECT COUNT(*) FROM notification_inbox WHERE user_id=2 AND category='task'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(count, 1);
+    // 全局站内开关关闭后不再扇出。
+    c.execute(
+        "INSERT INTO setting(item_type,key,value) VALUES('notification','in_app_enabled','false')",
+        &[],
+    )
+    .await
+    .unwrap();
+    let tx = c.transaction().await.unwrap();
+    enqueue_with_context(
+        &tx,
+        "user.login",
+        "warning",
+        "inbox:login:1",
+        "用户登录",
+        "member",
+        None,
+        json!({"user_id":2}),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let count: i64 = c
+        .query_one(
+            "SELECT COUNT(*) FROM notification_inbox WHERE category='security'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(count, 0);
+    c.execute(
+        "UPDATE setting SET value='true' WHERE item_type='notification' AND key='in_app_enabled'",
+        &[],
+    )
+    .await
+    .unwrap();
+    // 保留期清理删除超期行。
+    c.execute(
+        "UPDATE notification_inbox SET created_at=NOW()-INTERVAL '100 days' WHERE category='alert'",
+        &[],
+    )
+    .await
+    .unwrap();
+    inbox::cleanup(&pool).await.unwrap();
+    let count: i64 = c
+        .query_one(
+            "SELECT COUNT(*) FROM notification_inbox WHERE category='alert'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(count, 0);
+    // 容量清理只删最旧已读，未读保留。
+    c.execute("INSERT INTO setting(item_type,key,value) VALUES('notification','inbox_max_per_user','100') ON CONFLICT(item_type,key) DO UPDATE SET value='100'", &[]).await.unwrap();
+    for i in 0..150 {
+        c.execute("INSERT INTO notification_inbox(id,user_id,event_id,category,event_type,severity,title,body,read_at) VALUES($1,2,NULL,'task','task.completed','info','t','b',CASE WHEN $2<120 THEN NOW() ELSE NULL END)", &[&Uuid::now_v7(), &i]).await.unwrap();
+    }
+    inbox::cleanup(&pool).await.unwrap();
+    let row = c.query_one("SELECT COUNT(*) FILTER (WHERE read_at IS NOT NULL),COUNT(*) FILTER (WHERE read_at IS NULL) FROM notification_inbox WHERE user_id=2 AND category='task'", &[]).await.unwrap();
+    assert_eq!(row.get::<_, i64>(0), 70);
+    assert_eq!(row.get::<_, i64>(1), 31);
+    drop(c);
+    cleanup(pool, schema).await;
 }

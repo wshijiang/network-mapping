@@ -1,5 +1,6 @@
 //! Durable, administrator-managed notification channels with shared event subscriptions.
 mod email;
+mod inbox;
 mod outcome;
 pub use outcome::Outcome;
 pub mod feishu;
@@ -687,6 +688,7 @@ pub(crate) async fn enqueue_with_context(
         }
         tx.execute("INSERT INTO notification_delivery(id,event_id,channel_id,destination_revision) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING", &[&Uuid::now_v7(),&id,&channel,&destination]).await?;
     }
+    inbox::fanout(tx, id, event_type, severity, title, body, &context).await?;
     Ok(())
 }
 

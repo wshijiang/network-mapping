@@ -315,4 +315,5 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .service(delivery_detail)
             .service(retry_delivery),
     );
+    super::inbox::configure(cfg);
 }

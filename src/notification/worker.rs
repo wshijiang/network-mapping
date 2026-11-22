@@ -56,6 +56,9 @@ pub(crate) async fn run(
                 let _ = conn.execute("DELETE FROM notification_event e WHERE occurred_at<NOW()-INTERVAL '30 days' AND NOT EXISTS(SELECT 1 FROM notification_delivery d WHERE d.event_id=e.id AND d.status IN ('pending','sending')) AND (outage_id IS NULL OR EXISTS(SELECT 1 FROM scanner_outage o WHERE o.id=e.outage_id AND o.recovered_at<NOW()-INTERVAL '30 days'))", &[]).await;
                 let _ = conn.execute("DELETE FROM notification_health_gate WHERE admitted_at<NOW()-INTERVAL '7 days'", &[]).await;
             }
+            if inbox::cleanup(&pool).await.is_err() {
+                tracing::warn!(event = "InboxCleanupFailed", "站内通知保留清理失败");
+            }
             cleanup_at = std::time::Instant::now() + Duration::from_secs(3600);
         }
         tokio::select! {
