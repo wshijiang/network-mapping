@@ -96,8 +96,9 @@ pub async fn refresh_task_aggregate(
     transaction: &tokio_postgres::Transaction<'_>,
     task_db_id: i32,
 ) -> Result<(), tokio_postgres::Error> {
-    transaction.execute(
-        "WITH aggregate AS (SELECT \
+    let rows = transaction.query(
+        "WITH previous AS (SELECT task_status FROM scan_task WHERE id=$1), \
+         aggregate AS (SELECT \
             COUNT(*)::INT AS total, \
             COUNT(*) FILTER (WHERE execution_status = 'pending')::INT AS pending, \
             COUNT(*) FILTER (WHERE execution_status = 'running')::INT AS running, \
@@ -109,8 +110,8 @@ pub async fn refresh_task_aggregate(
             CASE WHEN COUNT(*) = 1 THEN MAX(assigned_scanner_id) ELSE NULL END AS scanner_id, \
             STRING_AGG(CASE WHEN failure_reason IS NOT NULL THEN \
                 COALESCE(assigned_scanner_id, requested_scanner_id, 'unassigned') || ': ' || failure_reason END, E'\\n') AS failures \
-          FROM scan_task_execution WHERE task_id = $1 AND execution_status <> 'superseded') \
-         UPDATE scan_task t SET \
+          FROM scan_task_execution WHERE task_id = $1 AND execution_status <> 'superseded'), \
+         updated AS (UPDATE scan_task t SET \
            task_status = CASE WHEN a.running > 0 THEN 'running' WHEN a.pending > 0 THEN 'pending' \
              WHEN a.succeeded = a.total THEN 'succeeded' WHEN a.failed = a.total THEN 'failed' \
              WHEN a.cancelled = a.total THEN 'cancelled' ELSE 'partial' END, \
@@ -118,9 +119,79 @@ pub async fn refresh_task_aggregate(
            task_end_time = CASE WHEN a.pending = 0 AND a.running = 0 THEN a.ended_at ELSE NULL END, \
            attempt_count = a.attempts, assigned_scanner_id = a.scanner_id, \
            lease_expires_at = NULL, failure_reason = a.failures, cancel_requested = a.cancelling \
-         FROM aggregate a WHERE t.id = $1;",
+         FROM aggregate a WHERE t.id = $1 \
+         RETURNING t.task_status, t.user_id, t.task_id, t.task_initiator, t.task_target::TEXT[] AS targets, \
+           t.dns_targets, t.task_port, t.scan_profile, t.task_kind, t.task_source, \
+           t.task_start_time, t.task_end_time, t.attempt_count, t.failure_reason) \
+         SELECT u.*, p.task_status AS previous_status FROM updated u CROSS JOIN previous p;",
         &[&task_db_id],
     ).await?;
+    for row in &rows {
+        let previous_status: String = row.get("previous_status");
+        let status: String = row.get("task_status");
+        let task_id: String = row.get("task_id");
+        let initiator: String = row.get("task_initiator");
+        let ports: String = row.get("task_port");
+        let profile: String = row.get("scan_profile");
+        let kind: String = row.get("task_kind");
+        let source: String = row.get("task_source");
+        crate::notification::enqueue_task_terminal(
+            transaction,
+            &previous_status,
+            crate::notification::TaskTerminal {
+                user_id: row.get("user_id"),
+                task_id: &task_id,
+                initiator: &initiator,
+                targets: row.get("targets"),
+                dns_targets: row.get("dns_targets"),
+                ports: &ports,
+                profile: &profile,
+                kind: &kind,
+                source: &source,
+                status: &status,
+                started_at: row.get("task_start_time"),
+                ended_at: row.get("task_end_time"),
+                attempts: row.get("attempt_count"),
+                failure_reason: row.get("failure_reason"),
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// 过期租约清扫：置回 pending/failed 并刷新任务聚合（含终态通知）。
+pub(crate) async fn sweep_expired_leases_tx(
+    transaction: &tokio_postgres::Transaction<'_>,
+) -> Result<(), tokio_postgres::Error> {
+    let expired = transaction
+        .query(
+            "UPDATE scan_task_execution SET execution_status = CASE WHEN cancel_requested THEN 'cancelled' ELSE 'pending' END, \
+             assigned_scanner_id = CASE WHEN cancel_requested THEN assigned_scanner_id ELSE NULL END, lease_expires_at = NULL, \
+             task_start_time = CASE WHEN cancel_requested THEN task_start_time ELSE NULL END, \
+             task_end_time = CASE WHEN cancel_requested THEN (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000)::BIGINT ELSE NULL END, \
+             cancel_requested = false, failure_reason = CASE WHEN cancel_requested THEN NULL ELSE 'task lease expired' END \
+             WHERE execution_status = 'running' AND lease_expires_at IS NOT NULL \
+               AND lease_expires_at < (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000)::BIGINT RETURNING task_id;",
+            &[],
+        )
+        .await?;
+    let expired_tasks: std::collections::HashSet<i32> =
+        expired.iter().map(|row| row.get("task_id")).collect();
+    for task_id in expired_tasks {
+        refresh_task_aggregate(transaction, task_id).await?;
+    }
+    Ok(())
+}
+
+/// 独立事务版清扫，供目标监控 worker 周期调用，使失败通知不依赖页面访问。
+pub(crate) async fn sweep_expired_leases(
+    pool: &deadpool_postgres::Pool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut connection = pool.get().await?;
+    let transaction = connection.transaction().await?;
+    sweep_expired_leases_tx(&transaction).await?;
+    transaction.commit().await?;
     Ok(())
 }
 

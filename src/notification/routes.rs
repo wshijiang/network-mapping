@@ -256,6 +256,33 @@ async fn delivery_detail(
     }
     respond(super::delivery_detail(&pool, id.into_inner()).await)
 }
+#[get("/preferences")]
+async fn get_preferences(pool: web::Data<Pool>, user: UserBaseI) -> HttpResponse {
+    if let Err(response) = admin(&user) {
+        return response;
+    }
+    respond(super::preferences(&pool).await)
+}
+#[put("/preferences")]
+async fn put_preferences(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    input: web::Json<crate::config::NotificationPreferences>,
+) -> HttpResponse {
+    if let Err(response) = admin(&user) {
+        return response;
+    }
+    respond(
+        super::save_preferences(
+            &pool,
+            input.into_inner(),
+            &user,
+            &AuditContext::from_request(&req),
+        )
+        .await,
+    )
+}
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api/notifications")
@@ -273,6 +300,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     }),
             )
             .service(channels)
+            .service(get_preferences)
+            .service(put_preferences)
             .configure(templates::configure)
             .service(create)
             .service(update)
@@ -286,4 +315,5 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .service(delivery_detail)
             .service(retry_delivery),
     );
+    super::inbox::configure(cfg);
 }

@@ -72,7 +72,11 @@ pub fn build(
     ].into_iter().map(|(label, key, unit)| json!({"label": label, "value": signed(&payload["comparison"][key], unit)})).collect();
     Ok(json!({
         "system_name": "Network Mapping",
-        "report_label": if payload["period"]["type"] == "weekly" { "周报" } else { "月报" },
+        "report_label": match payload["period"]["type"].as_str() {
+            Some("daily") => "日报",
+            Some("weekly") => "周报",
+            _ => "月报",
+        },
         "period_label": format!("{} 至 {}（不含），{}", date("start_at")?, date("end_at")?, timezone),
         "tasks": payload["tasks"], "scan_output": payload["scan_output"],
         "recommendations": recommendations, "detail_path": format!("/reports/{id}"),

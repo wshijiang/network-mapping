@@ -31,9 +31,17 @@ pub const HEALTH_ALERT_TEMPLATE_KEY: &str = "health_alert";
 
 pub const SCANNER_OUTAGE_TEMPLATE_KEY: &str = "scanner_outage";
 
+pub const REPORT_DAILY_TEMPLATE_KEY: &str = "report_daily";
+
 pub const REPORT_WEEKLY_TEMPLATE_KEY: &str = "report_weekly";
 
 pub const REPORT_MONTHLY_TEMPLATE_KEY: &str = "report_monthly";
+
+pub const TASK_COMPLETED_TEMPLATE_KEY: &str = "task_completed";
+
+pub const TASK_FAILED_TEMPLATE_KEY: &str = "task_failed";
+
+pub const MONITOR_ALERT_TEMPLATE_KEY: &str = "monitor_alert";
 
 const MAX_SUBJECT_TEMPLATE_CHARS: usize = 500;
 
@@ -135,10 +143,14 @@ pub fn render_template(
     if !matches!(
         template_key,
         LOGIN_SUCCESS_TEMPLATE_KEY
+            | REPORT_DAILY_TEMPLATE_KEY
             | HEALTH_ALERT_TEMPLATE_KEY
             | SCANNER_OUTAGE_TEMPLATE_KEY
             | REPORT_WEEKLY_TEMPLATE_KEY
             | REPORT_MONTHLY_TEMPLATE_KEY
+            | TASK_COMPLETED_TEMPLATE_KEY
+            | TASK_FAILED_TEMPLATE_KEY
+            | MONITOR_ALERT_TEMPLATE_KEY
     ) {
         return Err("未知邮件模板".into());
     }

@@ -65,8 +65,11 @@ pub async fn recipients<C: GenericClient + Sync>(
     client: &C,
     selected: &[i32],
 ) -> Result<Vec<(i32, String)>, String> {
-    let rows = client.query("SELECT id, email FROM users WHERE role = 1 AND disabled_at IS NULL AND deleted_at IS NULL \
-        AND NOT limit_login AND email IS NOT NULL AND trim(email) <> '' AND (cardinality($1::INTEGER[]) = 0 OR id = ANY($1)) ORDER BY id;", &[&selected])
+    // Empty selection keeps the historic default (all administrators); an explicit
+    // selection may include any active platform user chosen by an administrator.
+    let rows = client.query("SELECT id, email FROM users WHERE disabled_at IS NULL AND deleted_at IS NULL \
+        AND NOT limit_login AND email IS NOT NULL AND trim(email) <> '' \
+        AND (CASE WHEN cardinality($1::INTEGER[]) = 0 THEN role = 1 ELSE id = ANY($1) END) ORDER BY id;", &[&selected])
         .await.map_err(|e| e.to_string())?;
     Ok(rows
         .iter()
@@ -237,6 +240,18 @@ pub async fn schedules(pool: &Pool) -> Result<Value, String> {
     let tz = timezone
         .parse::<chrono_tz::Tz>()
         .map_err(|e| e.to_string())?;
+    let subscriber_counts: std::collections::HashMap<String, i64> = client
+        .query(
+            "SELECT s.period_type, COUNT(*)::BIGINT AS count FROM report_subscription s \
+             JOIN users u ON u.id=s.user_id AND u.deleted_at IS NULL AND u.disabled_at IS NULL \
+             GROUP BY s.period_type;",
+            &[],
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
     let mut plans = Vec::new();
     for row in rows {
         let kind: String = row.get("period_type");
@@ -262,9 +277,10 @@ pub async fn schedules(pool: &Pool) -> Result<Value, String> {
         };
         plans.push(json!({"period_type": kind, "enabled": enabled, "send_hour": hour, "send_minute": minute,
             "recipient_ids": row.get::<_, Vec<i32>>("recipient_ids"), "revision": row.get::<_, i64>("revision"),
-            "enabled_at": enabled_at, "next_run_at": next, "timezone": timezone}));
+            "enabled_at": enabled_at, "next_run_at": next, "timezone": timezone,
+            "subscriber_count": subscriber_counts.get(&kind).copied().unwrap_or(0)}));
     }
-    let users = client.query("SELECT id, username, email FROM users WHERE role = 1 AND disabled_at IS NULL AND deleted_at IS NULL AND NOT limit_login ORDER BY username;", &[]).await.map_err(|e| e.to_string())?;
+    let users = client.query("SELECT id, username, email FROM users WHERE disabled_at IS NULL AND deleted_at IS NULL AND NOT limit_login ORDER BY username;", &[]).await.map_err(|e| e.to_string())?;
     let users: Vec<Value> = users.iter().map(|r| json!({"id": r.get::<_, i32>("id"), "username": r.get::<_, String>("username"), "email": r.get::<_, Option<String>>("email")})).collect();
     Ok(json!({"schedules": plans, "recipients": users}))
 }

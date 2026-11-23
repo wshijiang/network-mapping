@@ -1,0 +1,10 @@
+目标监控：{{ rule_name }}
+
+{{ system_name }} 目标监控检测到{{ event_label }}。
+规则：{{ rule_name }}
+级别：{{ severity }}
+变化数量：{{ change_count }}
+发生时间：{{ occurred_at }}
+{% for change in changes %}{{ change.kind_label }}：{{ change.target }}{% if change.port %}:{{ change.port }}{% endif %}
+{% endfor %}
+请登录平台查看变化明细：{{ detail_path }}

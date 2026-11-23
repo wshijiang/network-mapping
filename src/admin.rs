@@ -1518,6 +1518,12 @@ pub async fn get_mail_settings_from_database(
             .and_then(|value| value.parse::<bool>().ok())
             .unwrap_or(default)
     };
+    let notification_number = |key: &str, default: i32| {
+        values
+            .get(&(NOTIFICATION_SETTING_TYPE.to_owned(), key.to_owned()))
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or(default)
+    };
     let defaults = NotificationPreferences::default();
 
     Ok(MailSettingsResponse {
@@ -1536,6 +1542,7 @@ pub async fn get_mail_settings_from_database(
                 "notify_on_complete",
                 defaults.notify_on_complete,
             ),
+            notify_on_cancel: notification_value("notify_on_cancel", defaults.notify_on_cancel),
             report_daily: notification_value("report_daily", defaults.report_daily),
             report_weekly: notification_value("report_weekly", defaults.report_weekly),
             report_monthly: notification_value("report_monthly", defaults.report_monthly),
@@ -1550,6 +1557,23 @@ pub async fn get_mail_settings_from_database(
             scanner_recovery_enabled: notification_value(
                 "scanner_recovery_enabled",
                 defaults.scanner_recovery_enabled,
+            ),
+            in_app_enabled: notification_value("in_app_enabled", defaults.in_app_enabled),
+            monitor_notify_enabled: notification_value(
+                "monitor_notify_enabled",
+                defaults.monitor_notify_enabled,
+            ),
+            monitor_user_enabled: notification_value(
+                "monitor_user_enabled",
+                defaults.monitor_user_enabled,
+            ),
+            inbox_retention_days: notification_number(
+                "inbox_retention_days",
+                defaults.inbox_retention_days,
+            ),
+            inbox_max_per_user: notification_number(
+                "inbox_max_per_user",
+                defaults.inbox_max_per_user,
             ),
         },
     })
@@ -1617,50 +1641,7 @@ pub async fn write_mail_settings_to_database(
         ("port", settings.smtp_port.to_string()),
         ("sender", settings.sender.trim().to_owned()),
     ];
-    let notification_values = [
-        (
-            "login_notify_enabled",
-            settings.notification_prefs.login_notify_enabled.to_string(),
-        ),
-        (
-            "notify_on_stuck",
-            settings.notification_prefs.notify_on_stuck.to_string(),
-        ),
-        (
-            "notify_on_complete",
-            settings.notification_prefs.notify_on_complete.to_string(),
-        ),
-        (
-            "report_daily",
-            settings.notification_prefs.report_daily.to_string(),
-        ),
-        (
-            "report_weekly",
-            settings.notification_prefs.report_weekly.to_string(),
-        ),
-        (
-            "report_monthly",
-            settings.notification_prefs.report_monthly.to_string(),
-        ),
-        (
-            "health_alert_enabled",
-            settings.notification_prefs.health_alert_enabled.to_string(),
-        ),
-        (
-            "scanner_offline_enabled",
-            settings
-                .notification_prefs
-                .scanner_offline_enabled
-                .to_string(),
-        ),
-        (
-            "scanner_recovery_enabled",
-            settings
-                .notification_prefs
-                .scanner_recovery_enabled
-                .to_string(),
-        ),
-    ];
+    let notification_values = notification_setting_values(&settings.notification_prefs);
     const UPSERT_SETTING: &str = "INSERT INTO setting (item_type, key, value) VALUES ($1, $2, $3) \
          ON CONFLICT (item_type, key) DO UPDATE SET value = EXCLUDED.value, update_at = NOW();";
 
@@ -1684,6 +1665,69 @@ pub async fn write_mail_settings_to_database(
             .await?;
     }
 
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// 全局通知偏好的持久化键值；数值字段写入前钳制到允许范围。
+fn notification_setting_values(prefs: &NotificationPreferences) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "login_notify_enabled",
+            prefs.login_notify_enabled.to_string(),
+        ),
+        ("notify_on_stuck", prefs.notify_on_stuck.to_string()),
+        ("notify_on_complete", prefs.notify_on_complete.to_string()),
+        ("notify_on_cancel", prefs.notify_on_cancel.to_string()),
+        ("report_daily", prefs.report_daily.to_string()),
+        ("report_weekly", prefs.report_weekly.to_string()),
+        ("report_monthly", prefs.report_monthly.to_string()),
+        (
+            "health_alert_enabled",
+            prefs.health_alert_enabled.to_string(),
+        ),
+        (
+            "scanner_offline_enabled",
+            prefs.scanner_offline_enabled.to_string(),
+        ),
+        (
+            "scanner_recovery_enabled",
+            prefs.scanner_recovery_enabled.to_string(),
+        ),
+        ("in_app_enabled", prefs.in_app_enabled.to_string()),
+        (
+            "monitor_notify_enabled",
+            prefs.monitor_notify_enabled.to_string(),
+        ),
+        (
+            "monitor_user_enabled",
+            prefs.monitor_user_enabled.to_string(),
+        ),
+        (
+            "inbox_retention_days",
+            prefs.inbox_retention_days.clamp(7, 365).to_string(),
+        ),
+        (
+            "inbox_max_per_user",
+            prefs.inbox_max_per_user.clamp(100, 10_000).to_string(),
+        ),
+    ]
+}
+
+/// 仅写入全局通知偏好（不触碰 SMTP 配置），供通知管理页独立保存。
+pub async fn write_notification_preferences_to_database(
+    pool: &deadpool_postgres::Pool,
+    prefs: &NotificationPreferences,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut conn = pool.get().await?;
+    let transaction = conn.transaction().await?;
+    const UPSERT_SETTING: &str = "INSERT INTO setting (item_type, key, value) VALUES ($1, $2, $3) \
+         ON CONFLICT (item_type, key) DO UPDATE SET value = EXCLUDED.value, update_at = NOW();";
+    for (key, value) in notification_setting_values(prefs) {
+        transaction
+            .execute(UPSERT_SETTING, &[&NOTIFICATION_SETTING_TYPE, &key, &value])
+            .await?;
+    }
     transaction.commit().await?;
     Ok(())
 }

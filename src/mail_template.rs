@@ -1,9 +1,10 @@
 #[cfg(test)]
 use nm_report_renderer::sanitize_email_html;
 pub use nm_report_renderer::{
-    HEALTH_ALERT_TEMPLATE_KEY, LOGIN_SUCCESS_TEMPLATE_KEY, MailTemplateSource,
-    REPORT_MONTHLY_TEMPLATE_KEY, REPORT_WEEKLY_TEMPLATE_KEY, RenderedMailTemplate,
-    SCANNER_OUTAGE_TEMPLATE_KEY, render_template,
+    HEALTH_ALERT_TEMPLATE_KEY, LOGIN_SUCCESS_TEMPLATE_KEY, MONITOR_ALERT_TEMPLATE_KEY,
+    MailTemplateSource, REPORT_DAILY_TEMPLATE_KEY, REPORT_MONTHLY_TEMPLATE_KEY,
+    REPORT_WEEKLY_TEMPLATE_KEY, RenderedMailTemplate, SCANNER_OUTAGE_TEMPLATE_KEY,
+    TASK_COMPLETED_TEMPLATE_KEY, TASK_FAILED_TEMPLATE_KEY, render_template,
 };
 
 use chrono::{DateTime, Utc};
@@ -31,6 +32,16 @@ const DEFAULT_SCANNER_OUTAGE_SUBJECT: &str =
     "{{ system_name }} 扫描器{{ event_label }}：{{ scanner_name }}";
 const DEFAULT_SCANNER_OUTAGE_HTML: &str = include_str!("../templates/mail/scanner_outage.html");
 const DEFAULT_SCANNER_OUTAGE_TEXT: &str = include_str!("../templates/mail/scanner_outage.txt");
+const DEFAULT_TASK_COMPLETED_SUBJECT: &str =
+    "{{ system_name }} 任务{{ status_label }}：{{ task_id }}";
+const DEFAULT_TASK_COMPLETED_HTML: &str = include_str!("../templates/mail/task_completed.html");
+const DEFAULT_TASK_COMPLETED_TEXT: &str = include_str!("../templates/mail/task_completed.txt");
+const DEFAULT_TASK_FAILED_SUBJECT: &str = "{{ system_name }} 任务失败：{{ task_id }}";
+const DEFAULT_TASK_FAILED_HTML: &str = include_str!("../templates/mail/task_failed.html");
+const DEFAULT_TASK_FAILED_TEXT: &str = include_str!("../templates/mail/task_failed.txt");
+const DEFAULT_MONITOR_ALERT_SUBJECT: &str = "{{ system_name }} 目标监控：{{ rule_name }}";
+const DEFAULT_MONITOR_ALERT_HTML: &str = include_str!("../templates/mail/monitor_alert.html");
+const DEFAULT_MONITOR_ALERT_TEXT: &str = include_str!("../templates/mail/monitor_alert.txt");
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -117,6 +128,14 @@ const SCANNER_OUTAGE_DEFINITION: MailTemplateDefinition = MailTemplateDefinition
     default_text: DEFAULT_SCANNER_OUTAGE_TEXT,
 };
 
+const REPORT_DAILY_DEFINITION: MailTemplateDefinition = MailTemplateDefinition {
+    template_key: REPORT_DAILY_TEMPLATE_KEY,
+    display_name: "平台日报",
+    default_subject: "{{ system_name }} {{ report_label }}：{{ period_label }}",
+    default_html: include_str!("../templates/mail/report.html"),
+    default_text: include_str!("../templates/mail/report.txt"),
+};
+
 const REPORT_WEEKLY_DEFINITION: MailTemplateDefinition = MailTemplateDefinition {
     template_key: REPORT_WEEKLY_TEMPLATE_KEY,
     display_name: "平台周报",
@@ -130,12 +149,40 @@ const REPORT_MONTHLY_DEFINITION: MailTemplateDefinition = MailTemplateDefinition
     ..REPORT_WEEKLY_DEFINITION
 };
 
+const TASK_COMPLETED_DEFINITION: MailTemplateDefinition = MailTemplateDefinition {
+    template_key: TASK_COMPLETED_TEMPLATE_KEY,
+    display_name: "任务完成与取消",
+    default_subject: DEFAULT_TASK_COMPLETED_SUBJECT,
+    default_html: DEFAULT_TASK_COMPLETED_HTML,
+    default_text: DEFAULT_TASK_COMPLETED_TEXT,
+};
+
+const TASK_FAILED_DEFINITION: MailTemplateDefinition = MailTemplateDefinition {
+    template_key: TASK_FAILED_TEMPLATE_KEY,
+    display_name: "任务失败",
+    default_subject: DEFAULT_TASK_FAILED_SUBJECT,
+    default_html: DEFAULT_TASK_FAILED_HTML,
+    default_text: DEFAULT_TASK_FAILED_TEXT,
+};
+
+const MONITOR_ALERT_DEFINITION: MailTemplateDefinition = MailTemplateDefinition {
+    template_key: MONITOR_ALERT_TEMPLATE_KEY,
+    display_name: "目标监控变化",
+    default_subject: DEFAULT_MONITOR_ALERT_SUBJECT,
+    default_html: DEFAULT_MONITOR_ALERT_HTML,
+    default_text: DEFAULT_MONITOR_ALERT_TEXT,
+};
+
 const ALL_TEMPLATE_DEFINITIONS: &[MailTemplateDefinition] = &[
     LOGIN_SUCCESS_DEFINITION,
+    REPORT_DAILY_DEFINITION,
     HEALTH_ALERT_DEFINITION,
     SCANNER_OUTAGE_DEFINITION,
     REPORT_WEEKLY_DEFINITION,
     REPORT_MONTHLY_DEFINITION,
+    TASK_COMPLETED_DEFINITION,
+    TASK_FAILED_DEFINITION,
+    MONITOR_ALERT_DEFINITION,
 ];
 
 fn template_definition(template_key: &str) -> Option<MailTemplateDefinition> {
@@ -143,8 +190,12 @@ fn template_definition(template_key: &str) -> Option<MailTemplateDefinition> {
         LOGIN_SUCCESS_TEMPLATE_KEY => Some(LOGIN_SUCCESS_DEFINITION),
         HEALTH_ALERT_TEMPLATE_KEY => Some(HEALTH_ALERT_DEFINITION),
         SCANNER_OUTAGE_TEMPLATE_KEY => Some(SCANNER_OUTAGE_DEFINITION),
+        REPORT_DAILY_TEMPLATE_KEY => Some(REPORT_DAILY_DEFINITION),
         REPORT_WEEKLY_TEMPLATE_KEY => Some(REPORT_WEEKLY_DEFINITION),
         REPORT_MONTHLY_TEMPLATE_KEY => Some(REPORT_MONTHLY_DEFINITION),
+        TASK_COMPLETED_TEMPLATE_KEY => Some(TASK_COMPLETED_DEFINITION),
+        TASK_FAILED_TEMPLATE_KEY => Some(TASK_FAILED_DEFINITION),
+        MONITOR_ALERT_TEMPLATE_KEY => Some(MONITOR_ALERT_DEFINITION),
         _ => None,
     }
 }
@@ -255,96 +306,202 @@ pub(crate) fn template_variables(template_key: &str) -> Vec<MailTemplateVariable
                 example: "/scanner/01952f0c-0000-7000-8000-000000000001",
             },
         ],
-        REPORT_WEEKLY_TEMPLATE_KEY | REPORT_MONTHLY_TEMPLATE_KEY => vec![
+        REPORT_DAILY_TEMPLATE_KEY | REPORT_WEEKLY_TEMPLATE_KEY | REPORT_MONTHLY_TEMPLATE_KEY => {
+            vec![
+                MailTemplateVariable {
+                    key: "system_name",
+                    label: "系统名称",
+                    example: "Network Mapping",
+                },
+                MailTemplateVariable {
+                    key: "report_label",
+                    label: "报告类型",
+                    example: "周报 / 月报",
+                },
+                MailTemplateVariable {
+                    key: "period_label",
+                    label: "报告周期（上海时间）",
+                    example: "2026-09-21 至 2026-09-28（不含）",
+                },
+                MailTemplateVariable {
+                    key: "tasks",
+                    label: "任务统计",
+                    example: "created / succeeded / failed / partial / cancelled / success_rate",
+                },
+                MailTemplateVariable {
+                    key: "scan_output",
+                    label: "扫描产出",
+                    example: "unique_ips / port_observations / service_observations",
+                },
+                MailTemplateVariable {
+                    key: "recommendations",
+                    label: "建议列表",
+                    example: "[处理失败任务]",
+                },
+                MailTemplateVariable {
+                    key: "detail_path",
+                    label: "报告详情路径",
+                    example: "/reports/报告ID",
+                },
+                MailTemplateVariable {
+                    key: "report_meta",
+                    label: "报告版本与归档信息",
+                    example: "revision / timezone / generated_at / cutoff_at",
+                },
+                MailTemplateVariable {
+                    key: "previous_available",
+                    label: "环比是否可用",
+                    example: "true / false",
+                },
+                MailTemplateVariable {
+                    key: "comparison",
+                    label: "环比数值",
+                    example: "created_growth_percent / unique_ips_growth_percent / daily_unique_ips_growth_percent / success_rate_change_points",
+                },
+                MailTemplateVariable {
+                    key: "comparison_rows",
+                    label: "格式化环比列表",
+                    example: "label / value",
+                },
+                MailTemplateVariable {
+                    key: "trend_rows",
+                    label: "每日完成任务",
+                    example: "day / succeeded / failed / partial / cancelled",
+                },
+                MailTemplateVariable {
+                    key: "trend_image_url",
+                    label: "服务器趋势图片地址",
+                    example: "启用远程图片后生成；预览使用示例图",
+                },
+                MailTemplateVariable {
+                    key: "scanners",
+                    label: "扫描器执行表现",
+                    example: "name / total / succeeded / failed / cancelled / avg_duration / p50 / p95",
+                },
+                MailTemplateVariable {
+                    key: "scanner_omitted",
+                    label: "未展示的扫描器数量",
+                    example: "0",
+                },
+                MailTemplateVariable {
+                    key: "quality_summary",
+                    label: "统计完整性",
+                    example: "ready / expected",
+                },
+                MailTemplateVariable {
+                    key: "notes",
+                    label: "统计口径说明",
+                    example: "[统计说明]",
+                },
+                MailTemplateVariable {
+                    key: "detail_url",
+                    label: "报告详情绝对地址",
+                    example: "https://平台地址/reports/报告ID",
+                },
+            ]
+        }
+        TASK_COMPLETED_TEMPLATE_KEY | TASK_FAILED_TEMPLATE_KEY => vec![
             MailTemplateVariable {
                 key: "system_name",
                 label: "系统名称",
                 example: "Network Mapping",
             },
             MailTemplateVariable {
-                key: "report_label",
-                label: "报告类型",
-                example: "周报 / 月报",
+                key: "task_id",
+                label: "任务 ID",
+                example: "01952f0c-0000-7000-8000-000000000001",
             },
             MailTemplateVariable {
-                key: "period_label",
-                label: "报告周期（上海时间）",
-                example: "2026-09-21 至 2026-09-28（不含）",
+                key: "status_label",
+                label: "任务状态",
+                example: "完成 / 部分完成 / 失败 / 已取消",
             },
             MailTemplateVariable {
-                key: "tasks",
-                label: "任务统计",
-                example: "created / succeeded / failed / partial / cancelled / success_rate",
+                key: "username",
+                label: "任务发起人",
+                example: "admin",
             },
             MailTemplateVariable {
-                key: "scan_output",
-                label: "扫描产出",
-                example: "unique_ips / port_observations / service_observations",
+                key: "targets",
+                label: "目标摘要",
+                example: "192.0.2.0/24 等 3 个目标",
             },
             MailTemplateVariable {
-                key: "recommendations",
-                label: "建议列表",
-                example: "[处理失败任务]",
+                key: "scan_profile",
+                label: "扫描模式",
+                example: "服务识别",
+            },
+            MailTemplateVariable {
+                key: "started_at",
+                label: "开始时间",
+                example: "2026-11-22 10:00:00 UTC",
+            },
+            MailTemplateVariable {
+                key: "ended_at",
+                label: "结束时间",
+                example: "2026-11-22 10:05:00 UTC",
+            },
+            MailTemplateVariable {
+                key: "duration_label",
+                label: "耗时",
+                example: "5 分 0 秒",
+            },
+            MailTemplateVariable {
+                key: "attempt_count",
+                label: "尝试次数",
+                example: "1",
+            },
+            MailTemplateVariable {
+                key: "failure_reason",
+                label: "失败原因（无则为空）",
+                example: "scanner recovery limit exceeded",
             },
             MailTemplateVariable {
                 key: "detail_path",
-                label: "报告详情路径",
-                example: "/reports/报告ID",
+                label: "任务详情路径",
+                example: "/task/01952f0c-0000-7000-8000-000000000001",
+            },
+        ],
+        MONITOR_ALERT_TEMPLATE_KEY => vec![
+            MailTemplateVariable {
+                key: "system_name",
+                label: "系统名称",
+                example: "Network Mapping",
             },
             MailTemplateVariable {
-                key: "report_meta",
-                label: "报告版本与归档信息",
-                example: "revision / timezone / generated_at / cutoff_at",
+                key: "rule_name",
+                label: "监控规则名称",
+                example: "生产网段监控",
             },
             MailTemplateVariable {
-                key: "previous_available",
-                label: "环比是否可用",
-                example: "true / false",
+                key: "event_label",
+                label: "事件类型",
+                example: "端口开放 / 目标离线 / 证书即将到期",
             },
             MailTemplateVariable {
-                key: "comparison",
-                label: "环比数值",
-                example: "created_growth_percent / unique_ips_growth_percent / daily_unique_ips_growth_percent / success_rate_change_points",
+                key: "severity",
+                label: "严重级别",
+                example: "info / warning / critical",
             },
             MailTemplateVariable {
-                key: "comparison_rows",
-                label: "格式化环比列表",
-                example: "label / value",
+                key: "change_count",
+                label: "变化数量",
+                example: "3",
             },
             MailTemplateVariable {
-                key: "trend_rows",
-                label: "每日完成任务",
-                example: "day / succeeded / failed / partial / cancelled",
+                key: "changes",
+                label: "变化明细列表",
+                example: "[{\"kind_label\":\"端口开放\",\"target\":\"192.0.2.1\",\"port\":443}]",
             },
             MailTemplateVariable {
-                key: "trend_image_url",
-                label: "服务器趋势图片地址",
-                example: "启用远程图片后生成；预览使用示例图",
+                key: "occurred_at",
+                label: "发生时间",
+                example: "2026-11-22 10:00:00",
             },
             MailTemplateVariable {
-                key: "scanners",
-                label: "扫描器执行表现",
-                example: "name / total / succeeded / failed / cancelled / avg_duration / p50 / p95",
-            },
-            MailTemplateVariable {
-                key: "scanner_omitted",
-                label: "未展示的扫描器数量",
-                example: "0",
-            },
-            MailTemplateVariable {
-                key: "quality_summary",
-                label: "统计完整性",
-                example: "ready / expected",
-            },
-            MailTemplateVariable {
-                key: "notes",
-                label: "统计口径说明",
-                example: "[统计说明]",
-            },
-            MailTemplateVariable {
-                key: "detail_url",
-                label: "报告详情绝对地址",
-                example: "https://平台地址/reports/报告ID",
+                key: "detail_path",
+                label: "监控详情路径",
+                example: "/monitor?run=运行ID",
             },
         ],
         _ => Vec::new(),
@@ -361,13 +518,13 @@ pub fn sample_context(template_key: &str) -> Result<Context, Box<dyn std::error:
     }
     if matches!(
         template_key,
-        REPORT_WEEKLY_TEMPLATE_KEY | REPORT_MONTHLY_TEMPLATE_KEY
+        REPORT_DAILY_TEMPLATE_KEY | REPORT_WEEKLY_TEMPLATE_KEY | REPORT_MONTHLY_TEMPLATE_KEY
     ) {
         let mut sample = crate::reports::mail_context::sample();
-        sample["report_label"] = json!(if template_key == REPORT_WEEKLY_TEMPLATE_KEY {
-            "周报"
-        } else {
-            "月报"
+        sample["report_label"] = json!(match template_key {
+            REPORT_DAILY_TEMPLATE_KEY => "日报",
+            REPORT_WEEKLY_TEMPLATE_KEY => "周报",
+            _ => "月报",
         });
         sample["trend_image_url"] = json!("/mail/report-images/sample/trend.png");
         return Ok(Context::from_serialize(sample)?);
@@ -395,6 +552,40 @@ pub fn sample_context(template_key: &str) -> Result<Context, Box<dyn std::error:
             "last_seen_at": "2026-09-30 10:00:00 UTC",
             "event_at": "2026-09-30 10:02:00 UTC",
             "detail_path": "/scanner/01952f0c-0000-7000-8000-000000000001"
+        }))?);
+    }
+    if matches!(
+        template_key,
+        TASK_COMPLETED_TEMPLATE_KEY | TASK_FAILED_TEMPLATE_KEY
+    ) {
+        let failed = template_key == TASK_FAILED_TEMPLATE_KEY;
+        return Ok(Context::from_serialize(json!({
+            "system_name": "Network Mapping",
+            "task_id": "01952f0c-0000-7000-8000-000000000001",
+            "status_label": if failed { "失败" } else { "完成" },
+            "username": "admin",
+            "targets": "192.0.2.0/24",
+            "scan_profile": "服务识别",
+            "started_at": "2026-11-22 10:00:00 UTC",
+            "ended_at": "2026-11-22 10:05:00 UTC",
+            "duration_label": "5 分 0 秒",
+            "attempt_count": 1,
+            "failure_reason": if failed { "scanner recovery limit exceeded" } else { "" },
+            "detail_path": "/task/01952f0c-0000-7000-8000-000000000001"
+        }))?);
+    }
+    if template_key == MONITOR_ALERT_TEMPLATE_KEY {
+        return Ok(Context::from_serialize(json!({
+            "system_name": "Network Mapping",
+            "rule_name": "生产网段监控",
+            "event_label": "端口开放",
+            "severity": "warning",
+            "change_count": 1,
+            "changes": [
+                {"kind_label": "端口开放", "target": "192.0.2.1", "port": 443, "detail": {"after": {"service": "https"}}}
+            ],
+            "occurred_at": "2026-11-22 10:00:00",
+            "detail_path": "/monitor?run=01952f0c-0000-7000-8000-000000000001"
         }))?);
     }
     Ok(Context::from_serialize(json!({

@@ -6,6 +6,7 @@ pub const TIMEZONE: &str = crate::system_time::DEFAULT_TIMEZONE;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PeriodType {
+    Daily,
     Weekly,
     Monthly,
 }
@@ -13,21 +14,24 @@ pub enum PeriodType {
 impl PeriodType {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Daily => "daily",
             Self::Weekly => "weekly",
             Self::Monthly => "monthly",
         }
     }
     pub fn label(self) -> &'static str {
         match self {
+            Self::Daily => "日报",
             Self::Weekly => "周报",
             Self::Monthly => "月报",
         }
     }
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
+            "daily" => Ok(Self::Daily),
             "weekly" => Ok(Self::Weekly),
             "monthly" => Ok(Self::Monthly),
-            _ => Err("周期必须为 weekly 或 monthly".into()),
+            _ => Err("周期必须为 daily、weekly 或 monthly".into()),
         }
     }
 }
@@ -69,6 +73,7 @@ impl Period {
             .parse::<chrono_tz::Tz>()
             .map_err(|_| "无效报告时区")?;
         let start = match kind {
+            PeriodType::Daily => Some(date),
             PeriodType::Weekly => {
                 date.checked_sub_days(Days::new(u64::from(date.weekday().num_days_from_monday())))
             }
@@ -76,6 +81,7 @@ impl Period {
         }
         .ok_or("日期超出支持范围")?;
         let end = match kind {
+            PeriodType::Daily => start.checked_add_days(Days::new(1)),
             PeriodType::Weekly => start.checked_add_days(Days::new(7)),
             PeriodType::Monthly => start.checked_add_months(Months::new(1)),
         }
@@ -216,6 +222,26 @@ mod tests {
                 "01:00"
             );
         }
+    }
+    #[test]
+    fn daily_period_is_one_local_day_and_previous_crosses_month() {
+        let p = Period::containing_in(PeriodType::Daily, date("2026-03-08"), "America/New_York", 3)
+            .expect("period");
+        // DST 起始日只有 23 小时，仍是一个完整本地日。
+        assert_eq!(p.days().expect("days"), 1);
+        assert_eq!((p.end - p.start).num_hours(), 23);
+        let prev = p.previous().expect("previous");
+        assert_eq!(local_date(prev.start).expect("date"), date("2026-03-07"));
+        let month = Period::containing(PeriodType::Daily, date("2026-01-01")).expect("period");
+        assert_eq!(
+            local_date(month.previous().expect("previous").start).expect("date"),
+            date("2025-12-31")
+        );
+        assert_eq!(
+            PeriodType::parse("daily").expect("parse"),
+            PeriodType::Daily
+        );
+        assert_eq!(PeriodType::Daily.label(), "日报");
     }
     #[test]
     fn zero_baseline_is_not_an_infinite_growth_rate() {

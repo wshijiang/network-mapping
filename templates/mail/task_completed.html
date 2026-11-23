@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { margin: 0; padding: 24px; background: #f3f4f6; color: #1f2937; font-family: Arial, sans-serif; }
+    .card { max-width: 600px; margin: 0 auto; padding: 32px; background: #ffffff; border-radius: 12px; }
+    .title { margin: 0 0 16px; color: #111827; font-size: 24px; }
+    .detail { margin: 8px 0; color: #4b5563; }
+    .footer { margin-top: 24px; color: #9ca3af; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1 class="title">任务{{ status_label }}</h1>
+    <p>{{ system_name }} 扫描任务{{ status_label }}。</p>
+    <p class="detail">任务 ID：{{ task_id }}</p>
+    <p class="detail">发起人：{{ username }}</p>
+    <p class="detail">目标：{{ targets }}</p>
+    <p class="detail">扫描模式：{{ scan_profile }}</p>
+    <p class="detail">开始时间：{{ started_at }}</p>
+    <p class="detail">结束时间：{{ ended_at }}</p>
+    <p class="detail">耗时：{{ duration_label }}</p>
+    <p class="detail">尝试次数：{{ attempt_count }}</p>
+    {% if failure_reason %}<p class="detail">失败原因：{{ failure_reason }}</p>{% endif %}
+    <p class="footer">请登录平台查看任务详情：{{ detail_path }}</p>
+  </div>
+</body>
+</html>

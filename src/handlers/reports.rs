@@ -34,6 +34,9 @@ fn admin(req: &HttpRequest, pool: &Pool, user: &UserBaseI, action: &str) -> bool
 fn denied() -> HttpResponse {
     HttpResponse::Forbidden().json(json!({"success": false, "message": "仅管理员可以访问平台报告"}))
 }
+fn inaccessible() -> HttpResponse {
+    HttpResponse::Forbidden().json(json!({"success": false, "message": "无权访问该报告"}))
+}
 fn bad(message: &str) -> HttpResponse {
     HttpResponse::BadRequest().json(json!({"success": false, "message": message}))
 }
@@ -58,6 +61,21 @@ async fn record(req: &HttpRequest, pool: &Pool, user: &UserBaseI, action: &str, 
     .await;
 }
 
+async fn subscribed(pool: &Pool, user_id: i32, period_type: &str) -> Result<bool, String> {
+    let count: i64 = pool
+        .get()
+        .await
+        .map_err(|e| e.to_string())?
+        .query_one(
+            "SELECT COUNT(*)::BIGINT AS count FROM report_subscription WHERE user_id=$1 AND period_type=$2;",
+            &[&user_id, &period_type],
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        .get("count");
+    Ok(count > 0)
+}
+
 #[derive(Deserialize)]
 pub(crate) struct ListQuery {
     page: Option<i64>,
@@ -66,22 +84,25 @@ pub(crate) struct ListQuery {
 }
 #[get("/api/reports")]
 pub(crate) async fn list(
-    req: HttpRequest,
+    _req: HttpRequest,
     pool: web::Data<Pool>,
     user: UserBaseI,
     query: web::Query<ListQuery>,
 ) -> HttpResponse {
-    if !admin(&req, &pool, &user, "report.query") {
-        return denied();
-    }
     let page = query.page.unwrap_or(1).clamp(1, 1_000_000);
     let limit = query.page_size.unwrap_or(20).clamp(1, 100);
     let kind = query.period_type.map(|p| p.as_str());
+    // 管理员可见全部报告；其他用户仅可见已归档且自助订阅或由管理员指定的周期报告。
+    let unrestricted = user.role == 1;
+    let user_id = user.id;
     let result = async {
         let client = pool.get().await.map_err(|e| e.to_string())?;
-        let total: i64 = client.query_one("SELECT COUNT(*)::BIGINT AS count FROM report_run WHERE ($1::TEXT IS NULL OR period_type = $1);", &[&kind]).await.map_err(|e| e.to_string())?.get("count");
+        let total: i64 = client.query_one("SELECT COUNT(*)::BIGINT AS count FROM report_run WHERE ($1::TEXT IS NULL OR period_type = $1) \
+            AND ($2::BOOLEAN OR (status = 'ready' AND (period_type IN (SELECT period_type FROM report_subscription WHERE user_id=$3) OR $3 = ANY(recipient_ids))));", &[&kind, &unrestricted, &user_id]).await.map_err(|e| e.to_string())?.get("count");
         let rows = client.query("SELECT id, period_type, period_start, period_end, revision, source, status, cutoff_at, created_at, generated_at, timezone, settings_revision, supersedes_report_id, quality, last_error, content_checksum \
-            FROM report_run WHERE ($1::TEXT IS NULL OR period_type = $1) ORDER BY period_start DESC, created_at DESC LIMIT $2 OFFSET $3;", &[&kind, &limit, &((page - 1) * limit)]).await.map_err(|e| e.to_string())?;
+            FROM report_run WHERE ($1::TEXT IS NULL OR period_type = $1) \
+            AND ($4::BOOLEAN OR (status = 'ready' AND (period_type IN (SELECT period_type FROM report_subscription WHERE user_id=$5) OR $5 = ANY(recipient_ids)))) \
+            ORDER BY period_start DESC, created_at DESC LIMIT $2 OFFSET $3;", &[&kind, &limit, &((page - 1) * limit), &unrestricted, &user_id]).await.map_err(|e| e.to_string())?;
         Ok::<_, String>(json!({"items": rows.into_iter().map(|r| Report::from_row(r, false)).collect::<Vec<_>>(), "total": total, "page": page, "page_size": limit}))
     }.await;
     match result {
@@ -92,14 +113,11 @@ pub(crate) async fn list(
 
 #[get("/api/reports/{id}")]
 pub(crate) async fn detail(
-    req: HttpRequest,
+    _req: HttpRequest,
     pool: web::Data<Pool>,
     user: UserBaseI,
     id: web::Path<Uuid>,
 ) -> HttpResponse {
-    if !admin(&req, &pool, &user, "report.query") {
-        return denied();
-    }
     let result = async {
         let client = pool.get().await.map_err(|e| e.to_string())?;
         client
@@ -110,9 +128,97 @@ pub(crate) async fn detail(
     .await;
     match result {
         Ok(Some(row)) => {
-            HttpResponse::Ok().json(json!({"success": true, "data": Report::from_row(row, true)}))
+            let status: String = row.get("status");
+            let kind: String = row.get("period_type");
+            let recipients: Vec<i32> = row.get("recipient_ids");
+            let permitted = if user.role == 1 {
+                Ok(true)
+            } else if status != "ready" {
+                Ok(false)
+            } else if recipients.contains(&user.id) {
+                Ok(true)
+            } else {
+                subscribed(&pool, user.id, &kind).await
+            };
+            match permitted {
+                Ok(true) => HttpResponse::Ok()
+                    .json(json!({"success": true, "data": Report::from_row(row, true)})),
+                Ok(false) => inaccessible(),
+                Err(e) => internal(e),
+            }
         }
         Ok(None) => missing(),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Subscriptions {
+    daily: bool,
+    weekly: bool,
+    monthly: bool,
+}
+
+#[get("/api/report-subscriptions")]
+pub(crate) async fn subscriptions(pool: web::Data<Pool>, user: UserBaseI) -> HttpResponse {
+    let result = async {
+        let rows = pool
+            .get()
+            .await
+            .map_err(|e| e.to_string())?
+            .query(
+                "SELECT period_type FROM report_subscription WHERE user_id=$1;",
+                &[&user.id],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let selected: std::collections::HashSet<String> =
+            rows.iter().map(|row| row.get(0)).collect();
+        Ok::<_, String>(json!({"daily":selected.contains("daily"),"weekly":selected.contains("weekly"),"monthly":selected.contains("monthly")}))
+    }
+    .await;
+    match result {
+        Ok(data) => HttpResponse::Ok().json(json!({"success": true, "data": data})),
+        Err(e) => internal(e),
+    }
+}
+
+#[put("/api/report-subscriptions")]
+pub(crate) async fn save_subscriptions(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    user: UserBaseI,
+    body: web::Json<Subscriptions>,
+) -> HttpResponse {
+    let state = Subscriptions {
+        daily: body.daily,
+        weekly: body.weekly,
+        monthly: body.monthly,
+    };
+    let result = async {
+        let mut client = pool.get().await.map_err(|e| e.to_string())?;
+        let tx = client.transaction().await.map_err(|e| e.to_string())?;
+        for (kind, enabled) in [
+            ("daily", state.daily),
+            ("weekly", state.weekly),
+            ("monthly", state.monthly),
+        ] {
+            if enabled {
+                tx.execute("INSERT INTO report_subscription(user_id,period_type) VALUES($1,$2) ON CONFLICT DO NOTHING;", &[&user.id, &kind]).await.map_err(|e| e.to_string())?;
+            } else {
+                tx.execute("DELETE FROM report_subscription WHERE user_id=$1 AND period_type=$2;", &[&user.id, &kind]).await.map_err(|e| e.to_string())?;
+            }
+        }
+        let mut event = AuditEvent::user("configuration", "report.subscription.update", "success", &user);
+        event.metadata = json!({"daily": state.daily, "weekly": state.weekly, "monthly": state.monthly});
+        audit::write(&tx, &AuditContext::from_request(&req), &event).await.map_err(|e| e.to_string())?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+        Ok::<_, String>(state)
+    }
+    .await;
+    match result {
+        Ok(state) => HttpResponse::Ok().json(json!({"success": true, "data": state})),
         Err(e) => internal(e),
     }
 }
@@ -292,7 +398,7 @@ pub(crate) async fn schedules(
                         && channel.event_types.iter().any(|event| event == topic)
                 })
             };
-            data["notifications"] = json!({"weekly":subscribed("report.weekly"),"monthly":subscribed("report.monthly")});
+            data["notifications"] = json!({"daily":subscribed("report.daily"),"weekly":subscribed("report.weekly"),"monthly":subscribed("report.monthly")});
             data["bot_channels"] = json!(
                 channels
                     .iter()
@@ -365,7 +471,7 @@ pub(crate) async fn save_schedule(
         let mut client = pool.get().await.map_err(|e| e.to_string())?; let tx = client.transaction().await.map_err(|e| e.to_string())?;
         if body.enabled && !selected.is_empty() {
             let valid = storage::recipients(&tx, &selected).await?;
-            if valid.is_empty() || (!selected.is_empty() && valid.len() != selected.len()) { return Ok::<_, String>(Some(bad("收件人必须是有有效邮箱的启用中管理员"))); }
+            if valid.is_empty() || (!selected.is_empty() && valid.len() != selected.len()) { return Ok::<_, String>(Some(bad("收件人必须是启用中且有有效邮箱的平台用户"))); }
         }
         let key = kind.as_str();
         // Match report creation's lock order: schedule before notification channels.
@@ -463,7 +569,7 @@ pub(crate) async fn send(
         if !body.recipient_ids.is_empty() && row.get::<_, Option<Value>>("rendered_mail").is_none() { return Ok(conflict("当前报告没有可发送的邮件内容，请检查模板后创建修订版")); }
         if !body.recipient_ids.is_empty() && tx.query_opt("SELECT report_id FROM report_mail_asset WHERE report_id = $1 AND revoked_at IS NOT NULL", &[&*id]).await.map_err(|e| e.to_string())?.is_some() { return Ok(conflict("报告趋势图片已撤销，请生成修订版后发送")); }
         let mut selected = body.recipient_ids.clone(); selected.sort_unstable(); selected.dedup();
-        if !selected.is_empty() && storage::recipients(&tx, &selected).await?.len() != selected.len() { return Ok(bad("收件人必须是有有效邮箱的启用中管理员")); }
+        if !selected.is_empty() && storage::recipients(&tx, &selected).await?.len() != selected.len() { return Ok(bad("收件人必须是启用中且有有效邮箱的平台用户")); }
         let active: bool = tx.query_one("SELECT EXISTS (SELECT 1 FROM report_delivery WHERE report_id = $1 AND status IN ('pending','sending')) AS active;", &[&*id]).await.map_err(|e| e.to_string())?.get("active");
         if active && !selected.is_empty() { return Ok(conflict("已有待投递邮件，请等待投递完成后再重发")); }
         let count = if selected.is_empty() { 0 } else { storage::enqueue_delivery(&tx, *id, &selected, false, true).await? };

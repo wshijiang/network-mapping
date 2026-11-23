@@ -972,6 +972,16 @@ async fn database_with_max_size(max_size: usize) -> (Pool, String) {
         ))
         .await
         .unwrap();
+        c.batch_execute(include_str!(
+            "../../source/database/migrate_notification_inbox.sql"
+        ))
+        .await
+        .unwrap();
+        c.batch_execute(include_str!(
+            "../../source/database/migrate_target_monitor.sql"
+        ))
+        .await
+        .unwrap();
     }
     c.batch_execute("INSERT INTO users(id,username,password,role) VALUES(1,'admin','test',1)")
         .await
@@ -2829,5 +2839,358 @@ async fn proxies_are_private_preserved_and_do_not_change_recipient_revision() {
             .await
             .unwrap();
     }
+    cleanup(pool, schema).await;
+}
+
+#[test]
+fn severity_rank_orders_info_below_warning_and_critical() {
+    assert!(severity_rank("info") < severity_rank("warning"));
+    assert!(severity_rank("warning") < severity_rank("critical"));
+    assert_eq!(severity_rank("unknown"), 0);
+}
+
+#[test]
+fn channel_validation_accepts_info_minimum_severity() {
+    let mut v = provider_input("feishu");
+    v.minimum_severity = "info".into();
+    assert!(v.validate(true).is_ok());
+    v.minimum_severity = "debug".into();
+    assert!(v.validate(true).is_err());
+}
+
+fn terminal_fixture(status: &'static str) -> TaskTerminal<'static> {
+    TaskTerminal {
+        user_id: 1,
+        task_id: "01952f0c-0000-7000-8000-000000000001",
+        initiator: "admin",
+        targets: (1..=7).map(|i| format!("192.0.2.{i}")).collect(),
+        dns_targets: Vec::new(),
+        ports: "1-65535",
+        profile: "service_inventory",
+        kind: "ip",
+        source: "manual",
+        status,
+        started_at: Some(0),
+        ended_at: Some(61_000),
+        attempts: 1,
+        failure_reason: None,
+    }
+}
+
+#[test]
+fn task_duration_and_targets_summary_are_bounded() {
+    assert_eq!(format_task_duration(None, Some(1)), "-");
+    assert_eq!(
+        format_task_duration(Some(0), Some(3_661_000)),
+        "1 小时 1 分"
+    );
+    assert_eq!(format_task_duration(Some(0), Some(61_000)), "1 分 1 秒");
+    assert_eq!(format_task_duration(Some(0), Some(5_000)), "5 秒");
+    assert_eq!(format_task_duration(Some(9_000), Some(1_000)), "0 秒");
+    let summary = task_targets_summary(&terminal_fixture("succeeded"));
+    assert!(summary.contains("等 7 个目标"));
+    assert!(!summary.contains("192.0.2.6"));
+    let mut dns = terminal_fixture("succeeded");
+    dns.kind = "dns";
+    dns.dns_targets = vec!["example.com".into()];
+    assert_eq!(task_targets_summary(&dns), "example.com");
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn task_terminal_notifications_gate_by_severity_preference_and_dedup() {
+    let (pool, schema) = database().await;
+    let audit = AuditContext::cli("notification-test");
+    save(
+        &pool,
+        &key(),
+        None,
+        provider_input("feishu"),
+        &user(1),
+        &audit,
+    )
+    .await
+    .unwrap();
+    let mut info = provider_input("telegram");
+    info.minimum_severity = "info".into();
+    save(&pool, &key(), None, info, &user(1), &audit)
+        .await
+        .unwrap();
+    let mut c = pool.get().await.unwrap();
+    c.execute("INSERT INTO scan_task(id,user_id,task_id,task_initiator,task_target,task_status,task_source) VALUES(1,1,'01952f0c-0000-7000-8000-000000000001','admin',ARRAY['192.0.2.1']::INET[],'running','manual')", &[]).await.unwrap();
+    c.execute("INSERT INTO scan_task_execution(id,execution_id,task_id,execution_status,task_start_time,task_end_time) VALUES(1,'exec-1',1,'succeeded',1000,61000)", &[]).await.unwrap();
+    let tx = c.transaction().await.unwrap();
+    crate::scan_control::dispatch::refresh_task_aggregate(&tx, 1)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    // info 级任务完成只投递给显式降到 info 的渠道。
+    let rows = c.query("SELECT c.provider,e.event_type,e.severity FROM notification_delivery d JOIN notification_channel c ON c.id=d.channel_id JOIN notification_event e ON e.id=d.event_id", &[]).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, String>(0), "telegram");
+    assert_eq!(rows[0].get::<_, String>(1), "task.completed");
+    assert_eq!(rows[0].get::<_, String>(2), "info");
+    // 终态 → 终态的重复刷新不再产生事件。
+    let tx = c.transaction().await.unwrap();
+    crate::scan_control::dispatch::refresh_task_aggregate(&tx, 1)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let count: i64 = c
+        .query_one("SELECT COUNT(*) FROM notification_event", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(count, 1);
+    // 失败为 warning：两个渠道都订阅。
+    c.execute("INSERT INTO scan_task(id,user_id,task_id,task_initiator,task_target,task_status,task_source) VALUES(2,1,'01952f0c-0000-7000-8000-000000000002','admin',ARRAY['192.0.2.2']::INET[],'running','manual')", &[]).await.unwrap();
+    c.execute("INSERT INTO scan_task_execution(id,execution_id,task_id,execution_status,failure_reason) VALUES(2,'exec-2',2,'failed','boom')", &[]).await.unwrap();
+    let tx = c.transaction().await.unwrap();
+    crate::scan_control::dispatch::refresh_task_aggregate(&tx, 2)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let count: i64 = c.query_one("SELECT COUNT(*) FROM notification_delivery d JOIN notification_event e ON e.id=d.event_id WHERE e.event_type='task.failed'", &[]).await.unwrap().get(0);
+    assert_eq!(count, 2);
+    // 取消默认静默；管理员开启偏好后产生 info 事件。
+    c.execute("INSERT INTO scan_task(id,user_id,task_id,task_initiator,task_target,task_status,task_source) VALUES(3,1,'01952f0c-0000-7000-8000-000000000003','admin',ARRAY['192.0.2.3']::INET[],'running','manual')", &[]).await.unwrap();
+    c.execute("INSERT INTO scan_task_execution(id,execution_id,task_id,execution_status) VALUES(3,'exec-3',3,'cancelled')", &[]).await.unwrap();
+    let tx = c.transaction().await.unwrap();
+    crate::scan_control::dispatch::refresh_task_aggregate(&tx, 3)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let count: i64 = c
+        .query_one(
+            "SELECT COUNT(*) FROM notification_event WHERE event_type='task.cancelled'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(count, 0);
+    c.execute(
+        "INSERT INTO setting(item_type,key,value) VALUES('notification','notify_on_cancel','true')",
+        &[],
+    )
+    .await
+    .unwrap();
+    c.execute("INSERT INTO scan_task(id,user_id,task_id,task_initiator,task_target,task_status,task_source) VALUES(4,1,'01952f0c-0000-7000-8000-000000000004','admin',ARRAY['192.0.2.4']::INET[],'running','manual')", &[]).await.unwrap();
+    c.execute("INSERT INTO scan_task_execution(id,execution_id,task_id,execution_status) VALUES(4,'exec-4',4,'cancelled')", &[]).await.unwrap();
+    let tx = c.transaction().await.unwrap();
+    crate::scan_control::dispatch::refresh_task_aggregate(&tx, 4)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let row = c.query_one("SELECT severity,context->>'mail_template' FROM notification_event WHERE event_type='task.cancelled'", &[]).await.unwrap();
+    assert_eq!(row.get::<_, String>(0), "info");
+    assert_eq!(row.get::<_, String>(1), "task_completed");
+    drop(c);
+    cleanup(pool, schema).await;
+}
+
+#[actix_web::test]
+async fn preferences_endpoints_require_administrator_and_csrf() {
+    let pool = Pool::builder(Manager::new(
+        "host=127.0.0.1 user=unused".parse().unwrap(),
+        NoTls,
+    ))
+    .build()
+    .unwrap();
+    let app = http_test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(user(2));
+                srv.call(req)
+            })
+            .configure(configure),
+    )
+    .await;
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::get()
+            .uri("/api/notifications/preferences")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let payload = json!({"loginNotifyEnabled":true,"notifyOnStuck":true,"notifyOnComplete":true,"reportDaily":false,"reportWeekly":true,"reportMonthly":false});
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::put()
+            .uri("/api/notifications/preferences")
+            .set_json(&payload)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let app = http_test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool))
+            .wrap(crate::middlewares::csrfmiddleware::CsrfMiddleware)
+            .configure(configure),
+    )
+    .await;
+    let response = http_test::call_service(
+        &app,
+        http_test::TestRequest::put()
+            .uri("/api/notifications/preferences")
+            .set_json(&payload)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn inbox_fanout_respects_recipients_preferences_and_retention() {
+    let (pool, schema) = database().await;
+    let mut c = pool.get().await.unwrap();
+    c.execute("INSERT INTO users(id,username,password,role,email) VALUES(2,'member','test',2,'member@example.com')", &[]).await.unwrap();
+    // 任务事件只发给任务 owner。
+    let tx = c.transaction().await.unwrap();
+    enqueue_with_context(
+        &tx,
+        "task.completed",
+        "info",
+        "inbox:task:1",
+        "扫描任务完成",
+        "任务 ID：t1",
+        None,
+        json!({"user_id":2,"task_id":"t1"}),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let rows = c
+        .query("SELECT user_id,category,link FROM notification_inbox", &[])
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, i32>(0), 2);
+    assert_eq!(rows[0].get::<_, String>(1), "task");
+    assert_eq!(
+        rows[0].get::<_, Option<String>>(2).as_deref(),
+        Some("/task/t1")
+    );
+    // 健康告警发给全部有效管理员，而非普通用户。
+    let tx = c.transaction().await.unwrap();
+    enqueue_with_context(
+        &tx,
+        "health.alert",
+        "warning",
+        "inbox:alert:1",
+        "健康告警",
+        "慢请求",
+        None,
+        json!({}),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let rows = c
+        .query(
+            "SELECT user_id FROM notification_inbox WHERE category='alert'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, i32>(0), 1);
+    // 个人关闭任务类别后不再接收该类站内通知。
+    c.execute(
+        "INSERT INTO notification_user_preference(user_id,category,enabled) VALUES(2,'task',false)",
+        &[],
+    )
+    .await
+    .unwrap();
+    let tx = c.transaction().await.unwrap();
+    enqueue_with_context(
+        &tx,
+        "task.failed",
+        "warning",
+        "inbox:task:2",
+        "扫描任务失败",
+        "任务 ID：t2",
+        None,
+        json!({"user_id":2,"task_id":"t2"}),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let count: i64 = c
+        .query_one(
+            "SELECT COUNT(*) FROM notification_inbox WHERE user_id=2 AND category='task'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(count, 1);
+    // 全局站内开关关闭后不再扇出。
+    c.execute(
+        "INSERT INTO setting(item_type,key,value) VALUES('notification','in_app_enabled','false')",
+        &[],
+    )
+    .await
+    .unwrap();
+    let tx = c.transaction().await.unwrap();
+    enqueue_with_context(
+        &tx,
+        "user.login",
+        "warning",
+        "inbox:login:1",
+        "用户登录",
+        "member",
+        None,
+        json!({"user_id":2}),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let count: i64 = c
+        .query_one(
+            "SELECT COUNT(*) FROM notification_inbox WHERE category='security'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(count, 0);
+    c.execute(
+        "UPDATE setting SET value='true' WHERE item_type='notification' AND key='in_app_enabled'",
+        &[],
+    )
+    .await
+    .unwrap();
+    // 保留期清理删除超期行。
+    c.execute(
+        "UPDATE notification_inbox SET created_at=NOW()-INTERVAL '100 days' WHERE category='alert'",
+        &[],
+    )
+    .await
+    .unwrap();
+    inbox::cleanup(&pool).await.unwrap();
+    let count: i64 = c
+        .query_one(
+            "SELECT COUNT(*) FROM notification_inbox WHERE category='alert'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(count, 0);
+    // 容量清理只删最旧已读，未读保留。
+    c.execute("INSERT INTO setting(item_type,key,value) VALUES('notification','inbox_max_per_user','100') ON CONFLICT(item_type,key) DO UPDATE SET value='100'", &[]).await.unwrap();
+    for i in 0..150 {
+        c.execute("INSERT INTO notification_inbox(id,user_id,event_id,category,event_type,severity,title,body,read_at) VALUES($1,2,NULL,'task','task.completed','info','t','b',CASE WHEN $2<120 THEN NOW() ELSE NULL END)", &[&Uuid::now_v7(), &i]).await.unwrap();
+    }
+    inbox::cleanup(&pool).await.unwrap();
+    let row = c.query_one("SELECT COUNT(*) FILTER (WHERE read_at IS NOT NULL),COUNT(*) FILTER (WHERE read_at IS NULL) FROM notification_inbox WHERE user_id=2 AND category='task'", &[]).await.unwrap();
+    assert_eq!(row.get::<_, i64>(0), 70);
+    assert_eq!(row.get::<_, i64>(1), 31);
+    drop(c);
     cleanup(pool, schema).await;
 }

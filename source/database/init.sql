@@ -657,7 +657,7 @@ CREATE TABLE IF NOT EXISTS audit_event (
 	occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	category TEXT NOT NULL CONSTRAINT audit_event_category_check CHECK (category IN (
 		'authentication', 'authorization', 'user_security', 'task', 'scanner',
-		'automatic_target', 'configuration', 'data_access', 'audit', 'backup', 'data_import', 'federation', 'data_export'
+		'automatic_target', 'configuration', 'data_access', 'audit', 'backup', 'data_import', 'federation', 'data_export', 'target_monitor'
 	)),
 	action TEXT NOT NULL,
 	outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failure', 'denied')),
@@ -692,6 +692,7 @@ BEGIN
               OR POSITION('data_import' IN pg_get_constraintdef(oid)) = 0
               OR POSITION('federation' IN pg_get_constraintdef(oid)) = 0
               OR POSITION('data_export' IN pg_get_constraintdef(oid)) = 0
+              OR POSITION('target_monitor' IN pg_get_constraintdef(oid)) = 0
           )
     ) THEN
         ALTER TABLE audit_event DROP CONSTRAINT audit_event_category_check;
@@ -705,7 +706,7 @@ BEGIN
     ) THEN
         ALTER TABLE audit_event ADD CONSTRAINT audit_event_category_check CHECK (category IN (
             'authentication', 'authorization', 'user_security', 'task', 'scanner',
-            'automatic_target', 'configuration', 'data_access', 'audit', 'backup', 'data_import', 'federation', 'data_export'
+            'automatic_target', 'configuration', 'data_access', 'audit', 'backup', 'data_import', 'federation', 'data_export', 'target_monitor'
         ));
     END IF;
 END $$;
@@ -1156,7 +1157,7 @@ ALTER TABLE scan_task_execution ADD COLUMN IF NOT EXISTS recovery_failure_count 
 
 -- Administrator platform reports. Plans remain disabled on upgrades.
 CREATE TABLE IF NOT EXISTS report_schedule (
-    period_type TEXT PRIMARY KEY CHECK (period_type IN ('weekly', 'monthly')),
+    period_type TEXT PRIMARY KEY CHECK (period_type IN ('daily', 'weekly', 'monthly')),
     enabled BOOLEAN NOT NULL DEFAULT FALSE,
     send_hour SMALLINT NOT NULL DEFAULT 9 CHECK (send_hour BETWEEN 0 AND 23),
     send_minute SMALLINT NOT NULL DEFAULT 0 CHECK (send_minute BETWEEN 0 AND 59),
@@ -1167,7 +1168,19 @@ CREATE TABLE IF NOT EXISTS report_schedule (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CHECK (cardinality(recipient_ids) <= 100)
 );
-INSERT INTO report_schedule(period_type) VALUES ('weekly'), ('monthly') ON CONFLICT DO NOTHING;
+-- Upgrades created the table with the weekly/monthly-only constraint; widen before seeding daily.
+ALTER TABLE report_schedule DROP CONSTRAINT IF EXISTS report_schedule_period_type_check;
+ALTER TABLE report_schedule ADD CONSTRAINT report_schedule_period_type_check
+    CHECK (period_type IN ('daily', 'weekly', 'monthly'));
+INSERT INTO report_schedule(period_type) VALUES ('daily'), ('weekly'), ('monthly') ON CONFLICT DO NOTHING;
+
+-- Per-user report subscriptions: in-site notifications and report center access.
+CREATE TABLE IF NOT EXISTS report_subscription (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    period_type TEXT NOT NULL REFERENCES report_schedule(period_type) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, period_type)
+);
 
 CREATE TABLE IF NOT EXISTS report_run (
     id UUID PRIMARY KEY,
@@ -1238,7 +1251,7 @@ CREATE INDEX IF NOT EXISTS idx_report_delivery_ready ON report_delivery(availabl
 CREATE INDEX IF NOT EXISTS idx_scan_execution_report_end ON scan_task_execution(task_end_time, id)
     WHERE execution_status = 'succeeded';
 INSERT INTO mail_template(template_key, display_name) VALUES
-    ('report_weekly', '平台周报'), ('report_monthly', '平台月报') ON CONFLICT DO NOTHING;
+    ('report_daily', '平台日报'), ('report_weekly', '平台周报'), ('report_monthly', '平台月报') ON CONFLICT DO NOTHING;
 
 -- Preserve absolute observation instants and immutable report calendar rules.
 ALTER TABLE analytics_discovery_fact ADD COLUMN IF NOT EXISTS first_observed_at TIMESTAMPTZ;
@@ -1461,6 +1474,9 @@ ALTER TABLE notification_channel ADD COLUMN IF NOT EXISTS settings JSONB NOT NUL
 ALTER TABLE notification_channel ADD COLUMN IF NOT EXISTS feishu_app_secret_ciphertext BYTEA;
 ALTER TABLE notification_channel ADD COLUMN IF NOT EXISTS legacy_email BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_legacy_email ON notification_channel(legacy_email) WHERE legacy_email;
+ALTER TABLE notification_channel DROP CONSTRAINT IF EXISTS notification_channel_minimum_severity_check;
+ALTER TABLE notification_channel ADD CONSTRAINT notification_channel_minimum_severity_check
+    CHECK (minimum_severity IN ('info', 'warning', 'critical'));
 
 CREATE TABLE IF NOT EXISTS notification_event (
     id UUID PRIMARY KEY,
@@ -1505,6 +1521,125 @@ CREATE TABLE IF NOT EXISTS notification_health_gate (
     severity TEXT NOT NULL,
     admitted_at TIMESTAMPTZ NOT NULL
 );
+
+-- 站内通知收件箱：快照列独立于 notification_event 的 30 天清理，保留期由管理员配置。
+CREATE TABLE IF NOT EXISTS notification_inbox (
+    id UUID PRIMARY KEY,
+    user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    event_id UUID REFERENCES notification_event(id) ON DELETE SET NULL,
+    category TEXT NOT NULL CHECK (category IN ('task', 'monitor', 'alert', 'security', 'report')),
+    event_type TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    link TEXT,
+    read_at TIMESTAMPTZ,
+    dismissed_at TIMESTAMPTZ,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_notification_inbox_list
+    ON notification_inbox(user_id, id DESC) WHERE dismissed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_notification_inbox_unread
+    ON notification_inbox(user_id, category) WHERE read_at IS NULL AND dismissed_at IS NULL;
+
+-- 个人接收偏好：缺行 = 默认开启。
+CREATE TABLE IF NOT EXISTS notification_user_preference (
+    user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    category TEXT NOT NULL CHECK (category IN ('task', 'monitor', 'alert', 'security', 'report')),
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, category)
+);
+
+-- 目标监控：规则 + 运行 + 变化明细；审计分类 target_monitor。
+CREATE TABLE IF NOT EXISTS target_monitor_rule (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 80),
+    created_by INT NOT NULL REFERENCES users(id),
+    recipient_ids INT[] NOT NULL DEFAULT '{}',
+    target_type TEXT NOT NULL DEFAULT 'ip' CHECK (target_type IN ('ip', 'domain')),
+    target_family TEXT CHECK (target_family IN ('ipv4', 'ipv6')),
+    targets TEXT[] NOT NULL CHECK (cardinality(targets) BETWEEN 1 AND 64),
+    ports TEXT NOT NULL DEFAULT '1-65535',
+    scan_profile TEXT NOT NULL DEFAULT 'service_inventory',
+    interval_seconds INT NOT NULL DEFAULT 86400 CHECK (interval_seconds BETWEEN 3600 AND 2592000),
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    baseline JSONB,
+    last_task_id VARCHAR(36),
+    last_run_at TIMESTAMPTZ,
+    next_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revision BIGINT NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_target_monitor_due
+    ON target_monitor_rule(next_run_at) WHERE enabled AND deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_target_monitor_owner
+    ON target_monitor_rule(created_by) WHERE deleted_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS target_monitor_run (
+    id UUID PRIMARY KEY,
+    rule_id UUID NOT NULL REFERENCES target_monitor_rule(id) ON DELETE CASCADE,
+    task_id VARCHAR(36),
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled', 'skipped')),
+    skip_reason TEXT,
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    snapshot JSONB,
+    change_count INT NOT NULL DEFAULT 0,
+    summary JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_target_monitor_run_rule ON target_monitor_run(rule_id, id DESC);
+
+-- 运行创建时冻结规则配置：收尾按派发时的目标类型与基线比对，
+-- 运行期间编辑规则不会让旧任务的结果与新目标混用。
+ALTER TABLE target_monitor_run ADD COLUMN IF NOT EXISTS target_type TEXT;
+ALTER TABLE target_monitor_run ADD COLUMN IF NOT EXISTS targets TEXT[];
+ALTER TABLE target_monitor_run ADD COLUMN IF NOT EXISTS baseline JSONB;
+
+CREATE TABLE IF NOT EXISTS target_monitor_change (
+    id UUID PRIMARY KEY,
+    run_id UUID NOT NULL REFERENCES target_monitor_run(id) ON DELETE CASCADE,
+    rule_id UUID NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN
+        ('port_opened', 'port_closed', 'service_changed', 'title_changed', 'cert_changed', 'cert_expiring', 'target_down', 'target_up', 'dns_changed')),
+    severity TEXT NOT NULL CHECK (severity IN ('info', 'warning', 'critical')),
+    target TEXT NOT NULL,
+    port INT,
+    detail JSONB NOT NULL DEFAULT '{}',
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_target_monitor_change_rule
+    ON target_monitor_change(rule_id, occurred_at DESC, id);
+
+-- 审计分类扩展（幂等 drop/re-add，兼容存量约束）。
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'audit_event'::regclass
+          AND conname = 'audit_event_category_check'
+          AND POSITION('target_monitor' IN pg_get_constraintdef(oid)) = 0
+    ) THEN
+        ALTER TABLE audit_event DROP CONSTRAINT audit_event_category_check;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'audit_event'::regclass AND conname = 'audit_event_category_check'
+    ) THEN
+        ALTER TABLE audit_event ADD CONSTRAINT audit_event_category_check CHECK (category IN (
+            'authentication', 'authorization', 'user_security', 'task', 'scanner',
+            'automatic_target', 'configuration', 'data_access', 'audit', 'backup',
+            'data_import', 'federation', 'data_export', 'target_monitor'
+        ));
+    END IF;
+END $$;
+
+
 
 ALTER TABLE scanner_outage ADD COLUMN IF NOT EXISTS notification_recovery BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE scanner_outage ADD COLUMN IF NOT EXISTS notification_recovery_prepared BOOLEAN NOT NULL DEFAULT FALSE;

@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { margin: 0; padding: 24px; background: #f3f4f6; color: #1f2937; font-family: Arial, sans-serif; }
+    .card { max-width: 600px; margin: 0 auto; padding: 32px; background: #ffffff; border-radius: 12px; }
+    .title { margin: 0 0 16px; color: #111827; font-size: 24px; }
+    .detail { margin: 8px 0; color: #4b5563; }
+    .change { margin: 4px 0; padding: 8px 12px; background: #f9fafb; border-radius: 8px; color: #374151; font-size: 14px; }
+    .footer { margin-top: 24px; color: #9ca3af; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1 class="title">目标监控：{{ rule_name }}</h1>
+    <p>{{ system_name }} 目标监控检测到{{ event_label }}。</p>
+    <p class="detail">规则：{{ rule_name }}</p>
+    <p class="detail">级别：{{ severity }}</p>
+    <p class="detail">变化数量：{{ change_count }}</p>
+    <p class="detail">发生时间：{{ occurred_at }}</p>
+    {% for change in changes %}<p class="change">{{ change.kind_label }}：{{ change.target }}{% if change.port %}:{{ change.port }}{% endif %}</p>{% endfor %}
+    <p class="footer">请登录平台查看变化明细：{{ detail_path }}</p>
+  </div>
+</body>
+</html>

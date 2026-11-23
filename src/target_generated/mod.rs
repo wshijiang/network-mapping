@@ -19,7 +19,7 @@ use crate::scan_control::creation::build_scan_plan;
 
 const STRATEGY: &str = "sequential_subnet";
 const SYSTEM_REQUEST_PATH: &str = "system://automatic-target-generator";
-const MANDATORY_IPV4_EXCLUSIONS: &[&str] = &["0.0.0.0/8"];
+pub(crate) const MANDATORY_IPV4_EXCLUSIONS: &[&str] = &["0.0.0.0/8"];
 
 #[derive(Clone, Debug)]
 struct FamilyGenerator {

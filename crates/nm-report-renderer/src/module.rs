@@ -33,7 +33,9 @@ pub struct LocalReportRenderModule;
 fn render(input: ReportRenderInput) -> Result<ReportRenderOutput, ModuleError> {
     if !matches!(
         input.template_key.as_str(),
-        mail_template::REPORT_WEEKLY_TEMPLATE_KEY | mail_template::REPORT_MONTHLY_TEMPLATE_KEY
+        mail_template::REPORT_DAILY_TEMPLATE_KEY
+            | mail_template::REPORT_WEEKLY_TEMPLATE_KEY
+            | mail_template::REPORT_MONTHLY_TEMPLATE_KEY
     ) || input.template_version < 0
     {
         return Err(ModuleError::Execution(

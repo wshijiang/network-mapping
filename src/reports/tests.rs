@@ -59,7 +59,7 @@ use uuid::Uuid;
 async fn deferred_legacy_reports_wait_for_transfer_while_manual_mail_still_runs() {
     let (pool, schema) = isolated_pool().await;
     let c = pool.get().await.unwrap();
-    c.batch_execute("UPDATE users SET email='first@example.com' WHERE id=1; UPDATE users SET email='demoted@example.com',role=2 WHERE id=2").await.unwrap();
+    c.batch_execute("UPDATE users SET email='first@example.com' WHERE id=1; UPDATE users SET email='demoted@example.com',role=2,disabled_at=NOW() WHERE id=2").await.unwrap();
     let report = Uuid::new_v4();
     let rendered = json!({"subject":"report","html_body":"<p>report</p>","text_body":"report"});
     c.execute("INSERT INTO report_run(id,period_type,period_start,period_end,source,status,task_snapshot,rendered_mail) VALUES($1,'weekly',NOW()-INTERVAL '10 days',NOW()-INTERVAL '3 days','automatic','ready','{}',$2)", &[&report,&rendered]).await.unwrap();
@@ -1123,7 +1123,7 @@ async fn disabled_plans_do_not_send_legacy_weekly_notifications_and_reclaimed_jo
 
 #[tokio::test]
 #[ignore = "requires disposable REPORT_TEST_DATABASE_URL"]
-async fn delivery_revalidates_administrator_role_without_sending_smtp() {
+async fn delivery_revalidates_active_user_without_sending_smtp() {
     let (pool, schema) = isolated_pool().await;
     let period = Period::last_closed(PeriodType::Weekly, Utc::now()).expect("period");
     let id = storage::create(&pool, &period, Some(1), "manual", None)
@@ -1138,9 +1138,9 @@ async fn delivery_revalidates_administrator_role_without_sending_smtp() {
         1
     );
     client
-        .execute("UPDATE users SET role=2 WHERE id=1;", &[])
+        .execute("UPDATE users SET disabled_at=NOW() WHERE id=1;", &[])
         .await
-        .expect("demote");
+        .expect("disable");
     drop(client);
     worker::send_one(
         &pool,
@@ -1165,7 +1165,7 @@ async fn delivery_revalidates_administrator_role_without_sending_smtp() {
 }
 
 #[actix_web::test]
-async fn ordinary_users_cannot_query_or_generate_platform_reports() {
+async fn ordinary_users_cannot_generate_send_or_manage_platform_reports() {
     use actix_web::{App, HttpMessage, dev::Service, test, web};
     let pool = Pool::builder(Manager::new(
         "host=127.0.0.1 port=1 user=test".parse().expect("config"),
@@ -1187,9 +1187,7 @@ async fn ordinary_users_cannot_query_or_generate_platform_reports() {
                 });
                 srv.call(req)
             })
-            .service(crate::handlers::reports::list)
             .service(crate::handlers::reports::generate)
-            .service(crate::handlers::reports::detail)
             .service(crate::handlers::reports::send)
             .service(crate::handlers::report_mail_assets::revoke),
     )
@@ -1199,11 +1197,9 @@ async fn ordinary_users_cannot_query_or_generate_platform_reports() {
             "/api/reports/{}/mail-image/revoke",
             Uuid::new_v4()
         )),
-        test::TestRequest::get().uri("/api/reports"),
         test::TestRequest::post()
             .uri("/api/reports/generate")
             .set_json(json!({"period_type":"weekly"})),
-        test::TestRequest::get().uri(&format!("/api/reports/{}", Uuid::new_v4())),
         test::TestRequest::post()
             .uri(&format!("/api/reports/{}/deliveries", Uuid::new_v4()))
             .set_json(json!({"recipient_ids":[1]})),
@@ -1211,6 +1207,127 @@ async fn ordinary_users_cannot_query_or_generate_platform_reports() {
         let response = test::call_service(&app, request.to_request()).await;
         assert_eq!(response.status(), 403);
     }
+}
+
+#[actix_web::test]
+#[ignore = "requires disposable REPORT_TEST_DATABASE_URL"]
+async fn subscribers_and_selected_users_see_ready_reports_and_receive_inbox_notifications() {
+    use actix_web::{App, HttpMessage, dev::Service, test, web};
+    let (pool, schema) = isolated_pool().await;
+    let ready = Uuid::new_v4();
+    let failed = Uuid::new_v4();
+    let client = pool.get().await.unwrap();
+    // Empty selections keep the administrator default; explicit selections admit ordinary users.
+    assert_eq!(
+        storage::recipients(&client, &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(
+        storage::recipients(&client, &[1, 2])
+            .await
+            .unwrap()
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    client.execute("INSERT INTO report_run(id,period_type,period_start,period_end,source,status,task_snapshot,payload,recipient_ids) VALUES($1,'weekly',NOW()-INTERVAL '10 days',NOW()-INTERVAL '3 days','manual','ready','{}','{}',$3),($2,'weekly',NOW()-INTERVAL '17 days',NOW()-INTERVAL '10 days','manual','failed','{}',NULL,$3)", &[&ready,&failed,&vec![2]]).await.unwrap();
+    drop(client);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .wrap_fn(|req, srv| {
+                req.extensions_mut().insert(crate::admin::UserBaseI {
+                    id: 2,
+                    username: "user".into(),
+                    role: 2,
+                    email: Some("user@example.invalid".into()),
+                    limit_login: false,
+                    enable_2fa: false,
+                });
+                srv.call(req)
+            })
+            .service(crate::handlers::reports::list)
+            .service(crate::handlers::reports::detail)
+            .service(crate::handlers::reports::subscriptions)
+            .service(crate::handlers::reports::save_subscriptions),
+    )
+    .await;
+    // A selected recipient can read the report but never unready reports.
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/reports/{ready}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/reports/{failed}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), 403);
+    let body: Value = test::read_body_json(
+        test::call_service(
+            &app,
+            test::TestRequest::get().uri("/api/reports").to_request(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(body["data"]["total"], 1);
+    assert_eq!(body["data"]["items"][0]["id"], json!(ready));
+    // Subscription is self-service, grants access and yields the report inbox rows.
+    let response = test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri("/api/report-subscriptions")
+            .set_json(json!({"daily":false,"weekly":true,"monthly":false}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    let body: Value = test::read_body_json(
+        test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/api/report-subscriptions")
+                .to_request(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        body["data"],
+        json!({"daily":false,"weekly":true,"monthly":false})
+    );
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "INSERT INTO report_subscription(user_id,period_type) VALUES(1,'weekly')",
+            &[],
+        )
+        .await
+        .unwrap();
+    drop(client);
+    let id = Uuid::new_v4();
+    let mut client = pool.get().await.unwrap();
+    client.execute("INSERT INTO report_run(id,period_type,period_start,period_end,source,status,task_snapshot,payload) VALUES($1,'weekly',NOW()-INTERVAL '24 days',NOW()-INTERVAL '17 days','manual','ready','{}','{}')", &[&id]).await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    crate::notification::enqueue_report(&tx, id).await.unwrap();
+    tx.commit().await.unwrap();
+    let recipients: Vec<i32> = client.query("SELECT user_id FROM notification_inbox WHERE event_type='report.weekly' ORDER BY user_id", &[]).await.unwrap().iter().map(|row| row.get(0)).collect();
+    assert_eq!(recipients, vec![1, 2]);
+    drop(client);
+    cleanup(&pool, schema).await;
 }
 
 #[tokio::test]
@@ -1351,14 +1468,20 @@ async fn administrator_report_routes_validate_periods_plans_and_archive_delivery
     .await;
     let response=test::call_service(&app,test::TestRequest::post().uri("/api/reports/generate").set_json(json!({"period_type":"weekly","date":super::period::local_date(Utc::now()).expect("date")})).to_request()).await;
     assert_eq!(response.status(), 400, "reject unfinished period");
-    let response=test::call_service(&app,test::TestRequest::put().uri("/api/report-schedules/weekly").set_json(json!({"enabled":true,"send_hour":9,"send_minute":0,"recipient_ids":[2],"expected_revision":0})).to_request()).await;
+    let response=test::call_service(&app,test::TestRequest::put().uri("/api/report-schedules/weekly").set_json(json!({"enabled":true,"send_hour":9,"send_minute":0,"recipient_ids":[9999],"expected_revision":0})).to_request()).await;
     assert_eq!(
         response.status(),
         400,
-        "ordinary user cannot receive platform mail"
+        "unknown users cannot receive platform mail"
     );
     let response=test::call_service(&app,test::TestRequest::put().uri("/api/report-schedules/weekly").set_json(json!({"enabled":true,"send_hour":9,"send_minute":0,"recipient_ids":[1],"expected_revision":0})).to_request()).await;
     assert_eq!(response.status(), 200, "plan save is audited atomically");
+    let response=test::call_service(&app,test::TestRequest::put().uri("/api/report-schedules/weekly").set_json(json!({"enabled":true,"send_hour":9,"send_minute":0,"recipient_ids":[1,2],"expected_revision":1})).to_request()).await;
+    assert_eq!(
+        response.status(),
+        200,
+        "ordinary platform users can be selected as report recipients"
+    );
     let response=test::call_service(&app,test::TestRequest::put().uri("/api/report-schedules/weekly").set_json(json!({"enabled":false,"send_hour":9,"send_minute":0,"recipient_ids":[],"expected_revision":0})).to_request()).await;
     assert_eq!(
         response.status(),

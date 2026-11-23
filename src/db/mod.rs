@@ -341,6 +341,16 @@ pub async fn init_database_table(
             "../../source/database/migrate_search_freshness.sql"
         ))
         .await?;
+    transaction
+        .batch_execute(include_str!(
+            "../../source/database/migrate_notification_inbox.sql"
+        ))
+        .await?;
+    transaction
+        .batch_execute(include_str!(
+            "../../source/database/migrate_target_monitor.sql"
+        ))
+        .await?;
     transaction.commit().await?;
 
     Ok(())
