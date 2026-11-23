@@ -833,6 +833,10 @@ pub(crate) async fn enqueue_task_terminal(
     {
         return Ok(());
     }
+    // 监控任务的信号由 monitor.* 事件承载，不再重复产生任务通知。
+    if task.source == "monitor" {
+        return Ok(());
+    }
     let (event_type, severity, status_label, pref_key, default_enabled) = match task.status {
         "succeeded" => ("task.completed", "info", "完成", "notify_on_complete", true),
         "partial" => (

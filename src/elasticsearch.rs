@@ -694,6 +694,30 @@ impl ElasticsearchService {
     /// Returns the immutable DNS observations for one task. Comparison is
     /// intentionally derived from these source observations, never from the
     /// mutable current-record projection.
+    /// 目标监控 diff 前刷新数据源：最终批次上传只刷新观察/执行端点索引，
+    /// 当前端点索引与 DNS 流可能尚未对搜索可见，不刷新会读到空快照。
+    pub(crate) async fn refresh_monitor_source(&self, domain: bool) -> Result<(), String> {
+        if !self.can_read() {
+            return Err("Elasticsearch 扫描事实读路径尚未就绪".to_owned());
+        }
+        let index = if domain {
+            &self.inner.config.dns_observation_data_stream
+        } else {
+            &self.inner.config.current_endpoint_index
+        };
+        let result = self
+            .send_json_request(
+                ElasticsearchOperation::IndexAdmin,
+                Method::POST,
+                &format!("/{index}/_refresh"),
+                |request| request,
+            )
+            .await?;
+        validate_scan_refresh_response(&result)?;
+        self.mark_success();
+        Ok(())
+    }
+
     pub(crate) async fn dns_task_observations(&self, task_id: &str) -> Result<Value, String> {
         if !self.can_read() {
             return Err("Elasticsearch DNS 查询读路径尚未就绪".to_owned());

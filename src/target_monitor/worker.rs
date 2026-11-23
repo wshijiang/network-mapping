@@ -282,7 +282,8 @@ async fn ip_snapshot(
             {"term": {"scope_type": scope_type}},
             {"term": {"scope_id": scope_id}},
             {"bool": {"should": should, "minimum_should_match": 1}},
-            {"range": {"last_seen": {"gte": started_ms}}}
+            // masscan 时间戳按秒截断，last_seen 可能比任务开始早最多 1 秒；留 2 秒宽限防误报离线。
+            {"range": {"last_seen": {"gte": started_ms.saturating_sub(2000)}}}
         ]}},
         "sort": [{"endpoint_key": "asc"}]
     });
@@ -305,6 +306,9 @@ async fn observe(
     let target_type: String = row.get("target_type");
     let baseline: Option<Value> = row.get("baseline");
     let now_ms = Utc::now().timestamp_millis();
+    elasticsearch
+        .refresh_monitor_source(target_type == "domain")
+        .await?;
     if target_type == "domain" {
         let task_id: String = row.get("task_id");
         let hits = elasticsearch.dns_task_observations(&task_id).await?;

@@ -109,8 +109,19 @@ pub fn dns_snapshot_from_hits(hits: &Value) -> DnsSnapshot {
         let Some(source) = entry.get("_source") else {
             continue;
         };
-        let Ok(observation) = serde_json::from_value::<crate::dns::DnsObservation>(source.clone())
-        else {
+        // DNS 观察文档为嵌套结构：观察载荷在 _source.dns，任务归属在 _source.scan。
+        let Some(dns) = source.get("dns") else {
+            continue;
+        };
+        let mut value = dns.clone();
+        let observed_at = source
+            .get("@timestamp")
+            .and_then(Value::as_str)
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.timestamp_millis())
+            .unwrap_or(1);
+        value["observed_at"] = json!(observed_at);
+        let Ok(observation) = serde_json::from_value::<crate::dns::DnsObservation>(value) else {
             continue;
         };
         let domain = observation.question.name;
@@ -487,13 +498,17 @@ mod tests {
     #[test]
     fn dns_snapshot_keeps_only_a_and_aaaa_answers() {
         let hits = json!({"hits": {"hits": [{"_source": {
-            "observed_at": NOW, "question": {"name": "example.com", "type": "A", "class": "IN"},
-            "response_code": "NOERROR",
-            "answers": [
-                {"type": "A", "value": "192.0.2.1", "ttl": 60},
-                {"type": "AAAA", "value": "2001:db8::1", "ttl": 60},
-                {"type": "CNAME", "value": "other.example.com", "ttl": 60}
-            ]
+            "@timestamp": "2026-11-23T10:00:00Z",
+            "scan": {"task_id": "t1"},
+            "dns": {
+                "question": {"name": "example.com", "type": "A", "class": "IN"},
+                "response_code": "NOERROR",
+                "answers": [
+                    {"type": "A", "value": "192.0.2.1", "ttl": 60},
+                    {"type": "AAAA", "value": "2001:db8::1", "ttl": 60},
+                    {"type": "CNAME", "value": "other.example.com", "ttl": 60}
+                ]
+            }
         }}]}});
         let snapshot = dns_snapshot_from_hits(&hits);
         assert_eq!(

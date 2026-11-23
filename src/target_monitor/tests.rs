@@ -341,6 +341,19 @@ async fn dispatch_skips_without_scanner_then_creates_monitor_task_and_degrades_w
         .unwrap();
     assert_eq!(run.get::<_, String>(0), "succeeded");
     assert_eq!(run.get::<_, String>(1), "es_unavailable");
+    // 监控任务不产生任务通知（信号由 monitor.* 事件承载）。
+    let task_events: i64 = pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT COUNT(*) FROM notification_event WHERE dedup_key LIKE 'task:'||$1||'%'",
+            &[&task_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(task_events, 0);
     let baseline: Option<serde_json::Value> = pool
         .get()
         .await
