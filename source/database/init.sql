@@ -1595,6 +1595,12 @@ CREATE TABLE IF NOT EXISTS target_monitor_run (
 );
 CREATE INDEX IF NOT EXISTS idx_target_monitor_run_rule ON target_monitor_run(rule_id, id DESC);
 
+-- 运行创建时冻结规则配置：收尾按派发时的目标类型与基线比对，
+-- 运行期间编辑规则不会让旧任务的结果与新目标混用。
+ALTER TABLE target_monitor_run ADD COLUMN IF NOT EXISTS target_type TEXT;
+ALTER TABLE target_monitor_run ADD COLUMN IF NOT EXISTS targets TEXT[];
+ALTER TABLE target_monitor_run ADD COLUMN IF NOT EXISTS baseline JSONB;
+
 CREATE TABLE IF NOT EXISTS target_monitor_change (
     id UUID PRIMARY KEY,
     run_id UUID NOT NULL REFERENCES target_monitor_run(id) ON DELETE CASCADE,

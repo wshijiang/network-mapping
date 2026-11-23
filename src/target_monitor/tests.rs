@@ -294,10 +294,17 @@ async fn dispatch_skips_without_scanner_then_creates_monitor_task_and_degrades_w
         .unwrap();
     worker::dispatch_due(&pool, &maxmind).await.unwrap();
     let run = pool.get().await.unwrap().query_one(
-        "SELECT id,task_id,status FROM target_monitor_run WHERE rule_id=$1 ORDER BY id DESC LIMIT 1",
+        "SELECT id,task_id,status,target_type,targets,baseline FROM target_monitor_run WHERE rule_id=$1 ORDER BY id DESC LIMIT 1",
         &[&rule_id],
     ).await.unwrap();
     assert_eq!(run.get::<_, String>(2), "running");
+    // 派发时冻结规则配置，运行期间编辑规则不会改变本次运行的比对输入。
+    assert_eq!(run.get::<_, String>(3), "ip");
+    assert_eq!(
+        run.get::<_, Vec<String>>(4),
+        vec!["192.0.2.0/24".to_string()]
+    );
+    assert!(run.get::<_, Option<serde_json::Value>>(5).is_none());
     let task_id: String = run.get(1);
     let task = pool
         .get()

@@ -58,43 +58,48 @@ fn epoch_ms(source: &Value, key: &str) -> Option<i64> {
     }
 }
 
-/// 从 ES CurrentEndpoints 命中构建快照；返回（快照，是否截断）。
-pub fn snapshot_from_hits(hits: &Value) -> (IpSnapshot, bool) {
+fn endpoint_state(source: &Value) -> Option<(String, u16, EndpointState)> {
+    let ip = text(source, "ip")?;
+    let port = u16::try_from(source.get("port").and_then(Value::as_u64)?).unwrap_or(0);
+    Some((
+        ip,
+        port,
+        EndpointState {
+            service: text(source, "service"),
+            product: text(source, "product"),
+            version: text(source, "version"),
+            title: text(source, "title"),
+            cert_sha256: text(source, "tls_fingerprint_sha256"),
+            not_after: epoch_ms(source, "tls_not_after"),
+        },
+    ))
+}
+
+/// 从执行端点索引的 collapse 查询命中构建快照：每个 endpoint_key 取
+/// `inner_hits.latest` 的最新一条观测，避免同一任务多次执行时旧观测覆盖新值。
+pub fn snapshot_from_collapsed_hits(hits: &Value) -> IpSnapshot {
     let mut snapshot = IpSnapshot::new();
-    let mut total = 0_usize;
     let entries = hits
         .pointer("/hits/hits")
         .and_then(Value::as_array)
         .into_iter()
         .flatten();
-    for entry in entries {
-        total += 1;
-        if snapshot.values().map(BTreeMap::len).sum::<usize>() >= MAX_SNAPSHOT_PORTS {
+    for entry in entries.take(MAX_SNAPSHOT_PORTS) {
+        let Some(source) = entry.pointer("/inner_hits/latest/hits/hits/0/_source") else {
             continue;
+        };
+        if let Some((ip, port, state)) = endpoint_state(source) {
+            snapshot.entry(ip).or_default().insert(port, state);
         }
-        let Some(source) = entry.get("_source") else {
-            continue;
-        };
-        let (Some(ip), Some(port)) = (
-            text(source, "ip"),
-            source.get("port").and_then(Value::as_u64),
-        ) else {
-            continue;
-        };
-        let port = u16::try_from(port).unwrap_or(0);
-        snapshot.entry(ip).or_default().insert(
-            port,
-            EndpointState {
-                service: text(source, "service"),
-                product: text(source, "product"),
-                version: text(source, "version"),
-                title: text(source, "title"),
-                cert_sha256: text(source, "tls_fingerprint_sha256"),
-                not_after: epoch_ms(source, "tls_not_after"),
-            },
-        );
     }
-    (snapshot, total > MAX_SNAPSHOT_PORTS)
+    snapshot
+}
+
+/// collapse 查询按上限 +1 取组；返回组数超过上限即表示快照不完整。
+pub fn hits_exceed_capacity(hits: &Value) -> bool {
+    hits.pointer("/hits/hits")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| entries.len() > MAX_SNAPSHOT_PORTS)
 }
 
 /// 从 DNS 任务观察命中构建解析集合（仅 A/AAAA）。
@@ -174,6 +179,66 @@ pub fn cert_expiry_severity(
     }
 }
 
+fn compare_endpoint(
+    ip: &str,
+    port: u16,
+    previous: &EndpointState,
+    state: &EndpointState,
+    now_ms: i64,
+    changes: &mut Vec<Change>,
+) {
+    for (field, before, after) in [
+        ("service", &previous.service, &state.service),
+        ("product", &previous.product, &state.product),
+        ("version", &previous.version, &state.version),
+    ] {
+        if before != after {
+            changes.push(field_change(
+                "service_changed",
+                "warning",
+                ip,
+                port,
+                field,
+                before,
+                after,
+            ));
+        }
+    }
+    if previous.title != state.title {
+        changes.push(field_change(
+            "title_changed",
+            "info",
+            ip,
+            port,
+            "title",
+            &previous.title,
+            &state.title,
+        ));
+    }
+    if previous.cert_sha256 != state.cert_sha256 {
+        changes.push(field_change(
+            "cert_changed",
+            "warning",
+            ip,
+            port,
+            "cert_sha256",
+            &previous.cert_sha256,
+            &state.cert_sha256,
+        ));
+    }
+    if let Some(not_after) = state.not_after
+        && let Some((severity, bucket)) = cert_expiry_severity(not_after, now_ms)
+    {
+        changes.push(Change {
+            kind: "cert_expiring",
+            severity,
+            target: ip.to_owned(),
+            port: Some(port),
+            detail: json!({"not_after": not_after, "bucket": bucket}),
+        });
+    }
+}
+
 /// IP 快照 diff。首次运行（baseline=None）只建基线，抑制端口变化噪声；
 /// 证书到期不依赖基线，首跑即在阈值窗口内告警（长周期规则不会漏报到过期之后）。
 pub fn diff_ip(baseline: Option<&IpSnapshot>, current: &IpSnapshot, now_ms: i64) -> Vec<Change> {
@@ -222,56 +287,7 @@ pub fn diff_ip(baseline: Option<&IpSnapshot>, current: &IpSnapshot, now_ms: i64)
                 });
                 continue;
             };
-            for (field, before, after) in [
-                ("service", &previous.service, &state.service),
-                ("product", &previous.product, &state.product),
-                ("version", &previous.version, &state.version),
-            ] {
-                if before != after {
-                    changes.push(field_change(
-                        "service_changed",
-                        "warning",
-                        ip,
-                        *port,
-                        field,
-                        before,
-                        after,
-                    ));
-                }
-            }
-            if previous.title != state.title {
-                changes.push(field_change(
-                    "title_changed",
-                    "info",
-                    ip,
-                    *port,
-                    "title",
-                    &previous.title,
-                    &state.title,
-                ));
-            }
-            if previous.cert_sha256 != state.cert_sha256 {
-                changes.push(field_change(
-                    "cert_changed",
-                    "warning",
-                    ip,
-                    *port,
-                    "cert_sha256",
-                    &previous.cert_sha256,
-                    &state.cert_sha256,
-                ));
-            }
-            if let Some(not_after) = state.not_after
-                && let Some((severity, bucket)) = cert_expiry_severity(not_after, now_ms)
-            {
-                changes.push(Change {
-                    kind: "cert_expiring",
-                    severity,
-                    target: ip.clone(),
-                    port: Some(*port),
-                    detail: json!({"not_after": not_after, "bucket": bucket}),
-                });
-            }
+            compare_endpoint(ip, *port, previous, state, now_ms, &mut changes);
         }
         for port in previous_ports.keys() {
             if !ports.contains_key(port) {
@@ -294,6 +310,50 @@ pub fn diff_ip(baseline: Option<&IpSnapshot>, current: &IpSnapshot, now_ms: i64)
                 port: None,
                 detail: json!({"last_open_ports": previous_ports.keys().collect::<Vec<_>>()}),
             });
+        }
+    }
+    changes.sort_by(|a, b| (&a.target, a.port, a.kind).cmp(&(&b.target, b.port, b.kind)));
+    changes
+}
+
+/// 截断快照的部分 diff：只比较本次观测到的端点，绝不从缺失端点推断
+/// 端口关闭或目标离线——截断集合不具备完整性，缺失不代表不存在。
+/// 新出现（或此前基线缺失）的端点仍按 port_opened / target_up 正常上报。
+pub fn diff_ip_partial(
+    baseline: Option<&IpSnapshot>,
+    current: &IpSnapshot,
+    now_ms: i64,
+) -> Vec<Change> {
+    let Some(baseline) = baseline else {
+        return diff_ip(None, current, now_ms);
+    };
+    let mut changes = Vec::new();
+    for (ip, ports) in current {
+        let Some(previous_ports) = baseline.get(ip) else {
+            if !ports.is_empty() {
+                changes.push(Change {
+                    kind: "target_up",
+                    severity: "warning",
+                    target: ip.clone(),
+                    port: None,
+                    detail: json!({"open_ports": ports.keys().collect::<Vec<_>>()}),
+                });
+            }
+            continue;
+        };
+        for (port, state) in ports {
+            match previous_ports.get(port) {
+                None => changes.push(Change {
+                    kind: "port_opened",
+                    severity: "warning",
+                    target: ip.clone(),
+                    port: Some(*port),
+                    detail: json!({"after": state}),
+                }),
+                Some(previous) => {
+                    compare_endpoint(ip, *port, previous, state, now_ms, &mut changes)
+                }
+            }
         }
     }
     changes.sort_by(|a, b| (&a.target, a.port, a.kind).cmp(&(&b.target, b.port, b.kind)));
@@ -475,24 +535,52 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_parses_es_hits_and_truncates_over_capacity() {
+    fn collapsed_snapshot_parses_latest_endpoint_hits() {
         let hits = json!({"hits": {"hits": [
-            {"_source": {"ip": "192.0.2.1", "port": 443, "service": "https", "title": "t", "tls_fingerprint_sha256": "abc", "tls_not_after": NOW + DAY}},
-            {"_source": {"ip": "192.0.2.1", "port": 80}}
+            {"inner_hits": {"latest": {"hits": {"hits": [
+                {"_source": {"ip": "192.0.2.1", "port": 443, "service": "https", "title": "t", "tls_fingerprint_sha256": "abc", "tls_not_after": NOW + DAY}}
+            ]}}}},
+            {"inner_hits": {"latest": {"hits": {"hits": [
+                {"_source": {"ip": "192.0.2.1", "port": 80}}
+            ]}}}},
+            {"inner_hits": {"latest": {"hits": {"hits": []}}}}
         ]}});
-        let (snapshot, truncated) = snapshot_from_hits(&hits);
-        assert!(!truncated);
+        let snapshot = snapshot_from_collapsed_hits(&hits);
         assert_eq!(
             snapshot["192.0.2.1"][&443].service.as_deref(),
             Some("https")
         );
         assert_eq!(snapshot["192.0.2.1"][&443].not_after, Some(NOW + DAY));
         assert_eq!(snapshot["192.0.2.1"][&80], EndpointState::default());
-        let many: Vec<Value> = (0..=MAX_SNAPSHOT_PORTS)
-            .map(|i| json!({"_source": {"ip": "192.0.2.1", "port": i + 1}}))
+        assert!(!hits_exceed_capacity(&hits));
+        let groups: Vec<Value> = (0..=MAX_SNAPSHOT_PORTS)
+            .map(|i| {
+                json!({"inner_hits": {"latest": {"hits": {"hits": [
+                    {"_source": {"ip": "192.0.2.1", "port": i + 1}}
+                ]}}}})
+            })
             .collect();
-        let (_, truncated) = snapshot_from_hits(&json!({"hits": {"hits": many}}));
-        assert!(truncated);
+        assert!(hits_exceed_capacity(&json!({"hits": {"hits": groups}})));
+    }
+
+    #[test]
+    fn partial_diff_ignores_endpoints_missing_from_truncated_snapshot() {
+        let baseline = snapshot(&[
+            ("192.0.2.1", 80, state("http", "t", "c", None)),
+            ("192.0.2.2", 443, state("https", "t", "c", None)),
+        ]);
+        let current = snapshot(&[("192.0.2.1", 80, state("http", "t2", "c", None))]);
+        let changes = diff_ip_partial(Some(&baseline), &current, NOW);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, "title_changed");
+        // 缺失端点不会被推断为关闭或离线。
+        assert!(diff_ip_partial(Some(&baseline), &IpSnapshot::new(), NOW).is_empty());
+        // 新观测到的端点仍正常上报。
+        let added = snapshot(&[("192.0.2.3", 22, state("ssh", "", "", None))]);
+        let changes = diff_ip_partial(Some(&baseline), &added, NOW);
+        assert_eq!(changes[0].kind, "target_up");
+        // 首跑（无基线）保持只报证书到期的行为。
+        assert!(diff_ip_partial(None, &current, NOW).is_empty());
     }
 
     #[test]

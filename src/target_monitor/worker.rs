@@ -2,7 +2,7 @@
 use crate::elasticsearch::{ElasticsearchService, ScanQueryIndex};
 use crate::maxmind::MaxMindState;
 use crate::system_maintenance::SystemMaintenanceState;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use deadpool_postgres::Pool;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -82,9 +82,11 @@ pub(super) async fn dispatch_due(pool: &Pool, maxmind: &MaxMindState) -> Result<
                 &[&rule_id, &interval],
             ).await?;
             let run_id = Uuid::now_v7();
+            // 冻结本次派发时的规则配置：运行期间编辑规则不改变收尾所用的
+            // 目标类型与基线，避免拿新目标 diff 旧任务的结果。
             tx.execute(
-                "INSERT INTO target_monitor_run(id,rule_id,status,started_at) VALUES($1,$2,'pending',NOW())",
-                &[&run_id, &rule_id],
+                "INSERT INTO target_monitor_run(id,rule_id,status,started_at,target_type,targets,baseline) VALUES($1,$2,'pending',NOW(),$3,$4,$5)",
+                &[&run_id, &rule_id, &row.get::<_, String>("target_type"), &row.get::<_, Vec<String>>("targets"), &row.get::<_, Option<Value>>("baseline")],
             ).await?;
             due.push(DueRule {
                 rule_id,
@@ -259,44 +261,41 @@ fn change_mail_row(change: &Change) -> Value {
     })
 }
 
+/// 只读取本监控任务自身执行产出的端点投影：按 task_id 过滤执行端点索引，
+/// 并按 endpoint_key 折叠取最新观测。共享的 CurrentEndpoints 会被并发扫描
+/// 更新，不能用来判断本次监控实际观测到了什么。
 async fn ip_snapshot(
     elasticsearch: &ElasticsearchService,
-    targets: &[String],
-    owner_role: i32,
-    owner_id: i32,
-    started_ms: i64,
+    task_id: &str,
 ) -> Result<(IpSnapshot, bool), String> {
-    let should: Vec<Value> = targets
-        .iter()
-        .map(|target| json!({"term": {"ip": target}}))
-        .collect();
-    let (scope_type, scope_id) = if owner_role == 1 {
-        ("global", 0)
-    } else {
-        ("user", owner_id)
-    };
     let body = json!({
         "size": diff::MAX_SNAPSHOT_PORTS + 1,
-        "_source": ["ip", "port", "service", "product", "version", "title", "tls_fingerprint_sha256", "tls_not_after"],
-        "query": {"bool": {"filter": [
-            {"term": {"scope_type": scope_type}},
-            {"term": {"scope_id": scope_id}},
-            {"bool": {"should": should, "minimum_should_match": 1}},
-            // masscan 时间戳按秒截断，last_seen 可能比任务开始早最多 1 秒；留 2 秒宽限防误报离线。
-            {"range": {"last_seen": {"gte": started_ms.saturating_sub(2000)}}}
-        ]}},
+        "_source": false,
+        "query": {"term": {"task_id": task_id}},
+        "collapse": {
+            "field": "endpoint_key",
+            "inner_hits": {
+                "name": "latest",
+                "size": 1,
+                "sort": [{"observed_at_ms": "desc"}],
+                "_source": ["ip", "port", "service", "product", "version", "title", "tls_fingerprint_sha256", "tls_not_after"]
+            }
+        },
         "sort": [{"endpoint_key": "asc"}]
     });
     let hits = elasticsearch
-        .scan_query(ScanQueryIndex::CurrentEndpoints, &body)
+        .scan_query(ScanQueryIndex::ExecutionEndpoints, &body)
         .await?;
-    Ok(diff::snapshot_from_hits(&hits))
+    Ok((
+        diff::snapshot_from_collapsed_hits(&hits),
+        diff::hits_exceed_capacity(&hits),
+    ))
 }
 
 struct Finalized {
     snapshot: Value,
     changes: Vec<Change>,
-    truncated: bool,
+    snapshot_truncated: bool,
 }
 
 async fn observe(
@@ -306,11 +305,11 @@ async fn observe(
     let target_type: String = row.get("target_type");
     let baseline: Option<Value> = row.get("baseline");
     let now_ms = Utc::now().timestamp_millis();
+    let task_id: String = row.get("task_id");
     elasticsearch
         .refresh_monitor_source(target_type == "domain")
         .await?;
     if target_type == "domain" {
-        let task_id: String = row.get("task_id");
         let hits = elasticsearch.dns_task_observations(&task_id).await?;
         let current = diff::dns_snapshot_from_hits(&hits);
         let previous: Option<DnsSnapshot> = baseline
@@ -321,34 +320,27 @@ async fn observe(
         return Ok(Finalized {
             snapshot: json!({"kind": "dns", "data": current}),
             changes,
-            truncated: false,
+            snapshot_truncated: false,
         });
     }
-    let targets: Vec<String> = row.get("targets");
-    let started_ms: i64 = row
-        .get::<_, Option<i64>>("task_start_time")
-        .or_else(|| {
-            row.get::<_, Option<DateTime<Utc>>>("started_at")
-                .map(|at| at.timestamp_millis())
-        })
-        .unwrap_or(now_ms);
-    let (current, truncated) = ip_snapshot(
-        elasticsearch,
-        &targets,
-        row.get("owner_role"),
-        row.get("created_by"),
-        started_ms,
-    )
-    .await?;
+    let (current, truncated) = ip_snapshot(elasticsearch, &task_id).await?;
     let previous: Option<IpSnapshot> = baseline
         .as_ref()
         .filter(|value| value["kind"] == "ip")
         .and_then(|value| serde_json::from_value(value["data"].clone()).ok());
-    let changes = diff::diff_ip(previous.as_ref(), &current, now_ms);
+    // 此前基线若也是截断快照，同样只能做部分 diff，直到一次完整快照重建基线。
+    let previous_truncated = baseline
+        .as_ref()
+        .is_some_and(|value| value["truncated"].as_bool() == Some(true));
+    let changes = if truncated || previous_truncated {
+        diff::diff_ip_partial(previous.as_ref(), &current, now_ms)
+    } else {
+        diff::diff_ip(previous.as_ref(), &current, now_ms)
+    };
     Ok(Finalized {
-        snapshot: json!({"kind": "ip", "data": current}),
+        snapshot: json!({"kind": "ip", "data": current, "truncated": truncated}),
         changes,
-        truncated,
+        snapshot_truncated: truncated,
     })
 }
 
@@ -362,10 +354,12 @@ pub(super) async fn finalize_runs(
         let mut conn = pool.get().await?;
         let tx = conn.transaction().await?;
         let row = tx.query_opt(
-            "SELECT run.id AS run_id, run.rule_id, run.task_id, run.started_at, r.name AS rule_name, r.created_by, r.recipient_ids, \
-             r.target_type, r.targets, r.baseline, t.task_status, t.task_start_time, u.role AS owner_role \
+            "SELECT run.id AS run_id, run.rule_id, run.task_id, \
+             COALESCE(run.target_type, r.target_type) AS target_type, \
+             COALESCE(run.baseline, r.baseline) AS baseline, \
+             r.name AS rule_name, r.created_by, r.recipient_ids, t.task_status \
              FROM target_monitor_run run JOIN target_monitor_rule r ON r.id=run.rule_id \
-             JOIN scan_task t ON t.task_id=run.task_id JOIN users u ON u.id=r.created_by \
+             JOIN scan_task t ON t.task_id=run.task_id \
              WHERE run.status IN ('pending','running') AND t.task_status IN ('succeeded','partial','failed','cancelled') \
              ORDER BY run.id LIMIT 1 FOR UPDATE OF run SKIP LOCKED",
             &[],
@@ -471,8 +465,17 @@ async fn finalize_one(
     };
     let total = finalized.changes.len();
     let mut changes = finalized.changes;
-    let truncated = finalized.truncated || total > MAX_RUN_CHANGES;
+    let snapshot_truncated = finalized.snapshot_truncated;
+    let truncated = snapshot_truncated || total > MAX_RUN_CHANGES;
     changes.truncate(MAX_RUN_CHANGES);
+    if snapshot_truncated {
+        tracing::warn!(
+            event = "TargetMonitorSnapshotTruncated",
+            run_id = %run_id,
+            rule_id = %rule_id,
+            "目标监控快照超过端点上限，本次只按已观测端点做部分比对"
+        );
+    }
 
     for change in &changes {
         tx.execute(
@@ -557,7 +560,8 @@ async fn finalize_one(
             .await?;
         }
     }
-    let summary = json!({"truncated": truncated, "total": total});
+    let summary =
+        json!({"truncated": truncated, "total": total, "snapshot_truncated": snapshot_truncated});
     tx.execute(
         "UPDATE target_monitor_run SET status='succeeded',finished_at=NOW(),snapshot=$2,change_count=$3,summary=$4 WHERE id=$1",
         &[&run_id, &finalized.snapshot, &(total as i32), &summary],

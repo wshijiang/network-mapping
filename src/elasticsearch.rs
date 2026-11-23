@@ -703,7 +703,8 @@ impl ElasticsearchService {
         let index = if domain {
             &self.inner.config.dns_observation_data_stream
         } else {
-            &self.inner.config.current_endpoint_index
+            // 目标监控按任务读取执行端点投影，刷新执行索引即可看到本任务观测。
+            &self.inner.config.execution_endpoint_index
         };
         let result = self
             .send_json_request(
