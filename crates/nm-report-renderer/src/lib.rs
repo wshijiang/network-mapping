@@ -31,6 +31,8 @@ pub const HEALTH_ALERT_TEMPLATE_KEY: &str = "health_alert";
 
 pub const SCANNER_OUTAGE_TEMPLATE_KEY: &str = "scanner_outage";
 
+pub const REPORT_DAILY_TEMPLATE_KEY: &str = "report_daily";
+
 pub const REPORT_WEEKLY_TEMPLATE_KEY: &str = "report_weekly";
 
 pub const REPORT_MONTHLY_TEMPLATE_KEY: &str = "report_monthly";
@@ -141,6 +143,7 @@ pub fn render_template(
     if !matches!(
         template_key,
         LOGIN_SUCCESS_TEMPLATE_KEY
+            | REPORT_DAILY_TEMPLATE_KEY
             | HEALTH_ALERT_TEMPLATE_KEY
             | SCANNER_OUTAGE_TEMPLATE_KEY
             | REPORT_WEEKLY_TEMPLATE_KEY

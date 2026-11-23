@@ -1157,7 +1157,7 @@ ALTER TABLE scan_task_execution ADD COLUMN IF NOT EXISTS recovery_failure_count 
 
 -- Administrator platform reports. Plans remain disabled on upgrades.
 CREATE TABLE IF NOT EXISTS report_schedule (
-    period_type TEXT PRIMARY KEY CHECK (period_type IN ('weekly', 'monthly')),
+    period_type TEXT PRIMARY KEY CHECK (period_type IN ('daily', 'weekly', 'monthly')),
     enabled BOOLEAN NOT NULL DEFAULT FALSE,
     send_hour SMALLINT NOT NULL DEFAULT 9 CHECK (send_hour BETWEEN 0 AND 23),
     send_minute SMALLINT NOT NULL DEFAULT 0 CHECK (send_minute BETWEEN 0 AND 59),
@@ -1168,7 +1168,19 @@ CREATE TABLE IF NOT EXISTS report_schedule (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CHECK (cardinality(recipient_ids) <= 100)
 );
-INSERT INTO report_schedule(period_type) VALUES ('weekly'), ('monthly') ON CONFLICT DO NOTHING;
+-- Upgrades created the table with the weekly/monthly-only constraint; widen before seeding daily.
+ALTER TABLE report_schedule DROP CONSTRAINT IF EXISTS report_schedule_period_type_check;
+ALTER TABLE report_schedule ADD CONSTRAINT report_schedule_period_type_check
+    CHECK (period_type IN ('daily', 'weekly', 'monthly'));
+INSERT INTO report_schedule(period_type) VALUES ('daily'), ('weekly'), ('monthly') ON CONFLICT DO NOTHING;
+
+-- Per-user report subscriptions: in-site notifications and report center access.
+CREATE TABLE IF NOT EXISTS report_subscription (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    period_type TEXT NOT NULL REFERENCES report_schedule(period_type) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, period_type)
+);
 
 CREATE TABLE IF NOT EXISTS report_run (
     id UUID PRIMARY KEY,
@@ -1239,7 +1251,7 @@ CREATE INDEX IF NOT EXISTS idx_report_delivery_ready ON report_delivery(availabl
 CREATE INDEX IF NOT EXISTS idx_scan_execution_report_end ON scan_task_execution(task_end_time, id)
     WHERE execution_status = 'succeeded';
 INSERT INTO mail_template(template_key, display_name) VALUES
-    ('report_weekly', '平台周报'), ('report_monthly', '平台月报') ON CONFLICT DO NOTHING;
+    ('report_daily', '平台日报'), ('report_weekly', '平台周报'), ('report_monthly', '平台月报') ON CONFLICT DO NOTHING;
 
 -- Preserve absolute observation instants and immutable report calendar rules.
 ALTER TABLE analytics_discovery_fact ADD COLUMN IF NOT EXISTS first_observed_at TIMESTAMPTZ;

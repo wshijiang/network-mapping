@@ -38,6 +38,8 @@ fn reports(cfg: &mut web::ServiceConfig) {
     cfg.service(handlers::reports::send);
     cfg.service(handlers::reports::schedules);
     cfg.service(handlers::reports::save_schedule);
+    cfg.service(handlers::reports::subscriptions);
+    cfg.service(handlers::reports::save_subscriptions);
     cfg.service(handlers::mail_template::list_mail_templates);
     cfg.service(handlers::mail_template::get_mail_template);
     cfg.service(handlers::mail_template::validate_mail_template);

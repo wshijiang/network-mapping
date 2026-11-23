@@ -115,6 +115,7 @@ pub const WEB_OPERATIONS: &[(&str, &str)] = &[
     ),
     ("GET /api/open-source/projects", "读取开源项目信息"),
     ("GET /api/report-schedules", "读取报告计划列表"),
+    ("GET /api/report-subscriptions", "读取个人报告订阅"),
     ("GET /api/reports", "读取报告列表"),
     ("GET /api/reports/{id}", "读取报告详情"),
     ("GET /api/reports/{id}/deliveries", "读取报告投递记录"),
@@ -331,6 +332,7 @@ pub const WEB_OPERATIONS: &[(&str, &str)] = &[
         "更新邮件模板草稿",
     ),
     ("PUT /api/report-schedules/{kind}", "更新报告计划"),
+    ("PUT /api/report-subscriptions", "更新个人报告订阅"),
     ("PUT /api/scanner/diagnostics/chunk", "更新诊断文件分块"),
     ("PUT /api/scanner/{scanner_id}", "更新扫描器详情"),
     (

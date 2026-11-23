@@ -247,10 +247,10 @@ async fn capture(
     .iter()
     .map(|b| format!("{b:02x}"))
     .collect::<String>();
-    let key = if period.kind == PeriodType::Weekly {
-        mail_template::REPORT_WEEKLY_TEMPLATE_KEY
-    } else {
-        mail_template::REPORT_MONTHLY_TEMPLATE_KEY
+    let key = match period.kind {
+        PeriodType::Daily => mail_template::REPORT_DAILY_TEMPLATE_KEY,
+        PeriodType::Weekly => mail_template::REPORT_WEEKLY_TEMPLATE_KEY,
+        PeriodType::Monthly => mail_template::REPORT_MONTHLY_TEMPLATE_KEY,
     };
     let mail_settings = match super::mail_config::load(&tx).await {
         Ok(settings) => settings,
@@ -483,7 +483,7 @@ pub(crate) async fn send_one(
         FROM report_run r JOIN report_schedule s ON s.period_type = r.period_type WHERE r.id = $1;", &[&report]).await.map_err(|e| e.to_string())?;
     let active: bool = client
         .query_one(
-            "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND role = 1 AND disabled_at IS NULL \
+            "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND disabled_at IS NULL \
         AND deleted_at IS NULL AND NOT limit_login AND trim(email) = $2) AS active;",
             &[&user, &email],
         )
@@ -497,10 +497,10 @@ pub(crate) async fn send_one(
         .map_err(|e| e.to_string())?;
     let kind: String = report.get("period_type");
     let selected: Vec<i32> = report.get("recipient_ids");
-    let preference = if kind == "weekly" {
-        settings.notification_prefs.report_weekly
-    } else {
-        settings.notification_prefs.report_monthly
+    let preference = match kind.as_str() {
+        "daily" => settings.notification_prefs.report_daily,
+        "weekly" => settings.notification_prefs.report_weekly,
+        _ => settings.notification_prefs.report_monthly,
     };
     let activation_valid = report
         .get::<_, Option<DateTime<Utc>>>("enabled_at")

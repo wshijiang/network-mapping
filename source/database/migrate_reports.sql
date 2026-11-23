@@ -82,4 +82,18 @@ CREATE INDEX IF NOT EXISTS idx_report_delivery_ready ON report_delivery(availabl
 CREATE INDEX IF NOT EXISTS idx_scan_execution_report_end ON scan_task_execution(task_end_time, id)
     WHERE execution_status = 'succeeded';
 INSERT INTO mail_template(template_key, display_name) VALUES
-    ('report_weekly', '平台周报'), ('report_monthly', '平台月报') ON CONFLICT DO NOTHING;
+    ('report_daily', '平台日报'), ('report_weekly', '平台周报'), ('report_monthly', '平台月报') ON CONFLICT DO NOTHING;
+
+-- 日报周期：扩展约束并补齐计划行（幂等）。
+ALTER TABLE report_schedule DROP CONSTRAINT IF EXISTS report_schedule_period_type_check;
+ALTER TABLE report_schedule ADD CONSTRAINT report_schedule_period_type_check
+    CHECK (period_type IN ('daily', 'weekly', 'monthly'));
+INSERT INTO report_schedule(period_type) VALUES ('daily') ON CONFLICT DO NOTHING;
+
+-- 用户报告订阅：站内通知收件人并授予对应周期报告的查看权限（幂等）。
+CREATE TABLE IF NOT EXISTS report_subscription (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    period_type TEXT NOT NULL REFERENCES report_schedule(period_type) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, period_type)
+);

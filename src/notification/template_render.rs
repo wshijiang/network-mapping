@@ -81,6 +81,7 @@ pub fn sample_context(event: &str) -> Context {
             "扫描器：示例节点\n最后心跳：2026-01-01 08:00:00 UTC",
         ),
         "scanner.recovered" => ("Scanner 恢复连接", "扫描器：示例节点\n节点已恢复连接。"),
+        "report.daily" => ("日报已生成", "报告周期：示例日期\n请登录平台报告中心查看。"),
         "report.weekly" => ("周报已生成", "报告周期：示例周期\n请登录平台报告中心查看。"),
         "report.monthly" => ("月报已生成", "报告周期：示例周期\n请登录平台报告中心查看。"),
         "task.completed" => (

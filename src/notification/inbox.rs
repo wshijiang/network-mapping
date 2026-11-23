@@ -21,7 +21,7 @@ pub(crate) fn category(event_type: &str) -> Option<&'static str> {
         "monitor.change" | "monitor.availability" | "monitor.cert_expiring" => Some("monitor"),
         "health.alert" | "scanner.offline" | "scanner.recovered" => Some("alert"),
         "user.login" => Some("security"),
-        "report.weekly" | "report.monthly" => Some("report"),
+        "report.daily" | "report.weekly" | "report.monthly" => Some("report"),
         _ => None,
     }
 }
@@ -50,13 +50,20 @@ pub(crate) fn link(event_type: &str, context: &Value) -> Option<String> {
 }
 
 fn context_user_ids(context: &Value) -> Vec<i32> {
-    context["recipient_ids"]
-        .as_array()
+    // 报告事件同时携带管理员选择的收件人与自助订阅者；两者都进入站内收件箱。
+    let mut ids: Vec<i32> = ["recipient_ids", "subscriber_ids"]
         .into_iter()
+        .filter_map(|key| context[key].as_array())
         .flatten()
-        .chain(std::iter::once(&context["user_id"]))
         .filter_map(|v| v.as_i64().and_then(|v| i32::try_from(v).ok()))
-        .collect()
+        .collect();
+    if let Some(id) = context["user_id"]
+        .as_i64()
+        .and_then(|v| i32::try_from(v).ok())
+    {
+        ids.push(id);
+    }
+    ids
 }
 
 /// 与渠道扇出同事务：按事件解析收件人，过滤个人偏好与失效账号后写入快照行。
@@ -484,6 +491,7 @@ mod tests {
             ("scanner.offline", "alert", "/scanner"),
             ("scanner.recovered", "alert", "/scanner"),
             ("user.login", "security", "/user/security"),
+            ("report.daily", "report", "/reports/r2"),
             ("report.weekly", "report", "/reports/r2"),
             ("report.monthly", "report", "/reports/r2"),
         ] {
@@ -508,5 +516,15 @@ mod tests {
         assert!(neither.all == !neither.ids.is_empty());
         let ids: ReadInput = serde_json::from_value(json!({"ids":[Uuid::nil()]})).unwrap();
         assert!(ids.all != !ids.ids.is_empty());
+    }
+
+    #[test]
+    fn report_context_merges_selected_recipients_and_subscribers() {
+        let context = json!({"recipient_ids":[2,3],"subscriber_ids":[3,4],"user_id":5});
+        assert_eq!(super::context_user_ids(&context), vec![2, 3, 3, 4, 5]);
+        assert_eq!(
+            super::context_user_ids(&json!({"recipient_ids":["bad",2]})),
+            vec![2]
+        );
     }
 }

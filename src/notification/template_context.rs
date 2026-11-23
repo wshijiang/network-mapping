@@ -9,6 +9,7 @@ pub fn key(event: &str) -> Option<&'static str> {
         "user.login" => Some(mail::LOGIN_SUCCESS_TEMPLATE_KEY),
         "health.alert" => Some(mail::HEALTH_ALERT_TEMPLATE_KEY),
         "scanner.offline" | "scanner.recovered" => Some(mail::SCANNER_OUTAGE_TEMPLATE_KEY),
+        "report.daily" => Some(mail::REPORT_DAILY_TEMPLATE_KEY),
         "report.weekly" => Some(mail::REPORT_WEEKLY_TEMPLATE_KEY),
         "report.monthly" => Some(mail::REPORT_MONTHLY_TEMPLATE_KEY),
         "task.completed" | "task.cancelled" => Some(mail::TASK_COMPLETED_TEMPLATE_KEY),

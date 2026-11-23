@@ -33,11 +33,12 @@ pub(crate) use feishu_ws::run as run_feishu_binding;
 pub use routes::configure;
 pub(crate) use worker::run;
 
-pub const EVENT_TYPES: [&str; 12] = [
+pub const EVENT_TYPES: [&str; 13] = [
     "health.alert",
     "scanner.offline",
     "scanner.recovered",
     "user.login",
+    "report.daily",
     "report.weekly",
     "report.monthly",
     "task.completed",
@@ -741,7 +742,23 @@ pub(crate) async fn enqueue_report(
 ) -> std::result::Result<(), tokio_postgres::Error> {
     let Some(row) = tx.query_opt("SELECT period_type,period_start,period_end,recipient_ids FROM report_run WHERE id=$1 AND status='ready'", &[&report]).await? else { return Ok(()) };
     let kind: String = row.get("period_type");
-    let label = if kind == "weekly" { "周报" } else { "月报" };
+    let label = match kind.as_str() {
+        "daily" => "日报",
+        "weekly" => "周报",
+        _ => "月报",
+    };
+    // 订阅者只进入站内收件箱；外部渠道与邮件仍按管理员选择的收件人投递。
+    let subscribers: Vec<i32> = tx
+        .query(
+            "SELECT s.user_id FROM report_subscription s \
+             JOIN users u ON u.id=s.user_id AND u.deleted_at IS NULL AND u.disabled_at IS NULL \
+             WHERE s.period_type=$1 ORDER BY s.user_id",
+            &[&kind],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
     enqueue_with_context(
         tx,
         &format!("report.{kind}"),
@@ -754,7 +771,7 @@ pub(crate) async fn enqueue_report(
             row.get::<_, DateTime<Utc>>("period_end")
         ),
         None,
-        json!({"report_id":report,"recipient_ids":row.get::<_,Vec<i32>>("recipient_ids")}),
+        json!({"report_id":report,"recipient_ids":row.get::<_,Vec<i32>>("recipient_ids"),"subscriber_ids":subscribers}),
     )
     .await
 }

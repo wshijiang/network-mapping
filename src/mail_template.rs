@@ -2,9 +2,9 @@
 use nm_report_renderer::sanitize_email_html;
 pub use nm_report_renderer::{
     HEALTH_ALERT_TEMPLATE_KEY, LOGIN_SUCCESS_TEMPLATE_KEY, MONITOR_ALERT_TEMPLATE_KEY,
-    MailTemplateSource, REPORT_MONTHLY_TEMPLATE_KEY, REPORT_WEEKLY_TEMPLATE_KEY,
-    RenderedMailTemplate, SCANNER_OUTAGE_TEMPLATE_KEY, TASK_COMPLETED_TEMPLATE_KEY,
-    TASK_FAILED_TEMPLATE_KEY, render_template,
+    MailTemplateSource, REPORT_DAILY_TEMPLATE_KEY, REPORT_MONTHLY_TEMPLATE_KEY,
+    REPORT_WEEKLY_TEMPLATE_KEY, RenderedMailTemplate, SCANNER_OUTAGE_TEMPLATE_KEY,
+    TASK_COMPLETED_TEMPLATE_KEY, TASK_FAILED_TEMPLATE_KEY, render_template,
 };
 
 use chrono::{DateTime, Utc};
@@ -128,6 +128,14 @@ const SCANNER_OUTAGE_DEFINITION: MailTemplateDefinition = MailTemplateDefinition
     default_text: DEFAULT_SCANNER_OUTAGE_TEXT,
 };
 
+const REPORT_DAILY_DEFINITION: MailTemplateDefinition = MailTemplateDefinition {
+    template_key: REPORT_DAILY_TEMPLATE_KEY,
+    display_name: "平台日报",
+    default_subject: "{{ system_name }} {{ report_label }}：{{ period_label }}",
+    default_html: include_str!("../templates/mail/report.html"),
+    default_text: include_str!("../templates/mail/report.txt"),
+};
+
 const REPORT_WEEKLY_DEFINITION: MailTemplateDefinition = MailTemplateDefinition {
     template_key: REPORT_WEEKLY_TEMPLATE_KEY,
     display_name: "平台周报",
@@ -167,6 +175,7 @@ const MONITOR_ALERT_DEFINITION: MailTemplateDefinition = MailTemplateDefinition 
 
 const ALL_TEMPLATE_DEFINITIONS: &[MailTemplateDefinition] = &[
     LOGIN_SUCCESS_DEFINITION,
+    REPORT_DAILY_DEFINITION,
     HEALTH_ALERT_DEFINITION,
     SCANNER_OUTAGE_DEFINITION,
     REPORT_WEEKLY_DEFINITION,
@@ -181,6 +190,7 @@ fn template_definition(template_key: &str) -> Option<MailTemplateDefinition> {
         LOGIN_SUCCESS_TEMPLATE_KEY => Some(LOGIN_SUCCESS_DEFINITION),
         HEALTH_ALERT_TEMPLATE_KEY => Some(HEALTH_ALERT_DEFINITION),
         SCANNER_OUTAGE_TEMPLATE_KEY => Some(SCANNER_OUTAGE_DEFINITION),
+        REPORT_DAILY_TEMPLATE_KEY => Some(REPORT_DAILY_DEFINITION),
         REPORT_WEEKLY_TEMPLATE_KEY => Some(REPORT_WEEKLY_DEFINITION),
         REPORT_MONTHLY_TEMPLATE_KEY => Some(REPORT_MONTHLY_DEFINITION),
         TASK_COMPLETED_TEMPLATE_KEY => Some(TASK_COMPLETED_DEFINITION),
@@ -296,98 +306,100 @@ pub(crate) fn template_variables(template_key: &str) -> Vec<MailTemplateVariable
                 example: "/scanner/01952f0c-0000-7000-8000-000000000001",
             },
         ],
-        REPORT_WEEKLY_TEMPLATE_KEY | REPORT_MONTHLY_TEMPLATE_KEY => vec![
-            MailTemplateVariable {
-                key: "system_name",
-                label: "系统名称",
-                example: "Network Mapping",
-            },
-            MailTemplateVariable {
-                key: "report_label",
-                label: "报告类型",
-                example: "周报 / 月报",
-            },
-            MailTemplateVariable {
-                key: "period_label",
-                label: "报告周期（上海时间）",
-                example: "2026-09-21 至 2026-09-28（不含）",
-            },
-            MailTemplateVariable {
-                key: "tasks",
-                label: "任务统计",
-                example: "created / succeeded / failed / partial / cancelled / success_rate",
-            },
-            MailTemplateVariable {
-                key: "scan_output",
-                label: "扫描产出",
-                example: "unique_ips / port_observations / service_observations",
-            },
-            MailTemplateVariable {
-                key: "recommendations",
-                label: "建议列表",
-                example: "[处理失败任务]",
-            },
-            MailTemplateVariable {
-                key: "detail_path",
-                label: "报告详情路径",
-                example: "/reports/报告ID",
-            },
-            MailTemplateVariable {
-                key: "report_meta",
-                label: "报告版本与归档信息",
-                example: "revision / timezone / generated_at / cutoff_at",
-            },
-            MailTemplateVariable {
-                key: "previous_available",
-                label: "环比是否可用",
-                example: "true / false",
-            },
-            MailTemplateVariable {
-                key: "comparison",
-                label: "环比数值",
-                example: "created_growth_percent / unique_ips_growth_percent / daily_unique_ips_growth_percent / success_rate_change_points",
-            },
-            MailTemplateVariable {
-                key: "comparison_rows",
-                label: "格式化环比列表",
-                example: "label / value",
-            },
-            MailTemplateVariable {
-                key: "trend_rows",
-                label: "每日完成任务",
-                example: "day / succeeded / failed / partial / cancelled",
-            },
-            MailTemplateVariable {
-                key: "trend_image_url",
-                label: "服务器趋势图片地址",
-                example: "启用远程图片后生成；预览使用示例图",
-            },
-            MailTemplateVariable {
-                key: "scanners",
-                label: "扫描器执行表现",
-                example: "name / total / succeeded / failed / cancelled / avg_duration / p50 / p95",
-            },
-            MailTemplateVariable {
-                key: "scanner_omitted",
-                label: "未展示的扫描器数量",
-                example: "0",
-            },
-            MailTemplateVariable {
-                key: "quality_summary",
-                label: "统计完整性",
-                example: "ready / expected",
-            },
-            MailTemplateVariable {
-                key: "notes",
-                label: "统计口径说明",
-                example: "[统计说明]",
-            },
-            MailTemplateVariable {
-                key: "detail_url",
-                label: "报告详情绝对地址",
-                example: "https://平台地址/reports/报告ID",
-            },
-        ],
+        REPORT_DAILY_TEMPLATE_KEY | REPORT_WEEKLY_TEMPLATE_KEY | REPORT_MONTHLY_TEMPLATE_KEY => {
+            vec![
+                MailTemplateVariable {
+                    key: "system_name",
+                    label: "系统名称",
+                    example: "Network Mapping",
+                },
+                MailTemplateVariable {
+                    key: "report_label",
+                    label: "报告类型",
+                    example: "周报 / 月报",
+                },
+                MailTemplateVariable {
+                    key: "period_label",
+                    label: "报告周期（上海时间）",
+                    example: "2026-09-21 至 2026-09-28（不含）",
+                },
+                MailTemplateVariable {
+                    key: "tasks",
+                    label: "任务统计",
+                    example: "created / succeeded / failed / partial / cancelled / success_rate",
+                },
+                MailTemplateVariable {
+                    key: "scan_output",
+                    label: "扫描产出",
+                    example: "unique_ips / port_observations / service_observations",
+                },
+                MailTemplateVariable {
+                    key: "recommendations",
+                    label: "建议列表",
+                    example: "[处理失败任务]",
+                },
+                MailTemplateVariable {
+                    key: "detail_path",
+                    label: "报告详情路径",
+                    example: "/reports/报告ID",
+                },
+                MailTemplateVariable {
+                    key: "report_meta",
+                    label: "报告版本与归档信息",
+                    example: "revision / timezone / generated_at / cutoff_at",
+                },
+                MailTemplateVariable {
+                    key: "previous_available",
+                    label: "环比是否可用",
+                    example: "true / false",
+                },
+                MailTemplateVariable {
+                    key: "comparison",
+                    label: "环比数值",
+                    example: "created_growth_percent / unique_ips_growth_percent / daily_unique_ips_growth_percent / success_rate_change_points",
+                },
+                MailTemplateVariable {
+                    key: "comparison_rows",
+                    label: "格式化环比列表",
+                    example: "label / value",
+                },
+                MailTemplateVariable {
+                    key: "trend_rows",
+                    label: "每日完成任务",
+                    example: "day / succeeded / failed / partial / cancelled",
+                },
+                MailTemplateVariable {
+                    key: "trend_image_url",
+                    label: "服务器趋势图片地址",
+                    example: "启用远程图片后生成；预览使用示例图",
+                },
+                MailTemplateVariable {
+                    key: "scanners",
+                    label: "扫描器执行表现",
+                    example: "name / total / succeeded / failed / cancelled / avg_duration / p50 / p95",
+                },
+                MailTemplateVariable {
+                    key: "scanner_omitted",
+                    label: "未展示的扫描器数量",
+                    example: "0",
+                },
+                MailTemplateVariable {
+                    key: "quality_summary",
+                    label: "统计完整性",
+                    example: "ready / expected",
+                },
+                MailTemplateVariable {
+                    key: "notes",
+                    label: "统计口径说明",
+                    example: "[统计说明]",
+                },
+                MailTemplateVariable {
+                    key: "detail_url",
+                    label: "报告详情绝对地址",
+                    example: "https://平台地址/reports/报告ID",
+                },
+            ]
+        }
         TASK_COMPLETED_TEMPLATE_KEY | TASK_FAILED_TEMPLATE_KEY => vec![
             MailTemplateVariable {
                 key: "system_name",
@@ -506,13 +518,13 @@ pub fn sample_context(template_key: &str) -> Result<Context, Box<dyn std::error:
     }
     if matches!(
         template_key,
-        REPORT_WEEKLY_TEMPLATE_KEY | REPORT_MONTHLY_TEMPLATE_KEY
+        REPORT_DAILY_TEMPLATE_KEY | REPORT_WEEKLY_TEMPLATE_KEY | REPORT_MONTHLY_TEMPLATE_KEY
     ) {
         let mut sample = crate::reports::mail_context::sample();
-        sample["report_label"] = json!(if template_key == REPORT_WEEKLY_TEMPLATE_KEY {
-            "周报"
-        } else {
-            "月报"
+        sample["report_label"] = json!(match template_key {
+            REPORT_DAILY_TEMPLATE_KEY => "日报",
+            REPORT_WEEKLY_TEMPLATE_KEY => "周报",
+            _ => "月报",
         });
         sample["trend_image_url"] = json!("/mail/report-images/sample/trend.png");
         return Ok(Context::from_serialize(sample)?);
