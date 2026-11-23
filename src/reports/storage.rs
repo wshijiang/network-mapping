@@ -65,8 +65,11 @@ pub async fn recipients<C: GenericClient + Sync>(
     client: &C,
     selected: &[i32],
 ) -> Result<Vec<(i32, String)>, String> {
+    // Empty selection keeps the historic default (all administrators); an explicit
+    // selection may include any active platform user chosen by an administrator.
     let rows = client.query("SELECT id, email FROM users WHERE disabled_at IS NULL AND deleted_at IS NULL \
-        AND NOT limit_login AND email IS NOT NULL AND trim(email) <> '' AND (cardinality($1::INTEGER[]) = 0 OR id = ANY($1)) ORDER BY id;", &[&selected])
+        AND NOT limit_login AND email IS NOT NULL AND trim(email) <> '' \
+        AND (CASE WHEN cardinality($1::INTEGER[]) = 0 THEN role = 1 ELSE id = ANY($1) END) ORDER BY id;", &[&selected])
         .await.map_err(|e| e.to_string())?;
     Ok(rows
         .iter()

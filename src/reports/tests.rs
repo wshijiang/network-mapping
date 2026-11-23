@@ -1217,6 +1217,25 @@ async fn subscribers_and_selected_users_see_ready_reports_and_receive_inbox_noti
     let ready = Uuid::new_v4();
     let failed = Uuid::new_v4();
     let client = pool.get().await.unwrap();
+    // Empty selections keep the administrator default; explicit selections admit ordinary users.
+    assert_eq!(
+        storage::recipients(&client, &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(
+        storage::recipients(&client, &[1, 2])
+            .await
+            .unwrap()
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
     client.execute("INSERT INTO report_run(id,period_type,period_start,period_end,source,status,task_snapshot,payload,recipient_ids) VALUES($1,'weekly',NOW()-INTERVAL '10 days',NOW()-INTERVAL '3 days','manual','ready','{}','{}',$3),($2,'weekly',NOW()-INTERVAL '17 days',NOW()-INTERVAL '10 days','manual','failed','{}',NULL,$3)", &[&ready,&failed,&vec![2]]).await.unwrap();
     drop(client);
     let app = test::init_service(
