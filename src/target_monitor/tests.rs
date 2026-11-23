@@ -353,5 +353,83 @@ async fn dispatch_skips_without_scanner_then_creates_monitor_task_and_degrades_w
         .unwrap()
         .get(0);
     assert!(baseline.is_none());
+    // 二次收尾幂等：已终态的运行不再被认领，无重复变化行。
+    worker::finalize_runs(&pool, &es).await.unwrap();
+    let runs: i64 = pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT COUNT(*) FROM target_monitor_run WHERE rule_id=$1",
+            &[&rule_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(runs, 2);
+    cleanup(pool, schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn startup_applies_inbox_and_monitor_migrations_for_older_init_files() {
+    let mut config: tokio_postgres::Config = std::env::var("NOTIFICATION_TEST_DATABASE_URL")
+        .expect("NOTIFICATION_TEST_DATABASE_URL must point to a disposable database")
+        .parse()
+        .unwrap();
+    let schema = format!("target_monitor_startup_{}", Uuid::new_v4().simple());
+    config.options(format!("-c search_path={schema} -c timezone=UTC"));
+    let pool = Pool::builder(Manager::new(config, NoTls))
+        .max_size(4)
+        .build()
+        .unwrap();
+    let c = pool.get().await.unwrap();
+    c.batch_execute(&format!("CREATE SCHEMA {schema}"))
+        .await
+        .unwrap();
+    drop(c);
+    // 模拟旧版自定义 init 文件：不含收件箱与目标监控 DDL。
+    let current_init = include_str!("../../source/database/init.sql");
+    let inbox_block = include_str!("../../source/database/migrate_notification_inbox.sql");
+    let monitor_block = include_str!("../../source/database/migrate_target_monitor.sql");
+    assert!(current_init.contains(inbox_block) && current_init.contains(monitor_block));
+    let old_init = current_init
+        .replace(inbox_block, "")
+        .replace(monitor_block, "");
+    let path = std::env::temp_dir().join(format!("nm-old-init-{}.sql", Uuid::new_v4().simple()));
+    std::fs::write(&path, old_init).unwrap();
+    crate::db::init_database_table(&pool, path.to_str().unwrap())
+        .await
+        .unwrap();
+    let _ = std::fs::remove_file(&path);
+    let c = pool.get().await.unwrap();
+    let tables: i64 = c
+        .query_one(
+            "SELECT COUNT(*) FROM pg_class WHERE relname IN ('notification_inbox','notification_user_preference','target_monitor_rule','target_monitor_run','target_monitor_change') AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = current_schema())",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(tables, 5);
+    let audit_def: String = c
+        .query_one(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='audit_event_category_check' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = current_schema())",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(audit_def.contains("target_monitor"));
+    let severity_def: String = c
+        .query_one(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='notification_channel_minimum_severity_check' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = current_schema())",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(severity_def.contains("info"));
+    drop(c);
     cleanup(pool, schema).await;
 }

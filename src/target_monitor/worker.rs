@@ -352,39 +352,49 @@ pub(super) async fn finalize_runs(
     pool: &Pool,
     elasticsearch: &ElasticsearchService,
 ) -> Result<(), Error> {
-    let rows = pool.get().await?.query(
-        "SELECT run.id AS run_id, run.rule_id, run.task_id, run.started_at, r.name AS rule_name, r.created_by, r.recipient_ids, \
-         r.target_type, r.targets, r.baseline, t.task_status, t.task_start_time, u.role AS owner_role \
-         FROM target_monitor_run run JOIN target_monitor_rule r ON r.id=run.rule_id \
-         JOIN scan_task t ON t.task_id=run.task_id JOIN users u ON u.id=r.created_by \
-         WHERE run.status IN ('pending','running') AND t.task_status IN ('succeeded','partial','failed','cancelled') LIMIT 16",
-        &[],
-    ).await?;
-    for row in rows {
+    // 逐条 FOR UPDATE SKIP LOCKED 认领：多实例不会重复收尾同一运行（变化行重复插入）。
+    // 行锁覆盖 ES 观测与收尾事务；观测耗时受 ES 请求超时约束，其他实例跳过被锁行。
+    for _ in 0..64 {
+        let mut conn = pool.get().await?;
+        let tx = conn.transaction().await?;
+        let row = tx.query_opt(
+            "SELECT run.id AS run_id, run.rule_id, run.task_id, run.started_at, r.name AS rule_name, r.created_by, r.recipient_ids, \
+             r.target_type, r.targets, r.baseline, t.task_status, t.task_start_time, u.role AS owner_role \
+             FROM target_monitor_run run JOIN target_monitor_rule r ON r.id=run.rule_id \
+             JOIN scan_task t ON t.task_id=run.task_id JOIN users u ON u.id=r.created_by \
+             WHERE run.status IN ('pending','running') AND t.task_status IN ('succeeded','partial','failed','cancelled') \
+             ORDER BY run.id LIMIT 1 FOR UPDATE OF run SKIP LOCKED",
+            &[],
+        ).await?;
+        let Some(row) = row else {
+            tx.commit().await?;
+            return Ok(());
+        };
         let run_id: Uuid = row.get("run_id");
         let task_status: String = row.get("task_status");
         if task_status == "failed" || task_status == "cancelled" {
-            pool.get()
-                .await?
-                .execute(
-                    "UPDATE target_monitor_run SET status=$2,finished_at=NOW() WHERE id=$1",
-                    &[&run_id, &task_status],
-                )
-                .await?;
+            tx.execute(
+                "UPDATE target_monitor_run SET status=$2,finished_at=NOW() WHERE id=$1",
+                &[&run_id, &task_status],
+            )
+            .await?;
+            tx.commit().await?;
             continue;
         }
         let finalized = match observe(elasticsearch, &row).await {
             Ok(finalized) => finalized,
             Err(message) => {
                 tracing::warn!(event="TargetMonitorObserveUnavailable", run_id=%run_id, error_message=%message, "目标监控观测降级，保留基线");
-                pool.get().await?.execute(
+                tx.execute(
                     "UPDATE target_monitor_run SET status='succeeded',skip_reason='es_unavailable',finished_at=NOW() WHERE id=$1",
                     &[&run_id],
                 ).await?;
+                tx.commit().await?;
                 continue;
             }
         };
-        finalize_one(pool, &row, finalized).await?;
+        finalize_one(&tx, &row, finalized).await?;
+        tx.commit().await?;
     }
     Ok(())
 }
@@ -441,7 +451,7 @@ async fn emit_monitor_event(
 }
 
 async fn finalize_one(
-    pool: &Pool,
+    tx: &deadpool_postgres::Transaction<'_>,
     row: &tokio_postgres::Row,
     finalized: Finalized,
 ) -> Result<(), Error> {
@@ -460,8 +470,6 @@ async fn finalize_one(
     let truncated = finalized.truncated || total > MAX_RUN_CHANGES;
     changes.truncate(MAX_RUN_CHANGES);
 
-    let mut conn = pool.get().await?;
-    let tx = conn.transaction().await?;
     for change in &changes {
         tx.execute(
             "INSERT INTO target_monitor_change(id,run_id,rule_id,kind,severity,target,port,detail) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
@@ -555,7 +563,6 @@ async fn finalize_one(
         &[&rule_id, &finalized.snapshot],
     )
     .await?;
-    tx.commit().await?;
     Ok(())
 }
 

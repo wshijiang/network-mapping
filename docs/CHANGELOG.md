@@ -4,6 +4,8 @@
 
 ## 未发布
 
+- **通知中心 · 评审修复**：① 启动迁移补齐——`db::init_database_table` 内嵌迁移列表加入 `migrate_notification_inbox.sql` 与 `migrate_target_monitor.sql`，自定义/旧版 `init_database_file` 部署升级时收件箱与监控表不再缺失（新增旧 init 文件回归测试）；② 目标监控首跑即报告阈值窗口内的证书到期（抑制端口噪声但保留到期告警，长周期规则不会漏报到过期之后）；③ 运行收尾改为逐条 `FOR UPDATE OF run SKIP LOCKED` 认领并在同一事务内完成，多实例不再重复插入变化明细（二次收尾幂等回归测试）。
+
 - **目标监控（资产监控）**：新增 `/monitor` 目标监控与 `/api/target-monitor/*`：对 IP/CIDR 或域名规则周期复扫（1 小时–30 天），任务终态后与基线 diff 产生变化明细与通知。IP 规则检测端口开/关、服务/产品/版本、网页标题、证书指纹变化与证书到期（≤14 天 warning / ≤7 天 critical）、目标离线/恢复；域名规则走 `dns_records` 任务检测 A/AAAA 解析漂移。新增 `monitor.change` / `monitor.availability` / `monitor.cert_expiring` 事件与 `monitor_alert` 邮件模板（飞书/Telegram 默认模板自动派生），按 run 聚合防风暴（明细 ≤20、单 run 变化 ≤200、快照 ≤1024 端口），证书按规则+目标+到期日+阈值桶稳定去重。**用户自助 + 管理员管控**：全局 `monitorUserEnabled` 开启后普通用户可创建管理自己的规则（收件人固定本人、目标受自动扫描授权网段与 DNS 排除约束、每用户 ≤20 条），管理员管理全部规则（≤200 条）并指定收件人；规则 CRUD 乐观并发 + 审计（新审计分类 `target_monitor`，幂等迁移）。调度 worker 60s 周期：过期租约主动清扫（任务失败通知不再依赖页面访问）、`FOR UPDATE SKIP LOCKED` 领取到期规则、无可用扫描器跳过并站内提示、ES 不可用降级保留基线、180 天运行清理。监控任务 `task_source='monitor'` 默认归入系统任务隐藏。
 
 - **通知 · 站内收件箱**：新增站内通知（`notification_inbox` + `notification_user_preference`，幂等迁移）。事件入队同事务按类别扇出到收件人：任务事件→任务所有者，健康告警 / Scanner 事件→全部有效管理员，登录→本人，报告→计划收件人；受全局 `inAppEnabled` 与个人类别偏好（task/monitor/alert/security/report，默认全开）双重过滤。收件箱行携带事件快照与深链，独立于事件表 30 天清理；保留天数（默认 90）与每用户容量（默认 2000，超限优先清理最旧已读）由管理员配置、通知 worker 周期清理。新增 `/api/inbox/*`：列表（类别/未读过滤 + UUIDv7 游标分页 + 未读数）、未读计数（按类别）、标记已读（指定 ID ≤200 或全部/按类别）、单条删除（软删）、个人偏好读写；全体登录用户可用，写操作过 CSRF。

@@ -163,10 +163,28 @@ pub fn cert_expiry_severity(
     }
 }
 
-/// IP 快照 diff。首次运行（baseline=None）只建基线，不产生变化。
+/// IP 快照 diff。首次运行（baseline=None）只建基线，抑制端口变化噪声；
+/// 证书到期不依赖基线，首跑即在阈值窗口内告警（长周期规则不会漏报到过期之后）。
 pub fn diff_ip(baseline: Option<&IpSnapshot>, current: &IpSnapshot, now_ms: i64) -> Vec<Change> {
     let Some(baseline) = baseline else {
-        return Vec::new();
+        let mut changes = Vec::new();
+        for (ip, ports) in current {
+            for (port, state) in ports {
+                if let Some(not_after) = state.not_after
+                    && let Some((severity, bucket)) = cert_expiry_severity(not_after, now_ms)
+                {
+                    changes.push(Change {
+                        kind: "cert_expiring",
+                        severity,
+                        target: ip.clone(),
+                        port: Some(*port),
+                        detail: json!({"not_after": not_after, "bucket": bucket}),
+                    });
+                }
+            }
+        }
+        changes.sort_by(|a, b| (&a.target, a.port, a.kind).cmp(&(&b.target, b.port, b.kind)));
+        return changes;
     };
     let mut changes = Vec::new();
     for (ip, ports) in current {
@@ -328,11 +346,28 @@ mod tests {
     const DAY: i64 = 86_400_000;
 
     #[test]
-    fn first_run_builds_baseline_without_changes() {
+    fn first_run_builds_baseline_without_port_noise_but_reports_expiring_certs() {
         let current = snapshot(&[("192.0.2.1", 443, state("https", "t", "c", None))]);
         assert!(diff_ip(None, &current, NOW).is_empty());
         let dns = DnsSnapshot::from([("example.com".into(), BTreeSet::from(["192.0.2.1".into()]))]);
         assert!(diff_dns(None, &dns).is_empty());
+        let expiring = snapshot(&[
+            (
+                "192.0.2.1",
+                443,
+                state("https", "t", "c", Some(NOW + 3 * DAY)),
+            ),
+            (
+                "192.0.2.1",
+                80,
+                state("http", "t", "c", Some(NOW + 30 * DAY)),
+            ),
+        ]);
+        let changes = diff_ip(None, &expiring, NOW);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, "cert_expiring");
+        assert_eq!(changes[0].severity, "critical");
+        assert_eq!(changes[0].port, Some(443));
     }
 
     #[test]
