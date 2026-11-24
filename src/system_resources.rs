@@ -366,32 +366,29 @@ impl SystemResource {
 ///获取数据库表的大小，单位为字节
 async fn get_db_table_size_byte(
     pool: &deadpool::managed::Object<deadpool_postgres::Manager>,
-    // db_h: &mut HashMap<String, DbTableSizeInfo>,
     sql: &str,
     params: &[&(dyn ToSql + Sync)],
 ) -> BTreeMap<String, DbTableSizeInfo> {
     let result = pool.query(sql, params).await;
     match result {
-        Ok(rows) => {
-            rows.iter()
-                .map(|row| {
-                    (
-                        row.get("table_name"),
-                        DbTableSizeInfo {
-                            total: row.get("total_size"),
-                            data: row.get("data_size"),
-                            index: row.get("index_size"),
-                        },
-                    )
-                })
-                .collect()
-            // for row in rows {
-            //     let key = row.get("table_name");
-            //     let value: i64 = row.get("total_size");
-            //     // let value = values.to_s
-            //     db_h.insert(key, value.to_string());
-            // }
-        }
+        Ok(rows) => rows
+            .iter()
+            .filter_map(|row| match decode_table_size(row) {
+                Ok(table) => table,
+                Err(error) => {
+                    let diagnostics = error_diagnostics(&error);
+                    warn!(
+                        event = "DatabaseTableMetricsDecodeError",
+                        operation = "decode_table_size",
+                        table_name = row.try_get::<_, &str>("table_name").unwrap_or("<unknown>"),
+                        error_message = %diagnostics.error_message,
+                        root_cause = %diagnostics.root_cause,
+                        outcome = "table_metrics_skipped",
+                    );
+                    None
+                }
+            })
+            .collect(),
         Err(e) => {
             let diagnostics = error_diagnostics(&e);
             let database = diagnostics.database.as_ref();
@@ -413,6 +410,96 @@ async fn get_db_table_size_byte(
                 .into_iter()
                 .collect()
         }
+    }
+}
+
+fn decode_table_size(
+    row: &tokio_postgres::Row,
+) -> Result<Option<(String, DbTableSizeInfo)>, tokio_postgres::Error> {
+    let total = row.try_get::<_, Option<i64>>("total_size")?;
+    let data = row.try_get::<_, Option<i64>>("data_size")?;
+    let index = row.try_get::<_, Option<i64>>("index_size")?;
+    // PostgreSQL can return NULL if a relation disappears after enumeration.
+    let (Some(total), Some(data), Some(index)) = (total, data, index) else {
+        return Ok(None);
+    };
+    Ok(Some((
+        row.try_get("table_name")?,
+        DbTableSizeInfo { total, data, index },
+    )))
+}
+
+#[cfg(test)]
+mod table_size_tests {
+    use super::*;
+    use deadpool_postgres::{Manager, Pool};
+    use tokio_postgres::NoTls;
+
+    #[tokio::test]
+    #[ignore = "requires disposable RESOURCE_TEST_DATABASE_URL"]
+    async fn table_sizes_exclude_temporary_and_skip_disappeared_relations() {
+        let config = std::env::var("RESOURCE_TEST_DATABASE_URL")
+            .expect("resource test database URL")
+            .parse()
+            .expect("valid test database URL");
+        let pool = Pool::builder(Manager::new(config, NoTls)).build().unwrap();
+        let client = pool.get().await.unwrap();
+        client
+            .batch_execute(
+                "BEGIN;
+                 CREATE TABLE resource_test_regular (id INT);
+                 CREATE UNLOGGED TABLE resource_test_unlogged (id INT);
+                 CREATE TEMP TABLE resource_test_temporary (id INT);
+                 CREATE TABLE resource_test_disappeared (id INT);",
+            )
+            .await
+            .unwrap();
+
+        let sizes = get_db_table_size_byte(
+            &client,
+            include_str!("../source/database/get_table_size.sql"),
+            &[],
+        )
+        .await;
+        assert!(sizes.contains_key("resource_test_regular"));
+        assert!(sizes.contains_key("resource_test_unlogged"));
+        assert!(
+            !sizes
+                .keys()
+                .any(|name| name.ends_with("resource_test_temporary"))
+        );
+
+        let oid: u32 = client
+            .query_one("SELECT 'resource_test_disappeared'::regclass::oid", &[])
+            .await
+            .unwrap()
+            .get(0);
+        client
+            .batch_execute("DROP TABLE resource_test_disappeared;")
+            .await
+            .unwrap();
+        let sizes = get_db_table_size_byte(
+            &client,
+            "SELECT 'disappeared'::text AS table_name,
+                    pg_total_relation_size($1::oid::regclass) AS total_size,
+                    pg_relation_size($1::oid::regclass) AS data_size,
+                    pg_indexes_size($1::oid::regclass) AS index_size
+             UNION ALL SELECT 'empty', 0, 0, 0",
+            &[&oid],
+        )
+        .await;
+        assert_eq!(sizes.len(), 1);
+        assert_eq!(sizes["empty"].total, 0);
+
+        let sizes = get_db_table_size_byte(
+            &client,
+            "SELECT 'invalid'::text AS table_name, 'invalid'::text AS total_size,
+                    0::bigint AS data_size, 0::bigint AS index_size",
+            &[],
+        )
+        .await;
+        assert!(sizes.is_empty());
+        client.batch_execute("ROLLBACK;").await.unwrap();
     }
 }
 
