@@ -805,7 +805,10 @@ pub async fn run(args: Clis) -> io::Result<()> {
     crate::data_export::settings::init(&pool, &config.data_export)
         .await
         .map_err(|error| io::Error::other(format!("加载导出配置失败：{error}")))?;
-    let export_storage = web::Data::new(crate::data_export::storage::Storage::default());
+    let export_storage = web::Data::new(crate::data_export::storage::Storage::new(
+        network_proxy.clone(),
+        &ser_con.encrypt_key,
+    ));
     background.spawn(
         "data-export-cleanup",
         crate::data_export::worker::run_cleanup(

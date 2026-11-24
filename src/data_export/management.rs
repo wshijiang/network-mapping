@@ -1,9 +1,12 @@
 use clap::{ArgAction, Args, Subcommand};
 use deadpool_postgres::Pool;
 use serde_json::json;
+use std::io::Read;
 
 use crate::admin::UserBaseI;
 use crate::audit::{AuditContext, AuditEvent, write_standalone};
+use crate::network_proxy::GlobalProxyState;
+use crate::outbound_proxy::ProxyMode;
 
 use super::DataExportConfig;
 use super::cli::resolve_admin;
@@ -99,9 +102,15 @@ pub struct S3Args {
     /// 经服务器转发 S3 下载
     #[arg(long)]
     proxy_download: bool,
-    /// 服务器访问 S3 时使用的 HTTP(S) 出站代理
+    /// 出站代理模式：system、direct 或 custom
     #[arg(long)]
+    proxy_mode: Option<ProxyMode>,
+    /// 自定义 HTTP(S) 或 SOCKS5(H) 代理，不含凭据
+    #[arg(long, conflicts_with = "proxy_url_stdin")]
     proxy_url: Option<String>,
+    /// 从标准输入读取自定义代理地址，适用于内嵌凭据的 URL
+    #[arg(long)]
+    proxy_url_stdin: bool,
 }
 
 impl From<&S3Args> for S3Config {
@@ -115,6 +124,10 @@ impl From<&S3Args> for S3Config {
             path_style: args.path_style,
             proxy_download: args.proxy_download,
             proxy_url: args.proxy_url.clone(),
+            proxy_mode: args.proxy_mode.or_else(|| {
+                (args.proxy_url.is_none() && !args.proxy_url_stdin).then_some(ProxyMode::System)
+            }),
+            proxy_ciphertext: None,
         }
     }
 }
@@ -148,7 +161,7 @@ fn print_connection(config: &DataExportConfig, settings: &Settings, revision: i6
             "revision": revision,
             "enabled": settings.s3,
             "overridden": settings.s3_override.is_some(),
-            "connection": settings.connection(config),
+            "connection": settings.connection(config).map(S3Config::public),
         }))?
     );
     Ok(())
@@ -185,7 +198,12 @@ pub async fn execute_settings(
     print_settings(config, &current.value, current.revision)
 }
 
-pub async fn execute_s3(command: &S3Command, pool: &Pool, config: &DataExportConfig) -> Result<()> {
+pub async fn execute_s3(
+    command: &S3Command,
+    pool: &Pool,
+    config: &DataExportConfig,
+    encryption_key: &str,
+) -> Result<()> {
     let admin = match command {
         S3Command::Show { admin }
         | S3Command::Set { admin, .. }
@@ -206,7 +224,8 @@ pub async fn execute_s3(command: &S3Command, pool: &Pool, config: &DataExportCon
                 .value
                 .connection(config)
                 .ok_or("请先保存 S3 连接设置")?;
-            let result = Storage::default().test(target).await;
+            let global = GlobalProxyState::initialize(pool, encryption_key).await;
+            let result = Storage::new(global, encryption_key).test(target).await;
             let outcome = if result.is_ok() { "success" } else { "failure" };
             audit(
                 pool,
@@ -224,7 +243,23 @@ pub async fn execute_s3(command: &S3Command, pool: &Pool, config: &DataExportCon
             return Ok(());
         }
         S3Command::Set { target, .. } => {
-            current.value.s3_override = Some(target.into());
+            let mut connection = S3Config::from(target);
+            if target.proxy_url_stdin {
+                let mut input = String::new();
+                std::io::stdin().take(2051).read_to_string(&mut input)?;
+                let url = input.trim_end_matches(['\r', '\n']);
+                if url.is_empty() || input.len() >= 2051 {
+                    return Err("S3 代理地址无效".into());
+                }
+                connection.proxy_url = Some(url.to_owned());
+            } else if let Some(url) = &connection.proxy_url {
+                let url = crate::outbound_proxy::validate_url(url)?;
+                if !url.username().is_empty() || url.password().is_some() {
+                    return Err("含凭据的代理地址请通过 --proxy-url-stdin 提供".into());
+                }
+            }
+            current.value.s3_override =
+                Some(connection.with_proxy(current.value.connection(config), encryption_key)?);
             "cli.settings.s3_update"
         }
         S3Command::Reset { .. } => {

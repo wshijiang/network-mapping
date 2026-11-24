@@ -6,20 +6,27 @@ use tokio::sync::OnceCell;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::presigning::PresigningConfig;
-use aws_sdk_s3::primitives::{ByteStream, Length};
+use aws_sdk_s3::primitives::{ByteStream, Length, SdkBody};
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
-use aws_smithy_http_client::{pool, proxy::ProxyConfig, tls};
+use aws_smithy_runtime_api::client::{
+    http::{HttpConnector, HttpConnectorFuture, SharedHttpConnector, http_client_fn},
+    orchestrator::{HttpRequest, HttpResponse},
+    result::ConnectorError,
+};
 use deadpool_postgres::Pool;
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::network_proxy::GlobalProxyState;
+use crate::outbound_proxy::{self, ProxyConfig, ProxyMode};
 
 use super::task::{self, Result};
 
 const PART_SIZE: u64 = 16 * 1024 * 1024;
 const MAX_PARTS: u64 = 10_000;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct S3Config {
     pub endpoint: Option<String>,
     pub download_endpoint: Option<String>,
@@ -33,15 +40,25 @@ pub struct S3Config {
     pub proxy_download: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_mode: Option<ProxyMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) proxy_ciphertext: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for S3Config {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.public().fmt(formatter)
+    }
 }
 
 impl S3Config {
     pub fn validate(&self) -> std::result::Result<(), String> {
-        for address in [&self.endpoint, &self.download_endpoint, &self.proxy_url]
+        for address in [&self.endpoint, &self.download_endpoint]
             .into_iter()
             .flatten()
         {
-            let url = reqwest::Url::parse(address).map_err(|_| "S3 连接或代理 URL 无效")?;
+            let url = reqwest::Url::parse(address).map_err(|_| "S3 连接 URL 无效")?;
             if !matches!(url.scheme(), "http" | "https")
                 || url.host().is_none()
                 || !url.username().is_empty()
@@ -50,11 +67,11 @@ impl S3Config {
                 || url.fragment().is_some()
                 || url.path() != "/"
             {
-                return Err("S3 连接或代理 URL 必须是不含凭据与路径的 HTTP(S) 服务地址".into());
+                return Err("S3 连接 URL 必须是不含凭据与路径的 HTTP(S) 服务地址".into());
             }
         }
-        if let Some(proxy_url) = &self.proxy_url {
-            ProxyConfig::all(proxy_url.as_str()).map_err(|_| "S3 代理地址无效")?;
+        if self.proxy_mode() == ProxyMode::Custom && self.proxy_ciphertext.is_none() {
+            self.proxy_config("").map_err(|_| "S3 代理地址无效")?;
         }
         if self.region.is_empty()
             || !self
@@ -78,6 +95,74 @@ impl S3Config {
         Ok(())
     }
 
+    fn proxy_mode(&self) -> ProxyMode {
+        self.proxy_mode.unwrap_or(if self.proxy_url.is_some() {
+            ProxyMode::Custom
+        } else {
+            ProxyMode::Direct
+        })
+    }
+
+    fn proxy_config(&self, key: &str) -> Result<ProxyConfig> {
+        let mode = self.proxy_mode();
+        let url = if mode != ProxyMode::Custom {
+            String::new()
+        } else if let Some(ciphertext) = &self.proxy_ciphertext {
+            crate::secret::decrypt(ciphertext, key).map_err(|_| crate::secret::UNAVAILABLE)?
+        } else {
+            self.proxy_url.clone().ok_or("请输入 S3 代理地址")?
+        };
+        let config = ProxyConfig { mode, url };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub(crate) fn with_proxy(
+        mut self,
+        current: Option<&S3Config>,
+        key: &str,
+    ) -> std::result::Result<Self, String> {
+        let mode = self.proxy_mode();
+        let input = self.proxy_url.take();
+        self.proxy_mode = Some(mode);
+        self.proxy_ciphertext = None;
+        if mode != ProxyMode::Custom && input.is_some() {
+            return Err("仅自定义模式允许填写 S3 代理地址".into());
+        }
+        if let Some(url) = input {
+            self.store_proxy(&url, key)?;
+        } else if let Some(previous) = current {
+            if previous.proxy_ciphertext.is_some() {
+                self.proxy_url = previous.proxy_url.clone();
+                self.proxy_ciphertext = previous.proxy_ciphertext.clone();
+            } else if let Some(url) = &previous.proxy_url {
+                self.store_proxy(url, key)?;
+            }
+        }
+        if mode == ProxyMode::Custom && self.proxy_ciphertext.is_none() {
+            return Err("请输入 S3 代理地址".into());
+        }
+        self.validate()?;
+        Ok(self)
+    }
+
+    fn store_proxy(&mut self, url: &str, key: &str) -> std::result::Result<(), String> {
+        self.proxy_url = Some(outbound_proxy::endpoint(url).map_err(|_| "S3 代理地址无效")?);
+        self.proxy_ciphertext = Some(crate::secret::encrypt(url, key).map_err(str::to_owned)?);
+        Ok(())
+    }
+
+    pub fn public(&self) -> serde_json::Value {
+        serde_json::json!({
+            "endpoint": self.endpoint, "download_endpoint": self.download_endpoint,
+            "region": self.region, "bucket": self.bucket, "prefix": self.prefix,
+            "path_style": self.path_style, "proxy_download": self.proxy_download,
+            "proxy_mode": self.proxy_mode(),
+            "proxy_endpoint": self.proxy_url.as_deref().and_then(|url| outbound_proxy::endpoint(url).ok()),
+            "proxy_configured": self.proxy_url.is_some() || self.proxy_ciphertext.is_some(),
+        })
+    }
+
     pub fn object(&self, task: Uuid, attempt: Uuid) -> Object {
         let prefix = self.prefix.trim_matches('/');
         let key = format!("{task}/{attempt}.csv");
@@ -98,12 +183,30 @@ pub struct Object {
     pub key: String,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Storage {
     sdk: Arc<OnceCell<aws_config::SdkConfig>>,
+    global_proxy: GlobalProxyState,
+    encryption_key: Arc<str>,
 }
 
 impl Storage {
+    pub(crate) fn new(global_proxy: GlobalProxyState, encryption_key: &str) -> Self {
+        Self {
+            sdk: Arc::new(OnceCell::new()),
+            global_proxy,
+            encryption_key: Arc::from(encryption_key),
+        }
+    }
+
+    pub(crate) fn prepare_connection(
+        &self,
+        connection: S3Config,
+        current: Option<&S3Config>,
+    ) -> std::result::Result<S3Config, String> {
+        connection.with_proxy(current, &self.encryption_key)
+    }
+
     async fn client(&self, target: &S3Config, download: bool) -> Result<Client> {
         target.validate()?;
         let sdk = self
@@ -141,14 +244,23 @@ impl Storage {
         if let Some(endpoint) = endpoint {
             config = config.endpoint_url(endpoint);
         }
-        if !download && let Some(proxy_url) = &target.proxy_url {
-            let pool = pool::ConnectionPool::builder()
-                .proxy_config(ProxyConfig::all(proxy_url.as_str())?)
-                .tls_provider(tls::Provider::Rustls(
-                    tls::rustls_provider::CryptoMode::AwsLc,
-                ))
-                .build_https()?;
-            config = config.http_client(pool::Client::new(&pool)?);
+        if !download {
+            let proxy = self
+                .global_proxy
+                .resolve(&target.proxy_config(&self.encryption_key)?)
+                .await?;
+            if proxy.mode != ProxyMode::Direct {
+                let connector = SharedHttpConnector::new(ProxyConnector(
+                    proxy
+                        .apply_to(
+                            reqwest::Client::builder()
+                                .redirect(reqwest::redirect::Policy::none())
+                                .connect_timeout(Duration::from_secs(10)),
+                        )?
+                        .build()?,
+                ));
+                config = config.http_client(http_client_fn(move |_, _| connector.clone()));
+            }
         }
         Ok(Client::from_conf(config.build()))
     }
@@ -338,6 +450,34 @@ impl Storage {
     }
 }
 
+#[derive(Debug)]
+struct ProxyConnector(reqwest::Client);
+
+impl HttpConnector for ProxyConnector {
+    fn call(&self, request: HttpRequest) -> HttpConnectorFuture {
+        let client = self.0.clone();
+        HttpConnectorFuture::new(async move {
+            let request = request
+                .try_into_http1x()
+                .map_err(|error| ConnectorError::user(error.into()))?;
+            let request = reqwest::Request::try_from(request.map(reqwest::Body::wrap))
+                .map_err(|error| ConnectorError::user(error.without_url().into()))?;
+            let response = client.execute(request).await.map_err(|error| {
+                let timeout = error.is_timeout();
+                let error = error.without_url().into();
+                if timeout {
+                    ConnectorError::timeout(error)
+                } else {
+                    ConnectorError::io(error)
+                }
+            })?;
+            let response: http::Response<reqwest::Body> = response.into();
+            HttpResponse::try_from(response.map(SdkBody::from_body_1_x))
+                .map_err(|error| ConnectorError::user(error.into()))
+        })
+    }
+}
+
 async fn abort_multipart(client: &Client, object: &Object, upload_id: &str) -> Result<()> {
     let result = client
         .abort_multipart_upload()
@@ -373,6 +513,8 @@ mod tests {
             path_style: true,
             proxy_download: false,
             proxy_url: None,
+            proxy_mode: None,
+            proxy_ciphertext: None,
         }
     }
 
@@ -385,6 +527,7 @@ mod tests {
             .build();
         Storage {
             sdk: Arc::new(OnceCell::new_with(Some(sdk))),
+            ..Storage::new(GlobalProxyState::system(), "")
         }
     }
 
@@ -426,6 +569,32 @@ mod tests {
             Some("attachment; filename=export.csv")
         );
         assert!(params.contains_key("X-Amz-Signature"));
+    }
+
+    #[test]
+    fn proxy_credentials_are_sealed_and_retained_across_mode_changes() {
+        let key = openssl::base64::encode_block(&[7; 32]);
+        let url = "socks5h://user:fixture-password@proxy.example.invalid:1080";
+        let mut custom = target();
+        custom.proxy_url = Some(url.to_owned());
+        let custom = custom.with_proxy(None, &key).unwrap();
+        assert_eq!(custom.proxy_config(&key).unwrap().url, url);
+        assert!(!custom.public().to_string().contains("fixture-password"));
+        assert!(
+            !serde_json::to_string(&custom)
+                .unwrap()
+                .contains("fixture-password")
+        );
+
+        let mut direct = target();
+        direct.proxy_mode = Some(ProxyMode::Direct);
+        let direct = direct.with_proxy(Some(&custom), &key).unwrap();
+        assert_eq!(direct.proxy_config(&key).unwrap().mode, ProxyMode::Direct);
+
+        let mut restored = target();
+        restored.proxy_mode = Some(ProxyMode::Custom);
+        let restored = restored.with_proxy(Some(&direct), &key).unwrap();
+        assert_eq!(restored.proxy_config(&key).unwrap().url, url);
     }
 
     #[tokio::test]

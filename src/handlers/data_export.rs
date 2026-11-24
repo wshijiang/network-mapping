@@ -280,7 +280,7 @@ fn connection_response(
         "success": true,
         "data": {
             "revision": revision,
-            "connection": document.connection(config),
+            "connection": document.connection(config).map(S3Config::public),
             "overridden": document.s3_override.is_some(),
             "deployment_connection": config.s3.is_some(),
             "enabled": document.s3,
@@ -315,6 +315,7 @@ pub(crate) async fn put_s3_settings(
     req: HttpRequest,
     pool: web::Data<Pool>,
     config: web::Data<DataExportConfig>,
+    storage: web::Data<Storage>,
     user: UserBaseI,
     body: web::Json<S3SettingsBody>,
 ) -> HttpResponse {
@@ -334,7 +335,15 @@ pub(crate) async fn put_s3_settings(
     } else {
         "settings.s3_reset"
     };
-    current.value.s3_override = body.connection;
+    current.value.s3_override = match body.connection {
+        Some(connection) => {
+            match storage.prepare_connection(connection, current.value.connection(&config)) {
+                Ok(connection) => Some(connection),
+                Err(error) => return bad(error),
+            }
+        }
+        None => None,
+    };
     match settings::save(
         &pool,
         &config,

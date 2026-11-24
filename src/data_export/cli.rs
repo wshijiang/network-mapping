@@ -139,7 +139,12 @@ fn compile(query: &str) -> CliResult<serde_json::Value> {
     }
 }
 
-pub async fn execute(command: &ExportCommand, pool: &Pool, config: &DataExportConfig) -> CliResult {
+pub async fn execute(
+    command: &ExportCommand,
+    pool: &Pool,
+    config: &DataExportConfig,
+    encryption_key: &str,
+) -> CliResult {
     if !config.enabled
         && !matches!(
             command,
@@ -152,7 +157,9 @@ pub async fn execute(command: &ExportCommand, pool: &Pool, config: &DataExportCo
         ExportCommand::Settings { command } => {
             management::execute_settings(command, pool, config).await
         }
-        ExportCommand::S3 { command } => management::execute_s3(command, pool, config).await,
+        ExportCommand::S3 { command } => {
+            management::execute_s3(command, pool, config, encryption_key).await
+        }
         ExportCommand::Create {
             admin,
             query,

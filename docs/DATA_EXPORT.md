@@ -94,7 +94,7 @@ network_mapping_server export settings set --admin admin --local true --s3 true 
 network_mapping_server export s3 show --admin admin
 network_mapping_server export s3 set --admin admin --region us-east-1 --bucket network-mapping-exports \
   --endpoint https://s3.example.invalid --prefix exports --path-style \
-  --proxy-url http://proxy.example.invalid:8080
+  --proxy-mode custom --proxy-url http://proxy.example.invalid:8080
 network_mapping_server export s3 test --admin admin
 network_mapping_server export s3 reset --admin admin
 ```
@@ -128,12 +128,15 @@ endpoint = "https://s3.example.invalid"
 path_style = true
 # download_endpoint = "https://download.example.invalid"
 # proxy_download = true
-# proxy_url = "http://proxy.example.invalid:8080"
+# proxy_mode = "system" # system / direct / custom
+# proxy_url = "http://proxy.example.invalid:8080" # 自定义代理地址
 ```
 
 AWS S3 通常可省略 `endpoint`，并使用默认的虚拟主机式地址。凭据由 AWS 凭据链提供，例如工作负载角色或服务进程的 `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY` 和可选的 `AWS_SESSION_TOKEN`。存储桶应保持私有，凭据仅授权导出前缀下的对象读写、删除和分片中止。对启用了对象版本控制的桶，可在导出前缀设置生命周期，清理非当前版本和未完成的分片上传。
 
-可配置 HTTP(S) 出站代理，地址不含用户信息。代理用于服务端的连接测试、上传、下载探测、服务端转发下载及清理。浏览器直连使用客户端自己的网络。
+S3 出站代理与其他模块共用代理策略。可跟随全局（`system`）、直连（`direct`）或自定义（`custom`）。自定义支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H。含凭据的自定义代理地址可在网页填写，CLI 使用 `--proxy-mode custom --proxy-url-stdin` 从标准输入读取。保存时加密，查看时只显示脱敏地址。编辑自定义连接时留空可保留已保存的代理。
+
+代理用于服务端的连接测试、上传、下载探测、服务端转发下载及清理。浏览器直连使用客户端自己的网络。显式选择跟随全局的任务会使用当前全局出站代理。
 
 默认由浏览器通过短时签名直连对象存储。若上传地址无法从浏览器访问，可指定供应商配置的 HTTPS `download_endpoint`，或设 `proxy_download = true` 从服务器流式转发。既有对象仍使用原始地址和桶；迁移时需保持旧位置、代理和凭据可用，直至旧副本到期。
 

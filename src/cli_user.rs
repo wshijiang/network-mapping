@@ -45,7 +45,7 @@ pub async fn execute(
                 .map_err(|error| -> Box<dyn std::error::Error> { error })
         }
         ServerCommand::Export { command } => {
-            crate::data_export::cli::execute(command, pool, data_export)
+            crate::data_export::cli::execute(command, pool, data_export, encrypt_key)
                 .await
                 .map_err(|error| -> Box<dyn std::error::Error> { error })
         }

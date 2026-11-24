@@ -2882,7 +2882,7 @@ dependencies = [
  "async-openai",
  "aws-config",
  "aws-sdk-s3",
- "aws-smithy-http-client",
+ "aws-smithy-runtime-api",
  "base64 0.22.1",
  "chrono",
  "chrono-tz 0.10.4",

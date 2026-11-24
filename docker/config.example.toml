@@ -65,7 +65,8 @@ directory = "/var/lib/network-mapping/data-export"
 # path_style = true                                # 按供应商要求设置
 # download_endpoint = "https://download.example.invalid" # 可选，用于生成浏览器可达的预签名 URL
 # proxy_download = false                           # OSS 仅内网可见时可设为 true
-# proxy_url = "http://proxy.example.invalid:8080"    # 可选 HTTP(S) 出站代理
+# proxy_mode = "system"                            # system / direct / custom
+# proxy_url = "http://proxy.example.invalid:8080"    # 自定义出站代理地址
 
 [backup]
 enabled = false
