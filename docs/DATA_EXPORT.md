@@ -43,6 +43,7 @@ CSV 格式：UTF-8 带 BOM、CRLF 行尾、RFC4180 引号；单元格公式注�
 | GET | `/api/data-export/tasks/{id}/download` | 仅 `completed`；可选 `?source=local\|s3`，默认本地优先 |
 | GET | `/api/data-export/tasks/{id}/download-link` | 验证指定副本并返回下载 URL；S3 直连链接有效期 60 秒 |
 | GET / PUT | `/api/data-export/settings` | 管理员查看或更新全局导出设置；更新时提交 `expected_revision` 和 `document` |
+| GET / PUT | `/api/data-export/settings/s3` | 管理员查看或保存 S3 连接；提交 `expected_revision` 和 `connection`，传 `null` 恢复部署默认连接 |
 | POST | `/api/data-export/settings/test-s3` | 管理员验证测试对象的写入、读取和删除 |
 | POST | `/api/data-export/tasks/{id}/cancel` | `pending`/`running` → `cancelled`（worker 批间检查生效） |
 | DELETE | `/api/data-export/tasks/{id}` | 仅终态任务；删除任务后由后台清理副本 |
@@ -84,6 +85,22 @@ network_mapping_server export status <task-id> [--json]
 network_mapping_server export cancel <task-id> --admin admin
 ```
 
+导出设置和 S3 连接也可以通过 CLI 管理，所有管理子命令都需要 `--admin`。
+
+```bash
+network_mapping_server export settings show --admin admin
+network_mapping_server export settings set --admin admin --local true --s3 true --batch-size 2000 --workers 2 --upload-concurrency 4
+
+network_mapping_server export s3 show --admin admin
+network_mapping_server export s3 set --admin admin --region us-east-1 --bucket network-mapping-exports \
+  --endpoint https://s3.example.invalid --prefix exports --path-style \
+  --proxy-url http://proxy.example.invalid:8080
+network_mapping_server export s3 test --admin admin
+network_mapping_server export s3 reset --admin admin
+```
+
+`settings set` 只更新传入的字段。`s3 set` 保存整套连接，可选 `--download-endpoint` 或 `--proxy-download`。配置可以先保存并测试，再通过 `settings set --s3 true` 启用。没有部署默认连接时，先取消 S3 保存位置，再执行 `s3 reset`。
+
 `--wait` 阻塞轮询直至终态并打印进度。CLI 创建的任务匹配条数由 worker 首批统计（创建时不做 ES 预览），超 `max_rows` 时任务失败并给出中文原因。
 
 ## 配置
@@ -100,7 +117,7 @@ retention_days = 30           # 终态任务文件与记录保留天数
 
 首次部署默认只保存到服务器本地。管理员可在「数据管理 → 导出 → 导出设置」勾选一个或两个位置，调整每批读取行数、每个服务进程同时执行的任务数（默认 1，范围 1–4）和每任务的 S3 分片上传并发数（默认 2，范围 1–8）。保存位置、批大小和上传并发会随新任务快照。历史任务按创建时的副本位置下载。
 
-启用 S3 时，在服务端配置中加入 `[data_export.s3]`，重启服务后到导出设置测试连接并勾选 S3。以下示例适用于使用路径式地址的兼容产品。
+在 Web「导出设置 → 管理 S3 连接」或 CLI 中保存并测试连接，然后勾选 S3 保存位置。两处修改共用数据库配置，保存后无需重启。也可以通过 `[data_export.s3]` 提供部署默认连接，以下示例适用于使用路径式地址的兼容产品。
 
 ```toml
 [data_export.s3]
@@ -111,11 +128,14 @@ endpoint = "https://s3.example.invalid"
 path_style = true
 # download_endpoint = "https://download.example.invalid"
 # proxy_download = true
+# proxy_url = "http://proxy.example.invalid:8080"
 ```
 
 AWS S3 通常可省略 `endpoint`，并使用默认的虚拟主机式地址。凭据由 AWS 凭据链提供，例如工作负载角色或服务进程的 `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY` 和可选的 `AWS_SESSION_TOKEN`。存储桶应保持私有，凭据仅授权导出前缀下的对象读写、删除和分片中止。对启用了对象版本控制的桶，可在导出前缀设置生命周期，清理非当前版本和未完成的分片上传。
 
-默认由浏览器通过短时签名直连对象存储。若上传地址无法从浏览器访问，可指定供应商配置的 HTTPS `download_endpoint`，或设 `proxy_download = true` 从服务器流式转发。既有对象仍使用原始地址和桶；迁移时需保持旧位置和凭据可用，直至旧副本到期。
+可配置 HTTP(S) 出站代理，地址不含用户信息。代理用于服务端的连接测试、上传、下载探测、服务端转发下载及清理。浏览器直连使用客户端自己的网络。
+
+默认由浏览器通过短时签名直连对象存储。若上传地址无法从浏览器访问，可指定供应商配置的 HTTPS `download_endpoint`，或设 `proxy_download = true` 从服务器流式转发。既有对象仍使用原始地址和桶；迁移时需保持旧位置、代理和凭据可用，直至旧副本到期。
 
 仅选 S3 时也需要可写的本地目录作为生成和上传的暂存区。多实例部署应让各实例在同一绝对路径访问共享导出目录。超过保留期或手动删除的任务由后台清理副本。系统维护模式期间不认领新任务。
 

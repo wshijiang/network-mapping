@@ -8,6 +8,7 @@ use aws_sdk_s3::config::Region;
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::{ByteStream, Length};
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+use aws_smithy_http_client::{pool, proxy::ProxyConfig, tls};
 use deadpool_postgres::Pool;
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
@@ -30,15 +31,17 @@ pub struct S3Config {
     pub path_style: bool,
     #[serde(default)]
     pub proxy_download: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
 }
 
 impl S3Config {
     pub fn validate(&self) -> std::result::Result<(), String> {
-        for address in [&self.endpoint, &self.download_endpoint]
+        for address in [&self.endpoint, &self.download_endpoint, &self.proxy_url]
             .into_iter()
             .flatten()
         {
-            let url = reqwest::Url::parse(address).map_err(|_| "S3 endpoint URL 无效")?;
+            let url = reqwest::Url::parse(address).map_err(|_| "S3 连接或代理 URL 无效")?;
             if !matches!(url.scheme(), "http" | "https")
                 || url.host().is_none()
                 || !url.username().is_empty()
@@ -47,8 +50,11 @@ impl S3Config {
                 || url.fragment().is_some()
                 || url.path() != "/"
             {
-                return Err("S3 endpoint 必须是 HTTP(S) 服务地址".into());
+                return Err("S3 连接或代理 URL 必须是不含凭据与路径的 HTTP(S) 服务地址".into());
             }
+        }
+        if let Some(proxy_url) = &self.proxy_url {
+            ProxyConfig::all(proxy_url.as_str()).map_err(|_| "S3 代理地址无效")?;
         }
         if self.region.is_empty()
             || !self
@@ -134,6 +140,15 @@ impl Storage {
         };
         if let Some(endpoint) = endpoint {
             config = config.endpoint_url(endpoint);
+        }
+        if !download && let Some(proxy_url) = &target.proxy_url {
+            let pool = pool::ConnectionPool::builder()
+                .proxy_config(ProxyConfig::all(proxy_url.as_str())?)
+                .tls_provider(tls::Provider::Rustls(
+                    tls::rustls_provider::CryptoMode::AwsLc,
+                ))
+                .build_https()?;
+            config = config.http_client(pool::Client::new(&pool)?);
         }
         Ok(Client::from_conf(config.build()))
     }
@@ -357,6 +372,19 @@ mod tests {
             prefix: "/data/exports/".into(),
             path_style: true,
             proxy_download: false,
+            proxy_url: None,
+        }
+    }
+
+    fn storage() -> Storage {
+        let sdk = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .credentials_provider(aws_sdk_s3::config::SharedCredentialsProvider::new(
+                aws_sdk_s3::config::Credentials::new("test-key", "test-secret", None, None, "test"),
+            ))
+            .build();
+        Storage {
+            sdk: Arc::new(OnceCell::new_with(Some(sdk))),
         }
     }
 
@@ -377,15 +405,7 @@ mod tests {
 
     #[tokio::test]
     async fn signs_path_style_download_for_browser_endpoint() {
-        let sdk = aws_config::SdkConfig::builder()
-            .behavior_version(aws_config::BehaviorVersion::latest())
-            .credentials_provider(aws_sdk_s3::config::SharedCredentialsProvider::new(
-                aws_sdk_s3::config::Credentials::new("test-key", "test-secret", None, None, "test"),
-            ))
-            .build();
-        let storage = Storage {
-            sdk: Arc::new(OnceCell::new_with(Some(sdk))),
-        };
+        let storage = storage();
         let object = target().object(Uuid::new_v4(), Uuid::new_v4());
         let link = storage
             .link(&object, "attachment; filename=export.csv".into())
@@ -406,5 +426,43 @@ mod tests {
             Some("attachment; filename=export.csv")
         );
         assert!(params.contains_key("X-Amz-Signature"));
+    }
+
+    #[tokio::test]
+    async fn sends_server_requests_through_configured_proxy() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut target = target();
+        target.endpoint = Some("http://export-fixture.invalid".into());
+        target.proxy_url = Some(format!("http://{}", listener.local_addr().unwrap()));
+        let object = target.object(Uuid::new_v4(), Uuid::new_v4());
+        let expected = format!("HEAD http://export-fixture.invalid/exports/{}", object.key);
+        let proxy = async {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut line = String::new();
+            socket.read_line(&mut line).await.unwrap();
+            assert!(line.starts_with(&expected), "{line}");
+            loop {
+                line.clear();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            socket
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        };
+        let storage = storage();
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(storage.check_object(&object), proxy)
+        })
+        .await
+        .unwrap();
+        result.unwrap();
     }
 }

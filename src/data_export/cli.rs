@@ -11,6 +11,7 @@ use crate::admin::UserBaseI;
 use crate::audit::{AuditContext, AuditEvent, write_standalone};
 use crate::data_export::DataExportConfig;
 use crate::data_export::fields;
+use crate::data_export::management::{self, S3Command, SettingsCommand};
 use crate::data_export::task::{self, NewTask};
 use crate::handlers::search_dsl::{ElasticsearchCompilation, parse_and_compile_elasticsearch};
 
@@ -18,6 +19,16 @@ type CliResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Debug, Subcommand)]
 pub enum ExportCommand {
+    /// 管理导出保存位置和性能
+    Settings {
+        #[command(subcommand)]
+        command: SettingsCommand,
+    },
+    /// 管理 S3 兼容对象存储连接
+    S3 {
+        #[command(subcommand)]
+        command: S3Command,
+    },
     /// 按搜索语句创建导出任务（由运行中的服务器执行）
     Create {
         /// 用于授权与审计的管理员用户名
@@ -85,7 +96,7 @@ impl ExportScope {
     }
 }
 
-async fn resolve_admin(pool: &Pool, name: &str) -> CliResult<UserBaseI> {
+pub(super) async fn resolve_admin(pool: &Pool, name: &str) -> CliResult<UserBaseI> {
     let row = pool
         .get()
         .await?
@@ -129,10 +140,19 @@ fn compile(query: &str) -> CliResult<serde_json::Value> {
 }
 
 pub async fn execute(command: &ExportCommand, pool: &Pool, config: &DataExportConfig) -> CliResult {
-    if !config.enabled {
+    if !config.enabled
+        && !matches!(
+            command,
+            ExportCommand::Settings { .. } | ExportCommand::S3 { .. }
+        )
+    {
         return Err("数据导出功能未启用（data_export.enabled=false）".into());
     }
     match command {
+        ExportCommand::Settings { command } => {
+            management::execute_settings(command, pool, config).await
+        }
+        ExportCommand::S3 { command } => management::execute_s3(command, pool, config).await,
         ExportCommand::Create {
             admin,
             query,

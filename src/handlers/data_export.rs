@@ -15,12 +15,11 @@ use crate::admin::UserBaseI;
 use crate::audit::{AuditContext, AuditEvent, write_standalone};
 use crate::data_export::DataExportConfig;
 use crate::data_export::fields;
-use crate::data_export::settings::{self, Settings};
-use crate::data_export::storage::{Object, Storage};
+use crate::data_export::settings::{self, SaveError, Settings};
+use crate::data_export::storage::{Object, S3Config, Storage};
 use crate::data_export::task::{self, NewTask};
 use crate::elasticsearch::ElasticsearchService;
 use crate::handlers::search_dsl::{ElasticsearchCompilation, parse_and_compile_elasticsearch};
-use crate::runtime_config::{self, PersistError};
 
 fn bad(message: impl Into<String>) -> HttpResponse {
     HttpResponse::BadRequest().json(json!({"success": false, "message": message.into()}))
@@ -160,12 +159,22 @@ fn forbidden() -> HttpResponse {
 }
 
 fn settings_response(config: &DataExportConfig, document: Settings, revision: i64) -> HttpResponse {
+    let s3_configured = document.connection(config).is_some();
+    let Settings {
+        local,
+        s3,
+        batch_size,
+        workers,
+        upload_concurrency,
+        ..
+    } = document;
     HttpResponse::Ok().json(json!({
         "success": true,
         "data": {
-            "document": document,
+            "document": { "local": local, "s3": s3, "batch_size": batch_size,
+                          "workers": workers, "upload_concurrency": upload_concurrency },
             "revision": revision,
-            "s3_configured": config.s3.is_some(),
+            "s3_configured": s3_configured,
         },
     }))
 }
@@ -205,16 +214,18 @@ pub(crate) async fn put_settings(
     if user.role != 1 {
         return forbidden();
     }
-    let body = body.into_inner();
-    if let Err(reason) = body.document.validate() {
-        return bad(reason);
+    let mut body = body.into_inner();
+    let current = match settings::read(&pool, &config).await {
+        Ok(current) => current,
+        Err(error) => return settings_read_error(error),
+    };
+    if current.revision != body.expected_revision {
+        return settings_save_error(SaveError::Conflict);
     }
-    if body.document.s3 && config.s3.is_none() {
-        return bad("请先在服务器配置 S3 连接");
-    }
-    match runtime_config::persist(
+    body.document.s3_override = current.value.s3_override;
+    match settings::save(
         &pool,
-        settings::NAMESPACE,
+        &config,
         body.expected_revision,
         &body.document,
         "data export settings",
@@ -223,18 +234,122 @@ pub(crate) async fn put_settings(
     .await
     {
         Ok(revision) => {
-            let event = AuditEvent::user("data_export", "settings.update", "success", &user)
-                .resource("data_export_settings", revision.to_string());
-            write_standalone(&pool, &AuditContext::from_request(&req), &event).await;
+            audit_settings(&pool, &req, &user, "settings.update", revision).await;
             settings_response(&config, body.document, revision)
         }
-        Err(PersistError::Conflict) => HttpResponse::Conflict().json(json!({
-            "success": false, "message": "设置已被修改，请重新加载后再保存"
+        Err(error) => settings_save_error(error),
+    }
+}
+
+fn settings_read_error(error: impl std::fmt::Display) -> HttpResponse {
+    tracing::error!(event = "DataExportSettingsReadFailed", %error);
+    server_error("无法读取导出设置")
+}
+
+fn settings_save_error(error: SaveError) -> HttpResponse {
+    match error {
+        SaveError::Invalid(reason) => bad(reason),
+        SaveError::Conflict => HttpResponse::Conflict().json(json!({
+            "success": false, "message": error.to_string()
         })),
-        Err(error) => {
+        SaveError::Database(error) => {
             tracing::error!(event = "DataExportSettingsWriteFailed", %error);
             server_error("无法保存导出设置")
         }
+    }
+}
+
+async fn audit_settings(
+    pool: &Pool,
+    req: &HttpRequest,
+    user: &UserBaseI,
+    action: &str,
+    revision: i64,
+) {
+    let event = AuditEvent::user("data_export", action, "success", user)
+        .resource("data_export_settings", revision.to_string());
+    write_standalone(pool, &AuditContext::from_request(req), &event).await;
+}
+
+fn connection_response(
+    config: &DataExportConfig,
+    document: &Settings,
+    revision: i64,
+) -> HttpResponse {
+    HttpResponse::Ok().json(json!({
+        "success": true,
+        "data": {
+            "revision": revision,
+            "connection": document.connection(config),
+            "overridden": document.s3_override.is_some(),
+            "deployment_connection": config.s3.is_some(),
+            "enabled": document.s3,
+        },
+    }))
+}
+
+#[get("/api/data-export/settings/s3")]
+pub(crate) async fn get_s3_settings(
+    pool: web::Data<Pool>,
+    config: web::Data<DataExportConfig>,
+    user: UserBaseI,
+) -> HttpResponse {
+    if user.role != 1 {
+        return forbidden();
+    }
+    match settings::read(&pool, &config).await {
+        Ok(current) => connection_response(&config, &current.value, current.revision),
+        Err(error) => settings_read_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct S3SettingsBody {
+    expected_revision: i64,
+    #[serde(deserialize_with = "Deserialize::deserialize")]
+    connection: Option<S3Config>,
+}
+
+#[put("/api/data-export/settings/s3")]
+pub(crate) async fn put_s3_settings(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    config: web::Data<DataExportConfig>,
+    user: UserBaseI,
+    body: web::Json<S3SettingsBody>,
+) -> HttpResponse {
+    if user.role != 1 {
+        return forbidden();
+    }
+    let body = body.into_inner();
+    let mut current = match settings::read(&pool, &config).await {
+        Ok(current) => current,
+        Err(error) => return settings_read_error(error),
+    };
+    if current.revision != body.expected_revision {
+        return settings_save_error(SaveError::Conflict);
+    }
+    let action = if body.connection.is_some() {
+        "settings.s3_update"
+    } else {
+        "settings.s3_reset"
+    };
+    current.value.s3_override = body.connection;
+    match settings::save(
+        &pool,
+        &config,
+        body.expected_revision,
+        &current.value,
+        action,
+        user.id,
+    )
+    .await
+    {
+        Ok(revision) => {
+            audit_settings(&pool, &req, &user, action, revision).await;
+            connection_response(&config, &current.value, revision)
+        }
+        Err(error) => settings_save_error(error),
     }
 }
 
@@ -249,8 +364,12 @@ pub(crate) async fn test_storage(
     if user.role != 1 {
         return forbidden();
     }
-    let Some(target) = &config.s3 else {
-        return bad("请先在服务器配置 S3 连接");
+    let current = match settings::read(&pool, &config).await {
+        Ok(current) => current,
+        Err(error) => return settings_read_error(error),
+    };
+    let Some(target) = current.value.connection(&config) else {
+        return bad("请先保存 S3 连接设置");
     };
     let result = storage.test(target).await;
     let outcome = if result.is_ok() { "success" } else { "failure" };

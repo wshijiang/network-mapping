@@ -6,6 +6,7 @@
 pub mod cli;
 pub mod csv;
 pub mod fields;
+pub mod management;
 pub mod settings;
 pub mod storage;
 pub mod task;
