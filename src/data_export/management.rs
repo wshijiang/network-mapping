@@ -11,7 +11,7 @@ use crate::outbound_proxy::ProxyMode;
 use super::DataExportConfig;
 use super::cli::resolve_admin;
 use super::settings::{self, Settings};
-use super::storage::{S3Config, Storage};
+use super::storage::{CredentialUpdate, S3Config, S3Credentials, Storage};
 use super::task::Result;
 
 #[derive(Debug, Subcommand)]
@@ -73,6 +73,11 @@ pub enum S3Command {
         #[command(flatten)]
         target: S3Args,
     },
+    /// 管理独立的 S3 Access Key 凭据
+    Credentials {
+        #[command(subcommand)]
+        command: S3CredentialsCommand,
+    },
     /// 删除自定义连接并恢复部署配置（如有）
     Reset {
         #[arg(long)]
@@ -80,6 +85,20 @@ pub enum S3Command {
     },
     /// 测试当前连接的写入、读取和删除
     Test {
+        #[arg(long)]
+        admin: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum S3CredentialsCommand {
+    /// 从标准输入读取包含 access_key_id、secret_access_key 和可选 session_token 的 JSON
+    Set {
+        #[arg(long)]
+        admin: String,
+    },
+    /// 改用服务器的 AWS 凭据链
+    UseAwsChain {
         #[arg(long)]
         admin: String,
     },
@@ -128,6 +147,7 @@ impl From<&S3Args> for S3Config {
                 (args.proxy_url.is_none() && !args.proxy_url_stdin).then_some(ProxyMode::System)
             }),
             proxy_ciphertext: None,
+            credential_ciphertext: None,
         }
     }
 }
@@ -209,9 +229,17 @@ pub async fn execute_s3(
         | S3Command::Set { admin, .. }
         | S3Command::Reset { admin }
         | S3Command::Test { admin } => admin,
+        S3Command::Credentials { command } => match command {
+            S3CredentialsCommand::Set { admin } | S3CredentialsCommand::UseAwsChain { admin } => {
+                admin
+            }
+        },
     };
     let user = resolve_admin(pool, admin).await?;
-    if matches!(command, S3Command::Set { .. } | S3Command::Reset { .. }) {
+    if matches!(
+        command,
+        S3Command::Set { .. } | S3Command::Reset { .. } | S3Command::Credentials { .. }
+    ) {
         settings::init(pool, config).await?;
     }
     let mut current = settings::read(pool, config).await?;
@@ -258,9 +286,52 @@ pub async fn execute_s3(
                     return Err("含凭据的代理地址请通过 --proxy-url-stdin 提供".into());
                 }
             }
-            current.value.s3_override =
-                Some(connection.with_proxy(current.value.connection(config), encryption_key)?);
+            let previous = current.value.connection(config);
+            current.value.s3_override = Some(
+                connection
+                    .with_proxy(previous, encryption_key)?
+                    .with_credentials(previous, None, encryption_key)?,
+            );
             "cli.settings.s3_update"
+        }
+        S3Command::Credentials { command } => {
+            let connection = current
+                .value
+                .connection(config)
+                .ok_or("请先保存 S3 连接设置")?;
+            let (update, action) = match command {
+                S3CredentialsCommand::Set { .. } => {
+                    const MAX_INPUT: u64 = 32 * 1024;
+                    let mut input = Vec::new();
+                    std::io::stdin()
+                        .take(MAX_INPUT + 1)
+                        .read_to_end(&mut input)?;
+                    if input.len() as u64 > MAX_INPUT {
+                        return Err("S3 凭据 JSON 超出大小限制".into());
+                    }
+                    let values = serde_json::from_slice::<S3Credentials>(&input)
+                        .map_err(|_| "S3 凭据 JSON 无效，请填写 access_key_id、secret_access_key 和可选 session_token")?;
+                    (
+                        CredentialUpdate::Static {
+                            values: Some(values),
+                        },
+                        "cli.settings.s3_credentials_update",
+                    )
+                }
+                S3CredentialsCommand::UseAwsChain { .. } => (
+                    CredentialUpdate::AwsChain,
+                    "cli.settings.s3_credentials_use_aws_chain",
+                ),
+            };
+            // The effective connection may originate in TOML, so also seal
+            // any deployment proxy URL before saving it to the database.
+            let mut next = connection.clone();
+            next.proxy_mode = Some(connection.proxy_mode());
+            next.proxy_url = None;
+            next = next.with_proxy(Some(connection), encryption_key)?;
+            current.value.s3_override =
+                Some(next.with_credentials(Some(connection), Some(update), encryption_key)?);
+            action
         }
         S3Command::Reset { .. } => {
             current.value.s3_override = None;

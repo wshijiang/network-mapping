@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::sync::OnceCell;
 
 use aws_sdk_s3::Client;
-use aws_sdk_s3::config::Region;
+use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::{ByteStream, Length, SdkBody};
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
@@ -44,6 +44,57 @@ pub struct S3Config {
     pub proxy_mode: Option<ProxyMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) proxy_ciphertext: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) credential_ciphertext: Option<Vec<u8>>,
+}
+
+const CREDENTIALS_UNAVAILABLE: &str = "无法读取 S3 凭据，请检查服务器加密密钥或重新保存凭据";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct S3Credentials {
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: Option<String>,
+}
+
+impl S3Credentials {
+    fn validate(&self) -> std::result::Result<(), String> {
+        let valid = |value: &str, max| {
+            !value.is_empty()
+                && value.len() <= max
+                && value.bytes().all(|byte| byte.is_ascii_graphic())
+        };
+        if !valid(&self.access_key_id, 256)
+            || !valid(&self.secret_access_key, 1024)
+            || self
+                .session_token
+                .as_deref()
+                .is_some_and(|token| !valid(token, 16_384))
+        {
+            return Err(
+                "请输入有效的 S3 Access Key ID、Secret Access Key 和可选 Session Token".into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn into_sdk(self) -> Credentials {
+        Credentials::new(
+            self.access_key_id,
+            self.secret_access_key,
+            self.session_token,
+            None,
+            "data-export",
+        )
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum CredentialUpdate {
+    AwsChain,
+    Static { values: Option<S3Credentials> },
 }
 
 impl std::fmt::Debug for S3Config {
@@ -95,7 +146,7 @@ impl S3Config {
         Ok(())
     }
 
-    fn proxy_mode(&self) -> ProxyMode {
+    pub(super) fn proxy_mode(&self) -> ProxyMode {
         self.proxy_mode.unwrap_or(if self.proxy_url.is_some() {
             ProxyMode::Custom
         } else {
@@ -152,6 +203,48 @@ impl S3Config {
         Ok(())
     }
 
+    pub(crate) fn with_credentials(
+        mut self,
+        current: Option<&S3Config>,
+        update: Option<CredentialUpdate>,
+        key: &str,
+    ) -> std::result::Result<Self, String> {
+        self.credential_ciphertext = match update {
+            Some(CredentialUpdate::AwsChain) => None,
+            Some(CredentialUpdate::Static {
+                values: Some(credentials),
+            }) => {
+                credentials.validate()?;
+                let serialized =
+                    serde_json::to_string(&credentials).map_err(|_| CREDENTIALS_UNAVAILABLE)?;
+                Some(
+                    crate::secret::encrypt(&serialized, key)
+                        .map_err(|_| CREDENTIALS_UNAVAILABLE)?,
+                )
+            }
+            update => {
+                let previous = current.and_then(|config| config.credential_ciphertext.clone());
+                if update.is_some() && previous.is_none() {
+                    return Err("请填写 S3 Access Key ID 和 Secret Access Key".into());
+                }
+                previous
+            }
+        };
+        Ok(self)
+    }
+
+    fn credentials(&self, key: &str) -> Result<Option<Credentials>> {
+        let Some(ciphertext) = &self.credential_ciphertext else {
+            return Ok(None);
+        };
+        let serialized =
+            crate::secret::decrypt(ciphertext, key).map_err(|_| CREDENTIALS_UNAVAILABLE)?;
+        let credentials = serde_json::from_str::<S3Credentials>(&serialized)
+            .map_err(|_| CREDENTIALS_UNAVAILABLE)?;
+        credentials.validate()?;
+        Ok(Some(credentials.into_sdk()))
+    }
+
     pub fn public(&self) -> serde_json::Value {
         serde_json::json!({
             "endpoint": self.endpoint, "download_endpoint": self.download_endpoint,
@@ -160,6 +253,7 @@ impl S3Config {
             "proxy_mode": self.proxy_mode(),
             "proxy_endpoint": self.proxy_url.as_deref().and_then(|url| outbound_proxy::endpoint(url).ok()),
             "proxy_configured": self.proxy_url.is_some() || self.proxy_ciphertext.is_some(),
+            "credential_mode": if self.credential_ciphertext.is_some() { "static" } else { "aws_chain" },
         })
     }
 
@@ -203,8 +297,11 @@ impl Storage {
         &self,
         connection: S3Config,
         current: Option<&S3Config>,
+        credentials: Option<CredentialUpdate>,
     ) -> std::result::Result<S3Config, String> {
-        connection.with_proxy(current, &self.encryption_key)
+        connection
+            .with_proxy(current, &self.encryption_key)?
+            .with_credentials(current, credentials, &self.encryption_key)
     }
 
     async fn client(&self, target: &S3Config, download: bool) -> Result<Client> {
@@ -233,6 +330,9 @@ impl Storage {
             .response_checksum_validation(
                 aws_sdk_s3::config::ResponseChecksumValidation::WhenRequired,
             );
+        if let Some(credentials) = target.credentials(&self.encryption_key)? {
+            config = config.credentials_provider(credentials);
+        }
         let endpoint = if download {
             target
                 .download_endpoint
@@ -515,6 +615,7 @@ mod tests {
             proxy_url: None,
             proxy_mode: None,
             proxy_ciphertext: None,
+            credential_ciphertext: None,
         }
     }
 
@@ -595,6 +696,55 @@ mod tests {
         restored.proxy_mode = Some(ProxyMode::Custom);
         let restored = restored.with_proxy(Some(&direct), &key).unwrap();
         assert_eq!(restored.proxy_config(&key).unwrap().url, url);
+    }
+
+    #[tokio::test]
+    async fn saved_credentials_override_aws_chain_without_public_exposure() {
+        let encryption_key = openssl::base64::encode_block(&[9; 32]);
+        let configured = target()
+            .with_credentials(
+                None,
+                Some(CredentialUpdate::Static {
+                    values: Some(S3Credentials {
+                        access_key_id: "managed-test-key".into(),
+                        secret_access_key: "managed-test-secret".into(),
+                        session_token: Some("managed-test-token".into()),
+                    }),
+                }),
+                &encryption_key,
+            )
+            .unwrap();
+        let retained = target()
+            .with_credentials(Some(&configured), None, &encryption_key)
+            .unwrap();
+        assert_eq!(retained.public()["credential_mode"], "static");
+        assert!(!retained.public().to_string().contains("managed-test-"));
+        assert!(
+            !serde_json::to_string(&retained)
+                .unwrap()
+                .contains("managed-test-")
+        );
+
+        let storage = Storage {
+            encryption_key: Arc::from(encryption_key.as_str()),
+            ..storage()
+        };
+        let object = retained.object(Uuid::new_v4(), Uuid::new_v4());
+        let link = storage.link(&object, "attachment".into()).await.unwrap();
+        let url = reqwest::Url::parse(&link).unwrap();
+        let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
+        assert!(params["X-Amz-Credential"].starts_with("managed-test-key/"));
+        assert_eq!(params["X-Amz-Security-Token"], "managed-test-token");
+
+        let reset = target()
+            .with_credentials(
+                Some(&retained),
+                Some(CredentialUpdate::AwsChain),
+                &encryption_key,
+            )
+            .unwrap();
+        assert_eq!(reset.public()["credential_mode"], "aws_chain");
+        assert!(reset.credentials(&encryption_key).unwrap().is_none());
     }
 
     #[tokio::test]

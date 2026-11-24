@@ -16,7 +16,7 @@ use crate::audit::{AuditContext, AuditEvent, write_standalone};
 use crate::data_export::DataExportConfig;
 use crate::data_export::fields;
 use crate::data_export::settings::{self, SaveError, Settings};
-use crate::data_export::storage::{Object, S3Config, Storage};
+use crate::data_export::storage::{CredentialUpdate, Object, S3Config, Storage};
 use crate::data_export::task::{self, NewTask};
 use crate::elasticsearch::ElasticsearchService;
 use crate::handlers::search_dsl::{ElasticsearchCompilation, parse_and_compile_elasticsearch};
@@ -308,6 +308,7 @@ pub(crate) struct S3SettingsBody {
     expected_revision: i64,
     #[serde(deserialize_with = "Deserialize::deserialize")]
     connection: Option<S3Config>,
+    credentials: Option<CredentialUpdate>,
 }
 
 #[put("/api/data-export/settings/s3")]
@@ -337,7 +338,11 @@ pub(crate) async fn put_s3_settings(
     };
     current.value.s3_override = match body.connection {
         Some(connection) => {
-            match storage.prepare_connection(connection, current.value.connection(&config)) {
+            match storage.prepare_connection(
+                connection,
+                current.value.connection(&config),
+                body.credentials,
+            ) {
                 Ok(connection) => Some(connection),
                 Err(error) => return bad(error),
             }

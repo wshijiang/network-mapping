@@ -56,7 +56,7 @@ directory = "/var/lib/network-mapping/data-import"
 # 导出 CSV 落盘目录，必须可写；默认位于 server-data 卷。其余参数使用代码默认值。
 directory = "/var/lib/network-mapping/data-export"
 
-# 可选部署默认连接，也可在 Web「导出设置 → 管理 S3 连接」或 CLI 保存。凭据通过 AWS 凭据链注入。
+# 可选部署默认连接，也可在 Web「导出设置 → 管理 S3 连接」或 CLI 保存。可在网页或 CLI 配置独立凭据，也可使用 AWS 凭据链。
 # [data_export.s3]
 # region = "us-east-1"
 # bucket = "network-mapping-exports"

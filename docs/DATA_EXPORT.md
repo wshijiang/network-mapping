@@ -43,7 +43,7 @@ CSV 格式：UTF-8 带 BOM、CRLF 行尾、RFC4180 引号；单元格公式注�
 | GET | `/api/data-export/tasks/{id}/download` | 仅 `completed`；可选 `?source=local\|s3`，默认本地优先 |
 | GET | `/api/data-export/tasks/{id}/download-link` | 验证指定副本并返回下载 URL；S3 直连链接有效期 60 秒 |
 | GET / PUT | `/api/data-export/settings` | 管理员查看或更新全局导出设置；更新时提交 `expected_revision` 和 `document` |
-| GET / PUT | `/api/data-export/settings/s3` | 管理员查看或保存 S3 连接；提交 `expected_revision` 和 `connection`，传 `null` 恢复部署默认连接 |
+| GET / PUT | `/api/data-export/settings/s3` | 管理员查看或保存 S3 连接；提交 `expected_revision` 和 `connection`，可另传 `credentials` 更新凭据；`connection: null` 恢复部署默认连接 |
 | POST | `/api/data-export/settings/test-s3` | 管理员验证测试对象的写入、读取和删除 |
 | POST | `/api/data-export/tasks/{id}/cancel` | `pending`/`running` → `cancelled`（worker 批间检查生效） |
 | DELETE | `/api/data-export/tasks/{id}` | 仅终态任务；删除任务后由后台清理副本 |
@@ -95,6 +95,8 @@ network_mapping_server export s3 show --admin admin
 network_mapping_server export s3 set --admin admin --region us-east-1 --bucket network-mapping-exports \
   --endpoint https://s3.example.invalid --prefix exports --path-style \
   --proxy-mode custom --proxy-url http://proxy.example.invalid:8080
+network_mapping_server export s3 credentials set --admin admin < s3-credentials.json
+network_mapping_server export s3 credentials use-aws-chain --admin admin
 network_mapping_server export s3 test --admin admin
 network_mapping_server export s3 reset --admin admin
 ```
@@ -132,7 +134,7 @@ path_style = true
 # proxy_url = "http://proxy.example.invalid:8080" # 自定义代理地址
 ```
 
-AWS S3 通常可省略 `endpoint`，并使用默认的虚拟主机式地址。凭据由 AWS 凭据链提供，例如工作负载角色或服务进程的 `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY` 和可选的 `AWS_SESSION_TOKEN`。存储桶应保持私有，凭据仅授权导出前缀下的对象读写、删除和分片中止。对启用了对象版本控制的桶，可在导出前缀设置生命周期，清理非当前版本和未完成的分片上传。
+AWS S3 通常可省略 `endpoint`，并使用默认的虚拟主机式地址。S3 兼容产品可选「自定义 Access Key」，配置 Access Key ID、Secret Access Key 和可选的 Session Token。CLI `credentials set` 从标准输入读取 JSON，对应字段为 `access_key_id`、`secret_access_key`、`session_token`（可省略）。网页和 CLI 加密保存凭据，查看时只返回凭据来源。留空可保留已保存的凭据；更换时同时填写两项密钥。也可选择服务器 AWS 凭据链，例如工作负载角色或服务进程的 `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY` 和可选的 `AWS_SESSION_TOKEN`。存储桶应保持私有，凭据仅授权导出前缀下的对象读写、删除和分片中止。对启用了对象版本控制的桶，可在导出前缀设置生命周期，清理非当前版本和未完成的分片上传。
 
 S3 出站代理与其他模块共用代理策略。可跟随全局（`system`）、直连（`direct`）或自定义（`custom`）。自定义支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H。含凭据的自定义代理地址可在网页填写，CLI 使用 `--proxy-mode custom --proxy-url-stdin` 从标准输入读取。保存时加密，查看时只显示脱敏地址。编辑自定义连接时留空可保留已保存的代理。
 
