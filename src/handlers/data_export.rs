@@ -4,8 +4,8 @@
 //! 任务列表/详情/下载/取消/删除仅所有者或管理员可见。
 
 use actix_files::NamedFile;
-use actix_web::http::header::{ContentDisposition, DispositionParam, DispositionType};
-use actix_web::{HttpRequest, HttpResponse, Responder, delete, get, post, web};
+use actix_web::http::header::{self, ContentDisposition, DispositionParam, DispositionType};
+use actix_web::{HttpRequest, HttpResponse, Responder, delete, get, post, put, web};
 use deadpool_postgres::Pool;
 use serde::Deserialize;
 use serde_json::json;
@@ -15,9 +15,12 @@ use crate::admin::UserBaseI;
 use crate::audit::{AuditContext, AuditEvent, write_standalone};
 use crate::data_export::DataExportConfig;
 use crate::data_export::fields;
+use crate::data_export::settings::{self, Settings};
+use crate::data_export::storage::{Object, Storage};
 use crate::data_export::task::{self, NewTask};
 use crate::elasticsearch::ElasticsearchService;
 use crate::handlers::search_dsl::{ElasticsearchCompilation, parse_and_compile_elasticsearch};
+use crate::runtime_config::{self, PersistError};
 
 fn bad(message: impl Into<String>) -> HttpResponse {
     HttpResponse::BadRequest().json(json!({"success": false, "message": message.into()}))
@@ -152,6 +155,118 @@ fn default_scope() -> String {
     "all".to_owned()
 }
 
+fn forbidden() -> HttpResponse {
+    HttpResponse::Forbidden().json(json!({"success": false, "message": "需要管理员权限"}))
+}
+
+fn settings_response(config: &DataExportConfig, document: Settings, revision: i64) -> HttpResponse {
+    HttpResponse::Ok().json(json!({
+        "success": true,
+        "data": {
+            "document": document,
+            "revision": revision,
+            "s3_configured": config.s3.is_some(),
+        },
+    }))
+}
+
+#[get("/api/data-export/settings")]
+pub(crate) async fn get_settings(
+    pool: web::Data<Pool>,
+    config: web::Data<DataExportConfig>,
+    user: UserBaseI,
+) -> HttpResponse {
+    if user.role != 1 {
+        return forbidden();
+    }
+    match settings::read(&pool, &config).await {
+        Ok(current) => settings_response(&config, current.value, current.revision),
+        Err(error) => {
+            tracing::error!(event = "DataExportSettingsReadFailed", %error);
+            server_error("无法读取导出设置")
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SettingsBody {
+    expected_revision: i64,
+    document: Settings,
+}
+
+#[put("/api/data-export/settings")]
+pub(crate) async fn put_settings(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    config: web::Data<DataExportConfig>,
+    user: UserBaseI,
+    body: web::Json<SettingsBody>,
+) -> HttpResponse {
+    if user.role != 1 {
+        return forbidden();
+    }
+    let body = body.into_inner();
+    if let Err(reason) = body.document.validate() {
+        return bad(reason);
+    }
+    if body.document.s3 && config.s3.is_none() {
+        return bad("请先在服务器配置 S3 连接");
+    }
+    match runtime_config::persist(
+        &pool,
+        settings::NAMESPACE,
+        body.expected_revision,
+        &body.document,
+        "data export settings",
+        user.id,
+    )
+    .await
+    {
+        Ok(revision) => {
+            let event = AuditEvent::user("data_export", "settings.update", "success", &user)
+                .resource("data_export_settings", revision.to_string());
+            write_standalone(&pool, &AuditContext::from_request(&req), &event).await;
+            settings_response(&config, body.document, revision)
+        }
+        Err(PersistError::Conflict) => HttpResponse::Conflict().json(json!({
+            "success": false, "message": "设置已被修改，请重新加载后再保存"
+        })),
+        Err(error) => {
+            tracing::error!(event = "DataExportSettingsWriteFailed", %error);
+            server_error("无法保存导出设置")
+        }
+    }
+}
+
+#[post("/api/data-export/settings/test-s3")]
+pub(crate) async fn test_storage(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    config: web::Data<DataExportConfig>,
+    storage: web::Data<Storage>,
+    user: UserBaseI,
+) -> HttpResponse {
+    if user.role != 1 {
+        return forbidden();
+    }
+    let Some(target) = &config.s3 else {
+        return bad("请先在服务器配置 S3 连接");
+    };
+    let result = storage.test(target).await;
+    let outcome = if result.is_ok() { "success" } else { "failure" };
+    let event = AuditEvent::user("data_export", "settings.test_s3", outcome, &user);
+    write_standalone(&pool, &AuditContext::from_request(&req), &event).await;
+    match result {
+        Ok(()) => HttpResponse::Ok().json(json!({"success": true})),
+        Err(error) => {
+            tracing::warn!(event = "DataExportStorageTestFailed", %error);
+            HttpResponse::BadGateway().json(json!({
+                "success": false, "message": "S3 连接测试失败，请检查服务器日志"
+            }))
+        }
+    }
+}
+
 #[post("/api/data-export/tasks")]
 pub(crate) async fn create_task(
     req: HttpRequest,
@@ -210,6 +325,15 @@ pub(crate) async fn create_task(
             config.max_rows
         ));
     }
+    let storage_plan = match settings::plan(&pool, &config).await {
+        Ok(plan) => plan,
+        Err(error) => {
+            tracing::warn!(event = "DataExportPlanFailed", %error);
+            return HttpResponse::ServiceUnavailable().json(json!({
+                "success": false, "message": "导出存储设置暂时不可用"
+            }));
+        }
+    };
     let id = Uuid::now_v7();
     let created = task::create_task(
         &pool,
@@ -227,6 +351,7 @@ pub(crate) async fn create_task(
             sort_order: sort.order_name(),
             fields: json!(keys),
             matched_total: Some(matched_total),
+            storage_plan,
         },
     )
     .await;
@@ -290,37 +415,195 @@ pub(crate) async fn get_task(
     }
 }
 
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DownloadSource {
+    Local,
+    S3,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DownloadQuery {
+    source: Option<DownloadSource>,
+}
+
+enum Artifact {
+    Local(String),
+    S3(Object),
+}
+
+impl Artifact {
+    fn source(&self) -> &'static str {
+        match self {
+            Self::Local(_) => "local",
+            Self::S3(_) => "s3",
+        }
+    }
+}
+
+fn download_error(error: impl std::fmt::Display) -> actix_web::Error {
+    tracing::warn!(event = "DataExportDownloadFailed", %error);
+    actix_web::error::ErrorBadGateway("对象存储暂时不可用")
+}
+
+async fn get_artifact(
+    pool: &Pool,
+    user: &UserBaseI,
+    id: Uuid,
+    source: Option<DownloadSource>,
+) -> actix_web::Result<Artifact> {
+    use actix_web::error::{ErrorBadRequest, ErrorInternalServerError, ErrorNotFound};
+
+    let task = task::get_task(pool, id)
+        .await
+        .map_err(|error| {
+            tracing::error!(event = "DataExportTaskReadFailed", %error);
+            ErrorInternalServerError("无法读取导出任务")
+        })?
+        .filter(|task| can_access(user, task))
+        .ok_or_else(|| ErrorNotFound("任务不存在"))?;
+    if task.status != task::STATUS_COMPLETED {
+        return Err(ErrorBadRequest("任务尚未完成"));
+    }
+    let source = source.unwrap_or(if task.file_path.is_some() {
+        DownloadSource::Local
+    } else {
+        DownloadSource::S3
+    });
+    match source {
+        DownloadSource::Local => task
+            .file_path
+            .map(Artifact::Local)
+            .ok_or_else(|| ErrorNotFound("任务没有本地副本")),
+        DownloadSource::S3 => task
+            .s3_object
+            .ok_or_else(|| ErrorNotFound("任务没有对象存储副本"))
+            .and_then(|value| {
+                serde_json::from_value(value)
+                    .map(Artifact::S3)
+                    .map_err(download_error)
+            }),
+    }
+}
+
+fn disposition(id: Uuid) -> ContentDisposition {
+    let date = chrono::Utc::now().format("%Y-%m-%d");
+    let short_id = &id.to_string()[..8];
+    ContentDisposition {
+        disposition: DispositionType::Attachment,
+        parameters: vec![DispositionParam::Filename(format!(
+            "network-mapping-export-{date}-{short_id}.csv"
+        ))],
+    }
+}
+
+async fn audit_download(pool: &Pool, req: &HttpRequest, user: &UserBaseI, id: Uuid, source: &str) {
+    let mut event = AuditEvent::user("data_export", "download", "success", user)
+        .resource("data_export_task", id.to_string());
+    event.metadata = json!({"source": source});
+    write_standalone(pool, &AuditContext::from_request(req), &event).await;
+}
+
+#[get("/api/data-export/tasks/{id}/download-link")]
+pub(crate) async fn download_link(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    storage: web::Data<Storage>,
+    user: UserBaseI,
+    path: web::Path<Uuid>,
+    query: web::Query<DownloadQuery>,
+) -> actix_web::Result<HttpResponse> {
+    let id = path.into_inner();
+    let artifact = get_artifact(&pool, &user, id, query.source).await?;
+    let source = artifact.source();
+    let url = match artifact {
+        Artifact::Local(path) => {
+            tokio::fs::metadata(path)
+                .await
+                .ok()
+                .filter(|m| m.is_file())
+                .ok_or_else(|| actix_web::error::ErrorNotFound("导出文件不存在或已被清理"))?;
+            format!("/api/data-export/tasks/{id}/download?source={source}")
+        }
+        Artifact::S3(object) => {
+            storage
+                .check_object(&object)
+                .await
+                .map_err(download_error)?;
+            if object.target.proxy_download {
+                format!("/api/data-export/tasks/{id}/download?source={source}")
+            } else {
+                let url = storage
+                    .link(&object, disposition(id).to_string())
+                    .await
+                    .map_err(download_error)?;
+                audit_download(&pool, &req, &user, id, source).await;
+                url
+            }
+        }
+    };
+    Ok(HttpResponse::Ok()
+        .insert_header((header::CACHE_CONTROL, "no-store"))
+        .json(json!({"success": true, "data": {"url": url}})))
+}
+
 #[get("/api/data-export/tasks/{id}/download")]
 pub(crate) async fn download(
     req: HttpRequest,
     pool: web::Data<Pool>,
+    storage: web::Data<Storage>,
     user: UserBaseI,
     path: web::Path<Uuid>,
-) -> actix_web::Result<NamedFile> {
+    query: web::Query<DownloadQuery>,
+) -> actix_web::Result<HttpResponse> {
     let id = path.into_inner();
-    let t = task::get_task(&pool, id)
-        .await
-        .map_err(|error| actix_web::error::ErrorInternalServerError(error.to_string()))?
-        .filter(|t| can_access(&user, t))
-        .ok_or_else(|| actix_web::error::ErrorNotFound("任务不存在"))?;
-    if t.status != task::STATUS_COMPLETED {
-        return Err(actix_web::error::ErrorBadRequest("任务尚未完成"));
-    }
-    let file_path = t
-        .file_path
-        .ok_or_else(|| actix_web::error::ErrorInternalServerError("导出文件缺失"))?;
-    let date = chrono::Utc::now().format("%Y-%m-%d");
-    let short_id = &id.to_string()[..8];
-    let file = NamedFile::open(&file_path)
-        .map_err(|_| actix_web::error::ErrorNotFound("导出文件不存在或已被清理"))?
-        .set_content_disposition(ContentDisposition {
-            disposition: DispositionType::Attachment,
-            parameters: vec![DispositionParam::Filename(format!(
-                "network-mapping-export-{date}-{short_id}.csv"
-            ))],
-        });
-    audit(&pool, &req, &user, "download", id, "success").await;
-    Ok(file)
+    let artifact = get_artifact(&pool, &user, id, query.source).await?;
+    let source = artifact.source();
+    let attachment = disposition(id);
+    let response = match artifact {
+        Artifact::Local(path) => web::block(move || NamedFile::open(path))
+            .await?
+            .map_err(|_| actix_web::error::ErrorNotFound("导出文件不存在或已被清理"))?
+            .set_content_disposition(attachment)
+            .into_response(&req),
+        Artifact::S3(object) if object.target.proxy_download => {
+            let output = storage.download(&object).await.map_err(download_error)?;
+            let mut response = HttpResponse::Ok();
+            response.insert_header((header::CONTENT_TYPE, "text/csv; charset=utf-8"));
+            response.insert_header((header::CONTENT_DISPOSITION, attachment));
+            if let Some(length) = output.content_length() {
+                response.insert_header((header::CONTENT_LENGTH, length.to_string()));
+            }
+            response.streaming(futures_util::stream::try_unfold(
+                output.body,
+                |mut body| async {
+                    Ok::<_, actix_web::Error>(
+                        body.try_next()
+                            .await
+                            .map_err(download_error)?
+                            .map(|bytes| (bytes, body)),
+                    )
+                },
+            ))
+        }
+        Artifact::S3(object) => {
+            let url = storage
+                .link(&object, attachment.to_string())
+                .await
+                .map_err(download_error)?;
+            HttpResponse::Found()
+                .insert_header((header::LOCATION, url))
+                .insert_header(("referrer-policy", "no-referrer"))
+                .finish()
+        }
+    };
+    audit_download(&pool, &req, &user, id, source).await;
+    let mut response = response;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
 }
 
 #[post("/api/data-export/tasks/{id}/cancel")]
@@ -364,14 +647,11 @@ pub(crate) async fn delete_task(
         Err(error) => return server_error(error.to_string()),
     }
     match task::delete_task(&pool, id).await {
-        Ok(Some(file_path)) => {
-            if let Some(path) = file_path {
-                let _ = tokio::fs::remove_file(&path).await;
-            }
+        Ok(true) => {
             audit(&pool, &req, &user, "delete", id, "success").await;
             HttpResponse::Ok().json(json!({"success": true, "data": {}}))
         }
-        Ok(None) => bad("仅终态任务可以删除"),
+        Ok(false) => bad("仅终态任务可以删除"),
         Err(error) => server_error(error.to_string()),
     }
 }

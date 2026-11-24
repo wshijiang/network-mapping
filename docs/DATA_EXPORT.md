@@ -2,20 +2,19 @@
 
 [文档中心](README.md)
 
-用户可通过 Web 管理端或服务器 CLI，把**搜索语句匹配的资产端点数据**交给后台导出：服务器 worker 执行查询、流式写入 CSV 文件并存放于服务器导出目录，Web 端下载文件。导出与资产搜索使用同一 DSL、同一数据范围规则，适合大批量结果离线分析。
+用户可通过 Web 管理端或服务器 CLI，把**搜索语句匹配的资产端点数据**交给后台导出：服务器 worker 执行查询、流式写入 CSV 文件并保存至服务器本地、S3 兼容对象存储或两个位置，Web 端可选下载来源。导出与资产搜索使用同一 DSL、同一数据范围规则，适合大批量结果离线分析。
 
 - Web 入口：侧边栏「**数据管理 → 导出**」（`/data/export`）；搜索页结果区「**导出**」按钮（可选本页/全部、调整字段）。
 - CLI 入口：`network_mapping_server export …`（与 `import` 同级）。**CLI 仅创建/查看/取消任务，文件下载仅 Web 提供。**
-- 设计稿见工作区 `DATA_EXPORT_PLAN.md`。
 
 ## 架构与口径
 
-- **单一执行者**：Web 与 CLI 都只在 PostgreSQL 创建任务（`data_export_task`），由服务器进程内的导出 worker 认领执行（租约模式，与数据导入一致）。服务器离线时任务保持待执行，启动后自动继续；租约过期的运行中任务从头重跑（导出只读、幂等）。
+- **后台执行**：Web 与 CLI 都只在 PostgreSQL 创建任务（`data_export_task`），由服务器进程内的导出 worker 认领执行（租约模式，与数据导入一致）。服务器离线时任务保持待执行，启动后自动继续；租约过期的运行中任务从头重跑（导出只读、幂等）。
 - **与搜索同口径**：同一搜索 DSL（`parse_and_compile_elasticsearch`）、同一排序定义。创建任务时**快照数据范围**（管理员 `global`，普通用户 `user` 级），后台执行期间角色变化不影响结果口径。
 - **只读本地索引**：导出查询 `current_endpoint` 索引，**不触发联测**。联测完成的数据本就自动入库，会被后续导出自然覆盖；搜索页展示态中尚未入库的联测端点不在导出范围内。匹配条数以本地索引 count 为准（`POST /api/data-export/preview`），与搜索页 total（可能含联测合并新增）可能有差异。
 - **突破 10k 浏览窗口**：搜索页分页受 `offset + limit ≤ 10000` 限制；「全部」导出使用 Elasticsearch **PIT + search_after** 分批遍历（排序含 `endpoint_key` tie-breaker，全序稳定），不受该窗口限制，行数上限由 `max_rows` 约束。PIT id 若被 ES 轮换，逐批跟随最新 id 并在结束时清理。
 - **拒绝不完整结果**：「本页」与「全部」导出均校验 ES 响应的 `timed_out` 与失败分片（`allow_partial_search_results=false` + 响应校验），不完整响应直接使任务失败，不会写出半份 CSV 后标记完成。
-- **流式写入**：逐批拉取、逐行追加写文件，内存占用与结果规模无关；边写边累计 SHA-256 与文件大小。
+- **流式写入**：逐批拉取、缓冲写入文件，内存占用与结果规模无关；边写边累计 SHA-256 与文件大小。
 
 ## 导出范围与字段
 
@@ -41,9 +40,12 @@ CSV 格式：UTF-8 带 BOM、CRLF 行尾、RFC4180 引号；单元格公式注�
 | POST | `/api/data-export/tasks` | 创建任务，见下方请求体 |
 | GET | `/api/data-export/tasks` | `?limit&offset&status`；普通用户仅本人，管理员全部 |
 | GET | `/api/data-export/tasks/{id}` | 详情（含进度 `exported_rows`/`matched_total`） |
-| GET | `/api/data-export/tasks/{id}/download` | 仅 `completed`；流式下载 CSV（`Content-Disposition` 附件） |
+| GET | `/api/data-export/tasks/{id}/download` | 仅 `completed`；可选 `?source=local\|s3`，默认本地优先 |
+| GET | `/api/data-export/tasks/{id}/download-link` | 验证指定副本并返回下载 URL；S3 直连链接有效期 60 秒 |
+| GET / PUT | `/api/data-export/settings` | 管理员查看或更新全局导出设置；更新时提交 `expected_revision` 和 `document` |
+| POST | `/api/data-export/settings/test-s3` | 管理员验证测试对象的写入、读取和删除 |
 | POST | `/api/data-export/tasks/{id}/cancel` | `pending`/`running` → `cancelled`（worker 批间检查生效） |
-| DELETE | `/api/data-export/tasks/{id}` | 仅终态任务；删除记录与文件 |
+| DELETE | `/api/data-export/tasks/{id}` | 仅终态任务；删除任务后由后台清理副本 |
 
 创建请求体：
 
@@ -91,17 +93,37 @@ network_mapping_server export cancel <task-id> --admin admin
 enabled = true
 directory = "./data-export"   # CSV 存放目录；相对路径相对配置文件目录解析
 max_rows = 1000000            # 单任务「全部」导出行数上限
-batch_size = 2000             # ES 每批拉取行数（1..=10000）
+batch_size = 2000             # 首次初始化导出设置时使用的 ES 每批行数（1..=10000）
 lease_seconds = 120           # worker 租约（≥10）
 retention_days = 30           # 终态任务文件与记录保留天数
 ```
 
-未配置时使用上述默认值，升级零行为变化。部署时导出目录需持久化（Docker 卷）；worker 定期清理超过保留期的终态任务文件与记录。系统维护模式期间不认领新任务。
+首次部署默认只保存到服务器本地。管理员可在「数据管理 → 导出 → 导出设置」勾选一个或两个位置，调整每批读取行数、每个服务进程同时执行的任务数（默认 1，范围 1–4）和每任务的 S3 分片上传并发数（默认 2，范围 1–8）。保存位置、批大小和上传并发会随新任务快照。历史任务按创建时的副本位置下载。
+
+启用 S3 时，在服务端配置中加入 `[data_export.s3]`，重启服务后到导出设置测试连接并勾选 S3。以下示例适用于使用路径式地址的兼容产品。
+
+```toml
+[data_export.s3]
+region = "us-east-1"
+bucket = "network-mapping-exports"
+prefix = "exports"
+endpoint = "https://s3.example.invalid"
+path_style = true
+# download_endpoint = "https://download.example.invalid"
+# proxy_download = true
+```
+
+AWS S3 通常可省略 `endpoint`，并使用默认的虚拟主机式地址。凭据由 AWS 凭据链提供，例如工作负载角色或服务进程的 `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY` 和可选的 `AWS_SESSION_TOKEN`。存储桶应保持私有，凭据仅授权导出前缀下的对象读写、删除和分片中止。对启用了对象版本控制的桶，可在导出前缀设置生命周期，清理非当前版本和未完成的分片上传。
+
+默认由浏览器通过短时签名直连对象存储。若上传地址无法从浏览器访问，可指定供应商配置的 HTTPS `download_endpoint`，或设 `proxy_download = true` 从服务器流式转发。既有对象仍使用原始地址和桶；迁移时需保持旧位置和凭据可用，直至旧副本到期。
+
+仅选 S3 时也需要可写的本地目录作为生成和上传的暂存区。多实例部署应让各实例在同一绝对路径访问共享导出目录。超过保留期或手动删除的任务由后台清理副本。系统维护模式期间不认领新任务。
 
 ## 安全与限制
 
 - 所有权隔离 + 创建时范围快照；下载路径只来自数据库记录，文件名服务端生成。
 - 审计事件：`data_export.create/cancel/delete/download`（Web）与 `cli.create/cli.cancel`（CLI）。
-- 单 worker 顺序执行；`max_rows` 与批间租约续期约束资源占用；PIT 在任务结束/失败时关闭。
-- 失败任务不留半成品文件；取消竞态由完成登记的条件更新兜底（登记失败即删除文件）。
+- 使用 `max_rows`、批大小和并发上限约束资源；PIT 在任务结束或失败时关闭。
+- 双位置任务上传失败时保留已生成的本地副本，并在列表显示 S3 上传失败。仅选 S3 的任务在上传失败时标为失败。
+- 通过独立的执行尝试记录追踪暂存文件和对象，任务取消、过期或重领后可重试清理。
 - 导出为只读操作，不修改资产数据；情报标注列暂未纳入字段目录（后续迭代）。

@@ -802,6 +802,18 @@ pub async fn run(args: Clis) -> io::Result<()> {
             security.scanner_token_pepper.clone(),
         ),
     );
+    crate::data_export::settings::init(&pool, &config.data_export)
+        .await
+        .map_err(|error| io::Error::other(format!("加载导出配置失败：{error}")))?;
+    let export_storage = web::Data::new(crate::data_export::storage::Storage::default());
+    background.spawn(
+        "data-export-cleanup",
+        crate::data_export::worker::run_cleanup(
+            pool.clone(),
+            config.data_export.retention_days,
+            export_storage.clone(),
+        ),
+    );
     background.spawn(
         "data-export",
         crate::data_export::worker::run_worker(
@@ -810,6 +822,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             elasticsearch_data.clone(),
             system_maintenance_state.clone(),
             runtime_settings.general.clone(),
+            export_storage.clone(),
         ),
     );
     let federation_config = config.federation.clone();
@@ -892,6 +905,7 @@ pub async fn run(args: Clis) -> io::Result<()> {
             .app_data(scanner_diagnostics_data.clone())
             .app_data(web::Data::new(data_import_config.clone()))
             .app_data(web::Data::new(config.data_export.clone()))
+            .app_data(export_storage.clone())
             .app_data(federation_service.clone())
             .app_data(web::JsonConfig::default().limit(server_max_body))
             .wrap(CsrfMiddleware)

@@ -180,6 +180,7 @@ pub async fn execute(command: &ExportCommand, pool: &Pool, config: &DataExportCo
                     sort_order: sort.order_name(),
                     fields: serde_json::json!(keys),
                     matched_total: None,
+                    storage_plan: super::settings::plan(pool, config).await?,
                 },
             )
             .await?;
