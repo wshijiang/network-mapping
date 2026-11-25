@@ -213,6 +213,7 @@ p = 2
 # max_targets_per_task = 100
 
 # [analytics_snapshot]
+# page_rollups = "off" # off | build | read
 # mode = "realtime"
 # interval_minutes = 30
 # execution_timeout_minutes = 360

@@ -25,12 +25,66 @@ Elasticsearch，分析接口只读取 PostgreSQL 中的紧凑统计事实。
 5. 确认首次回填水位已生成后，在运行时设置中改为 `snapshot`。首次快照尚未完整时接口返回 503，
    不会静默回退到可能很慢的实时 ES 聚合。
 
+## 扫描分析页图表快照
+
+图表发布器使用现有 PostgreSQL 扫描快照事实，按系统时区计算页面的 4／8／12 周查询。
+热力图保存各权限及筛选范围的每日精确唯一 IP 数。分布保存预设窗口的总数和 Top 10，
+接口直接截取所选 Top N。管理员全局和用户自身范围分别计算；全部扫描器或来源的唯一 IP
+在后台跨执行去重。图表结果以同一发布版本提交，两条接口返回 `meta.snapshot_revision` 和
+`meta.data_as_of`。任意时间范围、专项统计和报告继续使用各自已有的统计口径。
+
+### 启用和回滚
+
+1. 基础快照已发布后，在设置的运行策略中，将「分析图表快照」设置为「后台生成」
+   （`analytics_snapshot.page_rollups = "build"`）。保持现有读取路径，等待首次发布。
+2. 重新加载设置，确认 `GET /api/config/runtime/analytics_snapshot` 的 `page_progress.ready`
+   为 `true`，核对时区和数据时间。在 `mode = "snapshot"` 下切换为「读取已发布图表」
+   （`page_rollups = "read"`）。页面窗口未准备好时接口返回
+   `503 analytics_page_snapshot_pending`，响应含 `Retry-After`。
+3. 需要恢复旧查询时，切回「后台生成」并保留后台发布，或切为「关闭」
+   （`page_rollups = "off"`）同时停止发布。重新启用后等待新一轮回填。历史事实和已生成结果无需删除。
+
+发布器每 15 秒检查一次，数据库事务锁保证同一时间只有一个发布器。事实新增、替换、级联删除、
+截断和历史补传写入变更记录。一次发布读取固定的数据库视图并原子更新结果，计算期间的新变更留给
+下一次发布。新增可以继续使用上一个完整版本。受删除或替换影响的窗口在新版本提交前返回准备中，
+以免展示已失效的数据。发布器会为跨午夜后的预设范围提前生成结果。更改时区后，在匹配新时区的
+版本就绪前返回准备中。非上海时区遇到仅保留上海日期的旧事实时，热力图沿用原来的历史兼容提示。
+
+排查时查看 `page_progress` 中的 `revision`、`timezone`、`data_as_of`、`ready` 和
+`pending_changes`，以及服务日志 `AnalysisPageSnapshotPublished`、
+`AnalysisPagePublicationFailed`、`AnalysisPagePublicationTimedOut`。调试级别的
+`AnalysisPageSnapshotRead` 提供连接获取和主 SQL 耗时。
+
+### 前后性能对比
+
+在本地 PostgreSQL 18 使用 534,655 条发现事实、1,458,000 条分布事实，
+以管理员无筛选的默认 12 周窗口交替执行新旧 HTTP 处理路径。每条路径预热一次后取 24 个样本，
+逐次对照响应 `data`。计时包含实际查询、连接池获取和响应序列化，测试注入管理员身份，
+未计入真实登录鉴权、网络和反向代理。未启用响应缓存。
+
+| 请求 | 原路径 P50 / P95 | 图表快照 P50 / P95 |
+| --- | ---: | ---: |
+| 发现 IP 热力图 | 207.31 / 211.69 ms | 1.46 / 1.70 ms |
+| 服务分布 Top 5 | 36.43 / 39.20 ms | 0.82 / 1.02 ms |
+| 端口分布 Top 10 | 76.63 / 78.60 ms | 0.93 / 1.20 ms |
+
+本轮首次发布耗时 7.31 秒，图表表及索引合计约 55 MB。一次影响一天的分布变更重新发布耗时 3.08 秒。
+这些数据来自本地压测，生产切换后应继续观察上传延迟、连接池等待、发布耗时和请求 P95。
+
+复测时将 `ANALYTICS_TEST_DATABASE_URL` 指向一次性 PostgreSQL 数据库，执行：
+
+```sh
+cargo test --locked --lib analytics_page::tests -- --include-ignored --nocapture --test-threads=1
+```
+
 ## 配置
 
 ```toml
 [analytics_snapshot]
 # realtime: 保持旧实时查询；shadow: 后台构建、接口仍实时；snapshot: 接口只读快照。
 mode = "realtime"
+# off: 关闭；build: 只后台生成；read: snapshot 模式下读取已发布图表。
+page_rollups = "off"
 # 历史补偿检查及下一轮固定回填范围的建立周期；不是队列消费休眠时间。
 interval_minutes = 30
 # 单执行最长处理时间（分钟，30–1440），包括读取、暂存和发布。
