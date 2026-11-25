@@ -68,6 +68,8 @@ pub(super) async fn dispatch_due(pool: &Pool, maxmind: &MaxMindState) -> Result<
         let rows = tx.query(
             "SELECT r.*, u.username, u.role FROM target_monitor_rule r JOIN users u ON u.id=r.created_by \
              WHERE r.enabled AND r.deleted_at IS NULL AND r.next_run_at<=NOW() \
+             AND u.deleted_at IS NULL AND u.disabled_at IS NULL AND NOT u.limit_login \
+             AND (u.role=1 OR (u.role=2 AND u.access_policy IS NULL)) \
              AND NOT EXISTS(SELECT 1 FROM target_monitor_run run WHERE run.rule_id=r.id AND run.status IN ('pending','running')) \
              ORDER BY r.next_run_at LIMIT 8 FOR UPDATE OF r SKIP LOCKED",
             &[],
@@ -156,6 +158,12 @@ async fn create_monitor_task(
             .transaction()
             .await
             .map_err(|_| "database_unavailable")?;
+        crate::access::ensure_scan_authorized(&tx, rule.owner_id, None)
+            .await
+            .map_err(|error| match error {
+                crate::access::UpdateError::Forbidden => "authorization_changed",
+                _ => "database_unavailable",
+            })?;
         let db_id: i32 = tx.query_one(
             "INSERT INTO scan_task(user_id,task_id,task_initiator,task_target,task_port,task_level,remarks,dispatch_mode,address_family,scan_profile,scan_plan,task_kind,dns_targets,dns_resolvers,generation_metadata,task_source) \
              VALUES($1,$2,$3,ARRAY[]::INET[],'53',1,$4,'automatic','ipv4','dns_records',$5,'dns',$6,'[]'::JSONB,$7,'monitor') RETURNING id",
@@ -194,12 +202,22 @@ async fn create_monitor_task(
             &[None],
             &rule.profile,
             &plan,
+            None,
             &crate::audit::AuditContext::cli("target-monitor"),
             &actor,
             maxmind,
         )
         .await
-        .map_err(|_| "create_failed")?;
+        .map_err(|error| {
+            if matches!(
+                error.downcast_ref::<crate::access::UpdateError>(),
+                Some(crate::access::UpdateError::Forbidden)
+            ) {
+                "authorization_changed"
+            } else {
+                "create_failed"
+            }
+        })?;
     created.task_ids.into_iter().next().ok_or("create_failed")
 }
 
