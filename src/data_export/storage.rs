@@ -203,6 +203,18 @@ impl S3Config {
         Ok(())
     }
 
+    pub(super) fn seal_proxy(mut self, key: &str) -> std::result::Result<Self, String> {
+        if let Some(url) = self.proxy_url.take() {
+            if self.proxy_ciphertext.is_some() {
+                self.proxy_url =
+                    Some(outbound_proxy::endpoint(&url).map_err(|_| "S3 代理地址无效")?);
+            } else {
+                self.store_proxy(&url, key)?;
+            }
+        }
+        Ok(self)
+    }
+
     pub(crate) fn with_credentials(
         mut self,
         current: Option<&S3Config>,
@@ -291,6 +303,18 @@ impl Storage {
             global_proxy,
             encryption_key: Arc::from(encryption_key),
         }
+    }
+
+    pub(super) fn task_object(
+        &self,
+        target: S3Config,
+        task: Uuid,
+        attempt: Uuid,
+    ) -> Result<Object> {
+        // A queued task may predate encryption of deployment proxy snapshots.
+        Ok(target
+            .seal_proxy(&self.encryption_key)?
+            .object(task, attempt))
     }
 
     pub(crate) fn prepare_connection(
@@ -696,6 +720,30 @@ mod tests {
         restored.proxy_mode = Some(ProxyMode::Custom);
         let restored = restored.with_proxy(Some(&direct), &key).unwrap();
         assert_eq!(restored.proxy_config(&key).unwrap().url, url);
+    }
+
+    #[test]
+    fn worker_object_seals_legacy_proxy_and_preserves_encrypted_snapshots() {
+        let key = openssl::base64::encode_block(&[8; 32]);
+        let storage = Storage::new(GlobalProxyState::system(), &key);
+        let url = "http://fixture-user:fixture-password@proxy.example.invalid:8080";
+        let mut legacy = target();
+        legacy.proxy_url = Some(url.into());
+        let task = Uuid::new_v4();
+        let attempt = Uuid::new_v4();
+
+        let object = storage.task_object(legacy, task, attempt).unwrap();
+        let locator = serde_json::to_value(&object).unwrap();
+        assert_eq!(
+            locator["target"]["proxy_url"],
+            "http://proxy.example.invalid:8080/"
+        );
+        assert_eq!(object.target.proxy_config(&key).unwrap().url, url);
+        assert_eq!(
+            serde_json::to_value(storage.task_object(object.target, task, attempt).unwrap())
+                .unwrap(),
+            locator
+        );
     }
 
     #[tokio::test]

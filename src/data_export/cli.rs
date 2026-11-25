@@ -207,7 +207,7 @@ pub async fn execute(
                     sort_order: sort.order_name(),
                     fields: serde_json::json!(keys),
                     matched_total: None,
-                    storage_plan: super::settings::plan(pool, config).await?,
+                    storage_plan: super::settings::plan(pool, config, encryption_key).await?,
                 },
             )
             .await?;

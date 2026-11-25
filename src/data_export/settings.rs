@@ -149,15 +149,23 @@ pub async fn read(pool: &Pool, config: &DataExportConfig) -> Result<Versioned<Se
     })
 }
 
-pub async fn plan(pool: &Pool, config: &DataExportConfig) -> Result<Plan> {
-    let current = read(pool, config).await?;
+pub async fn plan(pool: &Pool, config: &DataExportConfig, encryption_key: &str) -> Result<Plan> {
+    build_plan(read(pool, config).await?, config, encryption_key)
+}
+
+fn build_plan(
+    current: Versioned<Settings>,
+    config: &DataExportConfig,
+    encryption_key: &str,
+) -> Result<Plan> {
     let s3 = if current.value.s3 {
         Some(
             current
                 .value
                 .connection(config)
                 .cloned()
-                .ok_or("S3 连接配置不可用")?,
+                .ok_or("S3 连接配置不可用")?
+                .seal_proxy(encryption_key)?,
         )
     } else {
         None
@@ -174,6 +182,40 @@ pub async fn plan(pool: &Pool, config: &DataExportConfig) -> Result<Plan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deployment_proxy_credentials_are_encrypted_in_task_plan() {
+        let url = "socks5h://fixture-user:fixture%40password@proxy.example.invalid:1080";
+        let config = DataExportConfig {
+            s3: Some(
+                serde_json::from_value(serde_json::json!({
+                    "region": "us-east-1",
+                    "bucket": "exports",
+                    "proxy_url": url,
+                }))
+                .unwrap(),
+            ),
+            ..DataExportConfig::default()
+        };
+        let mut settings = Settings::defaults(&config);
+        settings.s3 = true;
+        let key = openssl::base64::encode_block(&[8; 32]);
+        let revision = Versioned {
+            value: settings,
+            revision: 1,
+        };
+        assert!(build_plan(revision.clone(), &config, "invalid-key").is_err());
+        let plan = build_plan(revision, &config, &key).unwrap();
+        let document = serde_json::to_value(plan).unwrap();
+        assert_eq!(
+            document["s3"]["proxy_url"],
+            "socks5h://proxy.example.invalid:1080"
+        );
+        let persisted: Plan = serde_json::from_value(document).unwrap();
+        let target = persisted.s3.unwrap();
+        let ciphertext = target.proxy_ciphertext.unwrap();
+        assert_eq!(crate::secret::decrypt(&ciphertext, &key).unwrap(), url);
+    }
 
     #[test]
     fn storage_and_performance_limits_are_enforced() {

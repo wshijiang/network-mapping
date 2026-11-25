@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::admin::UserBaseI;
 use crate::audit::{AuditContext, AuditEvent, write_standalone};
+use crate::config::ServerConfig;
 use crate::data_export::DataExportConfig;
 use crate::data_export::fields;
 use crate::data_export::settings::{self, SaveError, Settings};
@@ -406,6 +407,7 @@ pub(crate) async fn create_task(
     pool: web::Data<Pool>,
     elasticsearch: web::Data<ElasticsearchService>,
     config: web::Data<DataExportConfig>,
+    server: web::Data<ServerConfig>,
     user: UserBaseI,
     body: web::Json<CreateBody>,
 ) -> impl Responder {
@@ -458,7 +460,7 @@ pub(crate) async fn create_task(
             config.max_rows
         ));
     }
-    let storage_plan = match settings::plan(&pool, &config).await {
+    let storage_plan = match settings::plan(&pool, &config, &server.encrypt_key).await {
         Ok(plan) => plan,
         Err(error) => {
             tracing::warn!(event = "DataExportPlanFailed", %error);

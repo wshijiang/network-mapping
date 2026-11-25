@@ -206,8 +206,8 @@ async fn execute_task(
     let path = config.directory.join(format!("{}-{attempt}.csv", task.id));
     let object = plan
         .s3
-        .as_ref()
-        .map(|target| target.object(task.id, attempt));
+        .map(|target| storage.task_object(target, task.id, attempt))
+        .transpose()?;
     let locator = object.as_ref().map(serde_json::to_value).transpose()?;
     let file_path = path.to_str().ok_or("导出目录不是有效的 UTF-8 路径")?;
     if !task::register_attempt(pool, task.id, attempt, file_path, locator.as_ref()).await? {
