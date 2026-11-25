@@ -321,6 +321,7 @@ pub(crate) async fn get_asset_favicon(
         .get("icon_md5")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    // Require authorization again when another session requests this URL.
     let etag = format!("\"{icon_md5}\"");
     if req
         .headers()
@@ -330,7 +331,7 @@ pub(crate) async fn get_asset_favicon(
     {
         return HttpResponse::NotModified()
             .insert_header(("ETag", etag))
-            .insert_header(("Cache-Control", "private, max-age=86400"))
+            .insert_header(("Cache-Control", "private, no-cache"))
             .finish();
     }
     let stored_type = source
@@ -347,7 +348,7 @@ pub(crate) async fn get_asset_favicon(
     HttpResponse::Ok()
         .content_type(content_type)
         .insert_header(("ETag", etag))
-        .insert_header(("Cache-Control", "private, max-age=86400"))
+        .insert_header(("Cache-Control", "private, no-cache"))
         .body(bytes)
 }
 

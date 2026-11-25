@@ -149,7 +149,7 @@ async fn discovery_schema_is_idempotent_and_job_ownership_is_enforced() {
     c.execute("INSERT INTO scanner_info(scanner_id,name,create_user,is_enable,supports_ipv4,ipv4_ready,scan_capabilities) VALUES($1,'DNS fixture',1,TRUE,TRUE,TRUE,$2)", &[&Uuid::new_v4().to_string(),&json!({"profiles":["dns_records"]})]).await.unwrap();
     let mut evidence = Evidence::empty("example.com");
     client::parse_rows(
-        br#"[{"id":7,"name_value":"api.example.com"}]"#,
+        br#"[{"id":7,"name_value":"api.example.com\nlater.example.com"}]"#,
         &mut evidence,
     )
     .unwrap();
@@ -221,6 +221,28 @@ async fn discovery_schema_is_idempotent_and_job_ownership_is_enforced() {
         .await
         .is_err()
     );
+    c.execute("UPDATE users SET access_policy='{}' WHERE id=1", &[])
+        .await
+        .unwrap();
+    let denied = queue_evidence(
+        &pool,
+        &policy,
+        &user,
+        id,
+        &evidence,
+        vec!["later.example.com".into()],
+        &context,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    assert_eq!(denied.code, "authorization_changed");
+    let count: i64 = c
+        .query_one("SELECT COUNT(*) FROM scan_task", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(count, 1);
     c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .await
         .unwrap();

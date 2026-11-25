@@ -221,6 +221,10 @@ impl Access {
         self.role == USER && self.policy.is_none()
     }
 
+    pub(crate) fn allows_automatic_scan(&self) -> bool {
+        self.role == ADMIN || self.legacy_user()
+    }
+
     pub(crate) fn allows(&self, permission: Permission) -> bool {
         self.role == ADMIN
             || (self.legacy_user() && permission.grantable_to(USER))
@@ -318,7 +322,6 @@ impl Access {
         }
         read && ((path == "/api/scanner/list"
             && (self.allows(ReadResults) || self.allows(CreateScan)))
-            || (path == "/api/dns/resolvers" && self.allows(CreateScan))
             || (self.allows(ReadResults)
                 && (matches!(
                     path,
@@ -517,6 +520,25 @@ mod tests {
     #[test]
     fn roles_and_expiry_bound_effective_permissions() {
         use Permission::*;
+        assert!(
+            Access {
+                role: ADMIN,
+                version: 0,
+                policy: None
+            }
+            .allows_automatic_scan()
+        );
+        assert!(
+            Access {
+                role: USER,
+                version: 0,
+                policy: None
+            }
+            .allows_automatic_scan()
+        );
+        let scanner = scoped(USER, vec![ReadResults, CreateScan]);
+        assert!(!scanner.allows_automatic_scan());
+        assert!(!scanner.allows_route(&Method::GET, "/api/dns/resolvers"));
         let reader = scoped(READ_ONLY, vec![ReadResults, CreateScan]);
         assert!(reader.allows_route(&Method::POST, "/api/search/v2"));
         assert!(reader.allows_route(&Method::GET, "/api/assets/favicon"));
