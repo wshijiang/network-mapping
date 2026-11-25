@@ -446,6 +446,15 @@ file 模式不再用 `NM__…` 覆盖 TOML；Compose 端口映射和探针环境
 | `scanner_diagnostics.error_retention_days` | 整数，`90` 天 | 错误保留，1–3650 |
 | `scanner_diagnostics.max_storage_bytes` | 整数，`10737418240` 字节 | 诊断存储上限，至少 1073741824 字节 |
 | `scanner_diagnostics.auto_collect` | 布尔值，`false` | 自动采集开关；见[诊断指南](SCANNER_DIAGNOSTICS.md) |
+| `data_export.s3.endpoint` | 可选 URL，未设置 | S3 兼容产品的 HTTP(S) API 地址；省略时使用 AWS S3 区域端点 |
+| `data_export.s3.region` | 字符串，配置该段时必填 | 请求签名区域 |
+| `data_export.s3.bucket` | 字符串，配置该段时必填 | 导出使用的存储桶 |
+| `data_export.s3.prefix` | 字符串，空 | 导出对象键的前缀 |
+| `data_export.s3.path_style` | 布尔值，`false` | 使用路径式桶寻址 |
+| `data_export.s3.download_endpoint` | 可选 URL，未设置 | 浏览器访问的签名下载地址，省略时使用 S3 API 地址 |
+| `data_export.s3.proxy_download` | 布尔值，`false` | 通过服务端转发 S3 下载 |
+| `data_export.s3.proxy_mode` | 可选枚举，未设置 | `system` 跟随全局，`direct` 直连，`custom` 使用自定义代理。省略时配置了代理地址即使用自定义代理，否则直连 |
+| `data_export.s3.proxy_url` | 可选 URL，未设置 | 自定义出站代理地址，支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H |
 | `report_renderer.releases_directory` | 可选路径，未设置 | 外部报表渲染制品目录；见[模块实现](MODULE_RUNTIME_IMPLEMENTATION.md) |
 | `report_mail.public_base_url` | 字符串，空 | 报告外部 HTTPS 地址；文件种子或 Web「报告邮件」 |
 | `report_mail.remote_images_enabled` | 布尔值，`false` | 报告远程图片开关，开启前需提供外部地址 |
@@ -462,6 +471,9 @@ file 模式不再用 `NM__…` 覆盖 TOML；Compose 端口映射和探针环境
 | `email_config.host` | 字符串，整个段默认未设置 | SMTP 主机；文件部署的邮件初始值，也可通过 Web 邮件设置管理 |
 | `email_config.account_username` | 字符串，整个段默认未设置 | SMTP 账户，使用文件段时需提供 |
 | `email_config.account_password` | 字符串，整个段默认未设置 | SMTP 密钥，使用文件段时需提供；见[部署指南](DEPLOYMENT.md) |
+
+`[data_export.s3]` 提供部署默认连接。也可通过 Web「导出设置 → 管理 S3 连接」或服务器 CLI
+配置连接和独立凭据，详见[数据导出](DATA_EXPORT.md)。
 
 `monitor.service_defaults` 以 `web_api`、`postgresql`、`elasticsearch_query`、
 `elasticsearch_write` 为可选键。未配置时沿用前述基础阈值；每条显式规则包含以下字段，
