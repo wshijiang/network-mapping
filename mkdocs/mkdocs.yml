@@ -48,6 +48,7 @@ nav:
       - Docker 配置参考: DOCKER_CONFIGURATION.md
       - 启动配置检查: CONFIG_CHECK.md
       - 登录人机验证: HUMAN_VERIFICATION.md
+      - 用户角色与权限管理: USER_ACCESS.md
       - 用户管理 CLI: USER_MANAGEMENT_CLI.md
   - 功能使用:
       - 功能概览: FEATURES.md

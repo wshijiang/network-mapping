@@ -2287,7 +2287,9 @@ pub(crate) async fn create_task(
                             &[],
                             &scan_profile,
                             create_data.level as u8,
-                            task_info.port.unwrap_or(crate::scan_control::creation::DEFAULT_SCAN_PORTS),
+                            task_info
+                                .port
+                                .unwrap_or(crate::scan_control::creation::DEFAULT_SCAN_PORTS),
                         )
                 })
             {
