@@ -22,7 +22,7 @@
 
 扫描创建权限要求至少一个已存在的扫描器、一种扫描模式和一个目标 CIDR 或域名。显式授权用户须在创建时选择获授权的节点。目标 CIDR 必须完整落在授权网段内，域名条目匹配本身及以点分隔的子域。节点列表只提供选择所需的状态和能力。
 
-受支持的模式为 `legacy`、`port_only`、`service_inventory`、`vulnerability_scan`、`udp_inventory` 和 `dns_records`。显式授权的 DNS 任务使用节点系统解析器，单独执行 DNS 记录查询。自定义解析器、DNS 派生端口扫描和自动或全部节点分配保留在现有管理员与兼容路径。授权可限制最高优先级、允许的端口范围、单任务目标数和端口数、未完成任务数以及滚动 24 小时内的任务数。
+受支持的模式为 `port_only`、`service_inventory`、`vulnerability_scan`、`udp_inventory` 和 `dns_records`。旧模式名 `legacy` 按 `port_only` 保存和执行。显式授权的 DNS 任务使用节点系统解析器，单独执行 DNS 记录查询。自定义解析器、DNS 派生端口扫描和自动或全部节点分配保留在现有管理员与兼容路径。授权可限制最高优先级、允许的端口范围、单任务目标数和端口数、未完成任务数以及滚动 24 小时内的任务数。
 
 审计类别按完整名称匹配，例如 `user_security`、`authorization`、`authentication`、`task`、`scanner`。类别过滤同时适用于列表、详情和 CSV 导出。审计导出需要近期验证。
 

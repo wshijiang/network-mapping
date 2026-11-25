@@ -49,6 +49,9 @@ pub async fn placement_preview(
         return HttpResponse::Forbidden().finish();
     }
     let profile = input.scan_profile.trim().to_ascii_lowercase();
+    let profile = crate::scan_control::profiles::ip_profile_alias(&profile)
+        .map(str::to_owned)
+        .unwrap_or(profile);
     let plan = crate::scan_control::creation::build_service_scan_plan_with_options(
         &profile,
         &input.required_services,

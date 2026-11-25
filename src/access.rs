@@ -61,6 +61,16 @@ pub(crate) struct Policy {
 }
 
 impl Policy {
+    fn normalize_profiles(&mut self) {
+        for profile in &mut self.profiles {
+            if let Some(canonical) = crate::scan_control::profiles::ip_profile_alias(profile) {
+                *profile = canonical.to_owned();
+            }
+        }
+        self.profiles.sort_unstable();
+        self.profiles.dedup();
+    }
+
     fn validate(&mut self, role: i32) -> Result<(), &'static str> {
         use Permission::*;
         if !matches!(role, USER | READ_ONLY | AUDITOR)
@@ -90,6 +100,7 @@ impl Policy {
         for domain in &mut self.domains {
             *domain = crate::dns::canonical_scan_domain(domain).map_err(|_| "授权域名无效")?;
         }
+        self.normalize_profiles();
         if self.profiles.iter().any(|p| {
             !(crate::scan_control::creation::is_ip_scan_profile(p)
                 || matches!(p.as_str(), "udp_inventory" | "dns_records"))
@@ -225,13 +236,17 @@ impl Access {
     }
 
     pub(crate) fn from_row(row: &tokio_postgres::Row) -> serde_json::Result<Self> {
+        let mut policy: Option<Policy> = row
+            .get::<_, Option<Value>>("access_policy")
+            .map(serde_json::from_value)
+            .transpose()?;
+        if let Some(policy) = &mut policy {
+            policy.normalize_profiles();
+        }
         Ok(Self {
             role: row.get("role"),
             version: row.get("access_version"),
-            policy: row
-                .get::<_, Option<Value>>("access_policy")
-                .map(serde_json::from_value)
-                .transpose()?,
+            policy,
         })
     }
 
@@ -309,6 +324,7 @@ impl Access {
                     path,
                     "/api/task/all"
                         | "/api/assets/summary"
+                        | "/api/assets/favicon"
                         | "/api/assets/ports"
                         | "/api/assets/port-history"
                         | "/api/assets/tags"
@@ -503,6 +519,8 @@ mod tests {
         use Permission::*;
         let reader = scoped(READ_ONLY, vec![ReadResults, CreateScan]);
         assert!(reader.allows_route(&Method::POST, "/api/search/v2"));
+        assert!(reader.allows_route(&Method::GET, "/api/assets/favicon"));
+        assert!(!scoped(READ_ONLY, vec![]).allows_route(&Method::GET, "/api/assets/favicon"));
         assert!(!reader.allows_route(&Method::POST, "/api/task/create"));
         assert!(!reader.allows_route(&Method::GET, "/api/scanner/anything"));
 
@@ -510,6 +528,7 @@ mod tests {
         assert!(auditor.allows_route(&Method::GET, "/api/audit/events"));
         assert!(!auditor.allows_route(&Method::POST, "/api/audit/export"));
         assert!(!auditor.allows_route(&Method::GET, "/api/task/all"));
+        assert!(!auditor.allows_route(&Method::GET, "/api/assets/favicon"));
         auditor.policy.as_mut().unwrap().expires_at =
             Some(Utc::now() - chrono::TimeDelta::seconds(1));
         assert!(!auditor.allows_route(&Method::GET, "/api/audit/events"));
@@ -534,6 +553,38 @@ mod tests {
         assert!(!scope.allows_targets(&ip("192.0.2.0/25"), &[], "port_only", 2, "80-83"));
         assert!(scope.allows_targets(&[], &["docs.example.org".into()], "dns_records", 0, "53"));
         assert!(!scope.allows_targets(&[], &["otherexample.org".into()], "dns_records", 0, "53"));
+    }
+
+    #[test]
+    fn legacy_profile_grants_authorize_the_canonical_ip_profile() {
+        let mut policy = Policy {
+            permissions: vec![Permission::CreateScan],
+            profiles: vec!["legacy".into()],
+            scanners: vec![Uuid::new_v4()],
+            target_cidrs: vec!["192.0.2.0/24".parse().unwrap()],
+            port_ranges: vec!["80".into()],
+            max_targets: 1,
+            max_ports: 1,
+            max_active_tasks: 1,
+            tasks_per_day: 1,
+            ..Policy::default()
+        };
+        policy.validate(USER).unwrap();
+        assert_eq!(policy.profiles, ["port_only"]);
+        assert!(policy.allows_targets(
+            &["192.0.2.1/32".parse().unwrap()],
+            &[],
+            "port_only",
+            0,
+            "80"
+        ));
+        assert!(!policy.allows_targets(
+            &["192.0.2.1/32".parse().unwrap()],
+            &[],
+            "service_inventory",
+            0,
+            "80"
+        ));
     }
 
     #[actix_web::test]
@@ -580,7 +631,7 @@ mod tests {
         let policy = Policy {
             permissions: vec![Permission::CreateScan, Permission::RetryScan],
             target_cidrs: vec!["192.0.2.0/24".parse().unwrap()],
-            profiles: vec!["port_only".into()],
+            profiles: vec!["legacy".into()],
             scanners: vec![scanner],
             max_targets: 10,
             max_ports: 10,
@@ -615,6 +666,21 @@ mod tests {
         )
         .await
         .unwrap();
+        let stored_profiles: Value = client
+            .query_one(
+                "SELECT access_policy->'profiles' FROM users WHERE id=2",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(stored_profiles, json!(["port_only"]));
+        client
+            .execute("UPDATE users SET access_policy=jsonb_set(access_policy,'{profiles}',$1) WHERE id=2", &[&json!(["legacy"])])
+            .await
+            .unwrap();
+        let existing = load(&client, Target::Id(2)).await.unwrap();
+        assert_eq!(existing.policy.unwrap().profiles, ["port_only"]);
         let task_id = Uuid::now_v7().to_string();
         client.execute("INSERT INTO scan_task(user_id,task_id,task_initiator,task_target,user_access_version) VALUES(2,$1,'owner',ARRAY['192.0.2.1'::INET],$2)", &[&task_id, &grant.version]).await.unwrap();
         for (candidate, allowed) in [(scanner, true), (Uuid::now_v7(), false)] {
