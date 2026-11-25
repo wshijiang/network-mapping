@@ -1220,7 +1220,7 @@ pub async fn get_user_info(
                 .query(&format!("{USER_SELECT_S} LIMIT $1;"), &[&limit_i])
                 .await?
         }
-        (1 | 2, Some(username_t)) => {
+        (1..=4, Some(username_t)) => {
             database_conn
                 .query(
                     &format!("{USER_SELECT_S} WHERE username = $1 LIMIT 1;"),
@@ -1908,9 +1908,14 @@ pub async fn web_add_scanner(
     add_data: &AddScanner,
     token_pepper: &str,
 ) -> Result<ScannerRegisterSecret, Box<dyn std::error::Error>> {
+    if user.role != crate::access::ADMIN {
+        return Err("仅管理员可以新增扫描器".into());
+    }
     let mut db_conn = pool.get().await?;
     let db_transaction = db_conn.transaction().await?;
-
+    if db_transaction.query_opt("SELECT id FROM users WHERE id=$1 AND role=1 AND disabled_at IS NULL AND deleted_at IS NULL AND NOT limit_login FOR SHARE", &[&user.id]).await?.is_none() {
+        return Err("管理员权限已失效".into());
+    }
     // 生成扫描器 id （uuid v7）
     let scanner_id = Uuid::now_v7().to_string();
     let registration_token = generate_scanner_token("nm_reg")?;
@@ -1956,6 +1961,7 @@ pub async fn scanner_register(
          WHERE scanner_id = $1 \
            AND registration_token_hash = $2 \
            AND registration_consumed_at IS NULL \
+           AND deleted_at IS NULL \
            AND registration_token_expires_at > NOW() \
          FOR UPDATE;",
             &[&register_data.scanner_id, &registration_token_hash],

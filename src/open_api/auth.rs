@@ -34,7 +34,7 @@ pub(crate) async fn load(pool: &Pool, id: Uuid) -> Result<(Principal, String, Ve
     let row=c.query_opt("SELECT a.id,a.client_id,a.owner_user_id,a.name,a.environment,a.revision,a.policy,k.id AS credential_id,k.secret_hash,k.scopes,k.ip_allowlist,k.expires_at \
         FROM api_credential k JOIN api_client a ON a.id=k.client_id JOIN users u ON u.id=a.owner_user_id \
         CROSS JOIN api_platform_settings s WHERE k.id=$1 AND k.revoked_at IS NULL AND k.expires_at>NOW() \
-        AND a.status='active' AND (a.expires_at IS NULL OR a.expires_at>NOW()) AND u.deleted_at IS NULL AND u.disabled_at IS NULL AND NOT u.limit_login AND COALESCE((s.document->>'enabled')::BOOLEAN,FALSE)", &[&id]).await?.ok_or_else(unauthorized)?;
+        AND a.status='active' AND (a.expires_at IS NULL OR a.expires_at>NOW()) AND u.deleted_at IS NULL AND u.disabled_at IS NULL AND NOT u.limit_login AND (u.role=1 OR (u.role=2 AND u.access_policy IS NULL)) AND COALESCE((s.document->>'enabled')::BOOLEAN,FALSE)", &[&id]).await?.ok_or_else(unauthorized)?;
     let policy: Policy = serde_json::from_value(row.get::<_, Value>("policy"))
         .map_err(|_| ApiError::unavailable())?;
     policy.validate()?;

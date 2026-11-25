@@ -224,10 +224,29 @@ pub(super) async fn reconcile_events(pool: &Pool) -> Result<()> {
     let c = connection.transaction().await?;
     // Keys and policies are checked again at dispatch. Notify already running
     // executions through the existing cancellation protocol as soon as possible.
-    c.execute("UPDATE scan_task_execution e SET cancel_requested=TRUE FROM scan_task t WHERE e.task_id=t.id AND t.api_client_id IS NOT NULL AND e.execution_status='running' AND NOT e.cancel_requested AND NOT api_scan_task_enabled(t)",&[]).await?;
-    let cancelled=c.query("UPDATE scan_task_execution e SET execution_status='cancelled',task_end_time=$1,cancel_requested=FALSE FROM scan_task t WHERE e.task_id=t.id AND t.api_client_id IS NOT NULL AND e.execution_status='pending' AND NOT api_scan_task_enabled(t) RETURNING e.task_id",&[&{ crate::clock::get_unix_epoch_ms() }]).await?;
-    for row in cancelled {
-        crate::scan_control::refresh_task_aggregate(&c, row.get(0)).await?;
+    c.execute(
+        "WITH denied AS (
+             SELECT e.id FROM scan_task_execution e JOIN scan_task t ON e.task_id=t.id
+             WHERE e.execution_status='running' AND NOT e.cancel_requested AND NOT api_scan_task_enabled(t)
+             ORDER BY e.id LIMIT 256 FOR UPDATE OF e SKIP LOCKED
+         )
+         UPDATE scan_task_execution e SET cancel_requested=TRUE FROM denied WHERE e.id=denied.id",
+        &[],
+    ).await?;
+    let cancelled = c.query(
+        "WITH denied AS (
+             SELECT e.id FROM scan_task_execution e JOIN scan_task t ON e.task_id=t.id
+             WHERE e.execution_status='pending' AND NOT api_scan_task_enabled(t)
+             ORDER BY e.id LIMIT 256 FOR UPDATE OF e SKIP LOCKED
+         )
+         UPDATE scan_task_execution e SET execution_status='cancelled',task_end_time=$1,cancel_requested=FALSE
+         FROM denied WHERE e.id=denied.id RETURNING e.task_id",
+        &[&crate::clock::get_unix_epoch_ms()],
+    ).await?;
+    let task_ids: std::collections::BTreeSet<i32> =
+        cancelled.iter().map(|row| row.get(0)).collect();
+    for task_id in task_ids {
+        crate::scan_control::refresh_task_aggregate(&c, task_id).await?;
     }
     c.execute("INSERT INTO api_event_outbox(event_id,client_id,event_type,resource_id,payload,dedup_key) SELECT gen_random_uuid(),t.api_client_id,'task.'||t.task_status,t.task_id,jsonb_build_object('task_id',t.task_id,'status',t.task_status),'task:'||t.task_id||':'||t.task_status FROM scan_task t WHERE t.api_client_id IS NOT NULL AND t.task_status IN ('succeeded','failed','partial','cancelled') AND t.task_end_time>=(EXTRACT(EPOCH FROM (NOW()-INTERVAL '30 days'))*1000)::BIGINT AND NOT EXISTS(SELECT 1 FROM api_event_outbox o WHERE o.dedup_key='task:'||t.task_id||':'||t.task_status) ORDER BY t.id LIMIT 100 ON CONFLICT(dedup_key) DO NOTHING",&[]).await?;
     c.execute("INSERT INTO api_event_outbox(event_id,client_id,event_type,resource_id,payload,dedup_key) SELECT gen_random_uuid(),t.api_client_id,'asset.ready',e.execution_id,jsonb_build_object('task_id',t.task_id,'execution_id',e.execution_id),'projection:'||e.execution_id FROM scan_projection_outbox p JOIN scan_task_execution e ON e.id=p.execution_id JOIN scan_task t ON t.id=e.task_id WHERE p.processed_at>NOW()-INTERVAL '30 days' AND t.api_client_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM api_event_outbox o WHERE o.dedup_key='projection:'||e.execution_id) ORDER BY p.execution_id LIMIT 100 ON CONFLICT(dedup_key) DO NOTHING",&[]).await?;

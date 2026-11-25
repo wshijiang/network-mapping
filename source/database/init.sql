@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS users (
 	update_at TIMESTAMPTZ
 );
 
+ALTER TABLE users ADD COLUMN IF NOT EXISTS access_policy JSONB;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS access_version BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS update_at TIMESTAMPTZ;
@@ -38,6 +40,8 @@ BEGIN
 END $$;
 CREATE INDEX IF NOT EXISTS idx_users_management_status
 ON users (role, disabled_at, deleted_at) WHERE role IN (1, 2);
+CREATE INDEX IF NOT EXISTS idx_users_scoped_management_status
+ON users (role, disabled_at, deleted_at) WHERE role IN (3, 4);
 
 -- 表 scan_task 用于存储扫描任务信息，配置了级联更新和删除
 CREATE TABLE IF NOT EXISTS scan_task( 

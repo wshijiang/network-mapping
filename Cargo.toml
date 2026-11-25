@@ -22,6 +22,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter", "json"] }
 tracing-appender = "0.2"
 rand = "0.9"
+thiserror = "2"
 tokio-postgres = { version = "0.7", features = ["array-impls", "with-cidr-0_3", "with-chrono-0_4", "with-uuid-1"]}
 cidr = { version = "0.3", features = ["serde"]}
 deadpool-postgres = { version = "0.14"}
@@ -43,7 +44,7 @@ prost = "0.14"
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system"] }
 fs2 = "0.4"
-ipnet = "2.12"
+ipnet = { version = "2.12", features = ["serde"] }
 regex = "1.12"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "socks", "stream"] }
 reqwest-sdk = { package = "reqwest", version = "0.13", default-features = false, features = ["stream"] }

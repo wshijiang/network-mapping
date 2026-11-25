@@ -426,7 +426,7 @@ pub async fn recover_scanner_task_with_failure(
              FROM scan_task_execution e JOIN scan_task t ON t.id = e.task_id \
              JOIN scanner_info s ON s.scanner_id = $1 \
              WHERE COALESCE(s.scan_capabilities->'service_protocols','[]'::jsonb) @> COALESCE(t.scan_plan->'required_services','[]'::jsonb) AND COALESCE((s.scan_capabilities->>'max_service_probes')::INT,0) >= jsonb_array_length(COALESCE(t.scan_plan->'required_services','[]'::jsonb)) \
-             AND e.cancel_requested = false AND api_scan_task_enabled(t) AND dns_scan_task_enabled(t) AND ( \
+             AND e.cancel_requested = false AND api_scan_task_enabled(t) AND dns_scan_task_enabled(t) AND user_scan_scanner_allowed(t, $1) AND ( \
                  (e.execution_status = 'running' AND e.assigned_scanner_id = $1 \
                   AND ($2::TEXT IS NULL OR t.task_id = $2) \
                   @engine_gate@) \
@@ -577,7 +577,7 @@ pub async fn apply_task(
          JOIN scanner_info s ON s.scanner_id = $1 \
          WHERE s.accepting_tasks AND e.execution_status = 'pending' AND e.requested_scanner_id = $1 \
            AND t.task_status IN ('pending', 'running') \
-           AND api_scan_task_enabled(t) AND dns_scan_task_enabled(t) \
+           AND api_scan_task_enabled(t) AND dns_scan_task_enabled(t) AND user_scan_scanner_allowed(t, $1) \
            AND ((t.address_family = 'ipv4' AND s.supports_ipv4 AND s.ipv4_ready) \
              OR (t.address_family = 'ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
            AND s.scan_capabilities->'profiles' ? t.scan_profile \
@@ -619,7 +619,7 @@ pub async fn apply_task(
                      ORDER BY candidate.id FOR UPDATE SKIP LOCKED LIMIT 1 \
                  ) e ON TRUE \
                  WHERE s.accepting_tasks AND @routing_guard@ AND t.task_status IN ('pending', 'running') \
-                   AND api_scan_task_enabled(t) AND dns_scan_task_enabled(t) \
+                   AND api_scan_task_enabled(t) AND dns_scan_task_enabled(t) AND user_scan_scanner_allowed(t, $2) \
                    AND ((t.address_family = 'ipv4' AND s.supports_ipv4 AND s.ipv4_ready) \
                      OR (t.address_family = 'ipv6' AND s.supports_ipv6 AND s.ipv6_ready)) \
                    AND s.scan_capabilities->'profiles' ? t.scan_profile \

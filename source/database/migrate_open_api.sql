@@ -202,13 +202,32 @@ CREATE TABLE IF NOT EXISTS api_webhook_delivery (
 );
 CREATE INDEX IF NOT EXISTS idx_api_delivery_queue ON api_webhook_delivery(next_attempt_at) WHERE status IN ('pending','running');
 
+ALTER TABLE users ADD COLUMN IF NOT EXISTS access_policy JSONB;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS access_version BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE scan_task ADD COLUMN IF NOT EXISTS user_access_version BIGINT;
 ALTER TABLE scan_task ADD COLUMN IF NOT EXISTS api_client_id INTEGER REFERENCES api_client(id);
 ALTER TABLE scan_task ADD COLUMN IF NOT EXISTS api_credential_id UUID REFERENCES api_credential(id);
 CREATE INDEX IF NOT EXISTS idx_scan_task_api_client ON scan_task(api_client_id,id DESC) WHERE api_client_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_scan_task_api_events ON scan_task(task_end_time,id) WHERE api_client_id IS NOT NULL AND task_status IN ('succeeded','failed','partial','cancelled');
 CREATE OR REPLACE FUNCTION api_scan_task_enabled(task scan_task) RETURNS BOOLEAN
 LANGUAGE SQL STABLE AS $function$
-    SELECT task.api_client_id IS NULL OR EXISTS (
+    SELECT EXISTS (
+        SELECT 1 FROM users owner
+        WHERE owner.id=task.user_id AND owner.deleted_at IS NULL AND owner.disabled_at IS NULL
+          AND (
+            owner.role=0 AND task.api_client_id IS NULL AND task.user_access_version IS NULL
+            OR (
+              owner.role=1 AND task.user_access_version IS NULL
+              OR owner.role=2 AND (
+                owner.access_policy IS NULL AND task.user_access_version IS NULL
+                OR task.api_client_id IS NULL AND owner.access_version=task.user_access_version
+                   AND owner.access_policy->'permissions' ? 'create_scan'
+                   AND ((owner.access_policy->>'expires_at') IS NULL OR
+                        (owner.access_policy->>'expires_at')::TIMESTAMPTZ > NOW())
+              )
+            )
+          )
+    ) AND (task.api_client_id IS NULL OR EXISTS (
         SELECT 1 FROM api_client a JOIN api_credential k ON k.client_id=a.id
         JOIN users u ON u.id=a.owner_user_id CROSS JOIN api_platform_settings s
         WHERE a.id=task.api_client_id AND k.id=task.api_credential_id AND a.status='active'
@@ -218,5 +237,14 @@ LANGUAGE SQL STABLE AS $function$
           AND COALESCE((s.document->>'enabled')::BOOLEAN,FALSE)
           AND 'tasks:create'=ANY(k.scopes) AND a.policy->'scopes' ? 'tasks:create'
           AND task.generation_metadata->'open_api'->>'policy_revision'=a.revision::TEXT
+    ));
+$function$;
+
+CREATE OR REPLACE FUNCTION user_scan_scanner_allowed(task scan_task, scanner TEXT) RETURNS BOOLEAN
+LANGUAGE SQL STABLE AS $function$
+    SELECT task.user_access_version IS NULL OR EXISTS (
+        SELECT 1 FROM users owner WHERE owner.id=task.user_id
+          AND owner.access_version=task.user_access_version
+          AND owner.access_policy->'scanners' ? scanner
     );
 $function$;

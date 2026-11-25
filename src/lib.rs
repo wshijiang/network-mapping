@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+mod access;
 pub mod admin;
 pub mod analytics_snapshot;
 pub mod api_response;

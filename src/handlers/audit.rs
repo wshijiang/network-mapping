@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use tokio_postgres::types::ToSql;
 use uuid::Uuid;
 
+use crate::access::{Access, Permission};
 use crate::admin::UserBaseI;
 use crate::audit::{AuditContext, AuditEvent, write_standalone};
 use crate::client_ip::display_ip;
@@ -51,8 +52,8 @@ struct AuditEventResponse {
     metadata: Value,
 }
 
-fn event_from_row(row: tokio_postgres::Row) -> AuditEventResponse {
-    AuditEventResponse {
+fn event_from_row(row: tokio_postgres::Row, scoped: bool) -> AuditEventResponse {
+    let mut event = AuditEventResponse {
         event_id: row.get("event_id"),
         occurred_at: row.get("occurred_at"),
         category: row.get("category"),
@@ -73,14 +74,41 @@ fn event_from_row(row: tokio_postgres::Row) -> AuditEventResponse {
         reason_code: row.get("reason_code"),
         changes: row.get("changes"),
         metadata: row.get("metadata"),
+    };
+    if scoped {
+        event.source_ip = None;
+        event.user_agent = None;
+        event.request_path = None;
+        event.metadata = json!({});
+        event.changes = match event.action.as_str() {
+            "user.access_update" | "cli.user.access_update" => event.changes.map(|changes| json!({
+                "before": {"role":changes["before"]["role"],"version":changes["before"]["version"],"permissions":changes["before"]["policy"]["permissions"]},
+                "after": {"role":changes["after"]["role"],"version":changes["after"]["version"],"permissions":changes["after"]["policy"]["permissions"]},
+            })),
+            _ => None,
+        };
     }
+    event
 }
 
-fn is_admin(user: &UserBaseI) -> bool {
-    user.role == 1
+fn audit_categories(
+    req: &HttpRequest,
+    user: &UserBaseI,
+    permission: Permission,
+) -> Result<Option<Vec<String>>, ()> {
+    if user.role == crate::access::ADMIN {
+        return Ok(None);
+    }
+    let access = Access::from_request(req)
+        .filter(|access| access.allows(permission))
+        .ok_or(())?;
+    Ok(Some(access.policy.ok_or(())?.audit_categories))
 }
 
-fn audit_filter(query: &AuditQuery) -> (String, Vec<&(dyn ToSql + Sync)>) {
+fn audit_filter<'a>(
+    query: &'a AuditQuery,
+    categories: &'a Option<Vec<String>>,
+) -> (String, Vec<&'a (dyn ToSql + Sync)>) {
     let mut conditions = Vec::new();
     let mut params: Vec<&(dyn ToSql + Sync)> = Vec::new();
     macro_rules! push_filter {
@@ -91,6 +119,7 @@ fn audit_filter(query: &AuditQuery) -> (String, Vec<&(dyn ToSql + Sync)>) {
             }
         };
     }
+    push_filter!(categories, "category = ANY(${})");
     push_filter!(query.category, "category = ${}");
     push_filter!(query.action, "action = ${}");
     push_filter!(query.outcome, "outcome = ${}");
@@ -131,13 +160,13 @@ pub(crate) async fn list_audit_events(
     query: web::Query<AuditQuery>,
     user: UserBaseI,
 ) -> impl Responder {
-    if !is_admin(&user) {
+    let Ok(categories) = audit_categories(&req, &user, Permission::ReadAudit) else {
         let mut event = AuditEvent::user("authorization", "audit.query", "denied", &user);
         event.response_status = Some(403);
-        event.reason_code = Some("administrator_required".to_owned());
+        event.reason_code = Some("audit_read_required".to_owned());
         write_standalone(pool.get_ref(), &AuditContext::from_request(&req), &event).await;
         return HttpResponse::Forbidden().json(json!({"success": false, "message": "forbidden"}));
-    }
+    };
 
     let (page, page_size) = pagination(query.page, query.page_size);
     let offset = (page - 1) * page_size;
@@ -153,7 +182,7 @@ pub(crate) async fn list_audit_events(
             return HttpResponse::InternalServerError().finish();
         }
     };
-    let (filter_sql, filter_params) = audit_filter(&query);
+    let (filter_sql, filter_params) = audit_filter(&query, &categories);
     let count_sql = format!("SELECT COUNT(*) FROM audit_event{filter_sql}");
     let total: i64 = match client.query_one(&count_sql, &filter_params).await {
         Ok(row) => row.get(0),
@@ -181,7 +210,10 @@ pub(crate) async fn list_audit_events(
             return HttpResponse::InternalServerError().finish();
         }
     };
-    let items: Vec<AuditEventResponse> = rows.into_iter().map(event_from_row).collect();
+    let items: Vec<AuditEventResponse> = rows
+        .into_iter()
+        .map(|row| event_from_row(row, categories.is_some()))
+        .collect();
 
     let mut event = AuditEvent::user("audit", "audit.query", "success", &user);
     event.response_status = Some(200);
@@ -211,9 +243,9 @@ pub(crate) async fn get_audit_event(
     event_id: web::Path<Uuid>,
     user: UserBaseI,
 ) -> impl Responder {
-    if !is_admin(&user) {
+    let Ok(categories) = audit_categories(&req, &user, Permission::ReadAudit) else {
         return HttpResponse::Forbidden().finish();
-    }
+    };
     let client = match pool.get().await {
         Ok(client) => client,
         Err(error_value) => {
@@ -231,8 +263,8 @@ pub(crate) async fn get_audit_event(
             "SELECT event_id, occurred_at, category, action, outcome, severity, actor_type, actor_id, \
              actor_name, resource_type, resource_id, request_id, source_ip, user_agent, \
              http_method, request_path, response_status, reason_code, changes, metadata \
-             FROM audit_event WHERE event_id = $1",
-            &[&event_id.into_inner()],
+             FROM audit_event WHERE event_id = $1 AND ($2::TEXT[] IS NULL OR category = ANY($2))",
+            &[&event_id.into_inner(), &categories],
         )
         .await
     {
@@ -243,24 +275,33 @@ pub(crate) async fn get_audit_event(
             return HttpResponse::InternalServerError().finish();
         }
     };
-    HttpResponse::Ok().json(json!({"success": true, "data": event_from_row(row)}))
+    HttpResponse::Ok()
+        .json(json!({"success": true, "data": event_from_row(row, categories.is_some())}))
 }
 
 fn csv_cell(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
+    let prefix = if value.trim_start().starts_with(['=', '+', '-', '@']) {
+        "'"
+    } else {
+        ""
+    };
+    format!(r#""{prefix}{}""#, value.replace('"', "\"\""))
 }
 
 const AUDIT_EXPORT_HEADER: &str = "event_id,occurred_at,category,action,outcome,severity,actor_type,actor_id,actor_name,resource_type,resource_id,request_id,source_ip,user_agent,http_method,request_path,response_status,reason_code,changes,metadata\n";
 
-#[get("/api/audit/export")]
+#[actix_web::route("/api/audit/export", method = "GET", method = "POST")]
 pub(crate) async fn export_audit_events(
     req: HttpRequest,
     pool: web::Data<Pool>,
     query: web::Query<AuditQuery>,
     user: UserBaseI,
 ) -> impl Responder {
-    if !is_admin(&user) {
+    let Ok(categories) = audit_categories(&req, &user, Permission::ExportAudit) else {
         return HttpResponse::Forbidden().finish();
+    };
+    if let Err(error) = crate::open_api::console::require_step_up(&req, &pool, &user).await {
+        return crate::open_api::response(&req, Err(error));
     }
     let client = match pool.get().await {
         Ok(client) => client,
@@ -274,7 +315,7 @@ pub(crate) async fn export_audit_events(
             return HttpResponse::InternalServerError().finish();
         }
     };
-    let (filter_sql, params) = audit_filter(&query);
+    let (filter_sql, params) = audit_filter(&query, &categories);
     let sql = format!(
         "SELECT event_id, occurred_at, category, action, outcome, severity, actor_type, actor_id, \
          actor_name, resource_type, resource_id, request_id, source_ip, \
@@ -288,42 +329,34 @@ pub(crate) async fn export_audit_events(
             return HttpResponse::InternalServerError().finish();
         }
     };
+    let count = rows.len();
     let mut csv = String::from(AUDIT_EXPORT_HEADER);
-    for row in &rows {
+    for row in rows {
+        let event = event_from_row(row, categories.is_some());
         let values = [
-            row.get::<_, Uuid>("event_id").to_string(),
-            row.get::<_, DateTime<Utc>>("occurred_at").to_rfc3339(),
-            row.get::<_, String>("category"),
-            row.get::<_, String>("action"),
-            row.get::<_, String>("outcome"),
-            row.get::<_, String>("severity"),
-            row.get::<_, String>("actor_type"),
-            row.get::<_, Option<String>>("actor_id").unwrap_or_default(),
-            row.get::<_, Option<String>>("actor_name")
+            event.event_id.to_string(),
+            event.occurred_at.to_rfc3339(),
+            event.category,
+            event.action,
+            event.outcome,
+            event.severity,
+            event.actor_type,
+            event.actor_id.unwrap_or_default(),
+            event.actor_name.unwrap_or_default(),
+            event.resource_type.unwrap_or_default(),
+            event.resource_id.unwrap_or_default(),
+            event.request_id.map(|v| v.to_string()).unwrap_or_default(),
+            event.source_ip.unwrap_or_default(),
+            event.user_agent.unwrap_or_default(),
+            event.http_method.unwrap_or_default(),
+            event.request_path.unwrap_or_default(),
+            event
+                .response_status
+                .map(|v| v.to_string())
                 .unwrap_or_default(),
-            row.get::<_, Option<String>>("resource_type")
-                .unwrap_or_default(),
-            row.get::<_, Option<String>>("resource_id")
-                .unwrap_or_default(),
-            row.get::<_, Option<Uuid>>("request_id")
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-            display_ip(row.get("source_ip")).unwrap_or_default(),
-            row.get::<_, Option<String>>("user_agent")
-                .unwrap_or_default(),
-            row.get::<_, Option<String>>("http_method")
-                .unwrap_or_default(),
-            row.get::<_, Option<String>>("request_path")
-                .unwrap_or_default(),
-            row.get::<_, Option<i16>>("response_status")
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-            row.get::<_, Option<String>>("reason_code")
-                .unwrap_or_default(),
-            row.get::<_, Option<Value>>("changes")
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-            row.get::<_, Value>("metadata").to_string(),
+            event.reason_code.unwrap_or_default(),
+            event.changes.map(|v| v.to_string()).unwrap_or_default(),
+            event.metadata.to_string(),
         ];
         csv.push_str(
             &values
@@ -336,7 +369,7 @@ pub(crate) async fn export_audit_events(
     }
     let mut event = AuditEvent::user("audit", "audit.export", "success", &user);
     event.response_status = Some(200);
-    event.metadata = json!({"exported_count": rows.len(), "limit": 10000});
+    event.metadata = json!({"exported_count": count, "limit": 10000});
     if let Err(error_value) =
         crate::audit::write(&client, &AuditContext::from_request(&req), &event).await
     {
@@ -346,6 +379,7 @@ pub(crate) async fn export_audit_events(
             "database_operation",
             &error_value,
         );
+        return HttpResponse::InternalServerError().finish();
     }
     HttpResponse::Ok()
         .insert_header(("Content-Type", "text/csv; charset=utf-8"))
@@ -381,7 +415,7 @@ mod tests {
     #[test]
     fn audit_filter_omits_absent_predicates() {
         let value = query();
-        let (sql, params) = audit_filter(&value);
+        let (sql, params) = audit_filter(&value, &None);
         assert!(sql.is_empty());
         assert!(params.is_empty());
     }
@@ -392,7 +426,7 @@ mod tests {
         value.category = Some("task".to_owned());
         value.keyword = Some("scanner".to_owned());
         value.request_id = Some(Uuid::nil());
-        let (sql, params) = audit_filter(&value);
+        let (sql, params) = audit_filter(&value, &None);
         assert!(sql.contains("category = $1"));
         assert_eq!(sql.matches("$2").count(), 3);
         assert!(sql.contains("request_id = $3"));

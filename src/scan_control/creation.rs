@@ -385,12 +385,14 @@ impl<'a> STask<'a> {
         requested_scanners: &[Option<String>],
         scan_profile: &str,
         scan_plan: &Value,
+        user_access_version: Option<i64>,
         audit_context: &audit::AuditContext,
         actor: &admin::UserBaseI,
         maxmind: &crate::maxmind::MaxMindState,
     ) -> Result<CreatedTasks, Box<dyn std::error::Error>> {
         let mut p = pool.get().await?;
         let client = p.transaction().await?;
+        crate::access::ensure_scan_authorized(&client, user_id, user_access_version).await?;
         let t_id = self
             .task_id
             .map(|task_id| task_id.to_string())
@@ -420,9 +422,9 @@ impl<'a> STask<'a> {
             task_ids.push(public_id.clone());
             let targets: Vec<String> = group.iter().map(ToString::to_string).collect();
             let task_db_id:i32 = client.query_one(
-                "INSERT INTO scan_task (user_id, task_id, task_initiator, task_target, task_port, task_level, remarks, dispatch_mode, address_family, scan_profile, scan_plan, task_group_id) \
-                 VALUES ($1,$2,$3,ARRAY(SELECT inet(unnest($4::text[]))),$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id",
-                &[&user_id,&public_id,&self.task_initiator,&targets,&self.port,&level,&self.remark,&dispatch_mode,&address_family,&scan_profile,&scan_plan,&group_id]
+                "INSERT INTO scan_task (user_id, task_id, task_initiator, task_target, task_port, task_level, remarks, dispatch_mode, address_family, scan_profile, scan_plan, task_group_id, user_access_version) \
+                 VALUES ($1,$2,$3,ARRAY(SELECT inet(unnest($4::text[]))),$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id",
+                &[&user_id,&public_id,&self.task_initiator,&targets,&self.port,&level,&self.remark,&dispatch_mode,&address_family,&scan_profile,&scan_plan,&group_id,&user_access_version]
             ).await?.get("id");
             for requested_scanner in requested_scanners {
                 client.execute("INSERT INTO scan_task_execution(execution_id,task_id,requested_scanner_id) VALUES($1,$2,$3)", &[&Uuid::now_v7().to_string(),&task_db_id,requested_scanner]).await?;

@@ -22,8 +22,14 @@ printf '%s\n' "$NEW_PASSWORD" | network_mapping_server user password set alice -
 ```
 
 也可以使用 `--generate` 生成随机密码。随机密码只在当前终端显示一次。修改密码会解除
-密码错误锁定、重置错误次数，并使该用户现有会话全部失效。`--role` 只接受 `admin` 或
-`user`，不能通过 CLI 创建内部 system 用户。
+密码错误锁定、重置错误次数，并使该用户现有会话全部失效。`user create --role` 接受 `admin`、`user`、`read-only` 和 `auditor`。
+内部 system 用户由服务端管理。
+
+## 角色与授权
+
+使用 `user access show <用户名>` 查看角色、授权范围与版本。使用
+`user access set` 更新普通、只读或审计账号，并提供当前版本、JSON 授权文件和变更原因。
+可用权限和命令示例见[用户角色与权限管理](USER_ACCESS.md)。
 
 ## 2FA 与登录白名单
 

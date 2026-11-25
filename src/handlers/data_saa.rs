@@ -174,7 +174,11 @@ async fn get_system_data_handler(
     _req: HttpRequest,
     cache: web::Data<SystemResourceCache>,
     systems: web::Data<Systems>,
+    user: UserBaseI,
 ) -> impl Responder {
+    if user.role != crate::access::ADMIN {
+        return HttpResponse::Forbidden().finish();
+    }
     let status_item: Vec<_> = cache.latest().into_iter().collect();
 
     let t_json = SystemStatusJson {

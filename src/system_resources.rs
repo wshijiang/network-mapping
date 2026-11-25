@@ -594,12 +594,11 @@ fn get_server_uptime() -> u64 {
 ///系统信息api基准测试
 pub async fn benchmark(
     sys: web::Data<Systems>,
-    pool: web::Data<&deadpool_postgres::Pool>,
+    pool: &deadpool_postgres::Pool,
     db_name: String,
     sql_file_path: &str,
 ) {
     let total_start = Instant::now();
-    let pool = pool.get_ref();
 
     // CPU
     let start = Instant::now();

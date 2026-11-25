@@ -3,7 +3,7 @@ mod analytics;
 mod auth;
 mod business;
 mod catalog;
-mod console;
+pub(crate) mod console;
 mod contract;
 mod model;
 mod query;
