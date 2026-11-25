@@ -728,6 +728,9 @@ async fn unbind_2fa_h(
     if user_base_i.role != 1 {
         return HttpResponse::Forbidden().finish();
     };
+    if let Err(error) = crate::open_api::console::require_step_up(&req, &pool, &user_base_i).await {
+        return crate::open_api::response(&req, Err(error));
+    }
     match unbind_2fa(&unbind_info.username, pool_c, user_base_i.id).await {
         Ok(true) => {
             let mut audit_event =
@@ -773,13 +776,13 @@ async fn get_user_info_h(
     let u_role = user_base_i.role;
     let username = user_base_i.username;
 
-    let t_username = if info.list.unwrap_or(false) {
+    let t_username = if u_role == 1 && info.list.unwrap_or(false) {
         // 当 list 存在且为 true 时不会指定用户名
         None
     } else if u_role == 1 {
         // 管理员可以查询所有用户，如果没有指定则查询自己的信息
         Some(info.username.as_deref().unwrap_or(username.as_str()))
-    } else if u_role == 2 {
+    } else if matches!(u_role, 2..=4) {
         // 普通用户只能查询自己的信息
         Some(username.as_str())
     } else {
@@ -851,7 +854,7 @@ async fn change_password_h(
     let current_password = password_change.current_password.as_str();
     let new_password = password_change.new_password.as_str();
 
-    if !matches!(user_base_i.role, 1 | 2) {
+    if !matches!(user_base_i.role, 1..=4) {
         return HttpResponse::Forbidden().json(json!({
             "success": false,
             "message": "当前账户不允许修改密码"
@@ -907,7 +910,7 @@ async fn change_password_h(
     };
     let row = match transaction
         .query_opt(
-            "SELECT password FROM users WHERE id = $1 AND role IN (1, 2) FOR UPDATE;",
+            "SELECT password FROM users WHERE id = $1 AND role IN (1, 2, 3, 4) FOR UPDATE;",
             &[&user_base_i.id],
         )
         .await
@@ -1060,6 +1063,12 @@ async fn web_add_scanner_h(
     user_base_i: UserBaseI,
     add_data: web::Json<AddScanner>,
 ) -> impl Responder {
+    if user_base_i.role != crate::access::ADMIN {
+        return HttpResponse::Forbidden().finish();
+    }
+    if let Err(error) = crate::open_api::console::require_step_up(&req, &pool, &user_base_i).await {
+        return crate::open_api::response(&req, Err(error));
+    }
     let pool_ref = pool.get_ref();
     let s_id = match web_add_scanner(
         pool_ref,
@@ -1088,16 +1097,39 @@ async fn get_scanners_h(
     req: HttpRequest,
     pool: web::Data<Pool>,
     maintenance: web::Data<SystemMaintenanceState>,
-    _user_base_i: UserBaseI,
+    user: UserBaseI,
 ) -> impl Responder {
     match get_scanners(pool.get_ref()).await {
         Ok(scanners) => {
             let maintenance = maintenance.snapshot().await;
-            HttpResponse::Ok().json(json!({
-                "success": true,
-                "data": scanners,
-                "maintenance": maintenance.enabled.then_some(maintenance),
-            }))
+            if user.role == crate::access::ADMIN {
+                HttpResponse::Ok().json(json!({
+                    "success": true,
+                    "data": scanners,
+                    "maintenance": maintenance.enabled.then_some(maintenance),
+                }))
+            } else {
+                let access = crate::access::Access::from_request(&req);
+                let scanners: Vec<_> = scanners.iter().filter(|scanner| {
+                    access.as_ref().is_some_and(|access| {
+                        access.legacy_user() || access.policy.as_ref().is_some_and(|p| {
+                            Uuid::parse_str(&scanner.scanner_id).is_ok_and(|id| p.scanners.contains(&id))
+                        })
+                    })
+                }).map(|scanner| json!({
+                    "scanner_id":scanner.scanner_id,"name":scanner.name,
+                    "is_enable":scanner.is_enable,"is_online":scanner.is_online,
+                    "supports_ipv4":scanner.supports_ipv4,"supports_ipv6":scanner.supports_ipv6,
+                    "ipv4_ready":scanner.ipv4_ready,"ipv6_ready":scanner.ipv6_ready,
+                    "scan_capabilities":{
+                        "profiles":scanner.scan_capabilities.get("profiles"),
+                        "explicit_dns_resolvers":scanner.scan_capabilities.get("explicit_dns_resolvers"),
+                        "service_protocols":scanner.scan_capabilities.get("service_protocols"),
+                        "max_service_probes":scanner.scan_capabilities.get("max_service_probes"),
+                    },
+                })).collect();
+                HttpResponse::Ok().json(json!({"success":true,"data":scanners}))
+            }
         }
         Err(error) => {
             error_logs_error(&req, "GetScannersError", "list_scanners", error.as_ref());
@@ -1110,9 +1142,12 @@ async fn get_scanners_h(
 async fn get_scanner_h(
     req: HttpRequest,
     pool: web::Data<Pool>,
-    _user_base_i: UserBaseI,
+    user: UserBaseI,
     scanner_id: web::Path<Uuid>,
 ) -> impl Responder {
+    if user.role != crate::access::ADMIN {
+        return HttpResponse::Forbidden().finish();
+    }
     match get_scanner(pool.get_ref(), scanner_id.into_inner()).await {
         Ok(Some(scanner)) => HttpResponse::Ok().json(json!({
             "success": true,

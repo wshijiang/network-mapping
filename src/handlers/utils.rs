@@ -47,20 +47,24 @@ use crate::rir::get_rir_data;
 use crate::{system_resources::Systems, system_resources::benchmark};
 
 ///获取系统信息基准测试
-#[get("/benchmark")]
+#[get("/api/admin/benchmark")]
 async fn benchmark_route(
     sys: web::Data<Systems>,
-    pool: web::Data<&deadpool_postgres::Pool>,
+    pool: web::Data<deadpool_postgres::Pool>,
     db_config: web::Data<DatabaseConfig>,
+    user: UserBaseI,
 ) -> impl Responder {
+    if user.role != crate::access::ADMIN {
+        return HttpResponse::Forbidden().finish();
+    }
     benchmark(
         sys,
-        pool,
+        pool.get_ref(),
         db_config.db_name.clone(),
         &db_config.sql_file_path,
     )
     .await;
-    "Benchmark finished, check server logs."
+    HttpResponse::Ok().body("Benchmark finished, check server logs.")
 }
 
 pub async fn not_found(

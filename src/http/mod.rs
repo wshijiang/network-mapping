@@ -58,6 +58,10 @@ fn identity(cfg: &mut web::ServiceConfig) {
             .app_data(web::JsonConfig::default().limit(crate::human_verification::LOGIN_BODY_LIMIT))
             .route(web::post().to(handlers::user::user_login_h)),
     );
+    cfg.service(handlers::access::current)
+        .service(handlers::access::verify)
+        .service(handlers::access::get_user_access)
+        .service(handlers::access::put_user_access);
     cfg.service(handlers::admin_user::list_users);
     cfg.service(handlers::admin_user::create_user);
     cfg.service(handlers::admin_user::set_user_enabled);

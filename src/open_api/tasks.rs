@@ -188,7 +188,7 @@ pub(crate) async fn authorize<C: GenericClient + Sync>(tx: &C, p: &Principal) ->
             "系统维护中，暂不接受业务写入",
         ));
     }
-    let row=tx.query_opt("SELECT a.revision FROM api_client a JOIN api_credential k ON k.client_id=a.id JOIN users u ON u.id=a.owner_user_id CROSS JOIN api_platform_settings s WHERE a.id=$1 AND k.id=$2 AND a.status='active' AND k.revoked_at IS NULL AND k.expires_at>NOW() AND (a.expires_at IS NULL OR a.expires_at>NOW()) AND u.deleted_at IS NULL AND u.disabled_at IS NULL AND NOT u.limit_login AND COALESCE((s.document->>'enabled')::BOOLEAN,FALSE) FOR UPDATE OF a FOR SHARE OF k",&[&p.client_pk,&p.credential_id]).await?.ok_or_else(auth::unauthorized)?;
+    let row=tx.query_opt("SELECT a.revision FROM api_client a JOIN api_credential k ON k.client_id=a.id JOIN users u ON u.id=a.owner_user_id CROSS JOIN api_platform_settings s WHERE a.id=$1 AND k.id=$2 AND a.status='active' AND k.revoked_at IS NULL AND k.expires_at>NOW() AND (a.expires_at IS NULL OR a.expires_at>NOW()) AND u.deleted_at IS NULL AND u.disabled_at IS NULL AND NOT u.limit_login AND (u.role=1 OR (u.role=2 AND u.access_policy IS NULL)) AND COALESCE((s.document->>'enabled')::BOOLEAN,FALSE) FOR UPDATE OF a FOR SHARE OF k",&[&p.client_pk,&p.credential_id]).await?.ok_or_else(auth::unauthorized)?;
     if row.get::<_, i64>(0) != p.revision {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -586,7 +586,7 @@ pub(crate) async fn follow_up_scope(
         .pointer("/open_api/credential_id")
         .and_then(Value::as_str)
         .and_then(|s| Uuid::parse_str(s).ok());
-    let row=tx.query_opt("SELECT a.client_id,a.owner_user_id,a.name,a.environment,a.revision,a.policy,k.id,k.scopes,k.expires_at FROM api_client a JOIN api_credential k ON k.client_id=a.id JOIN users u ON u.id=a.owner_user_id CROSS JOIN api_platform_settings s CROSS JOIN system_maintenance_state m WHERE a.id=$1 AND k.id=$2 AND a.status='active' AND k.revoked_at IS NULL AND k.expires_at>NOW() AND (a.expires_at IS NULL OR a.expires_at>NOW()) AND u.disabled_at IS NULL AND u.deleted_at IS NULL AND NOT u.limit_login AND NOT m.enabled AND COALESCE((s.document->>'enabled')::BOOLEAN,FALSE) FOR UPDATE OF a FOR SHARE OF k",&[&(id as i32),&key]).await?;
+    let row=tx.query_opt("SELECT a.client_id,a.owner_user_id,a.name,a.environment,a.revision,a.policy,k.id,k.scopes,k.expires_at FROM api_client a JOIN api_credential k ON k.client_id=a.id JOIN users u ON u.id=a.owner_user_id CROSS JOIN api_platform_settings s CROSS JOIN system_maintenance_state m WHERE a.id=$1 AND k.id=$2 AND a.status='active' AND k.revoked_at IS NULL AND k.expires_at>NOW() AND (a.expires_at IS NULL OR a.expires_at>NOW()) AND u.disabled_at IS NULL AND u.deleted_at IS NULL AND NOT u.limit_login AND (u.role=1 OR (u.role=2 AND u.access_policy IS NULL)) AND NOT m.enabled AND COALESCE((s.document->>'enabled')::BOOLEAN,FALSE) FOR UPDATE OF a FOR SHARE OF k",&[&(id as i32),&key]).await?;
     let Some(row) = row else {
         return Ok(None);
     };

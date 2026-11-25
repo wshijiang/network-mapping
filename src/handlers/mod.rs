@@ -1,3 +1,4 @@
+pub(crate) mod access;
 pub mod admin_user;
 pub mod assets;
 pub mod audit;

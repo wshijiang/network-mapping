@@ -112,10 +112,13 @@ fn normalize_query(
 pub(crate) async fn get_scanner_latency_history(
     req: HttpRequest,
     pool: web::Data<Pool>,
-    _user_base_i: UserBaseI,
+    user: UserBaseI,
     scanner_id: web::Path<Uuid>,
     query: web::Query<ScannerLatencyHistoryQuery>,
 ) -> impl Responder {
+    if user.role != crate::access::ADMIN {
+        return HttpResponse::Forbidden().finish();
+    }
     let (start, end, granularity) = match normalize_query(&query) {
         Ok(value) => value,
         Err(message) => {

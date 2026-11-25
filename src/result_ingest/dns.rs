@@ -573,6 +573,17 @@ async fn create_dns_follow_up_tasks(
     if follow_up.get("enabled").and_then(Value::as_bool) != Some(true) {
         return Ok(());
     }
+    let user_id: i32 = parent.get("user_id");
+    if api_scope.is_none() {
+        match crate::access::ensure_scan_authorized(transaction, user_id, None).await {
+            Ok(()) => {}
+            Err(crate::access::UpdateError::Database(error)) => return Err(error),
+            Err(_) => {
+                transaction.execute("INSERT INTO dns_follow_up_generation(execution_id,status,eligible_ip_count,created_task_count) VALUES($1,'blocked_policy',0,0) ON CONFLICT(execution_id) DO NOTHING", &[&parent_execution_id]).await?;
+                return Ok(());
+            }
+        }
+    }
     let scan_profile = follow_up
         .get("scan_profile")
         .and_then(Value::as_str)
@@ -650,7 +661,6 @@ async fn create_dns_follow_up_tasks(
         }
     }
 
-    let user_id: i32 = parent.get("user_id");
     let port: String = parent.get("task_port");
     let level: i32 = parent.get("task_level");
     let parent_public_execution_id: String = parent.get("public_execution_id");

@@ -162,6 +162,13 @@ async fn admit(
     // Serializes cross-target quota admission as well as same-target requests.
     tx.query_one("SELECT pg_advisory_xact_lock($1)", &[&ADMISSION_LOCK])
         .await?;
+    match crate::access::ensure_scan_authorized(&tx, user.id, None).await {
+        Ok(()) => {}
+        Err(crate::access::UpdateError::Forbidden) => {
+            return Ok(GenerationResult::status("disabled"));
+        }
+        Err(error) => return Err(error.into()),
+    }
     tx.execute("INSERT INTO search_target_state(owner_id,target_kind,target_key) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", &[&user.id,&target.kind,&target.key]).await?;
     let state = tx.query_one("SELECT *, (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)*1000)::BIGINT AS now_ms FROM search_target_state WHERE owner_id=$1 AND target_kind=$2 AND target_key=$3 FOR UPDATE", &[&user.id,&target.kind,&target.key]).await?;
     let now: i64 = state.get("now_ms");
@@ -693,6 +700,33 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+    async fn scoped_search_cannot_create_a_task_or_charge_quota() {
+        let f = Fixture::new().await;
+        // The caller still has its pre-change identity while admission sees the live grant.
+        f.sql("UPDATE users SET access_policy='{\"permissions\":[\"read_results\",\"create_scan\"]}' WHERE id=1")
+            .await;
+        let result = f.request("ip", "192.0.2.1", None).await;
+        assert_eq!(result.status, "disabled");
+        assert!(result.task_id.is_none());
+        let client = f.pool.get().await.unwrap();
+        let row = client.query_one(
+            "SELECT (SELECT COUNT(*) FROM scan_task), (SELECT COUNT(*) FROM search_generation_admission), (SELECT COUNT(*) FROM search_target_state)",
+            &[],
+        ).await.unwrap();
+        assert_eq!(
+            (
+                row.get::<_, i64>(0),
+                row.get::<_, i64>(1),
+                row.get::<_, i64>(2)
+            ),
+            (0, 0, 0)
+        );
+        drop(client);
+        f.cleanup().await;
     }
 
     #[tokio::test]

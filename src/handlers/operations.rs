@@ -179,6 +179,7 @@ pub(crate) async fn retry_task(
     push_task_owner_scope(&mut conditions, &mut params, &user, "user_id");
     let sql = format!(
         "SELECT id, user_id, task_target, dns_targets, dns_resolvers, task_kind, task_port, task_level, remarks, task_status, \
+                api_client_id, user_access_version, generation_metadata, \
                 dispatch_mode, address_family, scan_profile, scan_plan FROM scan_task \
          WHERE {} FOR UPDATE;",
         conditions.join(" AND ")
@@ -204,6 +205,26 @@ pub(crate) async fn retry_task(
     }
     let new_id = Uuid::now_v7().to_string();
     let owner_id: i32 = source.get("user_id");
+    if source.get::<_, Option<i32>>("api_client_id").is_some() {
+        return HttpResponse::Forbidden()
+            .json(json!({"success":false,"message":"开放平台任务须通过原应用重试"}));
+    }
+    let user_access_version: Option<i64> = source.get("user_access_version");
+    let current_access = crate::access::Access::from_request(&req);
+    if current_access.as_ref().is_some_and(|access| {
+        access.role != 1
+            && (!access.allows(crate::access::Permission::RetryScan)
+                || (!access.legacy_user() && user_access_version != Some(access.version)))
+    }) {
+        return HttpResponse::Forbidden()
+            .json(json!({"success":false,"message":"任务与当前授权不一致，请重新创建"}));
+    }
+    if let Err(error) =
+        crate::access::ensure_scan_authorized(&transaction, owner_id, user_access_version).await
+    {
+        return crate::handlers::access::update_error(error);
+    }
+    let generation_metadata: Option<Value> = source.get("generation_metadata");
     let targets: Vec<cidr::IpInet> = source.get("task_target");
     let dns_targets: Vec<String> = source.get("dns_targets");
     let dns_resolvers: serde_json::Value = source.get("dns_resolvers");
@@ -217,9 +238,9 @@ pub(crate) async fn retry_task(
     let scan_profile: String = source.get("scan_profile");
     let scan_plan: serde_json::Value = source.get("scan_plan");
     let new_task_pk: i32 = match transaction.query_one(
-        "INSERT INTO scan_task (user_id, task_id, task_initiator, task_target, dns_targets, dns_resolvers, task_kind, task_port, task_level, remarks, retry_of_task_id, dispatch_mode, address_family, scan_profile, scan_plan) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id;",
-        &[&owner_id, &new_id, &user.username, &targets, &dns_targets, &dns_resolvers, &task_kind, &port, &level, &remarks, &source_id, &dispatch_mode, &address_family, &scan_profile, &scan_plan]).await {
+        "INSERT INTO scan_task (user_id, task_id, task_initiator, task_target, dns_targets, dns_resolvers, task_kind, task_port, task_level, remarks, retry_of_task_id, dispatch_mode, address_family, scan_profile, scan_plan, user_access_version, generation_metadata) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING id;",
+        &[&owner_id, &new_id, &user.username, &targets, &dns_targets, &dns_resolvers, &task_kind, &port, &level, &remarks, &source_id, &dispatch_mode, &address_family, &scan_profile, &scan_plan, &user_access_version, &generation_metadata]).await {
         Ok(row) => row.get("id"),
         Err(error) => { log_database_error(&req, "RetryTaskDatabaseError", &error); return HttpResponse::InternalServerError().finish(); }
     };
@@ -284,12 +305,36 @@ fn csv_cell(value: &str) -> String {
 #[get("/api/task/{task_id}/export")]
 pub(crate) async fn export_task(
     req: HttpRequest,
+    pool: web::Data<Pool>,
     elasticsearch: web::Data<ElasticsearchService>,
     task_id: web::Path<Uuid>,
     query: web::Query<ExportQuery>,
     user: UserBaseI,
 ) -> impl Responder {
     let id = task_id.into_inner().to_string();
+    let owned =
+        async {
+            let client = pool.get().await?;
+            let row = client.query_one(
+            "SELECT EXISTS(SELECT 1 FROM scan_task WHERE task_id=$1 AND ($2=1 OR user_id=$3))",
+            &[&id, &user.role, &user.id],
+        ).await?;
+            Ok::<bool, Box<dyn std::error::Error>>(row.get(0))
+        }
+        .await;
+    match owned {
+        Ok(true) => {}
+        Ok(false) => return HttpResponse::NotFound().finish(),
+        Err(error) => {
+            error_logs_error(
+                &req,
+                "ExportTaskScopeError",
+                "authorize_task_export",
+                error.as_ref(),
+            );
+            return HttpResponse::InternalServerError().finish();
+        }
+    }
 
     return export_task_from_elasticsearch(
         &req,
@@ -457,10 +502,18 @@ pub(crate) async fn dashboard_overview(
     };
     let online_sql = format!(
         "SELECT COUNT(*)::BIGINT AS count FROM scanner_info WHERE deleted_at IS NULL AND is_enable = true \
-         AND runtime_state <> 'stopping' AND last_seen_at >= NOW() - ({}) * INTERVAL '1 second';",
+         AND runtime_state <> 'stopping' AND last_seen_at >= NOW() - ({}) * INTERVAL '1 second' AND ($1::TEXT[] IS NULL OR scanner_id=ANY($1));",
         crate::scanner_health::seconds_sql()
     );
-    let online: i64 = match connection.query_one(&online_sql, &[]).await {
+    let scanners = crate::access::Access::from_request(&req).and_then(|a| {
+        a.policy.map(|p| {
+            p.scanners
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+        })
+    });
+    let online: i64 = match connection.query_one(&online_sql, &[&scanners]).await {
         Ok(row) => row.get("count"),
         Err(error) => {
             log_database_error(&req, "DashboardDatabaseError", &error);

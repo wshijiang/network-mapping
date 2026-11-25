@@ -235,11 +235,13 @@ pub async fn search_v2(
         }
     };
 
+    let may_generate = crate::access::Access::from_request(&req)
+        .is_some_and(|access| access.allows_automatic_scan());
     match elasticsearch_compilation {
             ElasticsearchCompilation::Supported(filter)
             | ElasticsearchCompilation::RequiresElasticsearch(filter) => respond_search_elasticsearch(
                 pool.get_ref(), elasticsearch.get_ref(), &user, "advanced", query.to_owned(), filter, (limit, offset), sort,
-                (payload.generate_if_needed && offset == 0).then_some(GenerationContext { pool: pool.get_ref(), settings: settings.get_ref(), audit: crate::audit::AuditContext::from_request(&req) }),
+                (may_generate && payload.generate_if_needed && offset == 0).then(|| GenerationContext { pool: pool.get_ref(), settings: settings.get_ref(), audit: crate::audit::AuditContext::from_request(&req) }),
                 Some(federation.get_ref()),
                 Some(query.to_owned()),
             ).await,

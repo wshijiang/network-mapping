@@ -901,8 +901,16 @@ mod tests {
         bad["evidence_parts"][1]["quote"] = json!("192[.]0[.]2[.]1");
         bad["evidence_parts"][1]["block_id"] = json!(999);
         let error = parse_item(body, bad.clone()).unwrap_err();
-        assert_eq!(error.diagnostic["reason"], "evidence_block_not_found");
-        assert!(!error.report().to_string().contains("192"));
+        let mut report = error.report();
+        report.as_object_mut().unwrap().remove("occurred_at");
+        assert_eq!(
+            report,
+            json!({
+                "code": "intel_ai_evidence_not_found",
+                "reason": "evidence_block_not_found",
+                "record": 1
+            })
+        );
         bad["evidence_spans"] = json!([]);
         assert_eq!(
             parse_item(body, bad).unwrap_err().code,

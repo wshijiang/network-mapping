@@ -114,7 +114,7 @@ pub(crate) async fn handle(
         Ok(r) => r,
         Err(e) => return response(&req, Err(e)),
     };
-    let tail = req.match_info().get("tail").unwrap_or("");
+    let tail = req.match_info().get("tail").unwrap_or("").trim_matches('/');
     if tail == "openapi.json" && req.method().as_str() == "GET" {
         return HttpResponse::Ok().json(catalog::openapi());
     }
@@ -179,11 +179,20 @@ fn session_hash(req: &HttpRequest) -> Result<String> {
         .ok_or_else(auth::unauthorized)?;
     Ok(model::fingerprint(session.session.as_bytes()))
 }
-async fn require_step_up(req: &HttpRequest, pool: &Pool, user: &UserBaseI) -> Result<()> {
+pub(crate) async fn require_step_up(
+    req: &HttpRequest,
+    pool: &Pool,
+    user: &UserBaseI,
+) -> Result<()> {
     if pool.get().await?.query_opt("SELECT user_id FROM api_console_verification WHERE session_hash=$1 AND user_id=$2 AND expires_at>NOW()",&[&session_hash(req)?,&user.id]).await?.is_none(){return Err(ApiError::new(StatusCode::FORBIDDEN,"step_up_required","请重新验证密码及已启用的 2FA，验证有效期为 5 分钟"));}
     Ok(())
 }
-async fn step_up(req: &HttpRequest, pool: &Pool, user: &UserBaseI, v: &Value) -> Result<Value> {
+pub(crate) async fn step_up(
+    req: &HttpRequest,
+    pool: &Pool,
+    user: &UserBaseI,
+    v: &Value,
+) -> Result<Value> {
     allowed_keys(v, &["password", "totp"])?;
     let password = v["password"]
         .as_str()
@@ -446,7 +455,7 @@ async fn dispatch(
             .map_err(|_| ApiError::bad("策略格式无效"))?;
             policy.validate()?;
             let tx = c.transaction().await?;
-            tx.query_opt("SELECT id FROM users WHERE id=$1 AND disabled_at IS NULL AND deleted_at IS NULL AND NOT limit_login",&[&owner]).await?.ok_or_else(||ApiError::bad("责任用户不可用"))?;
+            tx.query_opt("SELECT id FROM users WHERE id=$1 AND disabled_at IS NULL AND deleted_at IS NULL AND NOT limit_login AND (role=1 OR (role=2 AND access_policy IS NULL))",&[&owner]).await?.ok_or_else(||ApiError::bad("责任用户不可用"))?;
             tx.execute("SELECT pg_advisory_xact_lock(912311,$1)", &[&owner])
                 .await?;
             let count: i64 = tx

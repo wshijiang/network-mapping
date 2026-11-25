@@ -1268,9 +1268,12 @@ pub(crate) async fn scanner_heartbeat_handler(
         let renewed = match transaction
             .query_opt(
                 "UPDATE scan_task_execution e SET lease_expires_at = CASE \
-                 WHEN e.maintenance_hold THEN NULL ELSE $1::bigint END, cancel_requested=e.cancel_requested OR NOT dns_scan_task_enabled(t) FROM scan_task t \
+                 WHEN e.maintenance_hold THEN NULL
+                 WHEN NOT e.cancel_requested AND api_scan_task_enabled(t) AND user_scan_scanner_allowed(t,$3) AND dns_scan_task_enabled(t) THEN $1::bigint
+                 ELSE e.lease_expires_at END, cancel_requested=e.cancel_requested OR NOT
+                 (api_scan_task_enabled(t) AND user_scan_scanner_allowed(t,$3) AND dns_scan_task_enabled(t)) FROM scan_task t \
                  WHERE e.task_id = t.id AND t.task_id = $2 AND e.assigned_scanner_id = $3 \
-                 AND e.execution_status = 'running' RETURNING e.maintenance_hold, e.lease_expires_at;",
+                 AND e.execution_status = 'running' RETURNING e.maintenance_hold, e.lease_expires_at, e.cancel_requested;",
                 &[&lease_expires_at, &task_id.to_string(), &scanner_id],
             )
             .await
@@ -1282,38 +1285,21 @@ pub(crate) async fn scanner_heartbeat_handler(
             Ok(row) => row,
         };
         if let Some(renewed) = renewed {
-            let maintenance_hold: bool = renewed.get("maintenance_hold");
-            lease = Some(ScannerHeartbeatLease {
-                task_id,
-                status: "renewed",
-                expires_at_ms: renewed.get("lease_expires_at"),
-                ttl_ms: if maintenance_hold {
-                    crate::system_maintenance::RESULT_UPLOAD_GRACE_TTL_MS
-                } else {
-                    crate::scan_control::dispatch::TASK_LEASE_MS
-                },
-                maintenance_hold,
-            });
-            match transaction
-                .query_opt(
-                    "SELECT t.task_id FROM scan_task_execution e JOIN scan_task t ON t.id = e.task_id \
-                     WHERE t.task_id = $1 AND e.assigned_scanner_id = $2 \
-                     AND e.execution_status = 'running' AND e.cancel_requested = true LIMIT 1;",
-                    &[&task_id.to_string(), &scanner_id],
-                )
-                .await
-            {
-                Ok(Some(_)) => cancel_task_id = Some(task_id),
-                Ok(None) => {}
-                Err(error) => {
-                    error_logs_error(
-                        &req,
-                        "ScannerCancelCommandError",
-                        "read_cancel_command",
-                        &error,
-                    );
-                    return HttpResponse::ServiceUnavailable().finish();
-                }
+            if renewed.get::<_, bool>("cancel_requested") {
+                cancel_task_id = Some(task_id);
+            } else {
+                let maintenance_hold: bool = renewed.get("maintenance_hold");
+                lease = Some(ScannerHeartbeatLease {
+                    task_id,
+                    status: "renewed",
+                    expires_at_ms: renewed.get("lease_expires_at"),
+                    ttl_ms: if maintenance_hold {
+                        crate::system_maintenance::RESULT_UPLOAD_GRACE_TTL_MS
+                    } else {
+                        crate::scan_control::dispatch::TASK_LEASE_MS
+                    },
+                    maintenance_hold,
+                });
             }
         } else {
             lease = Some(ScannerHeartbeatLease {
@@ -1754,7 +1740,7 @@ async fn get_task(
              t.task_kind, t.task_port, t.task_initiator, \
              t.task_level, t.task_create_time, t.task_start_time, t.task_end_time, \
              t.task_status, t.lease_expires_at, t.attempt_count, t.failure_reason, t.cancel_requested, \
-             t.retry_of_task_id, t.remarks, t.dispatch_mode, t.task_source, \
+             t.retry_of_task_id, t.remarks, t.dispatch_mode, t.task_source, t.api_client_id, t.user_access_version, \
              t.generation_strategy, t.generation_metadata, t.task_group_id, t.address_family, t.scan_profile, t.scan_plan, t.dns_resolvers \
              FROM scan_task t \
              WHERE t.task_id = $1 AND ($2 = 1 OR t.user_id = $3) LIMIT 1;",
@@ -1901,9 +1887,17 @@ async fn get_task(
         &stored_scan_profile,
         generation_metadata.as_ref(),
     );
+    let retry_allowed = task.get::<_, Option<i32>>("api_client_id").is_none()
+        && crate::access::Access::from_request(&req).is_some_and(|access| {
+            access.allows(crate::access::Permission::RetryScan)
+                && (access.role == 1
+                    || access.legacy_user()
+                    || task.get::<_, Option<i64>>("user_access_version") == Some(access.version))
+        });
     HttpResponse::Ok().json(serde_json::json!({
         "success": true,
         "data": {
+            "retry_allowed": retry_allowed,
             "task_id": task.get::<_, String>("task_id"),
             "task_target": task.get::<_, Vec<String>>("display_targets"),
             "task_kind": task_kind,
@@ -2276,6 +2270,37 @@ pub(crate) async fn create_task(
 
     let dispatch_mode = create_data.dispatch_mode.trim().to_lowercase();
 
+    let access = crate::access::Access::from_request(&req);
+    let user_access_version =
+        if let Some(access) = access.as_ref().filter(|a| a.role != 1 && !a.legacy_user()) {
+            if !access.allows(crate::access::Permission::CreateScan)
+                || access.policy.as_ref().is_none_or(|policy| {
+                    dispatch_mode != "selected"
+                        || create_data.scanner_ids.is_empty()
+                        || !crate::scan_control::target::check_port(&create_data.port)
+                        || !create_data
+                            .scanner_ids
+                            .iter()
+                            .all(|id| policy.scanners.contains(id))
+                        || !policy.allows_targets(
+                            &task_info.ip,
+                            &[],
+                            &scan_profile,
+                            create_data.level as u8,
+                            task_info
+                                .port
+                                .unwrap_or(crate::scan_control::creation::DEFAULT_SCAN_PORTS),
+                        )
+                })
+            {
+                return HttpResponse::Forbidden()
+                    .json(json!({"success":false,"message":"扫描请求超出当前授权范围"}));
+            }
+            Some(access.version)
+        } else {
+            None
+        };
+
     let requested_scanners: Vec<Option<String>> = match dispatch_mode.as_str() {
         "automatic" if create_data.scanner_ids.is_empty() => vec![None],
         "selected" if !create_data.scanner_ids.is_empty() => {
@@ -2342,6 +2367,7 @@ pub(crate) async fn create_task(
             &requested_scanners,
             &scan_profile,
             &scan_plan,
+            user_access_version,
             &AuditContext::from_request(&req),
             &user_base_i,
             &maxmind,
@@ -2352,6 +2378,16 @@ pub(crate) async fn create_task(
             HttpResponse::Ok().json(json!({"success":true,"message":"创建成功","data":created}))
         }
         Err(error) => {
+            match error.downcast_ref::<crate::access::UpdateError>() {
+                Some(crate::access::UpdateError::Forbidden) => {
+                    return HttpResponse::Forbidden().finish();
+                }
+                Some(crate::access::UpdateError::Quota) => {
+                    return HttpResponse::TooManyRequests()
+                        .json(json!({"success":false,"message":"扫描任务数已达到当前授权配额"}));
+                }
+                _ => {}
+            }
             error_logs_error(&req, "AddTaskError", "insert_scan_task", error.as_ref());
             HttpResponse::InternalServerError().body("500")
         }
@@ -2474,6 +2510,35 @@ async fn create_dns_task(
     };
     let dispatch_mode = input.dispatch_mode.trim().to_ascii_lowercase();
     let requires_explicit_resolvers = !dns_resolvers.is_empty();
+    let access = crate::access::Access::from_request(&req);
+    let user_access_version =
+        if let Some(access) = access.as_ref().filter(|a| a.role != 1 && !a.legacy_user()) {
+            if !access.allows(crate::access::Permission::CreateScan)
+                || access.policy.as_ref().is_none_or(|policy| {
+                    dispatch_mode != "selected"
+                        || input.scanner_ids.is_empty()
+                        || !input
+                            .scanner_ids
+                            .iter()
+                            .all(|id| policy.scanners.contains(id))
+                        || requires_explicit_resolvers
+                        || resolved_scan.follow_up_profile.is_some()
+                        || !policy.allows_targets(
+                            &[],
+                            &domains,
+                            &resolved_scan.task_profile,
+                            input.level as u8,
+                            &task_port,
+                        )
+                })
+            {
+                return HttpResponse::Forbidden()
+                    .json(json!({"success":false,"message":"DNS 扫描请求超出当前授权范围"}));
+            }
+            Some(access.version)
+        } else {
+            None
+        };
     let requires_ipv6_resolver = dns_resolvers.iter().any(|resolver| {
         resolver
             .ip
@@ -2626,12 +2691,17 @@ async fn create_dns_task(
             return HttpResponse::InternalServerError().finish();
         }
     };
+    if let Err(error) =
+        crate::access::ensure_scan_authorized(&transaction, user.id, user_access_version).await
+    {
+        return crate::handlers::access::update_error(error);
+    }
     let task = match transaction
         .query_one(
             "INSERT INTO scan_task (user_id, task_id, task_initiator, task_target, task_port, task_level, remarks, \
-             dispatch_mode, address_family, scan_profile, scan_plan, task_kind, dns_targets, dns_resolvers, generation_metadata) \
+             dispatch_mode, address_family, scan_profile, scan_plan, task_kind, dns_targets, dns_resolvers, generation_metadata, user_access_version) \
              VALUES ($1, $2, $3, ARRAY[]::INET[], $4, $5, $6, $7, $13, $8, \
-             $9, 'dns', $10, $11, $12) RETURNING id;",
+             $9, 'dns', $10, $11, $12, $14) RETURNING id;",
             &[
                 &user.id,
                 &task_id,
@@ -2647,6 +2717,7 @@ async fn create_dns_task(
                 &serde_json::to_value(&dns_resolvers).expect("DNS resolver input is serializable"),
                 &generation_metadata,
                 &DNS_TASK_ADDRESS_FAMILY,
+                &user_access_version,
             ],
         )
         .await
@@ -3120,7 +3191,7 @@ async fn get_all_task_handler(
 
     let permi = match user_role {
         1 => Permission::Administrator(user_id),
-        2 => Permission::Users(user_id),
+        2 | 3 => Permission::Users(user_id),
         _ => {
             error!(
                 event = "UserRoleValueInvalid",

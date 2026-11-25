@@ -311,7 +311,7 @@ pub async fn admin_login_records(
     };
     let target_username = match client
         .query_opt(
-            "SELECT username FROM users WHERE id = $1 AND role IN (1, 2);",
+            "SELECT username FROM users WHERE id = $1 AND role IN (1, 2, 3, 4);",
             &[&target_id],
         )
         .await

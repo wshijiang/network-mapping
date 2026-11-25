@@ -2768,6 +2768,11 @@ pub enum IntelCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum UserCommand {
+    /// 查看或更新用户角色及授权
+    Access {
+        #[command(subcommand)]
+        command: UserAccessCommand,
+    },
     /// 修改用户密码
     Password {
         #[command(subcommand)]
@@ -2833,6 +2838,24 @@ pub enum UserCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum UserAccessCommand {
+    Show {
+        username: String,
+    },
+    Set {
+        username: String,
+        #[arg(long, value_enum)]
+        role: UserRole,
+        #[arg(long)]
+        policy: std::path::PathBuf,
+        #[arg(long)]
+        expected_version: i64,
+        #[arg(long)]
+        reason: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum PasswordCommand {
     Set {
         username: String,
@@ -2894,6 +2917,8 @@ pub enum LoginAccessCommand {
 pub enum UserRole {
     Admin,
     User,
+    ReadOnly,
+    Auditor,
 }
 
 impl UserRole {
@@ -2901,6 +2926,8 @@ impl UserRole {
         match self {
             Self::Admin => 1,
             Self::User => 2,
+            Self::ReadOnly => 3,
+            Self::Auditor => 4,
         }
     }
 }

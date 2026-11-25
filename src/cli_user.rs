@@ -16,7 +16,8 @@ use crate::audit::{AuditContext, AuditEvent, write as write_audit, write_standal
 use crate::client_ip::display_ip;
 use crate::config::{
     AllowlistCommand, LoginAccessCommand, LoginOutcome, OutputFormat, PagerMode, PasswordCommand,
-    PasswordHashConfig, ServerCommand, SessionSelection, TwoFactorCommand, UserCommand,
+    PasswordHashConfig, ServerCommand, SessionSelection, TwoFactorCommand, UserAccessCommand,
+    UserCommand,
 };
 use crate::identity::generate_hash_password;
 use crate::login_allowlist::{display_login_allowlist, normalize_login_allowlist};
@@ -68,6 +69,7 @@ async fn execute_user(
     password_config: PasswordHashConfig,
 ) -> CliResult {
     match command {
+        UserCommand::Access { command } => manage_access(pool, command).await,
         UserCommand::Password { command } => match command {
             PasswordCommand::Set {
                 username,
@@ -124,6 +126,48 @@ async fn execute_user(
             .await
         }
     }
+}
+
+async fn manage_access(pool: &Pool, command: &UserAccessCommand) -> CliResult {
+    use crate::access::{Target, Update};
+    let access = match command {
+        UserAccessCommand::Show { username } => {
+            let username = validate_username(username)?;
+            let client = pool.get().await?;
+            crate::access::load(&client, Target::Username(&username)).await?
+        }
+        UserAccessCommand::Set {
+            username,
+            role,
+            policy,
+            expected_version,
+            reason,
+        } => {
+            let username = validate_username(username)?;
+            let mut bytes = Vec::new();
+            std::fs::File::open(policy)?
+                .take(65537)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 65536 {
+                return Err("授权文件大小不能超过 64 KiB".into());
+            }
+            crate::access::update(
+                pool,
+                Target::Username(&username),
+                Update {
+                    role: role.database_value(),
+                    expected_version: *expected_version,
+                    policy: serde_json::from_slice(&bytes)?,
+                    reason: reason.clone(),
+                },
+                None,
+                &AuditContext::cli("user access set"),
+            )
+            .await?
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&access)?);
+    Ok(())
 }
 
 fn validate_username(username: &str) -> CliResult<String> {
@@ -189,7 +233,7 @@ async fn set_password(
     let transaction = client.transaction().await?;
     let row = transaction
         .query_opt(
-            "SELECT id FROM users WHERE username = $1 AND role IN (1, 2) AND deleted_at IS NULL FOR UPDATE",
+            "SELECT id FROM users WHERE username = $1 AND role IN (1, 2, 3, 4) AND deleted_at IS NULL FOR UPDATE",
             &[&username],
         )
         .await?
@@ -238,7 +282,7 @@ async fn create_user(
     let mut client = pool.get().await?;
     let transaction = client.transaction().await?;
     let row = match transaction.query_one(
-        "INSERT INTO users(username,password,role,email,limit_login,login_error_count) VALUES($1,$2,$3,$4,FALSE,0) RETURNING id",
+        "INSERT INTO users(username,password,role,email,limit_login,login_error_count,access_policy) VALUES($1,$2,$3,$4,FALSE,0,CASE WHEN $3=1 THEN NULL ELSE '{}'::JSONB END) RETURNING id",
         &[&username, &password_hash, &role, &email],
     ).await {
         Ok(row) => row,
@@ -284,7 +328,7 @@ async fn clear_two_factor(pool: &Pool, username: &str, yes: bool) -> CliResult {
     let mut client = pool.get().await?;
     let transaction = client.transaction().await?;
     let row = transaction.query_opt(
-        "SELECT id, enable_2fa FROM users WHERE username=$1 AND role IN (1,2) AND deleted_at IS NULL FOR UPDATE",
+        "SELECT id, enable_2fa FROM users WHERE username=$1 AND role IN (1,2,3,4) AND deleted_at IS NULL FOR UPDATE",
         &[&username],
     ).await?.ok_or("用户不存在或已删除")?;
     let user_id: i32 = row.get("id");
@@ -329,7 +373,7 @@ async fn resolve_user_for_update(
     username: &str,
 ) -> CliResult<(i32, Vec<IpCidr>)> {
     let row = transaction.query_opt(
-        "SELECT id, login_ip_allowlist FROM users WHERE username=$1 AND role IN (1,2) AND deleted_at IS NULL FOR UPDATE",
+        "SELECT id, login_ip_allowlist FROM users WHERE username=$1 AND role IN (1,2,3,4) AND deleted_at IS NULL FOR UPDATE",
         &[&username],
     ).await?.ok_or("用户不存在或已删除")?;
     Ok((row.get("id"), row.get("login_ip_allowlist")))
@@ -341,7 +385,7 @@ async fn manage_allowlist(pool: &Pool, command: &AllowlistCommand) -> CliResult 
             let username = validate_username(username)?;
             let client = pool.get().await?;
             let row = client.query_opt(
-                "SELECT login_ip_allowlist FROM users WHERE username=$1 AND role IN (1,2) AND deleted_at IS NULL",
+                "SELECT login_ip_allowlist FROM users WHERE username=$1 AND role IN (1,2,3,4) AND deleted_at IS NULL",
                 &[&username],
             ).await?.ok_or("用户不存在或已删除")?;
             let entries: Vec<IpCidr> = row.get("login_ip_allowlist");
@@ -439,7 +483,7 @@ async fn manage_login_access(pool: &Pool, command: &LoginAccessCommand) -> CliRe
     let mut client = pool.get().await?;
     let transaction = client.transaction().await?;
     let rows = transaction.query(
-        "SELECT id, username, role, disabled_at IS NOT NULL AS disabled, limit_login FROM users WHERE username=ANY($1) AND role IN (1,2) AND deleted_at IS NULL FOR UPDATE",
+        "SELECT id, username, role, disabled_at IS NOT NULL AS disabled, limit_login FROM users WHERE username=ANY($1) AND role IN (1,2,3,4) AND deleted_at IS NULL FOR UPDATE",
         &[&normalized],
     ).await?;
     if rows.len() != normalized.len() {
@@ -528,7 +572,7 @@ async fn show_user(pool: &Pool, username: &str, sessions: SessionSelection) -> C
     let username = validate_username(username)?;
     let client = pool.get().await?;
     let row = client.query_opt(
-        "SELECT id,username,email,role,create_time,limit_login,enable_2fa,last_login_at,last_login_ip,login_ip_allowlist,disabled_at,deleted_at FROM users WHERE username=$1 AND role IN (1,2)",
+        "SELECT id,username,email,role,create_time,limit_login,enable_2fa,last_login_at,last_login_ip,login_ip_allowlist,disabled_at,deleted_at FROM users WHERE username=$1 AND role IN (1,2,3,4)",
         &[&username],
     ).await?.ok_or("用户不存在")?;
     let user_id: i32 = row.get("id");
@@ -539,10 +583,12 @@ async fn show_user(pool: &Pool, username: &str, sessions: SessionSelection) -> C
     println!("用户名          : {}", row.get::<_, String>("username"));
     println!(
         "角色            : {}",
-        if row.get::<_, i32>("role") == 1 {
-            "admin"
-        } else {
-            "user"
+        match row.get::<_, i32>("role") {
+            crate::access::ADMIN => "admin",
+            crate::access::USER => "user",
+            crate::access::READ_ONLY => "read-only",
+            crate::access::AUDITOR => "auditor",
+            _ => "unknown",
         }
     );
     println!(
@@ -701,7 +747,7 @@ async fn show_login_log(
     let client = pool.get().await?;
     let user = client
         .query_opt(
-            "SELECT id FROM users WHERE username=$1 AND role IN (1,2)",
+            "SELECT id FROM users WHERE username=$1 AND role IN (1,2,3,4)",
             &[&username],
         )
         .await?

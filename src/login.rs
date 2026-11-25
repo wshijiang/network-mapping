@@ -125,6 +125,7 @@ impl Error for LoginInvalidCredentials {}
 pub(crate) struct SessionAuthentication {
     pub(crate) user: UserBaseI,
     pub(crate) csrf_token: String,
+    pub(crate) access: crate::access::Access,
 }
 
 pub(crate) enum SessionCheck {
@@ -289,6 +290,7 @@ impl LoginToken {
         let row = client
             .query_opt(
                 "SELECT u.id, u.username, u.role, u.email, u.limit_login, u.enable_2fa, \
+                        u.access_policy, u.access_version, \
                         u.disabled_at IS NOT NULL AS user_disabled, \
                         u.deleted_at IS NOT NULL AS user_deleted, \
                         s.csrf_token, s.is_enable, s.deleted_at IS NOT NULL AS session_deleted, \
@@ -321,6 +323,8 @@ impl LoginToken {
             || row.get::<_, bool>("limit_login")
         {
             Some("session_user_inactive")
+        } else if !matches!(row.get::<_, Option<i32>>("role"), Some(1..=4)) {
+            Some("session_role_invalid")
         } else {
             None
         };
@@ -338,6 +342,7 @@ impl LoginToken {
                 enable_2fa: row.get("enable_2fa"),
             },
             csrf_token: row.get("csrf_token"),
+            access: crate::access::Access::from_row(&row)?,
         }))
     }
 

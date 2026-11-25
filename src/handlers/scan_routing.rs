@@ -39,6 +39,7 @@ fn empty_resolvers() -> Value {
 
 #[post("/api/task/placement-preview")]
 pub async fn placement_preview(
+    req: HttpRequest,
     pool: web::Data<Pool>,
     maxmind: web::Data<MaxMindState>,
     input: web::Json<PlacementRequest>,
@@ -48,6 +49,9 @@ pub async fn placement_preview(
         return HttpResponse::Forbidden().finish();
     }
     let profile = input.scan_profile.trim().to_ascii_lowercase();
+    let profile = crate::scan_control::profiles::ip_profile_alias(&profile)
+        .map(str::to_owned)
+        .unwrap_or(profile);
     let plan = crate::scan_control::creation::build_service_scan_plan_with_options(
         &profile,
         &input.required_services,
@@ -120,6 +124,46 @@ pub async fn placement_preview(
         }
         family.unwrap_or("ipv4")
     };
+    let access = crate::access::Access::from_request(&req);
+    let scoped = access.as_ref().filter(|a| a.role != 1 && !a.legacy_user());
+    let policy = scoped.and_then(|a| a.policy.as_ref());
+    if let Some(policy) = policy {
+        let mut ips = Vec::new();
+        let mut domains = Vec::new();
+        if profile == "dns_records" {
+            domains = input
+                .targets
+                .iter()
+                .filter_map(|t| crate::dns::canonical_scan_domain(t).ok())
+                .collect();
+        } else {
+            ips = input
+                .targets
+                .iter()
+                .filter_map(|t| {
+                    t.parse::<ipnet::IpNet>()
+                        .ok()
+                        .or_else(|| t.parse::<std::net::IpAddr>().ok().map(ipnet::IpNet::from))
+                })
+                .collect();
+        }
+        if !scoped.is_some_and(|a| a.allows(crate::access::Permission::CreateScan))
+            || !policy.allows_targets(
+                &ips,
+                &domains,
+                &profile,
+                0,
+                if profile == "dns_records" {
+                    "53"
+                } else {
+                    &input.port
+                },
+            )
+            || resolvers.as_array().is_some_and(|r| !r.is_empty())
+        {
+            return HttpResponse::Forbidden().finish();
+        }
+    }
     let plan = plan.unwrap();
     let required_services = plan
         .get("required_services")
@@ -128,7 +172,15 @@ pub async fn placement_preview(
     let result: Result<Value, Error> = async {
         let client = pool.get().await?;
         let cfg = routing::config(&client).await?;
-        let nodes = routing::candidates(&client, &maxmind, &input.targets, family, &profile, &input.port, user.id, &resolvers, &required_services, &plan, &cfg).await?;
+        let mut nodes = routing::candidates(&client, &maxmind, &input.targets, family, &profile, &input.port, user.id, &resolvers, &required_services, &plan, &cfg).await?;
+        if let Some(policy) = policy {
+            nodes.retain(|node| Uuid::parse_str(&node.scanner_id).is_ok_and(|id| policy.scanners.contains(&id)));
+            // Shared-node load and historical measurements are operational data.
+            let preferred = cfg.enabled.then(|| nodes.first().map(|n| n.scanner_id.clone())).flatten();
+            return Ok(json!({"enabled":cfg.enabled,"target_geo":routing::target_geo(&input.targets,&maxmind),
+                "preferred_scanner_id":preferred,"candidates":nodes.iter().map(|n| json!({"scanner_id":n.scanner_id,"name":n.name})).collect::<Vec<_>>(),
+                "reason":if preferred.is_some(){"ranked_candidate"}else{"no_idle_candidate"}}));
+        }
         let preferred = cfg.enabled.then(|| nodes.iter().find(|n| !n.busy).map(|n| n.scanner_id.clone())).flatten();
         Ok(json!({"enabled":cfg.enabled,"target_geo":routing::target_geo(&input.targets,&maxmind),"preferred_scanner_id":preferred,"candidates":nodes,"reason":if !cfg.enabled{"disabled"}else if preferred.is_some(){"ranked_candidate"}else{"no_idle_candidate"}}))
     }.await;

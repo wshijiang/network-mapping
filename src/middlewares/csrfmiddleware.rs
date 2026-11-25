@@ -68,7 +68,7 @@ where
         let path = req.path().to_owned();
         let csrf_protected_get = matches!(
             path.as_str(),
-            "/logout" | "/api/totp/bind" | "/api/updaterir"
+            "/logout" | "/api/totp/bind" | "/api/updaterir" | "/api/audit/export"
         );
         let safe_method = matches!(req.method().as_str(), "GET" | "HEAD") && !csrf_protected_get;
         let pass = is_scanner_api_request(req.method(), &path)

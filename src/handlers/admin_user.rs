@@ -40,7 +40,7 @@ fn user_list_filter<'a>(
     role: &'a Option<i32>,
     status: &str,
 ) -> (String, Vec<&'a (dyn ToSql + Sync)>) {
-    let mut conditions = vec!["u.role IN (1, 2)".to_owned()];
+    let mut conditions = vec!["u.role IN (1, 2, 3, 4)".to_owned()];
     let mut params: Vec<&(dyn ToSql + Sync)> = Vec::new();
     if let Some(value) = search.as_ref() {
         params.push(value);
@@ -203,7 +203,7 @@ fn normalize_list_query(query: &UserListQuery) -> Result<NormalizedUserListQuery
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.chars().take(100).collect::<String>());
-    if !matches!(query.role, None | Some(1 | 2)) {
+    if !matches!(query.role, None | Some(1..=4)) {
         return Err(ManagementError::BadRequest("用户角色筛选条件不正确"));
     }
     let status = query.status.as_deref().unwrap_or("all").to_owned();
@@ -310,10 +310,10 @@ pub async fn list_users(
              COUNT(*) FILTER (WHERE disabled_at IS NULL AND limit_login = TRUE) AS locked, \
              (SELECT COUNT(*) FROM session s JOIN users su ON su.id = s.user_id \
               WHERE s.is_enable = TRUE AND s.deleted_at IS NULL \
-              AND su.role IN (1, 2) AND su.deleted_at IS NULL \
+              AND su.role IN (1, 2, 3, 4) AND su.deleted_at IS NULL \
               AND s.create_time + s.ttl::BIGINT * 1000 > \
                   (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000)::BIGINT) AS active_sessions \
-             FROM users WHERE role IN (1, 2) AND deleted_at IS NULL;",
+             FROM users WHERE role IN (1, 2, 3, 4) AND deleted_at IS NULL;",
             &[],
         )
         .await
@@ -358,7 +358,7 @@ fn validate_create_request(
     if !(12..=256).contains(&password_length) {
         return Err(ManagementError::BadRequest("密码长度必须为 12-256 个字符"));
     }
-    if !matches!(request.role, 1 | 2) {
+    if !matches!(request.role, 2..=4) {
         return Err(ManagementError::BadRequest("用户角色不正确"));
     }
     let email = request
@@ -416,8 +416,8 @@ pub async fn create_user(
     };
     let inserted = transaction
         .query_one(
-            "INSERT INTO users (username, password, role, email, limit_login, login_error_count) \
-             VALUES ($1, $2, $3, $4, FALSE, 0) RETURNING id;",
+            "INSERT INTO users (username, password, role, email, limit_login, login_error_count, access_policy) \
+             VALUES ($1, $2, $3, $4, FALSE, 0, '{}'::JSONB) RETURNING id;",
             &[&username, &password_hash, &body.role, &email],
         )
         .await;
@@ -467,7 +467,7 @@ async fn lock_target_user(
         .query_opt(
             "SELECT id, username, role, disabled_at IS NOT NULL AS disabled, \
                     limit_login AS login_locked FROM users \
-             WHERE id = $1 AND role IN (1, 2) AND deleted_at IS NULL FOR UPDATE;",
+             WHERE id = $1 AND role IN (1, 2, 3, 4) AND deleted_at IS NULL FOR UPDATE;",
             &[&user_id],
         )
         .await?
@@ -813,7 +813,7 @@ mod tests {
     #[test]
     fn user_list_filter_has_no_optional_parameters_by_default() {
         let (sql, params) = user_list_filter(&None, &None, "all");
-        assert_eq!(sql, "u.role IN (1, 2) AND u.deleted_at IS NULL");
+        assert_eq!(sql, "u.role IN (1, 2, 3, 4) AND u.deleted_at IS NULL");
         assert!(params.is_empty());
     }
 }

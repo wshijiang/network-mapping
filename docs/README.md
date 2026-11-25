@@ -43,6 +43,7 @@
 | [Docker 配置参考](DOCKER_CONFIGURATION.md) | 环境变量、默认值、生效方式和 Compose 设置 |
 | [启动配置检查](CONFIG_CHECK.md) | 缺省字段提示、配置来源及 Web 检查快照 |
 | [登录人机验证](HUMAN_VERIFICATION.md) | 可选 Turnstile 的启用、验证和排障 |
+| [用户角色与权限管理](USER_ACCESS.md) | 角色、Web 授权、扫描与审计范围、升级步骤 |
 | [用户管理 CLI](USER_MANAGEMENT_CLI.md) | 用户、凭据、会话和登录限制的本地管理 |
 
 ## 功能使用

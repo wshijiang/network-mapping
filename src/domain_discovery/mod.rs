@@ -307,6 +307,17 @@ async fn queue_evidence(
         }
     }
     if !pending.is_empty() {
+        match crate::access::ensure_scan_authorized(&tx, user.id, None).await {
+            Ok(()) => {}
+            Err(crate::access::UpdateError::Forbidden) => {
+                return Err(Error {
+                    status: StatusCode::FORBIDDEN,
+                    code: "authorization_changed",
+                });
+            }
+            Err(crate::access::UpdateError::Database(error)) => return Err(error.into()),
+            Err(_) => return Err(Error::unavailable()),
+        }
         let dns_plan = crate::scan_control::creation::build_scan_plan(
             crate::scan_control::profiles::DNS_PARENT_PROFILE,
         )

@@ -175,6 +175,32 @@ where
             match login_t.check_token(&session, require_totp).await {
                 Ok(SessionCheck::Valid(authentication)) => {
                     let user = authentication.user;
+                    let access = authentication.access;
+                    if path.starts_with("/api/") && !access.allows_route(req.method(), &path) {
+                        set_reason(req.request(), "permission_denied");
+                        let mut event = AuditEvent::user(
+                            "authorization",
+                            "auth.permission_denied",
+                            "denied",
+                            &user,
+                        );
+                        event.response_status = Some(403);
+                        event.reason_code = Some("permission_denied".to_owned());
+                        write_standalone(
+                            g_pool,
+                            &AuditContext::from_request(req.request()),
+                            &event,
+                        )
+                        .await;
+                        let resp = error_response(
+                            req.request(),
+                            actix_web::http::StatusCode::FORBIDDEN,
+                            "permission_denied",
+                            "当前账号未获授予该权限",
+                        );
+                        return Ok(req.into_response(resp).map_into_right_body());
+                    }
+                    req.extensions_mut().insert(access);
                     // 将操作者写入最外层 wrap_fn 预置的槽位，供请求日志采集（request_log）。
                     // 槽位仅在采集开启且未被跳过的请求上存在；匿名/被拒绝请求保持 NULL。
                     if let Some(slot) = req.extensions().get::<RequestActor>() {

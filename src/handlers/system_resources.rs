@@ -422,8 +422,11 @@ pub(crate) async fn get_system_resource_history(
     req: HttpRequest,
     query: web::Query<ResourceHistoryQuery>,
     pool: web::Data<Pool>,
-    _user: UserBaseI,
+    user: UserBaseI,
 ) -> impl Responder {
+    if user.role != crate::access::ADMIN {
+        return HttpResponse::Forbidden().finish();
+    }
     let normalized = match normalize_query(&query) {
         Ok(value) => value,
         Err(message) => return bad_request(message),
@@ -495,8 +498,11 @@ pub(crate) async fn get_database_size_history(
     req: HttpRequest,
     query: web::Query<ResourceHistoryQuery>,
     pool: web::Data<Pool>,
-    _user: UserBaseI,
+    user: UserBaseI,
 ) -> impl Responder {
+    if user.role != crate::access::ADMIN {
+        return HttpResponse::Forbidden().finish();
+    }
     let normalized = match normalize_database_query(&query) {
         Ok(value) => value,
         Err(message) => return bad_request(message),
