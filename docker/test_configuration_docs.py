@@ -111,7 +111,8 @@ class ConfigurationDocumentationTests(unittest.TestCase):
         file_only = self.reference.split(
             '## 有文件配置或 Web 入口、暂不支持 env 的字段', 1)[1].split(
             '## 配置文档维护与覆盖检查', 1)[0]
-        fields.update(re.findall(r'^\| `([a-z_]+\.[a-z_.]+)` \|', file_only, re.MULTILINE))
+        fields.update(re.findall(r'^\| `([a-z_][a-z0-9_]*\.[a-z0-9_.]+)` \|', file_only,
+                                 re.MULTILINE))
         actual = set(leaf_fields(configuration, atomic=('monitor.service_defaults',)))
         self.assertEqual(fields, actual,
                          'TOML examples must cover all fields, including file-only and legacy names')

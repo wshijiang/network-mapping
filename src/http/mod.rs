@@ -164,10 +164,16 @@ fn data_import(cfg: &mut web::ServiceConfig) {
 
 fn data_export(cfg: &mut web::ServiceConfig) {
     cfg.service(handlers::data_export::get_schema)
+        .service(handlers::data_export::get_settings)
+        .service(handlers::data_export::put_settings)
+        .service(handlers::data_export::get_s3_settings)
+        .service(handlers::data_export::put_s3_settings)
+        .service(handlers::data_export::test_storage)
         .service(handlers::data_export::preview)
         .service(handlers::data_export::create_task)
         .service(handlers::data_export::list_tasks)
         .service(handlers::data_export::get_task)
+        .service(handlers::data_export::download_link)
         .service(handlers::data_export::download)
         .service(handlers::data_export::cancel_task)
         .service(handlers::data_export::delete_task);

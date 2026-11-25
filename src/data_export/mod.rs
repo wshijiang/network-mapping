@@ -6,6 +6,9 @@
 pub mod cli;
 pub mod csv;
 pub mod fields;
+pub mod management;
+pub mod settings;
+pub mod storage;
 pub mod task;
 pub mod worker;
 
@@ -26,6 +29,8 @@ pub struct DataExportConfig {
     pub lease_seconds: u64,
     /// 终态任务文件与记录保留天数。
     pub retention_days: u32,
+    /// S3 连接由部署配置指定，凭据由 AWS 凭据链提供。
+    pub s3: Option<storage::S3Config>,
 }
 
 impl Default for DataExportConfig {
@@ -37,6 +42,7 @@ impl Default for DataExportConfig {
             batch_size: 2000,
             lease_seconds: 120,
             retention_days: 30,
+            s3: None,
         }
     }
 }
@@ -54,6 +60,9 @@ impl DataExportConfig {
         }
         if self.retention_days == 0 {
             return Err("data_export.retention_days 必须大于 0".into());
+        }
+        if let Some(s3) = &self.s3 {
+            s3.validate()?;
         }
         Ok(())
     }

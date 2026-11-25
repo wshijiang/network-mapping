@@ -56,6 +56,18 @@ directory = "/var/lib/network-mapping/data-import"
 # 导出 CSV 落盘目录，必须可写；默认位于 server-data 卷。其余参数使用代码默认值。
 directory = "/var/lib/network-mapping/data-export"
 
+# 可选部署默认连接，也可在 Web「导出设置 → 管理 S3 连接」或 CLI 保存。可在网页或 CLI 配置独立凭据，也可使用 AWS 凭据链。
+# [data_export.s3]
+# region = "us-east-1"
+# bucket = "network-mapping-exports"
+# prefix = "exports"
+# endpoint = "https://s3.example.invalid"           # AWS S3 省略；兼容产品填写其 S3 API 地址
+# path_style = true                                # 按供应商要求设置
+# download_endpoint = "https://download.example.invalid" # 可选，用于生成浏览器可达的预签名 URL
+# proxy_download = false                           # OSS 仅内网可见时可设为 true
+# proxy_mode = "system"                            # system / direct / custom
+# proxy_url = "http://proxy.example.invalid:8080"    # 自定义出站代理地址
+
 [backup]
 enabled = false
 # 默认镜像没有 pgBackRest/sudo；需独立准备二进制、配置、账户与访问权限。

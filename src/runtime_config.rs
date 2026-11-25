@@ -294,7 +294,7 @@ impl RuntimeSettings {
     }
 }
 
-async fn load_namespace<T>(
+pub(crate) async fn load_namespace<T>(
     pool: &Pool,
     namespace: &'static str,
     bootstrap: T,

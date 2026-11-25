@@ -2,7 +2,7 @@
 //! （公式注入防护：`= + - @` 或制表符/换行开头前置单引号；引号翻倍）。
 
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, BufWriter};
 
 use crate::elasticsearch::ElasticsearchSearchItem;
 
@@ -21,7 +21,7 @@ pub(crate) fn escape_cell(value: &str) -> String {
 
 /// 流式 CSV 写入器：边写边累计 sha256 与字节数，避免大文件二次读取。
 pub(crate) struct CsvWriter {
-    file: tokio::fs::File,
+    file: BufWriter<tokio::fs::File>,
     hasher: Sha256,
     pub bytes_written: i64,
 }
@@ -33,7 +33,7 @@ impl CsvWriter {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let file = tokio::fs::File::create(path).await?;
         let mut writer = Self {
-            file,
+            file: BufWriter::with_capacity(256 * 1024, file),
             hasher: Sha256::new(),
             bytes_written: 0,
         };
@@ -75,7 +75,7 @@ impl CsvWriter {
         mut self,
     ) -> Result<(i64, String), Box<dyn std::error::Error + Send + Sync>> {
         self.file.flush().await?;
-        self.file.sync_all().await?;
+        self.file.get_ref().sync_all().await?;
         let sha256: String = self
             .hasher
             .finalize()

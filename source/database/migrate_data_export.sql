@@ -36,6 +36,28 @@ CREATE INDEX IF NOT EXISTS idx_data_export_task_owner
 CREATE INDEX IF NOT EXISTS idx_data_export_task_claim
     ON data_export_task(status, lease_expires_at);
 
+ALTER TABLE data_export_task
+    ADD COLUMN IF NOT EXISTS storage_plan JSONB,
+    ADD COLUMN IF NOT EXISTS s3_object JSONB,
+    ADD COLUMN IF NOT EXISTS s3_failed BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Keep cleanup details even if the parent task (or its owner) is deleted.
+CREATE TABLE IF NOT EXISTS data_export_attempt (
+    id UUID PRIMARY KEY,
+    task_id UUID REFERENCES data_export_task(id) ON DELETE SET NULL,
+    local_path TEXT,
+    s3_object JSONB,
+    multipart_upload_id TEXT,
+    cleanup_after TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '10 minutes'
+);
+CREATE INDEX IF NOT EXISTS idx_data_export_attempt_task ON data_export_attempt(task_id);
+CREATE INDEX IF NOT EXISTS idx_data_export_attempt_cleanup ON data_export_attempt(cleanup_after);
+
+-- Files created before multi-location support also use the cleanup ledger.
+INSERT INTO data_export_attempt (id, task_id, local_path)
+    SELECT id, id, file_path FROM data_export_task WHERE storage_plan IS NULL AND file_path IS NOT NULL
+    ON CONFLICT (id) DO NOTHING;
+
 -- 导出审计事件分类：旧库的 audit_event_category_check 可能不含 data_export，
 -- 启动时幂等补齐，避免导出审计写入被数据库约束拒绝。
 DO $$
