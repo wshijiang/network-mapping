@@ -2,6 +2,7 @@
 
 mod access;
 pub mod admin;
+mod analytics_page;
 pub mod analytics_snapshot;
 pub mod api_response;
 pub mod audit;

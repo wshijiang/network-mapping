@@ -208,10 +208,20 @@ impl AnalyticsSnapshotMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalyticsPageRollups {
+    #[default]
+    Off,
+    Build,
+    Read,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AnalyticsSnapshotConfig {
     pub mode: AnalyticsSnapshotMode,
+    pub page_rollups: AnalyticsPageRollups,
     pub interval_minutes: u64,
     pub execution_timeout_minutes: u64,
     pub max_staging_mib: u64,
@@ -221,6 +231,7 @@ impl Default for AnalyticsSnapshotConfig {
     fn default() -> Self {
         Self {
             mode: AnalyticsSnapshotMode::Realtime,
+            page_rollups: AnalyticsPageRollups::Off,
             interval_minutes: 30,
             execution_timeout_minutes: 360,
             max_staging_mib: 4096,

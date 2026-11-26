@@ -8,7 +8,8 @@ use tokio_postgres::types::ToSql;
 use uuid::Uuid;
 
 use crate::admin::UserBaseI;
-use crate::config::AnalyticsSnapshotConfig;
+use crate::analytics_page::{self, Chart, Window};
+use crate::config::{AnalyticsPageRollups, AnalyticsSnapshotConfig};
 use crate::elasticsearch::{ElasticsearchService, ScanQueryIndex};
 use crate::logs::write::{error_logs, error_logs_error};
 use crate::runtime_config::RuntimeConfig;
@@ -34,23 +35,27 @@ pub(crate) struct DistributionQuery {
     filters: AnalysisFilterQuery,
     dimension: Option<String>,
     limit: Option<i64>,
+    #[serde(default)]
+    page_window: bool,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct HeatmapQuery {
     #[serde(flatten)]
     filters: AnalysisFilterQuery,
+    #[serde(default)]
+    page_window: bool,
 }
 
 #[derive(Clone)]
-pub(super) struct AnalysisFilters {
-    pub(super) timezone: String,
-    pub(super) start_at: DateTime<Utc>,
-    pub(super) end_at: DateTime<Utc>,
-    pub(super) start_ms: i64,
-    pub(super) end_ms: i64,
-    pub(super) scanner_id: Option<String>,
-    pub(super) task_source: Option<String>,
+pub(crate) struct AnalysisFilters {
+    pub(crate) timezone: String,
+    pub(crate) start_at: DateTime<Utc>,
+    pub(crate) end_at: DateTime<Utc>,
+    pub(crate) start_ms: i64,
+    pub(crate) end_ms: i64,
+    pub(crate) scanner_id: Option<String>,
+    pub(crate) task_source: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -83,6 +88,8 @@ struct AnalysisMeta {
     timezone: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     data_as_of: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot_revision: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -107,7 +114,7 @@ struct DistributionData {
     total: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct HeatmapItem {
     date: String,
     count: i64,
@@ -155,6 +162,7 @@ fn analysis_meta(filters: &AnalysisFilters) -> AnalysisMeta {
         end_at: filters.end_at,
         timezone: filters.timezone.clone(),
         data_as_of: None,
+        snapshot_revision: None,
     }
 }
 
@@ -211,7 +219,23 @@ pub(crate) async fn get_analysis_distribution(
     if !matches!(limit, 5 | 7 | 10) {
         return bad_request("limit must be 5, 7 or 10");
     }
-    if analytics_snapshot.get().await.value.mode.reads_snapshot() {
+    let settings = analytics_snapshot.get().await.value;
+    if settings.mode.reads_snapshot() {
+        if let Some(window) = published_window(&settings, &filters) {
+            return published_chart(
+                &req,
+                &pool,
+                window,
+                &filters,
+                &user,
+                Chart::Distribution(dimension.as_str()),
+                limit,
+            )
+            .await;
+        }
+        if query.page_window && settings.page_rollups == AnalyticsPageRollups::Read {
+            return published_chart_pending();
+        }
         return analysis_distribution_from_snapshot(
             &req,
             pool.get_ref(),
@@ -247,12 +271,137 @@ pub(crate) async fn get_analysis_discovery_heatmap(
         Ok(value) => value,
         Err(message) => return bad_request(message),
     };
-    if analytics_snapshot.get().await.value.mode.reads_snapshot() {
+    let settings = analytics_snapshot.get().await.value;
+    if settings.mode.reads_snapshot() {
+        if let Some(window) = published_window(&settings, &filters) {
+            return published_chart(&req, &pool, window, &filters, &user, Chart::Heatmap, 0).await;
+        }
+        if query.page_window && settings.page_rollups == AnalyticsPageRollups::Read {
+            return published_chart_pending();
+        }
         return analysis_heatmap_from_snapshot(&req, pool.get_ref(), &filters, &user).await;
     }
 
     return analysis_heatmap_from_elasticsearch(&req, elasticsearch.get_ref(), &filters, &user)
         .await;
+}
+
+fn published_window(
+    settings: &AnalyticsSnapshotConfig,
+    filters: &AnalysisFilters,
+) -> Option<Window> {
+    if settings.page_rollups != AnalyticsPageRollups::Read {
+        return None;
+    }
+    Window::for_request(
+        filters.start_at,
+        filters.end_at,
+        &filters.timezone,
+        Utc::now(),
+    )
+}
+
+#[derive(Deserialize)]
+struct PublishedDistribution {
+    total: i64,
+    items: Vec<PublishedDistributionItem>,
+}
+
+#[derive(Deserialize)]
+struct PublishedDistributionItem {
+    label: String,
+    count: i64,
+}
+
+async fn published_chart(
+    req: &HttpRequest,
+    pool: &Pool,
+    window: Window,
+    filters: &AnalysisFilters,
+    user: &UserBaseI,
+    chart: Chart,
+    limit: i64,
+) -> HttpResponse {
+    let owner_id = (user.role != 1).then_some(user.id);
+    let result = match analytics_page::read(pool, window, filters, owner_id, chart).await {
+        Ok(Some(result)) => result,
+        Ok(None) => return published_chart_pending(),
+        Err(error) => {
+            error_logs(req, "AnalysisPageSnapshotReadError", &error);
+            return HttpResponse::ServiceUnavailable()
+                .json(json!({"success": false, "code": "analytics_page_snapshot_unavailable", "message": "分析图表快照暂时不可用，请稍后重试。"}));
+        }
+    };
+    if result.legacy_timezone_error {
+        return analytics_timezone_backfill_required();
+    }
+
+    let mut meta = analysis_meta(filters);
+    meta.data_as_of = Some(result.data_as_of);
+    meta.snapshot_revision = Some(result.revision);
+    let response = match chart {
+        Chart::Heatmap => serde_json::from_value::<Vec<HeatmapItem>>(result.data).map(|items| {
+            HttpResponse::Ok().json(AnalysisResponse {
+                success: true,
+                data: HeatmapData { items },
+                meta,
+            })
+        }),
+        Chart::Distribution(dimension) => {
+            serde_json::from_value::<PublishedDistribution>(result.data).map(|result| {
+                let items = result
+                    .items
+                    .into_iter()
+                    .take(limit as usize)
+                    .map(|item| DistributionItem {
+                        name: item.label,
+                        count: item.count,
+                        percentage: percentage(item.count, result.total),
+                    })
+                    .collect::<Vec<_>>();
+                let other_count = result
+                    .total
+                    .saturating_sub(items.iter().map(|item| item.count).sum());
+                HttpResponse::Ok().json(AnalysisResponse {
+                    success: true,
+                    data: DistributionData {
+                        dimension,
+                        items,
+                        other_count,
+                        total: result.total,
+                    },
+                    meta,
+                })
+            })
+        }
+    };
+    response.unwrap_or_else(|error| {
+        error_logs_error(
+            req,
+            "InvalidAnalysisPageSnapshot",
+            "decode_published_chart",
+            &error,
+        );
+        HttpResponse::InternalServerError().finish()
+    })
+}
+
+fn published_chart_pending() -> HttpResponse {
+    HttpResponse::ServiceUnavailable()
+        .insert_header(("Retry-After", "15"))
+        .json(json!({
+            "success": false,
+            "code": "analytics_page_snapshot_pending",
+            "message": "分析图表快照正在准备，请稍后刷新。"
+        }))
+}
+
+fn analytics_timezone_backfill_required() -> HttpResponse {
+    HttpResponse::ServiceUnavailable().json(json!({
+        "success": false,
+        "code": "analytics_timezone_backfill_required",
+        "message": "该范围包含仅保留上海日期的旧统计，请重建分析快照；已删除原始观测的数据无法换算时区。"
+    }))
 }
 
 async fn snapshot_data_as_of(
@@ -459,10 +608,17 @@ async fn analysis_heatmap_from_snapshot(
                 .replace("day_start < ($2", "day_start <= ($2")
         );
         match client.query_one(&legacy_sql, &params).await {
-            Ok(row) if row.get::<_, bool>("legacy") => return HttpResponse::ServiceUnavailable().json(json!({"success": false, "code": "analytics_timezone_backfill_required", "message": "该范围包含仅保留上海日期的旧统计，请重建分析快照；已删除原始观测的数据无法换算时区。"})),
-            Ok(_) => {},
+            Ok(row) if row.get::<_, bool>("legacy") => {
+                return analytics_timezone_backfill_required();
+            }
+            Ok(_) => {}
             Err(error) => {
-                error_logs_error(req, "AnalysisTimezoneLegacyCheckError", "database_operation", &error);
+                error_logs_error(
+                    req,
+                    "AnalysisTimezoneLegacyCheckError",
+                    "database_operation",
+                    &error,
+                );
                 return HttpResponse::ServiceUnavailable().finish();
             }
         }

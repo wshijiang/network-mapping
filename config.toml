@@ -165,6 +165,7 @@ scan_migration_checkpoint_batches = 100
 fallback_to_postgres = true
 
 [analytics_snapshot]
+page_rollups = "off"
 # realtime 保持旧行为；shadow 后台构建并核验快照；snapshot 让分析接口只读快照。
 mode = "realtime"
 # 历史补偿检查和下一轮固定范围的建立周期，不控制队列消费速度。

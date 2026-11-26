@@ -529,6 +529,13 @@ pub async fn run(args: Clis) -> io::Result<()> {
         ),
     );
     background.spawn(
+        "analytics-page",
+        crate::analytics_page::run_worker(
+            runtime_settings.analytics_snapshot.clone(),
+            db_pool.clone(),
+        ),
+    );
+    background.spawn(
         "search-freshness",
         crate::target_generated::search::run_freshness_worker(db_pool.clone()),
     );
