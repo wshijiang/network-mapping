@@ -295,6 +295,7 @@ docker compose --env-file docker/.env -f docker/compose.example.yml up -d --forc
 | `NM__DNS_FOLLOW_UP__EXCLUDED_CIDRS` | JSON 字符串数组 | `[]` | IPv4/IPv6 排除范围，排除优先，同类网段不得重复或重叠 |
 | `NM__DNS_FOLLOW_UP__MAX_TARGETS_PER_TASK` | 整数 | `100` | 每任务最多派生目标数，1–500 |
 | `NM__ANALYTICS_SNAPSHOT__MODE` | 字符串 | `realtime` | `realtime` 不运行快照 worker；`shadow` 生成快照；`snapshot` 使用快照读取 |
+| `NM__ANALYTICS_SNAPSHOT__PAGE_ROLLUPS` | 字符串 | `off` | `off` 关闭图表快照；`build` 后台生成；`read` 在 `snapshot` 模式下读取已发布图表。仅用于初始化运行时配置，已有部署通过运行策略设置 |
 | `NM__ANALYTICS_SNAPSHOT__INTERVAL_MINUTES` | 整数，分钟 | `30` | 历史补偿及回填范围检查间隔，1–1440 |
 | `NM__ANALYTICS_SNAPSHOT__EXECUTION_TIMEOUT_MINUTES` | 整数，分钟 | `360` | 单执行总时限，30–1440；仅用于初始化运行时配置 |
 | `NM__ANALYTICS_SNAPSHOT__MAX_STAGING_MIB` | 整数，MiB | `4096` | 单执行临时去重表和索引的空间上限，256–65536；仅用于初始化运行时配置 |
