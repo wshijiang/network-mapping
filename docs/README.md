@@ -75,6 +75,8 @@
 
 ## 存储与性能
 
+[扫描性能与慢 SQL 调查](SCANNER_PERFORMANCE.md)：告警版本差异、前后基准、上传分阶段定位。
+
 | 文档 | 内容 |
 | --- | --- |
 | [Elasticsearch 存储](ELASTICSEARCH.md) | 新安装、存储切换、历史迁移与验收 |

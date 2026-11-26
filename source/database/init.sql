@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS scan_task(
 	task_id VARCHAR(36) NOT NULL,                                                             -- 任务的 ID ，应该为 UUIDV7
 	task_initiator VARCHAR(200) NOT NULL,
 	task_target INET[] NOT NULL,                                                              -- 扫描的目标 IP/CIDR 数组
-	task_port TEXT DEFAULT '1-65535',                                                         -- 扫描目标的 PORT
+	task_port TEXT DEFAULT '1-11000,11211,20000,27017,47808,11210,11300,11371,12174,13720,13721,16379,16992,16993,17185,19071,26379,27018,27019,28015,29015,34962-34964,37777,44818,50000,50090,51413,51820,60010,60030,61613,61616,62078,64738',                                                         -- 扫描目标的 PORT
 	task_create_time BIGINT DEFAULT (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000)::BIGINT,   -- 表示扫描任务的创建时间
 	task_level INT NOT NULL CHECK ( task_level >= 0 AND task_level <=4 ) DEFAULT 1,           -- 表示任务的优先级
 	task_start_time BIGINT DEFAULT NULL,                                                      -- 扫描开始时间
@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS scan_task(
 
 -- 兼容已有数据库中的任务表。
 ALTER TABLE scan_task ALTER COLUMN task_initiator TYPE VARCHAR(200);
+ALTER TABLE scan_task ALTER COLUMN task_port SET DEFAULT '1-11000,11211,20000,27017,47808,11210,11300,11371,12174,13720,13721,16379,16992,16993,17185,19071,26379,27018,27019,28015,29015,34962-34964,37777,44818,50000,50090,51413,51820,60010,60030,61613,61616,62078,64738';
 ALTER TABLE scan_task ADD COLUMN IF NOT EXISTS task_source TEXT NOT NULL DEFAULT 'manual';
 ALTER TABLE scan_task ADD COLUMN IF NOT EXISTS generation_strategy TEXT;
 ALTER TABLE scan_task ADD COLUMN IF NOT EXISTS generation_key TEXT;
@@ -1566,7 +1567,7 @@ CREATE TABLE IF NOT EXISTS target_monitor_rule (
     target_type TEXT NOT NULL DEFAULT 'ip' CHECK (target_type IN ('ip', 'domain')),
     target_family TEXT CHECK (target_family IN ('ipv4', 'ipv6')),
     targets TEXT[] NOT NULL CHECK (cardinality(targets) BETWEEN 1 AND 64),
-    ports TEXT NOT NULL DEFAULT '1-65535',
+    ports TEXT NOT NULL DEFAULT '1-11000,11211,20000,27017,47808,11210,11300,11371,12174,13720,13721,16379,16992,16993,17185,19071,26379,27018,27019,28015,29015,34962-34964,37777,44818,50000,50090,51413,51820,60010,60030,61613,61616,62078,64738',
     scan_profile TEXT NOT NULL DEFAULT 'service_inventory',
     interval_seconds INT NOT NULL DEFAULT 86400 CHECK (interval_seconds BETWEEN 3600 AND 2592000),
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -1598,6 +1599,9 @@ CREATE TABLE IF NOT EXISTS target_monitor_run (
     summary JSONB
 );
 CREATE INDEX IF NOT EXISTS idx_target_monitor_run_rule ON target_monitor_run(rule_id, id DESC);
+
+-- 仅更新后续新规则的默认端口，保留已有规则配置。
+ALTER TABLE target_monitor_rule ALTER COLUMN ports SET DEFAULT '1-11000,11211,20000,27017,47808,11210,11300,11371,12174,13720,13721,16379,16992,16993,17185,19071,26379,27018,27019,28015,29015,34962-34964,37777,44818,50000,50090,51413,51820,60010,60030,61613,61616,62078,64738';
 
 -- 运行创建时冻结规则配置：收尾按派发时的目标类型与基线比对，
 -- 运行期间编辑规则不会让旧任务的结果与新目标混用。
