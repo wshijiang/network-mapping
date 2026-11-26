@@ -26,6 +26,7 @@ pub(crate) struct AssetPortsQuery {
     ip: String,
     limit: Option<i64>,
     offset: Option<i64>,
+    fingerprint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -60,6 +61,9 @@ struct AssetPortCurrent {
     service_stale: bool,
     os: Option<crate::os_detection::OsInference>,
     web: Option<crate::web_detection::WebInference>,
+    c2_fingerprint: Value,
+    c2_fingerprint_stale: bool,
+    last_c2_fingerprint: Option<Value>,
     icon_md5: Option<String>,
     favicon_url: Option<String>,
     favicon: Option<crate::web_assets::FaviconView>,
@@ -103,6 +107,8 @@ struct AssetObservationHistoryItem {
     banner: Option<String>,
     source: String,
     data: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    c2_fingerprint: Option<Value>,
     observed_at: i64,
     execution_id: String,
     task_id: String,
@@ -190,14 +196,21 @@ pub(crate) async fn get_asset_ports(
         Ok(value) => value,
         Err(message) => return bad_request(message),
     };
+    let fingerprint = match query.fingerprint.as_deref() {
+        None
+        | Some(
+            crate::service_fingerprint::COBALT_STRIKE | crate::service_fingerprint::ASYNCRAT_FAMILY,
+        ) => query.fingerprint.as_deref(),
+        _ => return bad_request("不支持的服务端指纹类型"),
+    };
 
     return get_asset_ports_from_elasticsearch(
         &req,
         pool.get_ref(),
         elasticsearch.get_ref(),
         &ip,
-        limit,
-        offset,
+        (limit, offset),
+        fingerprint,
         &user,
     )
     .await;
@@ -579,12 +592,15 @@ async fn get_asset_ports_from_elasticsearch(
     pool: &Pool,
     elasticsearch: &ElasticsearchService,
     ip: &str,
-    limit: i64,
-    offset: i64,
+    (limit, offset): (i64, i64),
+    fingerprint: Option<&str>,
     user: &UserBaseI,
 ) -> HttpResponse {
     let mut filters = current_scope_filters(user);
     filters.push(json!({"term": {"ip": ip}}));
+    if let Some(family) = fingerprint {
+        filters.push(json!({"term": {"c2_fingerprint.matches.family": family}}));
+    }
     let result = match elasticsearch
         .scan_query(
             ScanQueryIndex::CurrentEndpoints,
@@ -604,7 +620,7 @@ async fn get_asset_ports_from_elasticsearch(
         }
     };
     let total = es_total(&result);
-    if total == 0 {
+    if total == 0 && fingerprint.is_none() {
         return HttpResponse::NotFound().json(json!({"message": "没有可访问的资产观察记录"}));
     }
     let mut items = result
@@ -620,6 +636,22 @@ async fn get_asset_ports_from_elasticsearch(
                 .or_else(|| es_time_ms(source.get("last_seen")))
                 .unwrap_or(0);
             let service_observed_at = source.get("service_observed_at_ms").and_then(Value::as_i64);
+            // In a legacy projection, data may be from a different observation
+            // than the service summary, for example after a port-only update.
+            let legacy_service =
+                source["kind"] == "service" && service_observed_at == Some(last_seen_at);
+            let c2_fingerprint = fingerprint_view(source, last_seen_at, legacy_service);
+            let c2_fingerprint_stale = c2_fingerprint["observed_at"]
+                .as_i64()
+                .is_some_and(|at| at < last_seen_at);
+            let last_c2_fingerprint = (c2_fingerprint["status"] == "insufficient_evidence")
+                .then(|| {
+                    source
+                        .get("last_c2_fingerprint")
+                        .filter(|value| !value.is_null())
+                        .cloned()
+                })
+                .flatten();
             AssetPortCurrent {
                 data: source.get("data").filter(|d| !d.is_null()).cloned(),
                 intel: Default::default(),
@@ -651,6 +683,9 @@ async fn get_asset_ports_from_elasticsearch(
                 last_seen_at,
                 service_observed_at,
                 service_stale: service_observed_at.is_some_and(|time| time < last_seen_at),
+                c2_fingerprint,
+                c2_fingerprint_stale,
+                last_c2_fingerprint,
                 web: crate::web_detection::endpoint_view(
                     source
                         .get("web")
@@ -729,6 +764,26 @@ async fn get_asset_ports_from_elasticsearch(
     }}))
 }
 
+fn fingerprint_view(source: &Value, observed_at: i64, use_raw_data: bool) -> Value {
+    if let Some(result) = source
+        .get("c2_fingerprint")
+        .filter(|value| !value.is_null())
+    {
+        return result.clone();
+    }
+    let mut result = json!(crate::service_fingerprint::assess(
+        source.get("data").filter(|_| use_raw_data),
+        observed_at,
+        source["task_id"].as_str().unwrap_or_default(),
+        source["execution_id"].as_str().unwrap_or_default(),
+    ));
+    if use_raw_data {
+        result["observation_key"] = source["observation_key"].clone();
+        result["recomputed"] = json!(true);
+    }
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn get_asset_history_from_elasticsearch(
     req: &HttpRequest,
@@ -801,6 +856,13 @@ async fn get_asset_history_from_elasticsearch(
                 .unwrap_or("unknown")
                 .to_owned(),
             data: source.get("data").cloned().filter(|value| !value.is_null()),
+            c2_fingerprint: (source["kind"] == "service").then(|| {
+                fingerprint_view(
+                    source,
+                    es_time_ms(source.get("observed_at")).unwrap_or_default(),
+                    true,
+                )
+            }),
             observed_at: es_time_ms(source.get("observed_at")).unwrap_or_default(),
             execution_id: source
                 .get("execution_id")

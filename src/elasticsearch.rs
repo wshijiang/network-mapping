@@ -1794,6 +1794,12 @@ impl ElasticsearchService {
                 object.insert("upload_id".to_owned(), json!(context.upload_id));
                 object.insert("batch_index".to_owned(), json!(context.batch_index));
                 object.insert("payload_checksum".to_owned(), json!(payload_checksum));
+                if observation["kind"] == "service" {
+                    object.insert(
+                        "c2_fingerprint".to_owned(),
+                        scan_service_fingerprint(context, observation, observed_at_ms),
+                    );
+                }
             }
             let document_checksum = sha256_hex(
                 &serde_json::to_vec(&immutable_scan_observation(observation))
@@ -4186,6 +4192,7 @@ fn scan_observation_template(prefix: &str, replicas: u32) -> Value {
                     "tags": {"type": "object", "properties": scan_observation_tag_mapping_properties()},
                     "os": crate::os_detection::mapping(),
                     "web": crate::web_detection::mapping(),
+                    "c2_fingerprint": {"type": "object", "enabled": false},
                     "import_policy": {"type": "keyword"}
                 }
             }
@@ -4211,6 +4218,7 @@ fn scan_observation_compatibility_mapping() -> Value {
         "tags": {"properties": scan_observation_tag_mapping_properties()},
         "os": crate::os_detection::mapping(),
         "web": crate::web_detection::mapping(),
+        "c2_fingerprint": {"type": "object", "enabled": false},
         "import_policy": {"type": "keyword"}
     }})
 }
@@ -4523,6 +4531,8 @@ fn scan_endpoint_index_definition(replicas: u32) -> Value {
                 "service_observation_ref": {"type": "object", "enabled": false},
                 "os": crate::os_detection::mapping(),
             "web": crate::web_detection::mapping(),
+                "c2_fingerprint": service_fingerprint_mapping(),
+                "last_c2_fingerprint": {"type": "object", "enabled": false},
                 "import_policy": {"type": "keyword"},
                 "asn": {"type": "keyword", "normalizer": "lowercase_normalizer"},
                 "asn_number": {"type": "long"},
@@ -4565,6 +4575,22 @@ fn endpoint_protocol(observation: &Value) -> &str {
         _ => "unknown",
     }
 }
+
+fn scan_service_fingerprint(
+    context: &ScanBatchContext,
+    observation: &Value,
+    observed_at_ms: i64,
+) -> Value {
+    let mut result = json!(crate::service_fingerprint::assess(
+        observation.get("data"),
+        observed_at_ms,
+        &context.task_id,
+        &context.execution_id,
+    ));
+    result["observation_key"] = observation["observation_key"].clone();
+    result
+}
+
 fn endpoint_projection_document(
     context: &ScanBatchContext,
     observation: &Value,
@@ -4620,6 +4646,11 @@ fn endpoint_projection_document(
     // time (favicon MD5 from stored bytes), so every projection path — live
     // ingest, migration and offline rebuild — produces the same fields.
     let web_assets = crate::web_assets::extract(observation.get("data"));
+    let c2 = if kind == "service" {
+        scan_service_fingerprint(context, observation, observed_at_ms)
+    } else {
+        Value::Null
+    };
     json!({
         "scope_type": "execution",
         "scope_id": 0,
@@ -4665,6 +4696,8 @@ fn endpoint_projection_document(
         "service_observation_ref": if is_service { service_observation_reference(context, observation, observed_at_ms) } else { Value::Null },
         "os": observation.get("os").filter(|value| !value.is_null()).cloned().unwrap_or_else(|| if is_service { json!(crate::os_detection::OsInference::pending(observed_at_ms)) } else { Value::Null }),
         "web": observation.get("web").filter(|value| !value.is_null()).cloned().unwrap_or_else(|| if is_service { json!(crate::web_detection::WebInference::pending(observed_at_ms)) } else { Value::Null }),
+        "c2_fingerprint": c2,
+        "last_c2_fingerprint": if c2["status"] == "matched" { &c2 } else { &Value::Null },
         "asn": asn,
         "asn_number": asn_number,
         "isp": observation.get("isp").cloned().unwrap_or(Value::Null),
@@ -4687,6 +4720,15 @@ fn append_projection_update(
     document: &Value,
 ) -> Result<(), String> {
     const SCRIPT: &str = r#"
+        boolean newerFingerprint(def incoming, def previous) {
+            if (incoming == null) return false;
+            if (previous == null) return true;
+            if (incoming.observed_at != previous.observed_at) return incoming.observed_at > previous.observed_at;
+            int execution = incoming.execution_id.compareTo(previous.execution_id);
+            if (execution != 0) return execution > 0;
+            return incoming.observation_key != null &&
+                (previous.observation_key == null || incoming.observation_key.compareTo(previous.observation_key) > 0);
+        }
         boolean incomingImport = params.doc.task_source == 'import';
         boolean importFill = incomingImport && params.doc.import_policy == 'fill';
         boolean scanAuthoritative = ctx._source.service_observed_at_ms != null && ctx._source.task_source != null && ctx._source.task_source != 'import';
@@ -4727,6 +4769,10 @@ fn append_projection_update(
             def serviceReference = ctx._source.service_observation_ref;
             def os = ctx._source.os;
             def web = ctx._source.web;
+            def c2 = ctx._source.c2_fingerprint;
+            def lastC2 = ctx._source.last_c2_fingerprint;
+            def incomingC2 = params.doc.c2_fingerprint;
+            def incomingLastC2 = params.doc.last_c2_fingerprint;
             def incomingServiceObserved = params.doc.service_observed_at_ms;
             boolean replaceService = incomingServiceObserved != null &&
                 (serviceObserved == null || incomingServiceObserved >= serviceObserved);
@@ -4785,6 +4831,10 @@ fn append_projection_update(
                 ctx._source.os = sameEvidence && os != null && os.status != 'pending' && (params.doc.os == null || params.doc.os.status == 'pending' || os.ruleset_revision >= params.doc.os.ruleset_revision) ? os : params.doc.os;
                 ctx._source.web = sameEvidence && web != null && web.status != 'pending' && (params.doc.web == null || params.doc.web.status == 'pending' || web.ruleset_revision >= params.doc.web.ruleset_revision) ? web : params.doc.web;
             }
+            // Fingerprint observations have their own clock, which includes
+            // failed service probes, independently of the service summary.
+            ctx._source.c2_fingerprint = newerFingerprint(incomingC2, c2) ? incomingC2 : c2;
+            ctx._source.last_c2_fingerprint = newerFingerprint(incomingLastC2, lastC2) ? incomingLastC2 : lastC2;
             if (incomingImport) { ctx._source.tags = tags; }
         }
     "#;
@@ -4824,6 +4874,8 @@ fn index_mapping_update() -> Value {
             "service_observation_ref": {"type":"object", "enabled":false},
             "os": crate::os_detection::mapping(),
             "web": crate::web_detection::mapping(),
+            "c2_fingerprint": service_fingerprint_mapping(),
+            "last_c2_fingerprint": {"type": "object", "enabled": false},
             "import_policy": {"type": "keyword"},
             "latitude": {"type": "double"},
             "longitude": {"type": "double"},
@@ -4843,6 +4895,14 @@ fn index_mapping_update() -> Value {
     });
     merge_web_assets_mapping(update.pointer_mut("/properties"));
     update
+}
+
+fn service_fingerprint_mapping() -> Value {
+    json!({"type": "object", "dynamic": false, "properties": {
+        "matches": {"type": "object", "dynamic": false, "properties": {
+            "family": {"type": "keyword"}
+        }}
+    }})
 }
 
 #[cfg(test)]
