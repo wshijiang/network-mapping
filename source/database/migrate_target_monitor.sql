@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS target_monitor_run (
 );
 CREATE INDEX IF NOT EXISTS idx_target_monitor_run_rule ON target_monitor_run(rule_id, id DESC);
 
+-- 仅更新后续新规则的默认端口，保留已有规则配置。
+ALTER TABLE target_monitor_rule ALTER COLUMN ports SET DEFAULT '1-11000,11211,20000,27017,47808,11210,11300,11371,12174,13720,13721,16379,16992,16993,17185,19071,26379,27018,27019,28015,29015,34962-34964,37777,44818,50000,50090,51413,51820,60010,60030,61613,61616,62078,64738';
+
 -- 运行创建时冻结规则配置：收尾按派发时的目标类型与基线比对，
 -- 运行期间编辑规则不会让旧任务的结果与新目标混用。
 ALTER TABLE target_monitor_run ADD COLUMN IF NOT EXISTS target_type TEXT;

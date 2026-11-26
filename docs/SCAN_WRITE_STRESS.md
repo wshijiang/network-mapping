@@ -81,7 +81,7 @@ Java 进程合计 RSS 采样峰值：原始版本 1917.6 MiB，本 PR 1871.9 MiB
 
 10 万个目标的 CIDR 查询使用 GiST，命中 256 条，14 个共享缓冲命中，单次执行约 0.154 ms；完整目标状态 UPDATE 也使用 GiST/主键，无目标表 Seq Scan，单次约 5.717 ms。这是小范围、缓存热的执行计划验证。
 
-[原始统计 JSON](benchmarks/scan-write-2026-10-14.json) 包含各阶段分布、重试延迟和 ES indexing/refresh/merge/heap/GC/CPU 前后快照。
+原始统计 JSON 包含各阶段分布、重试延迟和 ES indexing/refresh/merge/heap/GC/CPU 前后快照，仅本地保存；结果文件不跟踪或上传，本文保留汇总结果。
 
 ## 2026-10-14 Codex review 分块修复后复测
 
@@ -106,5 +106,4 @@ Java 进程合计 RSS 采样峰值：原始版本 1917.6 MiB，本 PR 1871.9 MiB
 压力测试继续使用未优化测试构建，未包含 HTTP 解析或后台 worker。常规测试 393 项、
 Elasticsearch 相关检查 62 项、格式与严格 Clippy 全部通过。
 
-[分块修复原始统计 JSON](benchmarks/scan-write-chunking-2026-10-14.json) 包含完整分布、
-每次 final 请求规划、单块刷新/count 耗时，以及 ES heap/GC/CPU/indexing/refresh/merge 快照。
+分块修复原始统计 JSON 包含完整分布、每次 final 请求规划、单块刷新/count 耗时，以及 ES heap/GC/CPU/indexing/refresh/merge 快照。结果文件仅本地保存，不跟踪或上传。
