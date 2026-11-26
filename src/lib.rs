@@ -58,6 +58,7 @@ pub mod scanner_latency;
 pub mod scanner_outage;
 mod search_content;
 pub mod search_projection;
+mod service_fingerprint;
 pub mod statistics;
 pub mod syslog;
 pub mod system_maintenance;
