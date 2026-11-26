@@ -11,6 +11,8 @@ use crate::logs::write::{database_error_diagnostics, error_logs};
 const DEFAULT_RANGE_MINUTES: i64 = 30;
 const MAX_RANGE_DAYS: i64 = 30;
 pub(crate) const MAX_BUCKETS: i64 = 1_500;
+// Evaluate JSON metrics once per sample before aggregation; CTE folding otherwise
+// repeats regex/cast expressions for AVG, MAX and their range filters.
 const RESOURCE_HISTORY_SQL: &str = r#"
 WITH bucket_range AS (
     SELECT generate_series(
@@ -18,7 +20,7 @@ WITH bucket_range AS (
         (($2::BIGINT - 1) / $3::BIGINT) * $3::BIGINT,
         $3
     )::BIGINT AS bucket_start
-), metrics AS (
+), metrics AS MATERIALIZED (
     SELECT
         (create_time / $3::BIGINT) * $3::BIGINT AS bucket_start,
         CASE WHEN cpu->>'cpu_usage' ~ '^[0-9]+([.][0-9]+)?$'
@@ -68,6 +70,8 @@ FROM bucket_range b
 LEFT JOIN aggregates a ON a.bucket_start = b.bucket_start
 ORDER BY b.bucket_start;
 "#;
+// Sort only identifiers and timestamps. Load/decode the JSON snapshots only for
+// the winning row of each bucket, keeping wide JSON out of window sort spills.
 const DATABASE_HISTORY_SQL: &str = r#"
 WITH bucket_range AS (
     SELECT generate_series(
@@ -76,7 +80,18 @@ WITH bucket_range AS (
         $3
     )::BIGINT AS bucket_start
 ), ranked AS (
-    SELECT (create_time / $3::BIGINT) * $3::BIGINT AS bucket_start,
+    SELECT id, (create_time / $3::BIGINT) * $3::BIGINT AS bucket_start,
+        COUNT(*) OVER (
+            PARTITION BY (create_time / $3::BIGINT) * $3::BIGINT
+        )::BIGINT AS sample_count,
+        ROW_NUMBER() OVER (
+            PARTITION BY (create_time / $3::BIGINT) * $3::BIGINT
+            ORDER BY create_time DESC, id DESC
+        ) AS sample_rank
+    FROM system_status
+    WHERE create_time >= $1 AND create_time < $2
+), snapshots AS MATERIALIZED (
+    SELECT ranked.bucket_start, ranked.sample_count,
         CASE WHEN db_postgresql->>'db_library_size' ~ '^[0-9]+$'
              THEN (db_postgresql->>'db_library_size')::BIGINT END AS database_size,
         CASE WHEN db_postgresql->>'db_conn' ~ '^[0-9]+$'
@@ -96,16 +111,10 @@ WITH bucket_range AS (
              THEN (db_elasticsearch->>'total_size')::BIGINT END AS elasticsearch_total_size,
         CASE WHEN jsonb_typeof(db_elasticsearch->'indices') = 'object'
              THEN db_elasticsearch->'indices'
-             ELSE '{}'::JSONB END AS elasticsearch_indices,
-        COUNT(*) OVER (
-            PARTITION BY (create_time / $3::BIGINT) * $3::BIGINT
-        )::BIGINT AS sample_count,
-        ROW_NUMBER() OVER (
-            PARTITION BY (create_time / $3::BIGINT) * $3::BIGINT
-            ORDER BY create_time DESC, id DESC
-        ) AS sample_rank
-    FROM system_status
-    WHERE create_time >= $1 AND create_time < $2
+             ELSE '{}'::JSONB END AS elasticsearch_indices
+    FROM ranked
+    JOIN system_status s ON s.id = ranked.id
+    WHERE ranked.sample_rank = 1
 )
 SELECT b.bucket_start,
        COALESCE(r.sample_count, 0)::BIGINT AS sample_count,
@@ -119,9 +128,7 @@ SELECT b.bucket_start,
        r.elasticsearch_total_size,
        COALESCE(r.elasticsearch_indices, '{}'::JSONB) AS elasticsearch_indices
 FROM bucket_range b
-LEFT JOIN ranked r
-       ON r.bucket_start = b.bucket_start
-      AND r.sample_rank = 1
+LEFT JOIN snapshots r ON r.bucket_start = b.bucket_start
 ORDER BY b.bucket_start;
 "#;
 
@@ -685,6 +692,120 @@ mod tests {
         assert!(RESOURCE_HISTORY_SQL.contains("FROM system_status"));
         assert!(RESOURCE_HISTORY_SQL.contains("AS swap_usage"));
         assert!(DATABASE_HISTORY_SQL.contains("FROM system_status"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+    async fn history_queries_preserve_buckets_metrics_and_latest_snapshot() {
+        let config: tokio_postgres::Config = std::env::var("STORAGE_TEST_DATABASE_URL")
+            .expect("disposable PG URL")
+            .parse()
+            .unwrap();
+        let (client, connection) = config.connect(tokio_postgres::NoTls).await.unwrap();
+        let connection_task = tokio::spawn(async move { connection.await.unwrap() });
+        // Session-local table: no application tables or schemas are changed.
+        client
+            .batch_execute(
+                r#"
+                CREATE TEMP TABLE system_status (
+                    id SERIAL PRIMARY KEY, create_time BIGINT,
+                    cpu JSONB, ram JSONB, disk JSONB,
+                    db_postgresql JSONB, db_elasticsearch JSONB
+                );
+                INSERT INTO system_status (create_time, cpu, ram, disk, db_postgresql)
+                VALUES
+                    (100, '{"cpu_usage":99}', NULL, NULL, NULL),
+                    (101, '{"cpu_usage":20}', '{"used_ram":1,"total_ram":4}',
+                     '{"disk_total_usage":20,"disk_total_space":100}', '{"db_library_size":100}'),
+                    (109, '{"cpu_usage":40}', '{"ram_usage":50,"total_swap":100,"use_swap":10}',
+                     NULL, '{"db_library_size":200}'),
+                    (109, '{"cpu_usage":60}', '{"ram_usage":75,"total_swap":100,"swap_usage":20}',
+                     NULL, '{"db_library_size":300,"db_conn":4,"db_table_size":{"assets":{"total":30,"data":20,"index":10}}}'),
+                    (120, '{"cpu_usage":101}', '{"total_ram":0,"total_swap":0,"swap_usage":99}',
+                     '{"disk_total_usage":1,"disk_total_space":0}', '{"db_library_size":"invalid","db_table_size":[]}'),
+                    (139, '{"cpu_usage":"invalid"}', NULL, NULL, NULL),
+                    (140, '{"cpu_usage":99}', NULL, NULL, NULL);
+                UPDATE system_status SET db_elasticsearch =
+                    '{"enabled":true,"available":true,"primary_size":40,"replica_size":10,"total_size":50,"indices":{"assets":{"primary":40,"replica":10,"total":50}}}'
+                    WHERE create_time = 139;
+                "#,
+            )
+            .await
+            .unwrap();
+        let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[&101_i64, &140_i64, &10_i64];
+        let resource = client.query(RESOURCE_HISTORY_SQL, params).await.unwrap();
+        let database = client.query(DATABASE_HISTORY_SQL, params).await.unwrap();
+        for rows in [&resource, &database] {
+            assert_eq!(rows.len(), 4);
+            for (row, (bucket, count)) in rows.iter().zip([(100, 3), (110, 0), (120, 1), (130, 1)])
+            {
+                assert_eq!(row.get::<_, i64>("bucket_start"), bucket);
+                assert_eq!(row.get::<_, i64>("sample_count"), count);
+            }
+        }
+        let first = &resource[0];
+        for (field, expected) in [
+            ("cpu_avg", 40.0),
+            ("cpu_max", 60.0),
+            ("ram_avg", 50.0),
+            ("ram_max", 75.0),
+            ("swap_avg", 15.0),
+            ("swap_max", 20.0),
+            ("disk_avg", 20.0),
+            ("disk_max", 20.0),
+        ] {
+            assert_eq!(first.get::<_, Option<f64>>(field), Some(expected));
+        }
+        for row in &resource[1..] {
+            for field in ["cpu_avg", "ram_avg", "swap_avg", "disk_avg"] {
+                assert_eq!(row.get::<_, Option<f64>>(field), None);
+            }
+        }
+        // Equal timestamps select the larger id, rather than an older valid value.
+        assert_eq!(
+            database[0].get::<_, Option<i64>>("database_size"),
+            Some(300)
+        );
+        assert_eq!(
+            database[0].get::<_, Option<i64>>("connection_count"),
+            Some(4)
+        );
+        assert_eq!(
+            database[0].get::<_, serde_json::Value>("tables")["assets"]["total"],
+            30
+        );
+        for row in &database[1..] {
+            assert_eq!(row.get::<_, Option<i64>>("database_size"), None);
+            assert_eq!(
+                row.get::<_, serde_json::Value>("tables"),
+                serde_json::json!({})
+            );
+        }
+        assert!(!database[1].get::<_, bool>("elasticsearch_available"));
+        assert!(database[3].get::<_, bool>("elasticsearch_enabled"));
+        assert!(database[3].get::<_, bool>("elasticsearch_available"));
+        assert_eq!(
+            database[3].get::<_, Option<i64>>("elasticsearch_total_size"),
+            Some(50)
+        );
+        assert_eq!(
+            database[3].get::<_, serde_json::Value>("elasticsearch_indices")["assets"]["primary"],
+            40
+        );
+        // A range with no samples still returns its empty buckets.
+        for sql in [RESOURCE_HISTORY_SQL, DATABASE_HISTORY_SQL] {
+            let rows = client
+                .query(sql, &[&150_i64, &170_i64, &10_i64])
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 2);
+            assert!(
+                rows.iter()
+                    .all(|row| row.get::<_, i64>("sample_count") == 0)
+            );
+        }
+        drop(client);
+        connection_task.await.unwrap();
     }
 
     #[test]
