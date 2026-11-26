@@ -137,3 +137,17 @@ request_timeout_seconds = 180
 历史执行记录（2026-10-23）：扫描端全目标测试 217 项常规与 6 项 Worker 进程测试通过；另有 4 项被动接收定向回归通过。前端 152 项工具/组件测试通过，服务端常规测试、PostgreSQL 调度和投影测试的结果随 PR 记录。默认忽略的集成测试不计入常规通过数量。
 
 2026-10-27，修复基线 `5cb0bc82eecec854388cdca1189bb60e1536fc02` 的 [Service evidence inference CI](https://github.com/wshijiang/network-mapping/actions/runs/40498195862) 已通过：使用 PostgreSQL 和真实 Elasticsearch **9.5.4** 验证基础端点重建、投影、服务证据及不可变事实；[重新发布 PR](https://github.com/wshijiang/network-mapping/pull/136) 将 `transport_rebuild::tests` 与 `transport_rebuild::recovery_tests` 都纳入该工作流，覆盖模式选择、原地备份、PIT 恢复及真实 ES 重建。测试创建独立合成资源，不操作生产索引。生产迁移仍须事先备份并按实际配置验收；真实设备网络、浏览器视觉与线上部署不在该 CI 验证范围内。
+
+## 扫描威胁线索与自动标签
+
+服务端使用现有 schema_version=2 的 TLS / HTTPS 原始握手离线匹配，扫描请求数保持为原有探测数量。规则 v1 支持 Cobalt Strike Team Server 默认证书的叶证书 SHA-256 精确匹配，以及 AsyncRAT / DcRAT 的主体、颁发者、自签名状态、9999 年到期和 SHA512-RSA 签名组合。HTTPS 使用首个响应的证书，避免把跳转目的站的证据归给原端口。
+
+资产端口展开区的“威胁线索”显示识别对象、匹配依据和观测时间。原始证据路径、SNI（若探针保留）、规则版本和来源可在技术详情查看。常规协议、服务与技术栈识别继续作为测绘结果展示。握手失败时可能仍取得服务端证书，失败状态保留。
+
+新扫描结果入库时，命中自动添加 IP 级“威胁”“恶意软件”及“Cobalt Strike”或“AsyncRAT / DcRAT”标签，默认归入“威胁识别”分类，类型为 malicious。同名活动标签沿用现有配置。家族共享模板按系列名称标记；Cobalt Strike 同时具有授权测试用途，标签表示历史观测待复核。
+
+标签沿用资产标签机制，适用于该 IP 的其他端口和历史搜索结果。标签不能替代具体端口证据或直接证明主机感染。重复上报使用幂等关联，写入与扫描回执同事务提交，搜索更新通过 outbox 重试。证据不足、后续未匹配或地址复用时不会自动清除历史标签，管理员可复核移除；再次收到命中会重新添加。
+
+旧扫描记录在详情读取时可按当前规则重算。自动标签由新结果入库触发，存量记录需重新扫描后产生标签。QakBot 仅完成有限历史抓包候选验证，Sliver 仅验证通用 mTLS 采集行为，当前规则库尚未包含这两类识别规则。
+
+研究来源：[Cobalt Strike 默认证书研究](https://www.recordedfuture.com/research/cobalt-strike-servers)、[AsyncRAT / DcRAT 证书模板研究](https://www.trendmicro.com/content/dam/trendmicro/global/en/research/21/i/ssl-tls-technical-brief/ssl-tls-technical-brief.pdf)。
