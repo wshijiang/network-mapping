@@ -190,7 +190,7 @@ EXISTS(product)
 - `products[]`：`id`、`name`、`component`、`version`、`assessment`、`basis`、`evidence[]`。
 - `product_identification`：`status`（`identified` / `suspected` / `not_matched` / `insufficient_evidence`）、`coverage`（`complete` / `partial`）、`ruleset_revision`、`observed_at`、`stale`、`observation_ref`。
 
-产品规则版本 3（v2 新增 Sliver 和 QakBot，v3 增加检测方式及 JARM 元数据）。结果按自身服务观察时间更新，后续仅端口观察不会把旧产品刷新成当前证据；较早或旧规则的结果标记 `stale`。相同产品存在不同版本声明时并列保留，不拼接推断版本。
+产品规则版本 4（v2 新增 Sliver 和 QakBot，v3 增加检测方式及 JARM 元数据，v4 规范 Windows OpenSSH 版本）。结果按自身服务观察时间更新，后续仅端口观察不会把旧产品刷新成当前证据；较早或旧规则的结果标记 `stale`。相同产品存在不同版本声明时并列保留，不拼接推断版本。
 
 启动会增加 ES 映射。新扫描与执行投影重放生成可搜索产品；旧端口/历史详情只在原始数据确属该次服务观察时即时推断。若需要让全部存量产品进入 `product` 搜索，可在备份后按本文「存储升级与回滚」重建端点投影；不会自动重扫网络或改写原始观察。新前端兼容缺少新字段的服务端，保留旧版证书线索展示；旧 `c2_fingerprint` 字段和指纹过滤暂保留兼容。
 
@@ -253,3 +253,5 @@ network_mapping_server scanner-config set-jarm <ID> --enabled false --change-rea
 `set-jarm` 仅修改给出的字段，保留其他 JARM 参数和网页抓取、端口扫描等配置；不传任何修改字段会报错。参数范围与 Web 相同，`--enabled` 必须显式传 `true` 或 `false`，变更原因最多 500 个字符。每次成功更新都在同一事务中写入新修订、历史与审计；如果 Web 或另一个 CLI 已先修改配置，则报修订冲突并退出，不覆盖并发更新。`show` 可核对当前文档和修订；现有 `set-web-content` 命令继续可用。
 
 两种入口均只能管理服务端运行配置，不能越过扫描节点本地 `service_detection.enabled` / `service_detection.jarm.enabled` 授权。旧 worker 需同步升级后才能实际采集 JARM。
+
+Windows OpenSSH 的 `OpenSSH_for_Windows_9.5` 声明输出产品 `openssh`、版本 `9.5`，平台前缀保留在原始声明证据中，`product = "openssh@9.5"` 可与其他平台的同版本一并查询。旧规则详情仅在原始数据属于对应服务观察时回算；存量搜索投影需按前述步骤重放，新规则不会刷新旧观察时间。

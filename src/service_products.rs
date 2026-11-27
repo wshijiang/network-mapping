@@ -6,7 +6,7 @@ mod certificate_templates;
 mod detection_methods;
 use detection_methods::{DetectionMethod, JarmObservation};
 
-pub(crate) const RULESET_REVISION: u32 = 3;
+pub(crate) const RULESET_REVISION: u32 = 4;
 const MAX_EVIDENCE: usize = 8;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -198,7 +198,9 @@ pub(crate) fn infer(
             _ => continue,
         };
         let version = if id == "openssh" {
-            token.strip_prefix("OpenSSH_")
+            token
+                .strip_prefix("OpenSSH_for_Windows_")
+                .or_else(|| token.strip_prefix("OpenSSH_"))
         } else {
             version
         };
@@ -514,6 +516,40 @@ mod tests {
             result.product_identification.status,
             "insufficient_evidence"
         );
+    }
+
+    #[test]
+    fn openssh_release_versions_exclude_windows_platform_markers() {
+        for (software, version) in [
+            ("OpenSSH_for_Windows_9.5", "9.5"),
+            ("OpenSSH_for_Windows_9.5.0.0", "9.5.0.0"),
+            ("OpenSSH_9.5p1 Ubuntu-3", "9.5p1"),
+            ("OpenSSH_9.6", "9.6"),
+        ] {
+            let data = json!({"schema_version":2,"evidence":[{"module":"ssh","status":"success","result":{"server_id":{"software":software}}}]});
+            let inferred = infer(Some(&data), 1234, None);
+            assert_eq!(inferred.products[0].id, "openssh");
+            assert_eq!(inferred.products[0].version.as_deref(), Some(version));
+            assert_eq!(inferred.products[0].evidence[0].details[0].1, software);
+            let mut stored = json!(inferred);
+            stored["data"] = data;
+            stored["product_identification"]["ruleset_revision"] = json!(3);
+            stored["products"][0]["version"] = json!("for_Windows_9.5");
+            let refreshed = view(&stored, 1234, true);
+            assert_eq!(refreshed.products[0].version.as_deref(), Some(version));
+            assert_eq!(refreshed.product_identification.observed_at, 1234);
+            assert_eq!(
+                refreshed.product_identification.ruleset_revision,
+                RULESET_REVISION
+            );
+            assert!(!refreshed.product_identification.stale);
+            let without_matching_raw = view(&stored, 1234, false);
+            assert!(without_matching_raw.product_identification.stale);
+            assert_eq!(
+                without_matching_raw.products[0].version.as_deref(),
+                Some("for_Windows_9.5")
+            );
+        }
     }
 
     #[test]
