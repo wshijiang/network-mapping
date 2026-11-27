@@ -14,6 +14,7 @@ const BATCH_ENDPOINTS: usize = 40; // At most 480 keys per lookup.
 pub(crate) enum Basis {
     HttpRequest,
     HttpRedirect,
+    HttpBodySha256,
     JavascriptSha256,
 }
 
@@ -21,7 +22,7 @@ impl Basis {
     fn kind(self) -> &'static str {
         match self {
             Self::HttpRequest | Self::HttpRedirect => "url",
-            Self::JavascriptSha256 => "sha256",
+            Self::HttpBodySha256 | Self::JavascriptSha256 => "sha256",
         }
     }
 }
@@ -140,11 +141,18 @@ pub(crate) fn extract(data: Option<&Value>) -> Vec<Indicator> {
         }
     }
 
-    let scripts = evidence
+    let assets = evidence
         .iter()
         .find(|item| item["module"] == "web_assets" && item["status"] == "success")
-        .and_then(|item| item.pointer("/result/js"))
-        .and_then(Value::as_array);
+        .and_then(|item| item.get("result"));
+    if let Some(landing) = assets.and_then(|result| result.get("landing"))
+        && landing["status_code"] == 200
+        && landing["body_truncated"] == false
+        && let Some(hash) = landing["hash_sha256"].as_str()
+    {
+        push_indicator(&mut indicators, Basis::HttpBodySha256, hash);
+    }
+    let scripts = assets.and_then(|result| result["js"].as_array());
     for script in scripts.into_iter().flatten().take(MAX_INDICATORS) {
         if script["status"] == "success"
             && let Some(hash) = script["hash_sha256"].as_str()
@@ -209,6 +217,26 @@ mod tests {
         assert_eq!(extract(Some(&data)).len(), 1);
         data["evidence"][0]["result"]["response"]["request"]["url"] =
             json!("http://user:secret@asset.example/");
+        assert!(extract(Some(&data)).is_empty());
+    }
+
+    #[test]
+    fn uses_only_complete_successful_landing_body_hashes() {
+        let hash = "c".repeat(64);
+        let mut data = json!({"schema_version": 2, "evidence": [
+            {"module": "web_assets", "status": "success", "result": {"landing": {
+                "status_code": 200, "body_truncated": false, "hash_sha256": hash
+            }}}
+        ]});
+        let expected = vec![Indicator {
+            basis: Basis::HttpBodySha256,
+            value: hash,
+        }];
+        assert_eq!(extract(Some(&data)), expected);
+        data["evidence"][0]["result"]["landing"]["body_truncated"] = json!(true);
+        assert!(extract(Some(&data)).is_empty());
+        data["evidence"][0]["result"]["landing"]["body_truncated"] = json!(false);
+        data["evidence"][0]["result"]["landing"]["status_code"] = json!(206);
         assert!(extract(Some(&data)).is_empty());
     }
 }
