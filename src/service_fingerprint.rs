@@ -129,7 +129,7 @@ pub(crate) fn assess<'a>(
     }
 }
 
-fn probe_tls<'a>(
+pub(crate) fn probe_tls<'a>(
     probe: &'a Value,
     module: &str,
 ) -> Option<(&'a Value, Option<&'a Value>, &'static str)> {
@@ -159,7 +159,7 @@ fn probe_tls<'a>(
         .or_else(|| result.get("tls").map(|tls| (tls, None, "/tls")))
 }
 
-fn leaf_certificate(tls: &Value) -> Option<(&Value, &'static str)> {
+pub(crate) fn leaf_certificate(tls: &Value) -> Option<(&Value, &'static str)> {
     // zgrab2 TLS logs have used both a single certificate message and a list.
     [
         "/handshake_log/server_certificates/certificate/parsed",

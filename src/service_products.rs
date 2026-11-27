@@ -2,7 +2,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-pub(crate) const RULESET_REVISION: u32 = 1;
+mod certificate_templates;
+
+pub(crate) const RULESET_REVISION: u32 = 2;
 const MAX_EVIDENCE: usize = 8;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -88,10 +90,16 @@ pub(crate) fn infer(
     // Existing certificate rules are local product rules, independent of intel storage.
     // Their observations establish deployment candidates, never malicious intent.
     let certificate = crate::service_fingerprint::assess(data, observed_at, "", "");
-    for hit in certificate.matches {
+    for hit in certificate
+        .matches
+        .into_iter()
+        .chain(certificate_templates::matches(data))
+    {
         let (name, component) = match hit.family {
             crate::service_fingerprint::COBALT_STRIKE => ("Cobalt Strike", Some("Team Server")),
             crate::service_fingerprint::ASYNCRAT_FAMILY => ("AsyncRAT / DcRAT", None),
+            certificate_templates::SLIVER => ("Sliver", Some("Multiplayer")),
+            certificate_templates::QAKBOT => ("QakBot", None),
             _ => continue,
         };
         push(
@@ -102,7 +110,12 @@ pub(crate) fn infer(
                 component: component.map(str::to_owned),
                 version: None,
                 assessment: "suspected".into(),
-                basis: "certificate_template".into(),
+                basis: if hit.family == certificate_templates::QAKBOT {
+                    "historical_certificate_heuristic"
+                } else {
+                    "certificate_template"
+                }
+                .into(),
                 evidence: vec![Evidence {
                     rule_id: hit.rule_id.into(),
                     probe: hit.probe.into(),
@@ -267,6 +280,185 @@ pub(crate) fn mapping() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic_sliver_leaf() -> Value {
+        json!({"fingerprint_sha256":"a".repeat(64), "subject_dn":"CN=multiplayer", "issuer_dn":"CN=operators",
+            "signature":{"self_signed":false,"signature_algorithm":{"name":"ECDSA-SHA256"}}})
+    }
+
+    fn synthetic_qakbot_leaf() -> Value {
+        // Anonymized DN fields shaped like the historical research examples.
+        json!({"fingerprint_sha256":"b".repeat(64),
+            "subject_dn":"C=US, OU=Random Research Fixture, CN=sampletest.invalid",
+            "issuer_dn":"C=US, ST=CA, L=Samplecity, O=Example Research LLC., CN=sampletest.invalid",
+            "signature":{"self_signed":false,"signature_algorithm":{"name":"SHA256-RSA"}}})
+    }
+
+    fn tls_observation(leaf: Value) -> Value {
+        json!({"schema_version":2,"evidence":[{"module":"tls","status":"success","result":{
+            "handshake_log":{"server_certificates":{"certificate":{"parsed":leaf}}}
+        }}]})
+    }
+
+    #[test]
+    fn sliver_and_qakbot_are_scoped_candidates_from_the_same_protocol_product_pipeline() {
+        for (leaf, id, component, basis) in [
+            (
+                synthetic_sliver_leaf(),
+                "sliver",
+                Some("Multiplayer"),
+                "certificate_template",
+            ),
+            (
+                synthetic_qakbot_leaf(),
+                "qakbot",
+                None,
+                "historical_certificate_heuristic",
+            ),
+        ] {
+            let data = tls_observation(leaf);
+            let result = infer(Some(&data), 1234, Some(json!({"id":"observation"})));
+            assert_eq!(result.products.len(), 1);
+            let product = &result.products[0];
+            assert_eq!(product.id, id);
+            assert_eq!(product.component.as_deref(), component);
+            assert_eq!(product.basis, basis);
+            assert_eq!(product.assessment, "suspected");
+            assert!(product.version.is_none());
+            assert!(data.pointer(&product.evidence[0].field_path).is_some());
+            assert!(
+                product.evidence[0]
+                    .source_url
+                    .as_ref()
+                    .unwrap()
+                    .starts_with("https://")
+            );
+            assert_eq!(result.product_identification.ruleset_revision, 2);
+        }
+    }
+
+    #[test]
+    fn generic_mtls_partial_or_contradictory_sliver_fields_do_not_identify_sliver() {
+        for (path, value) in [
+            ("/issuer_dn", json!("CN=Example CA")),
+            ("/subject_dn", json!("CN=multiplayer.example")),
+            ("/signature/self_signed", json!(true)),
+            ("/signature/self_signed", Value::Null),
+            ("/signature/signature_algorithm/name", json!("SHA256-RSA")),
+        ] {
+            let mut leaf = synthetic_sliver_leaf();
+            *leaf.pointer_mut(path).unwrap() = value;
+            assert!(
+                infer(Some(&tls_observation(leaf)), 1234, None)
+                    .products
+                    .is_empty(),
+                "accepted {path}"
+            );
+        }
+        let data = tls_observation(
+            json!({"subject_dn":"CN=localhost", "issuer_dn":"CN=Example CA",
+            "signature":{"self_signed":false,"signature_algorithm":{"name":"ECDSA-SHA256"}}}),
+        );
+        assert!(infer(Some(&data), 1234, None).products.is_empty());
+    }
+
+    #[test]
+    fn qakbot_requires_both_complete_dn_shapes_and_correlated_identity_fields() {
+        for (field, value) in [
+            (
+                "subject_dn",
+                "C=US, OU=Domain Control Validated, CN=sampletest.invalid",
+            ),
+            (
+                "subject_dn",
+                "C=US, O=Example Corp, OU=Random Research Fixture, CN=sampletest.invalid",
+            ),
+            (
+                "issuer_dn",
+                "C=US, ST=CA, L=Samplecity, O=Example Research LLC., CN=other.invalid",
+            ),
+            (
+                "issuer_dn",
+                "C=GB, ST=CA, L=Samplecity, O=Example Research LLC., CN=sampletest.invalid",
+            ),
+            (
+                "issuer_dn",
+                "C=US, ST=CA, L=Samplecity, O=Example Research LLC., CN=sampletest.invalid, OU=extra",
+            ),
+            ("issuer_dn", "CN=Trusted Public CA"),
+        ] {
+            let mut leaf = synthetic_qakbot_leaf();
+            leaf[field] = json!(value);
+            assert!(
+                infer(Some(&tls_observation(leaf)), 1234, None)
+                    .products
+                    .is_empty(),
+                "accepted {field}: {value}"
+            );
+        }
+        let mut incomplete = synthetic_qakbot_leaf();
+        incomplete["issuer_dn"] = Value::Null;
+        assert!(
+            infer(Some(&tls_observation(incomplete)), 1234, None)
+                .products
+                .is_empty()
+        );
+        let mut oversized = synthetic_qakbot_leaf();
+        oversized["subject_dn"] = json!(format!(
+            "C=US, OU={}, CN=sampletest.invalid",
+            "a".repeat(2048)
+        ));
+        assert!(
+            infer(Some(&tls_observation(oversized)), 1234, None)
+                .products
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn new_candidates_use_the_leaf_and_first_https_response_even_when_a_handshake_fails() {
+        let mut failed = tls_observation(synthetic_sliver_leaf());
+        failed["evidence"][0]["status"] = json!("handshake-error");
+        let result = infer(Some(&failed), 1234, None);
+        assert_eq!(result.products[0].id, "sliver");
+        assert_eq!(result.product_identification.coverage, "partial");
+        for leaf in [synthetic_sliver_leaf(), synthetic_qakbot_leaf()] {
+            let ordinary = json!({"fingerprint_sha256":"c".repeat(64), "subject_dn":"CN=ordinary", "issuer_dn":"CN=ordinary"});
+            let mut data = tls_observation(ordinary.clone());
+            data["evidence"][0]["result"]["handshake_log"]["server_certificates"]["chain"] =
+                json!([{"parsed":leaf.clone()}]);
+            assert!(infer(Some(&data), 1234, None).products.is_empty());
+            let tls = json!({"handshake_log":{"server_certificates":{"certificate":{"parsed":leaf.clone()}}}});
+            let mut data = json!({"schema_version":2,"evidence":[{"module":"https","status":"success","result":{
+                "redirect_response_chain":[{"request":{"tls_log":{"handshake_log":{"server_certificates":{"certificate":{"parsed":ordinary}}}}}}],
+                "response":{"request":{"tls_log":tls}}
+            }}]});
+            assert!(infer(Some(&data), 1234, None).products.is_empty());
+            data["evidence"][0]["result"]["redirect_response_chain"][0]["request"]["tls_log"]["handshake_log"]
+                ["server_certificates"]["certificate"]["parsed"] = leaf;
+            let result = infer(Some(&data), 1234, None);
+            assert_eq!(result.products.len(), 1);
+            assert!(
+                result.products[0].evidence[0]
+                    .field_path
+                    .contains("redirect_response_chain/0")
+            );
+        }
+    }
+
+    #[test]
+    fn revision_two_recomputes_matching_raw_observations_without_renewing_old_unrelated_evidence() {
+        let data = tls_observation(synthetic_sliver_leaf());
+        let mut source = json!(infer(Some(&data), 1000, None));
+        source["product_identification"]["ruleset_revision"] = json!(1);
+        source["products"] = json!([]);
+        source["data"] = data;
+        assert_eq!(view(&source, 1000, true).products[0].id, "sliver");
+        let old = view(&source, 2000, false);
+        assert!(old.products.is_empty());
+        assert!(old.product_identification.stale);
+        assert_eq!(old.product_identification.observed_at, 1000);
+    }
 
     #[test]
     fn ordinary_product_and_c2_candidate_share_the_contract_without_iocs() {

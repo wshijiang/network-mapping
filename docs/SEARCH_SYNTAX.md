@@ -696,6 +696,7 @@ Web 技术目录现支持 `tech = minio`、`tech = s3`、`tech = gitlab` 和 `te
 
 ```text
 service = https AND product = cobalt_strike
+product IN (sliver, qakbot)
 product = "nginx@1.26.2"
 ```
 

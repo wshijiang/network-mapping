@@ -151,10 +151,22 @@ request_timeout_seconds = 180
 | `openssh` | OpenSSH | SSH 握手的 `server_id.software`；`identified`，可提取版本 |
 | `cobalt_strike` | Cobalt Strike / Team Server | 叶证书 SHA-256 符合公开记录的默认证书；`suspected` |
 | `asyncrat_family` | AsyncRAT / DcRAT | 主体、颁发者、自签名、9999 年到期与 SHA512-RSA 组合；`suspected`，不细分共享模板的具体家族 |
+| `sliver` | Sliver / Multiplayer | 默认多人管理端的主体、颁发者、非自签名与 ECDSA 签名组合；`suspected`，不表示已发现植入体通信监听器 |
+| `qakbot` | QakBot | 历史证书主体与颁发者的完整结构组合；`suspected`，`basis=historical_certificate_heuristic`，家族归属需复核 |
 
-`identified` 表示服务声明了产品名称，不证明声明可信或存在漏洞。`suspected` 表示部署特征符合已收录规则，不确认服务角色、恶意用途或主机感染。通用 404、自签名、正文中的软件名称以及网页文件 IOC 不独立产生产品身份。QakBot 和 Sliver 尚无正式产品规则。
+`identified` 表示服务声明了产品名称，不证明声明可信或存在漏洞。`suspected` 表示部署特征符合已收录规则，不确认服务角色、恶意用途或主机感染。通用 404、自签名、正文中的软件名称以及网页文件 IOC 不独立产生产品身份。Sliver 目前仅覆盖默认 Multiplayer 管理端证书，不覆盖通用 mTLS、HTTP(S)、DNS 或 WireGuard 植入体监听器。QakBot 仅提供历史证书启发式，不保证适用于当前基础设施或全部变种。
 
 HTTP/HTTPS 产品声明及 HTTPS 证书使用首次响应，跳转目的站不能覆盖原端口身份。TLS 握手失败前取得的证书可以产生候选，采集仍标记不完整。扫描器在既有大小预算内保留选中服务之外的 HTTP/HTTPS/TLS 补充证据，原始协议选择、网页富化开关和请求次数保持原义。
+
+### Sliver 与 QakBot 的候选边界
+
+Sliver 规则依据上游 v1.5.42 的多人管理端证书生成逻辑：叶证书主体为 `CN=multiplayer`、颁发者为 `CN=operators`，并要求明确的非自签名状态和 ECDSA 签名。只命中名称片段、通用 mTLS 或普通 CA 不产生候选。TLS 握手失败但已保存完整必要证书字段时仍可输出候选，并保留失败状态与 `coverage=partial`。
+
+QakBot 规则参考 2023 年公开研究的历史证书结构，要求同一叶证书上主体包含国家、组织单位和域名 CN，颁发者包含国家、省州、城市、组织和域名 CN；完整字段形状匹配，并额外要求两者的国家与 CN 相同。拒绝常见 `Domain Control Validated` 组织单位、额外 DN 字段、缺失和超长值。该研究提示候选可能误报，因此详情明确标为「历史证书启发式」，不输出已确认家族、服务角色、软件版本或当前恶意活动。
+
+新增规则复用已有原始握手，不需要导入 IOC 或新增扫描器配置，不发送 C2 专属通信或控制消息。只使用叶证书；HTTPS 只使用首次响应的证书，不把链证书、跳转目的站或正文中的产品名字归给源端口。回归使用合成字段及普通/矛盾/不完整证书反例，不代表已完成真实部署或全版本认证。
+
+研究与实现依据：[Sliver 管理端 TLS 配置](https://github.com/BishopFox/sliver/blob/v1.5.42/server/transport/mtls.go)、[Sliver CA 生成](https://github.com/BishopFox/sliver/blob/v1.5.42/server/certs/ca.go)、[Sliver 证书生成](https://github.com/BishopFox/sliver/blob/v1.5.42/server/certs/certs.go)、[QakBot 历史证书研究](https://www.embeeresearch.io/advanced-threat-intel-queries-catching-83-qakbot-servers-with-regex-censys-and-tls-certificates/)。
 
 ### 查看与搜索
 
@@ -165,7 +177,7 @@ HTTP/HTTPS 产品声明及 HTTPS 证书使用首次响应，跳转目的站不�
 ```text
 service = https AND product = cobalt_strike
 product = "nginx@1.26.2"
-product IN (cobalt_strike, asyncrat_family)
+product IN (cobalt_strike, asyncrat_family, sliver, qakbot)
 EXISTS(product)
 ```
 
@@ -178,7 +190,7 @@ EXISTS(product)
 - `products[]`：`id`、`name`、`component`、`version`、`assessment`、`basis`、`evidence[]`。
 - `product_identification`：`status`（`identified` / `suspected` / `not_matched` / `insufficient_evidence`）、`coverage`（`complete` / `partial`）、`ruleset_revision`、`observed_at`、`stale`、`observation_ref`。
 
-产品规则版本 1。结果按自身服务观察时间更新，后续仅端口观察不会把旧产品刷新成当前证据；较早或旧规则的结果标记 `stale`。相同产品存在不同版本声明时并列保留，不拼接推断版本。
+产品规则版本 2（本次新增 Sliver 和 QakBot）。结果按自身服务观察时间更新，后续仅端口观察不会把旧产品刷新成当前证据；较早或旧规则的结果标记 `stale`。相同产品存在不同版本声明时并列保留，不拼接推断版本。
 
 启动会增加 ES 映射。新扫描与执行投影重放生成可搜索产品；旧端口/历史详情只在原始数据确属该次服务观察时即时推断。若需要让全部存量产品进入 `product` 搜索，可在备份后按本文「存储升级与回滚」重建端点投影；不会自动重扫网络或改写原始观察。新前端兼容缺少新字段的服务端，保留旧版证书线索展示；旧 `c2_fingerprint` 字段和指纹过滤暂保留兼容。
 
