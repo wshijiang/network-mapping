@@ -190,10 +190,48 @@ EXISTS(product)
 - `products[]`：`id`、`name`、`component`、`version`、`assessment`、`basis`、`evidence[]`。
 - `product_identification`：`status`（`identified` / `suspected` / `not_matched` / `insufficient_evidence`）、`coverage`（`complete` / `partial`）、`ruleset_revision`、`observed_at`、`stale`、`observation_ref`。
 
-产品规则版本 2（本次新增 Sliver 和 QakBot）。结果按自身服务观察时间更新，后续仅端口观察不会把旧产品刷新成当前证据；较早或旧规则的结果标记 `stale`。相同产品存在不同版本声明时并列保留，不拼接推断版本。
+产品规则版本 3（v2 新增 Sliver 和 QakBot，v3 增加检测方式及 JARM 元数据）。结果按自身服务观察时间更新，后续仅端口观察不会把旧产品刷新成当前证据；较早或旧规则的结果标记 `stale`。相同产品存在不同版本声明时并列保留，不拼接推断版本。
 
 启动会增加 ES 映射。新扫描与执行投影重放生成可搜索产品；旧端口/历史详情只在原始数据确属该次服务观察时即时推断。若需要让全部存量产品进入 `product` 搜索，可在备份后按本文「存储升级与回滚」重建端点投影；不会自动重扫网络或改写原始观察。新前端兼容缺少新字段的服务端，保留旧版证书线索展示；旧 `c2_fingerprint` 字段和指纹过滤暂保留兼容。
 
 产品候选不再自动添加 IP 级「威胁」「恶意软件」或家族标签。既有标签和人工标签保留，可由管理员复核移除；产品识别与 IOC 风险、标签各自独立。
 
 研究来源：[Cobalt Strike 默认证书研究](https://www.recordedfuture.com/research/cobalt-strike-servers)、[AsyncRAT / DcRAT 证书模板研究](https://www.trendmicro.com/content/dam/trendmicro/global/en/research/21/i/ssl-tls-technical-brief/ssl-tls-technical-brief.pdf)。
+
+
+### 检测方式与 JARM 主动采集
+
+| 检测方式 | 是否主动探测 | 基本原理 | 当前用途 |
+| --- | --- | --- | --- |
+| JARM | 是，显式启用后额外最多 10 次 TCP/TLS 握手 | 对 10 组不同 ClientHello 的服务端密码套件、TLS 版本、ALPN 与扩展响应生成 62 位指纹 | 保存 TLS 配置指纹；当前没有以 JARM 单独归属 C2 家族的规则 |
+| TLS Certificate | 证书采集是；分析复用已有观察，无额外连接 | 分析叶证书主题、颁发者、有效期、公钥等元数据 | Cobalt Strike、AsyncRAT / DcRAT、Sliver、QakBot 候选，适用前述规则边界 |
+| HTTP Fingerprint | HTTP 采集是；产品规则复用已有响应 | 分析 HTTP 状态、响应头和内容特征 | 当前产品规则采用 nginx / Apache 的 Server 声明；网页技术识别仍走现有流程 |
+| Protocol Fingerprint | 通常是；已有工业被动接收方式除外，识别复用已有握手 | 根据应用层握手和协议响应识别服务 | 既有协议识别及 OpenSSH 软件声明；不表示已实现各 C2 的私有协议规则 |
+
+在扫描器本地 `config.toml` 中明确允许 JARM：
+
+```toml
+[service_detection.jarm]
+enabled = true
+concurrency = 4
+probe_timeout_seconds = 3
+max_stage_seconds = 60
+```
+
+再在控制台「扫描器 → 配置 → JARM 主动采集」启用该扫描器的远程开关。服务识别本身也需启用。JARM 本地和服务端默认均为关闭，远程开启不能覆盖本地禁用；旧服务端未下发该段时保留本地配置。配置在下一任务快照生效。模块模式需要同步更新 service-detection worker，旧 worker 不具备 JARM 采集能力。
+
+参数范围：`concurrency` 1–32、`probe_timeout_seconds` 1–30 秒、`max_stage_seconds` 1–3600 秒。并发以端点计，每端点固定 10 个按原始顺序的探测槽，无重试；沿用 `server_rate_limit` 的每 IP 连接间隔。每连接最多读取 64 KiB，仅解析 ServerHello/拒绝响应，不发送应用层请求；同时受块级总预算、任务剩余预算、取消信号及 64 MiB 结果上限约束。
+
+只对本次已有 TLS ServerHello 或证书证据的 TCP 端点采集（包括保留服务端证书的失败 mTLS 握手），不按端口号猜测，不跟随 HTTPS 跳转目的站。连接固定到扫描 IP 与端口；任务 `probe_options.server_name` 仅作为经过校验的 SNI，无此项时使用扫描 IP 文本，不执行额外 DNS 解析。
+
+成功指纹要求完整完成 10 个槽且至少一个 ServerHello。显式 TLS 拒绝或尚未收到任何字节时的正常关闭记为空槽；超时、连接异常、截断、畸形或超限响应标为不完整，不生成有效哈希。全部拒绝显示 `no_response`，不发布全零指纹。块级超时或取消会丢弃尚在执行的端点采集，保留基础服务证据和已完成端点；采集失败不会使基础扫描失败。JARM 与单次 ServerHello 的 JA3S 不同，共享指纹只说明 TLS 配置相似，不能单独确认家族或恶意用途。
+
+API 在 `product_identification` 中补充：
+
+- `detection_methods[]`：`id`（`jarm` / `tls_certificate` / `http_fingerprint` / `protocol_fingerprint`）、`name`、`active_probe`（采集是否需要主动网络交互）、`additional_probe`（是否额外连接）、`observed`（该次观察是否有此类证据；仅被动协议证据时 `active_probe=false`）、`principle`（稳定原理键）。方式清单不代表四类方式均已采集成功。
+- `jarm`：未采集时为 `null`；否则包含 `status`（`success` / `partial` / `no_response`）、`fingerprint`（不完整或全部拒绝为 `null`）、`expected_probes`、`attempted_probes`、`completed_probes`、`sni`、`field_path`。有效完成数包括明确拒绝，不等同于成功 ServerHello 数。
+- `products[].evidence[].detection_method` 标明产品规则使用的方式。新字段缺省兼容旧数据，不把历史观察标成已完成 JARM。
+
+搜索、端口当前与历史 API 沿用产品观察时钟携带这些元数据；JARM 不创建虚构产品或自动恶意标签，也未增加 JARM DSL 过滤字段。只有新扫描能获取新 JARM；重放旧数据不会主动连接网络。
+
+实现使用固定版本 [netfp 0.2.1](https://docs.rs/netfp/0.2.1/netfp/) 的纯编解码与哈希组件，网络、速率及预算由扫描器控制。算法说明见 [Salesforce JARM](https://github.com/salesforce/jarm)。回归仅使用本地合成 TLS 响应，未探测外部 C2，也不代表已完成各类真实部署验证。

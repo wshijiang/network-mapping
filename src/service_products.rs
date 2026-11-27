@@ -3,12 +3,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 mod certificate_templates;
+mod detection_methods;
+use detection_methods::{DetectionMethod, JarmObservation};
 
-pub(crate) const RULESET_REVISION: u32 = 2;
+pub(crate) const RULESET_REVISION: u32 = 3;
 const MAX_EVIDENCE: usize = 8;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Evidence {
+    #[serde(default)]
+    pub detection_method: Option<String>,
     pub rule_id: String,
     pub probe: String,
     pub field_path: String,
@@ -37,6 +41,10 @@ pub(crate) struct Identification {
     pub observed_at: i64,
     pub stale: bool,
     pub observation_ref: Option<Value>,
+    #[serde(default)]
+    pub detection_methods: Vec<DetectionMethod>,
+    #[serde(default)]
+    pub jarm: Option<JarmObservation>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -78,6 +86,8 @@ pub(crate) fn infer(
             observed_at,
             stale: false,
             observation_ref,
+            detection_methods: Vec::new(),
+            jarm: None,
         },
     };
     let Some(evidence) = data
@@ -86,6 +96,9 @@ pub(crate) fn infer(
     else {
         return result;
     };
+
+    result.product_identification.detection_methods = detection_methods::catalog(evidence);
+    result.product_identification.jarm = detection_methods::jarm(evidence);
 
     // Existing certificate rules are local product rules, independent of intel storage.
     // Their observations establish deployment candidates, never malicious intent.
@@ -117,6 +130,7 @@ pub(crate) fn infer(
                 }
                 .into(),
                 evidence: vec![Evidence {
+                    detection_method: Some("tls_certificate".into()),
                     rule_id: hit.rule_id.into(),
                     probe: hit.probe.into(),
                     field_path: hit.evidence_path,
@@ -206,6 +220,14 @@ pub(crate) fn infer(
                 assessment: "identified".into(),
                 basis: "service_declaration".into(),
                 evidence: vec![Evidence {
+                    detection_method: Some(
+                        if module == "ssh" {
+                            "protocol_fingerprint"
+                        } else {
+                            "http_fingerprint"
+                        }
+                        .into(),
+                    ),
                     rule_id: format!("{id}_service_declaration"),
                     probe: module.into(),
                     field_path: format!("/evidence/{index}/result{field}"),
@@ -333,7 +355,10 @@ mod tests {
                     .unwrap()
                     .starts_with("https://")
             );
-            assert_eq!(result.product_identification.ruleset_revision, 2);
+            assert_eq!(
+                result.product_identification.ruleset_revision,
+                RULESET_REVISION
+            );
         }
     }
 

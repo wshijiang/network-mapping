@@ -5606,7 +5606,20 @@ mod tests {
         "data":{"schema_version":2,"evidence":[{"module":"https","status":"success","result":{
             "response":{"headers":{"server":["nginx/1.26.2"]}}
         }}]}});
+        let mut observation = observation;
+        observation["data"]["evidence"].as_array_mut().unwrap().push(serde_json::json!({
+            "module":"jarm","status":"success","result":{
+                "profile":"salesforce-jarm","active_probe":true,"expected_probes":10,
+                "attempted_probes":10,"completed_probes":10,"probe_statuses":vec!["server_hello";10],
+                "fingerprint":"41d41d41d41d41d41d41d41d41d41da0bfb9dc5a7a50dfa51c2a70be11dda8"
+            }
+        }));
         let document = endpoint_projection_document(&context, &observation, 1000);
+        assert_eq!(
+            document["product_identification"]["jarm"]["completed_probes"],
+            10
+        );
+        assert_eq!(document["products"].as_array().unwrap().len(), 1);
         assert_eq!(document["service"], "https");
         assert_eq!(document["products"][0]["id"], "nginx");
         assert_eq!(document["product_identification"]["observed_at"], 1000);
@@ -5614,6 +5627,7 @@ mod tests {
         context.task_source = "import".into();
         let imported = endpoint_projection_document(&context, &observation, 1000);
         assert_eq!(imported["products"], serde_json::json!([]));
+        assert!(imported["product_identification"]["jarm"].is_null());
         assert_eq!(
             imported["product_identification"]["status"],
             "insufficient_evidence"
