@@ -10,6 +10,19 @@ use serde_json::json;
 use tokio_postgres::NoTls;
 use uuid::Uuid;
 
+// The startup fixture removes these complete blocks from init.sql. Keep this
+// contract in the regular test suite too, without requiring PostgreSQL.
+#[test]
+fn init_embeds_complete_inbox_and_monitor_migrations() {
+    let init = include_str!("../../source/database/init.sql");
+    for migration in [
+        include_str!("../../source/database/migrate_notification_inbox.sql"),
+        include_str!("../../source/database/migrate_target_monitor.sql"),
+    ] {
+        assert!(init.contains(migration));
+    }
+}
+
 async fn database() -> (Pool, String) {
     let mut config: tokio_postgres::Config = std::env::var("NOTIFICATION_TEST_DATABASE_URL")
         .expect("NOTIFICATION_TEST_DATABASE_URL must point to a disposable database")
@@ -26,6 +39,11 @@ async fn database() -> (Pool, String) {
         .await
         .unwrap();
     c.batch_execute(include_str!("../../source/database/init.sql"))
+        .await
+        .unwrap();
+    // Startup applies the access/task schema through the Open API migration.
+    // Task creation now records user_access_version even for legacy owners.
+    c.batch_execute(include_str!("../../source/database/migrate_open_api.sql"))
         .await
         .unwrap();
     for _ in 0..2 {
@@ -387,6 +405,71 @@ async fn dispatch_skips_without_scanner_then_creates_monitor_task_and_degrades_w
         .unwrap()
         .get(0);
     assert_eq!(runs, 2);
+    cleanup(pool, schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOTIFICATION_TEST_DATABASE_URL"]
+async fn monitor_port_default_upgrade_preserves_existing_rules_and_is_repeatable() {
+    let (pool, schema) = database().await;
+    let c = pool.get().await.unwrap();
+    c.batch_execute("ALTER TABLE target_monitor_rule ALTER COLUMN ports SET DEFAULT '1-65535'")
+        .await
+        .unwrap();
+    let insert = "INSERT INTO target_monitor_rule(id,name,created_by,targets) \
+        VALUES($1,$2,1,ARRAY['192.0.2.1']) RETURNING ports";
+    let old_id = Uuid::new_v4();
+    assert_eq!(
+        c.query_one(insert, &[&old_id, &"old"])
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+        "1-65535"
+    );
+    let custom_id = Uuid::new_v4();
+    c.execute(
+        "INSERT INTO target_monitor_rule(id,name,created_by,targets,ports) \
+        VALUES($1,'custom',1,ARRAY['192.0.2.2'],'12345')",
+        &[&custom_id],
+    )
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        c.batch_execute(include_str!(
+            "../../source/database/migrate_target_monitor.sql"
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            c.query_one(
+                "SELECT ports FROM target_monitor_rule WHERE id=$1",
+                &[&old_id]
+            )
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+            "1-65535"
+        );
+        assert_eq!(
+            c.query_one(
+                "SELECT ports FROM target_monitor_rule WHERE id=$1",
+                &[&custom_id]
+            )
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+            "12345"
+        );
+        let fresh = c
+            .query_one(insert, &[&Uuid::new_v4(), &"new"])
+            .await
+            .unwrap();
+        assert_eq!(
+            fresh.get::<_, String>(0),
+            crate::scan_control::creation::DEFAULT_SCAN_PORTS
+        );
+    }
+    drop(c);
     cleanup(pool, schema).await;
 }
 

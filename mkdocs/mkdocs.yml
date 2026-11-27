@@ -80,6 +80,7 @@ nav:
       - 扫描器任务恢复协议: scanner-recovery.md
   - 存储与性能:
       - Elasticsearch 存储: ELASTICSEARCH.md
+      - 扫描性能与慢 SQL 调查: SCANNER_PERFORMANCE.md
       - 扫描写入与资产发布: WRITE_SPEED.md
       - 扫描分析快照: ANALYTICS_SNAPSHOTS.md
       - 写入压力测试: SCAN_WRITE_STRESS.md

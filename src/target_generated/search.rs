@@ -385,7 +385,8 @@ const RECORD_SUCCESS_SQL: &str = r#"WITH requested AS MATERIALIZED (
         )
         UPDATE search_target_state s SET last_success_at=c.ended_at,last_success_plan=c.plan
         FROM candidates c WHERE s.owner_id=c.owner_id AND s.target_kind=c.target_kind
-            AND s.target_key=c.target_key AND (s.last_success_at IS NULL OR s.last_success_at<=c.ended_at)"#;
+            AND s.target_key=c.target_key AND (s.last_success_at IS NULL OR s.last_success_at<c.ended_at
+                OR (s.last_success_at=c.ended_at AND s.last_success_plan IS DISTINCT FROM c.plan))"#;
 
 /// Refreshes search-target freshness. The statement is index-driven (primary
 /// keys plus the lineage parent-execution index) and normally finishes in a
@@ -873,6 +874,41 @@ mod tests {
         tx.commit().await.unwrap();
         assert_eq!(client.query_one("SELECT last_success_at FROM search_target_state WHERE owner_id=1 AND target_key='192.0.2.1'",&[]).await.unwrap().get::<_,i64>(0),2000);
         drop(client);
+        f.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable STORAGE_TEST_DATABASE_URL"]
+    async fn freshness_replay_skips_physical_update_but_accepts_equal_time_plan_change() {
+        let f = Fixture::new().await;
+        f.sql("INSERT INTO search_target_state(owner_id,target_kind,target_key) VALUES(1,'ip','192.0.2.1');
+            INSERT INTO scan_task(id,user_id,task_id,task_initiator,task_target,task_port)
+            VALUES(1,1,'replay','search-test',ARRAY['192.0.2.1'::inet],'443');
+            INSERT INTO scan_task_execution(execution_id,task_id,execution_status,task_end_time)
+            VALUES('replay-execution',1,'succeeded',1000);").await;
+        let mut c = f.pool.get().await.unwrap();
+        let tx = c.transaction().await.unwrap();
+        assert_eq!(tx.execute(RECORD_SUCCESS_SQL, &[&1_i32]).await.unwrap(), 1);
+        assert_eq!(tx.execute(RECORD_SUCCESS_SQL, &[&1_i32]).await.unwrap(), 0);
+        tx.execute("UPDATE scan_task SET task_port='80,443' WHERE id=1", &[])
+            .await
+            .unwrap();
+        assert_eq!(tx.execute(RECORD_SUCCESS_SQL, &[&1_i32]).await.unwrap(), 1);
+        let plan: Value = tx
+            .query_one("SELECT last_success_plan FROM search_target_state", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(plan["ports"], "80,443");
+        tx.execute(
+            "UPDATE scan_task_execution SET task_end_time=999 WHERE task_id=1",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(tx.execute(RECORD_SUCCESS_SQL, &[&1_i32]).await.unwrap(), 0);
+        tx.commit().await.unwrap();
+        drop(c);
         f.cleanup().await;
     }
 
