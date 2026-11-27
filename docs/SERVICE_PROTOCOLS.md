@@ -163,10 +163,12 @@ request_timeout_seconds = 180
 | `asyncrat_family` | AsyncRAT / DcRAT | 主体、颁发者、自签名、9999 年到期与 SHA512-RSA 组合；`suspected`，不细分共享模板的具体家族 |
 | `sliver` | Sliver / Multiplayer | 默认多人管理端的主体、颁发者、非自签名与 ECDSA 签名组合；`suspected`，不表示已发现植入体通信监听器 |
 | `qakbot` | QakBot | 历史证书主体与颁发者的完整结构组合；`suspected`，`basis=historical_certificate_heuristic`，家族归属需复核 |
+| `mythic` | Mythic / Web UI | 管理页标题、挂载节点、manifest 与构建脚本路径组合。`suspected`，`basis=http_management_fingerprint` |
+| `empire` | Empire / Starkiller | 管理页标题、挂载节点、模块脚本与 Starkiller 专属 `noscript` 提示组合。`suspected`，`basis=http_management_fingerprint` |
 
-`identified` 表示服务声明了产品名称，不证明声明可信或存在漏洞。`suspected` 表示部署特征符合已收录规则，不确认服务角色、恶意用途或主机感染。通用 404、自签名、正文中的软件名称以及网页文件 IOC 不独立产生产品身份。Sliver 目前仅覆盖默认 Multiplayer 管理端证书，不覆盖通用 mTLS、HTTP(S)、DNS 或 WireGuard 植入体监听器。QakBot 仅提供历史证书启发式，不保证适用于当前基础设施或全部变种。
+`identified` 表示服务声明了产品名称，不证明声明可信或存在漏洞。`suspected` 表示证书或管理页特征符合已收录规则，不确认服务角色、恶意用途或主机感染。通用 404、自签名、正文中的软件名称以及网页文件 IOC 不独立产生产品身份。Sliver 目前仅覆盖默认 Multiplayer 管理端证书，不覆盖通用 mTLS、HTTP(S)、DNS 或 WireGuard 植入体监听器。QakBot 仅提供历史证书启发式，不保证适用于当前基础设施或全部变种。
 
-HTTP/HTTPS 产品声明及 HTTPS 证书使用首次响应，跳转目的站不能覆盖原端口身份。TLS 握手失败前取得的证书可以产生候选，采集仍标记不完整。扫描器在既有大小预算内保留选中服务之外的 HTTP/HTTPS/TLS 补充证据，这一步只保留已执行探测的结果，不改变原始协议选择，也不另发请求。可选 JARM 的额外连接另见后文。
+HTTP/HTTPS 产品声明及 HTTPS 证书使用首次响应，跳转目的站不能覆盖原端口身份。管理页规则支持符合下文条件的同源落地页。TLS 握手失败前取得的证书可以产生候选，采集仍标记不完整。扫描器在既有大小预算内保留选中服务之外的 HTTP/HTTPS/TLS 补充证据，这一步只保留已执行探测的结果，不改变原始协议选择，也不另发请求。可选 JARM 的额外连接另见后文。
 
 ### Sliver 与 QakBot 的候选边界
 
@@ -178,6 +180,12 @@ QakBot 规则参考 2023 年公开研究的历史证书结构，要求同一叶�
 
 研究与实现依据：[Sliver 管理端 TLS 配置](https://github.com/BishopFox/sliver/blob/v1.5.42/server/transport/mtls.go)、[Sliver CA 生成](https://github.com/BishopFox/sliver/blob/v1.5.42/server/certs/ca.go)、[Sliver 证书生成](https://github.com/BishopFox/sliver/blob/v1.5.42/server/certs/certs.go)、[QakBot 历史证书研究](https://www.embeeresearch.io/advanced-threat-intel-queries-catching-83-qakbot-servers-with-regex-censys-and-tls-certificates/)。
 
+### Mythic 与 Empire 管理端
+
+规则 v5 在同一个 HTML 响应中匹配上表所列结构。直接响应须为 HTTP 200 `text/html`。首次根路径响应若发生重定向，可复用扫描器已保存的 `web_assets` 落地页。首次 `Location` 须与落地页记录的首个跳转一致，全部跳转须保持协议、主机和端口一致，最终落地页须为 HTTP 200。来源字段须能核对，出现不同 Host/SNI 上下文时跳过落地页。规则检查未标记截断且不超过 64 KiB 的正文。
+
+候选只描述观察到的管理界面组件，软件版本留空。规则参考 Mythic **v3.4.0.61** 和 **v4.0.0rc5** 的上游构建页面，以及 Starkiller **v3.6.0** 和 **v4.0.3** 的上游页面模板。回归用这些结构构造本地样本，真实部署上的误报率和未覆盖版本尚待验证。[Mythic v3.4.0.61](https://github.com/its-a-feature/Mythic/blob/v3.4.0.61/mythic-react-docker/mythic/public/index.html) · [Mythic v4.0.0rc5](https://github.com/its-a-feature/Mythic/blob/v4.0.0rc5/mythic-react-docker/mythic/public/index.html) · [Starkiller v3.6.0](https://github.com/BC-SECURITY/Starkiller/blob/v3.6.0/index.html) · [Starkiller v4.0.3](https://github.com/BC-SECURITY/Starkiller/blob/v4.0.3/index.html)
+
 ### 查看与搜索
 
 搜索和资产端口表的「服务」列同时显示协议与产品，候选带黄色「疑似」徽标。展开端口，在「服务识别 → 产品识别」查看规则、证据路径、Host/SNI、观察时间与来源。历史弹窗显示对应原始观察的产品结果。
@@ -188,6 +196,7 @@ QakBot 规则参考 2023 年公开研究的历史证书结构，要求同一叶�
 service = https AND product = cobalt_strike
 product = "nginx@1.26.2"
 product IN (cobalt_strike, asyncrat_family, sliver, qakbot)
+product IN (mythic, empire)
 EXISTS(product)
 ```
 
@@ -202,7 +211,7 @@ EXISTS(product)
 
 `products[]` 是匹配结果，`product_identification` 用于解释匹配和证据状态；它们不会因为有一项为空而互相替代：
 
-- `status=identified` 表示至少有产品声明匹配；`suspected` 表示至少有证书候选匹配。`products[]` 为空时，`not_matched` 表示本次可检查的协议证据未匹配已收录产品规则，`insufficient_evidence` 表示当前证据不足以得出产品匹配结果。
+- `status=identified` 表示存在产品声明匹配且无疑似候选。`suspected` 表示至少有证书或管理页候选。`products[]` 为空时，`not_matched` 表示本次可检查的协议证据未匹配已收录产品规则，`insufficient_evidence` 表示当前证据不足以得出产品匹配结果。
 - `coverage=partial` 表示相关协议观察缺失、失败或被截断等情况；`complete` 仅表示当前汇总未发现这些不完整标记，不保证扫描了所有协议、支持所有产品或发现了端点上的全部软件。已看到明确 nginx 声明但 TLS 证据不全时，可以同时得到 `status=identified` 和 `coverage=partial`。
 - `ruleset_revision` 是规则修订号，不是软件版本。`observed_at` 属于原服务观察，重算时不改为重算时间。`stale` 表示该结果落后于较新端点观察或当前规则版本，不表示证书已经到期。
 - JARM 状态单独保存在 `jarm` 中。得到 JARM 指纹也可能没有任何产品匹配，不能用 `jarm.status=success` 推断产品 `status=identified`。
@@ -214,7 +223,7 @@ EXISTS(product)
 | 字段 | 核对方法 |
 | --- | --- |
 | `rule_id` / `detection_method` | 查看命中的规则及使用的检测方式；旧记录可能缺少检测方式字段 |
-| `probe` | 产生该条依据的协议探针，例如 `https` 或 `ssh` |
+| `probe` | 保存该条依据的采集模块，例如 `https`、`ssh` 或 `web_assets` |
 | `field_path` | 相对于该次服务观察 `data` 对象的 JSON Pointer，不是相对于搜索响应根对象的路径 |
 | `details` | 规则采用的关键字段和值，展示长度受限；完整数据以仍被保留的原始观察为准 |
 | `sni` / `http_host` | 采集时的虚拟主机上下文，不用于重新解析或扩大扫描目标 |
@@ -223,7 +232,7 @@ EXISTS(product)
 
 例如 HTTPS 观察中的 `Server: nginx/1.26.2` 可生成产品 `nginx`、版本 `1.26.2`、`basis=service_declaration`，证据路径通常为 `/evidence/0/result/response/headers/server`（实际索引随观察排列变化）。这说明服务端自报了 nginx；证书模板匹配则输出 `suspected`。原始数据已清理时，仍可展示已保存的规则依据，但不能仅凭 `field_path` 取回缺失原文。
 
-产品规则版本 4（v2 新增 Sliver 和 QakBot，v3 增加检测方式及 JARM 元数据，v4 规范 Windows OpenSSH 版本）。结果按自身服务观察时间更新，后续仅端口观察不会把旧产品刷新成当前证据；较早或旧规则的结果标记 `stale`。相同产品存在不同版本声明时并列保留，不拼接推断版本。
+当前产品规则版本为 **5**。v2 增加 Sliver 和 QakBot，v3 增加检测方式及 JARM 元数据，v4 规范 Windows OpenSSH 版本，v5 增加 Mythic 和 Empire 管理端。结果按自身服务观察时间更新，较早或旧规则的结果标记 `stale`。相同产品存在不同版本声明时并列保留。
 
 启动会增加 ES 映射。新扫描与执行投影重放生成可搜索产品；旧端口/历史详情只在原始数据确属该次服务观察时即时推断。若需要让全部存量产品进入 `product` 搜索，可在备份后按本文「存储升级与回滚」重建端点投影；不会自动重扫网络或改写原始观察。新前端兼容缺少新字段的服务端，保留旧版证书线索展示；旧 `c2_fingerprint` 字段和指纹过滤暂保留兼容。
 
@@ -238,8 +247,10 @@ EXISTS(product)
 | --- | --- | --- | --- |
 | JARM | 是，显式启用后额外最多 10 次 TCP 连接与 ClientHello 探测 | 对 10 组不同 ClientHello 的服务端密码套件、TLS 版本、ALPN 与扩展响应生成 62 个十六进制字符的指纹 | 保存 TLS 配置指纹；当前没有以 JARM 单独归属 C2 家族的规则 |
 | TLS Certificate | 证书采集是；分析复用已有观察，无额外连接 | 分析叶证书主题、颁发者、有效期、公钥等元数据 | Cobalt Strike、AsyncRAT / DcRAT、Sliver、QakBot 候选，适用前述规则边界 |
-| HTTP Fingerprint | HTTP 采集是；产品规则复用已有响应 | 分析 HTTP 状态、响应头和内容特征 | 当前产品规则采用 nginx / Apache 的 Server 声明；网页技术识别仍走现有流程 |
+| HTTP Fingerprint | HTTP 采集是；产品规则复用已有响应 | 分析 HTTP 状态、响应头和内容特征 | nginx / Apache 的 Server 声明，以及 Mythic / Empire 管理页候选 |
 | Protocol Fingerprint | 通常是；已有工业被动接收方式除外，识别复用已有握手 | 根据应用层握手和协议响应识别服务 | 既有协议识别及 OpenSSH 软件声明；不表示已实现各 C2 的私有协议规则 |
+
+JARM 以 TLS 握手响应为依据。证书轮换后，握手响应特征保持一致时，JARM 可以保持稳定。共享反向代理也可能为不同应用返回相同的握手特征。规则 v5 保持 JARM 为独立观察，家族候选由已收录的证书或 HTTP 管理页规则产生。[JARM 原理与样本重合情况](https://github.com/salesforce/jarm#how-jarm-works)
 
 在扫描器本地 `config.toml` 中明确允许 JARM：
 

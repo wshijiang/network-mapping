@@ -5604,7 +5604,8 @@ mod tests {
         let observation = serde_json::json!({"kind":"service", "ip_address":"192.0.2.1", "port":443,
         "protocol":"tcp", "service":"https", "observation_key":"service-1", "observed_at":1000,
         "data":{"schema_version":2,"evidence":[{"module":"https","status":"success","result":{
-            "response":{"headers":{"server":["nginx/1.26.2"]}}
+            "response":{"status_code":200,"headers":{"server":["nginx/1.26.2"],"content_type":["text/html"]},
+                "body":"<title>Mythic</title><link rel=manifest href=/new/manifest.json><script src=/new/static/js/main.12fdaefe.js></script><div id=root></div>"}
         }}]}});
         let mut observation = observation;
         observation["data"]["evidence"].as_array_mut().unwrap().push(serde_json::json!({
@@ -5619,9 +5620,11 @@ mod tests {
             document["product_identification"]["jarm"]["completed_probes"],
             10
         );
-        assert_eq!(document["products"].as_array().unwrap().len(), 1);
+        assert_eq!(document["products"].as_array().unwrap().len(), 2);
         assert_eq!(document["service"], "https");
-        assert_eq!(document["products"][0]["id"], "nginx");
+        assert_eq!(document["products"][0]["id"], "mythic");
+        assert_eq!(document["products"][0]["assessment"], "suspected");
+        assert_eq!(document["products"][1]["id"], "nginx");
         assert_eq!(document["product_identification"]["observed_at"], 1000);
         assert!(document["product_identification"]["observation_ref"]["id"].is_string());
         context.task_source = "import".into();
@@ -5632,6 +5635,9 @@ mod tests {
             imported["product_identification"]["status"],
             "insufficient_evidence"
         );
+        context.task_source = "federation".into();
+        let federated = endpoint_projection_document(&context, &observation, 1000);
+        assert_eq!(federated["products"], serde_json::json!([]));
     }
 
     #[test]

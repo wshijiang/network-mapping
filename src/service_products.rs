@@ -4,9 +4,10 @@ use serde_json::{Value, json};
 
 mod certificate_templates;
 mod detection_methods;
+mod http_management;
 use detection_methods::{DetectionMethod, JarmObservation};
 
-pub(crate) const RULESET_REVISION: u32 = 4;
+pub(crate) const RULESET_REVISION: u32 = 5;
 const MAX_EVIDENCE: usize = 8;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -70,6 +71,16 @@ fn push(products: &mut Vec<Product>, mut product: Product) {
     } else if products.len() < 32 {
         products.push(product);
     }
+}
+
+fn first_http_response(result: &Value) -> Option<(&Value, &'static str)> {
+    if let Some(first) = result["redirect_response_chain"]
+        .as_array()
+        .and_then(|chain| chain.first())
+    {
+        return Some((first, "/redirect_response_chain/0"));
+    }
+    result.get("response").map(|value| (value, "/response"))
 }
 
 pub(crate) fn infer(
@@ -162,21 +173,23 @@ pub(crate) fn infer(
         inspected = true;
         incomplete |=
             item["truncated"] == true || item["status"].as_str().is_some_and(|s| s != "success");
-        let (value, field) = if module == "ssh" {
+        let (value, path, field) = if module == "ssh" {
             (
                 &item["result"]["server_id"]["software"],
+                "",
                 "/server_id/software",
             )
         } else if matches!(module, "http" | "https") {
-            let response = item["result"]["redirect_response_chain"]
-                .as_array()
-                .and_then(|chain| chain.first());
-            let field = if response.is_some() {
-                "/redirect_response_chain/0/headers/server"
-            } else {
-                "/response/headers/server"
+            let Some((response, path)) = first_http_response(&item["result"]) else {
+                continue;
             };
-            (item["result"].pointer(field).unwrap_or(&Value::Null), field)
+            let (candidate, body_incomplete) =
+                http_management::candidate(evidence, index, module, response, path);
+            incomplete |= body_incomplete;
+            if let Some(product) = candidate {
+                push(&mut result.products, product);
+            }
+            (&response["headers"]["server"], path, "/headers/server")
         } else {
             continue;
         };
@@ -186,7 +199,7 @@ pub(crate) fn infer(
         else {
             continue;
         };
-        // Explicit product declarations only; bodies, names and IOC payloads are excluded.
+        // Ordinary software declarations use the protocol-owned header or banner.
         let declaration = text.split_whitespace().next().unwrap_or_default();
         let (token, version) = declaration
             .split_once('/')
@@ -232,7 +245,7 @@ pub(crate) fn infer(
                     ),
                     rule_id: format!("{id}_service_declaration"),
                     probe: module.into(),
-                    field_path: format!("/evidence/{index}/result{field}"),
+                    field_path: format!("/evidence/{index}/result{path}{field}"),
                     details: vec![("declaration".into(), bounded(text))],
                     sni: None,
                     http_host: None,

@@ -4,6 +4,8 @@
 
 ## 未发布
 
+- **服务产品规则 v5** 增加 Mythic Web UI 和 Empire / Starkiller 管理端候选。复用已保存的 HTTP/HTTPS 正文和可核对的同源落地页，以 `product IN (mythic, empire)` 查询。补充普通页面、跨站跳转、截断响应、来源隔离和旧数据回算回归。[规则与样本范围](SERVICE_PROTOCOLS.md#mythic-与-empire-管理端)
+
 - **说明澄清**：说明既有协议、Web 技术栈和 C2 专项结果与通用产品字段的关系，补充证据路径、结果状态及 JARM 探测/计数的适用含义，区分本地规则分析与额外网络采集。
 
 - **Review 修复**：规范 Windows OpenSSH 版本，移除 `for_Windows_` 平台前缀，保留完整声明证据并将产品规则提升至 v4，补充旧观察回算与版本查询说明。

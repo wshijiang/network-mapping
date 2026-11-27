@@ -1784,6 +1784,15 @@ mod web_tests {
         );
         assert!(parse_and_compile_elasticsearch("EXISTS(product)").is_ok());
         assert!(parse_and_compile_elasticsearch("product ~ nginx").is_err());
+        let ElasticsearchCompilation::Supported(query) =
+            parse_and_compile_elasticsearch("product IN (mythic, empire)").unwrap()
+        else {
+            panic!("unsupported management product query")
+        };
+        let query = query.to_string();
+        assert!(query.contains("products.id"));
+        assert!(query.contains("\"mythic\""));
+        assert!(query.contains("\"empire\""));
     }
 
     #[test]
