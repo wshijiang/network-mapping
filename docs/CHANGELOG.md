@@ -4,7 +4,7 @@
 
 ## 未发布
 
-- **服务产品规则 v6** 将 Sliver、Mythic 和 Empire / Starkiller 条件迁入外部可替换的 JSON 规则包，支持嵌套 `all`、`any`、`none`。新增离线导出、校验和样本回放，记录活动规则摘要，并在端点投影写入和重建续跑时校验规则修订。[规则包说明](SERVICE_PRODUCT_RULES.md)
+- **服务产品规则 v6** 将 Sliver、Mythic 和 Empire / Starkiller 条件迁入外部可替换的 JSON 规则包，支持嵌套 `all`、`any`、`none`。新增离线导出、校验和样本回放，启动日志与产品 API 记录规则摘要，端点投影写入和重建续跑核对规则修订号与摘要。[规则包说明](SERVICE_PRODUCT_RULES.md)
 
 - **服务产品规则 v5** 增加 Mythic Web UI 和 Empire / Starkiller 管理端候选。复用已保存的 HTTP/HTTPS 正文和可核对的同源落地页，以 `product IN (mythic, empire)` 查询。补充普通页面、跨站跳转、截断响应、来源隔离和旧数据回算回归。[规则与样本范围](SERVICE_PROTOCOLS.md#mythic-与-empire-管理端)
 

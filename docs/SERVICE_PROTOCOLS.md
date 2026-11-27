@@ -182,7 +182,7 @@ QakBot 规则参考 2023 年公开研究的历史证书结构，要求同一叶�
 
 ### Mythic 与 Empire 管理端
 
-规则 v5 在同一个 HTML 响应中匹配上表所列结构。直接响应须为 HTTP 200 `text/html`。首次根路径响应若发生重定向，可复用扫描器已保存的 `web_assets` 落地页。首次 `Location` 须与落地页记录的首个跳转一致，全部跳转须保持协议、主机和端口一致，最终落地页须为 HTTP 200。来源字段须能核对，出现不同 Host/SNI 上下文时跳过落地页。规则检查未标记截断且不超过 64 KiB 的正文。
+自规则 v5 起，服务端在同一个 HTML 响应中匹配上表所列结构。直接响应须为 HTTP 200 `text/html`。首次根路径响应若发生重定向，可复用扫描器已保存的 `web_assets` 落地页。首次 `Location` 须与落地页记录的首个跳转一致，全部跳转须保持协议、主机和端口一致，最终落地页须为 HTTP 200。来源字段须能核对，出现不同 Host/SNI 上下文时跳过落地页。规则检查未标记截断且不超过 64 KiB 的正文。
 
 候选只描述观察到的管理界面组件，软件版本留空。规则参考 Mythic **v3.4.0.61** 和 **v4.0.0rc5** 的上游构建页面，以及 Starkiller **v3.6.0** 和 **v4.0.3** 的上游页面模板。回归用这些结构构造本地样本，真实部署上的误报率和未覆盖版本尚待验证。[Mythic v3.4.0.61](https://github.com/its-a-feature/Mythic/blob/v3.4.0.61/mythic-react-docker/mythic/public/index.html) · [Mythic v4.0.0rc5](https://github.com/its-a-feature/Mythic/blob/v4.0.0rc5/mythic-react-docker/mythic/public/index.html) · [Starkiller v3.6.0](https://github.com/BC-SECURITY/Starkiller/blob/v3.6.0/index.html) · [Starkiller v4.0.3](https://github.com/BC-SECURITY/Starkiller/blob/v4.0.3/index.html)
 
@@ -207,13 +207,13 @@ EXISTS(product)
 搜索及资产端口、端口历史响应新增：
 
 - `products[]`：`id`、`name`、`component`、`version`、`assessment`、`basis`、`evidence[]`。
-- `product_identification`：`status`（`identified` / `suspected` / `not_matched` / `insufficient_evidence`）、`coverage`（`complete` / `partial`）、`ruleset_revision`、`observed_at`、`stale`、`observation_ref`。
+- `product_identification` 包含 `status`（`identified` / `suspected` / `not_matched` / `insufficient_evidence`）、`coverage`（`complete` / `partial`）、`ruleset_revision`、`ruleset_sha256`（旧观察可缺省）、`observed_at`、`stale` 和 `observation_ref`。
 
 `products[]` 是匹配结果，`product_identification` 用于解释匹配和证据状态；它们不会因为有一项为空而互相替代：
 
 - `status=identified` 表示存在产品声明匹配且无疑似候选。`suspected` 表示至少有证书或管理页候选。`products[]` 为空时，`not_matched` 表示本次可检查的协议证据未匹配已收录产品规则，`insufficient_evidence` 表示当前证据不足以得出产品匹配结果。
 - `coverage=partial` 表示相关协议观察缺失、失败或被截断等情况；`complete` 仅表示当前汇总未发现这些不完整标记，不保证扫描了所有协议、支持所有产品或发现了端点上的全部软件。已看到明确 nginx 声明但 TLS 证据不全时，可以同时得到 `status=identified` 和 `coverage=partial`。
-- `ruleset_revision` 是规则修订号，不是软件版本。`observed_at` 属于原服务观察，重算时不改为重算时间。`stale` 表示该结果落后于较新端点观察或当前规则版本，不表示证书已经到期。
+- `ruleset_revision` 和 `ruleset_sha256` 标识实际使用的规则包。`observed_at` 属于原服务观察，重算保留该时间。`stale` 表示该结果早于较新的端点观察，或规则修订号、摘要与当前规则包不一致。
 - JARM 状态单独保存在 `jarm` 中。得到 JARM 指纹也可能没有任何产品匹配，不能用 `jarm.status=success` 推断产品 `status=identified`。
 
 #### 如何核对识别证据
@@ -250,7 +250,7 @@ EXISTS(product)
 | HTTP Fingerprint | HTTP 采集是；产品规则复用已有响应 | 分析 HTTP 状态、响应头和内容特征 | nginx / Apache 的 Server 声明，以及 Mythic / Empire 管理页候选 |
 | Protocol Fingerprint | 通常是；已有工业被动接收方式除外，识别复用已有握手 | 根据应用层握手和协议响应识别服务 | 既有协议识别及 OpenSSH 软件声明；不表示已实现各 C2 的私有协议规则 |
 
-JARM 以 TLS 握手响应为依据。证书轮换后，握手响应特征保持一致时，JARM 可以保持稳定。共享反向代理也可能为不同应用返回相同的握手特征。规则 v5 保持 JARM 为独立观察，家族候选由已收录的证书或 HTTP 管理页规则产生。[JARM 原理与样本重合情况](https://github.com/salesforce/jarm#how-jarm-works)
+JARM 以 TLS 握手响应为依据。证书轮换后，握手响应特征保持一致时，JARM 可以保持稳定。共享反向代理也可能为不同应用返回相同的握手特征。服务端独立记录 JARM 观察，现有家族候选由证书或 HTTP 管理页规则产生。[JARM 原理与样本重合情况](https://github.com/salesforce/jarm#how-jarm-works)
 
 在扫描器本地 `config.toml` 中明确允许 JARM：
 
