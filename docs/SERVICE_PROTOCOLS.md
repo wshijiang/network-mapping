@@ -140,7 +140,17 @@ request_timeout_seconds = 180
 
 ## 服务产品识别
 
-服务识别同时返回应用协议和产品身份。`service` 继续使用 `http`、`https`、`tls`、`ssh` 等协议值；`products` 返回软件产品、组件、版本、识别程度和原始证据。普通服务软件与 C2 产品候选使用相同结构，产品匹配不查询 IOC 库、不依赖威胁情报启用状态，也不增加扫描请求。
+仓库已有 `service` 协议识别结果、Web 技术栈，以及旧 `c2_fingerprint` 证书线索。产品名称和版本等线索原先保存在协议原始数据、Web 技术栈或专项 C2 结果中；本次增加通用的服务产品结果结构，便于用同一组字段查看和查询本节列出的普通软件声明与 C2 部署候选。
+
+| 字段 | 表达内容 | 示例 |
+| --- | --- | --- |
+| `service` | 既有应用协议识别结果 | `https`、`tls`、`ssh` |
+| `products[]` | 匹配到的产品声明或部署候选，可为空或有多项 | nginx 及其声明版本、疑似 Sliver Multiplayer |
+| `product_identification` | 本次产品规则分析的状态、证据完整程度、规则版本和观察来源；另附检测方式及 JARM 记录 | `identified`、`coverage=partial`、原始观察时间 |
+
+已有 Web 技术栈及其 `tech` 查询继续使用原有识别流程，旧 `c2_fingerprint` 保留兼容；本次没有把全部既有技术目录迁入 `products[]`。`products[]` 的具体范围以本节产品表为准。
+
+服务端产品规则只分析已保存的协议观察，不查询 IOC 库、不依赖威胁情报开关，也不自行连接目标。扫描器保留基础补充证据不会增加原有探测请求；后文可选的 JARM 采集会额外发起最多 10 次连接与 ClientHello 探测，默认关闭。
 
 ### 当前支持与判断范围
 
@@ -156,7 +166,7 @@ request_timeout_seconds = 180
 
 `identified` 表示服务声明了产品名称，不证明声明可信或存在漏洞。`suspected` 表示部署特征符合已收录规则，不确认服务角色、恶意用途或主机感染。通用 404、自签名、正文中的软件名称以及网页文件 IOC 不独立产生产品身份。Sliver 目前仅覆盖默认 Multiplayer 管理端证书，不覆盖通用 mTLS、HTTP(S)、DNS 或 WireGuard 植入体监听器。QakBot 仅提供历史证书启发式，不保证适用于当前基础设施或全部变种。
 
-HTTP/HTTPS 产品声明及 HTTPS 证书使用首次响应，跳转目的站不能覆盖原端口身份。TLS 握手失败前取得的证书可以产生候选，采集仍标记不完整。扫描器在既有大小预算内保留选中服务之外的 HTTP/HTTPS/TLS 补充证据，原始协议选择、网页富化开关和请求次数保持原义。
+HTTP/HTTPS 产品声明及 HTTPS 证书使用首次响应，跳转目的站不能覆盖原端口身份。TLS 握手失败前取得的证书可以产生候选，采集仍标记不完整。扫描器在既有大小预算内保留选中服务之外的 HTTP/HTTPS/TLS 补充证据，这一步只保留已执行探测的结果，不改变原始协议选择，也不另发请求。可选 JARM 的额外连接另见后文。
 
 ### Sliver 与 QakBot 的候选边界
 
@@ -190,6 +200,29 @@ EXISTS(product)
 - `products[]`：`id`、`name`、`component`、`version`、`assessment`、`basis`、`evidence[]`。
 - `product_identification`：`status`（`identified` / `suspected` / `not_matched` / `insufficient_evidence`）、`coverage`（`complete` / `partial`）、`ruleset_revision`、`observed_at`、`stale`、`observation_ref`。
 
+`products[]` 是匹配结果，`product_identification` 用于解释匹配和证据状态；它们不会因为有一项为空而互相替代：
+
+- `status=identified` 表示至少有产品声明匹配；`suspected` 表示至少有证书候选匹配。`products[]` 为空时，`not_matched` 表示本次可检查的协议证据未匹配已收录产品规则，`insufficient_evidence` 表示当前证据不足以得出产品匹配结果。
+- `coverage=partial` 表示相关协议观察缺失、失败或被截断等情况；`complete` 仅表示当前汇总未发现这些不完整标记，不保证扫描了所有协议、支持所有产品或发现了端点上的全部软件。已看到明确 nginx 声明但 TLS 证据不全时，可以同时得到 `status=identified` 和 `coverage=partial`。
+- `ruleset_revision` 是规则修订号，不是软件版本。`observed_at` 属于原服务观察，重算时不改为重算时间。`stale` 表示该结果落后于较新端点观察或当前规则版本，不表示证书已经到期。
+- JARM 状态单独保存在 `jarm` 中。得到 JARM 指纹也可能没有任何产品匹配，不能用 `jarm.status=success` 推断产品 `status=identified`。
+
+#### 如何核对识别证据
+
+`products[].evidence[]` 保存规则采用的关键值及其来源位置，不是完整原始报文或抓包文件，也不表示已经确认软件真实身份或恶意用途：
+
+| 字段 | 核对方法 |
+| --- | --- |
+| `rule_id` / `detection_method` | 查看命中的规则及使用的检测方式；旧记录可能缺少检测方式字段 |
+| `probe` | 产生该条依据的协议探针，例如 `https` 或 `ssh` |
+| `field_path` | 相对于该次服务观察 `data` 对象的 JSON Pointer，不是相对于搜索响应根对象的路径 |
+| `details` | 规则采用的关键字段和值，展示长度受限；完整数据以仍被保留的原始观察为准 |
+| `sni` / `http_host` | 采集时的虚拟主机上下文，不用于重新解析或扩大扫描目标 |
+| `source_url` | 可选的规则实现或研究参考，不是目标响应的下载地址 |
+| `product_identification.observation_ref` | 与上述路径配合，定位证据所属的服务观察 |
+
+例如 HTTPS 观察中的 `Server: nginx/1.26.2` 可生成产品 `nginx`、版本 `1.26.2`、`basis=service_declaration`，证据路径通常为 `/evidence/0/result/response/headers/server`（实际索引随观察排列变化）。这说明服务端自报了 nginx；证书模板匹配则输出 `suspected`。原始数据已清理时，仍可展示已保存的规则依据，但不能仅凭 `field_path` 取回缺失原文。
+
 产品规则版本 4（v2 新增 Sliver 和 QakBot，v3 增加检测方式及 JARM 元数据，v4 规范 Windows OpenSSH 版本）。结果按自身服务观察时间更新，后续仅端口观察不会把旧产品刷新成当前证据；较早或旧规则的结果标记 `stale`。相同产品存在不同版本声明时并列保留，不拼接推断版本。
 
 启动会增加 ES 映射。新扫描与执行投影重放生成可搜索产品；旧端口/历史详情只在原始数据确属该次服务观察时即时推断。若需要让全部存量产品进入 `product` 搜索，可在备份后按本文「存储升级与回滚」重建端点投影；不会自动重扫网络或改写原始观察。新前端兼容缺少新字段的服务端，保留旧版证书线索展示；旧 `c2_fingerprint` 字段和指纹过滤暂保留兼容。
@@ -203,7 +236,7 @@ EXISTS(product)
 
 | 检测方式 | 是否主动探测 | 基本原理 | 当前用途 |
 | --- | --- | --- | --- |
-| JARM | 是，显式启用后额外最多 10 次 TCP/TLS 握手 | 对 10 组不同 ClientHello 的服务端密码套件、TLS 版本、ALPN 与扩展响应生成 62 位指纹 | 保存 TLS 配置指纹；当前没有以 JARM 单独归属 C2 家族的规则 |
+| JARM | 是，显式启用后额外最多 10 次 TCP 连接与 ClientHello 探测 | 对 10 组不同 ClientHello 的服务端密码套件、TLS 版本、ALPN 与扩展响应生成 62 个十六进制字符的指纹 | 保存 TLS 配置指纹；当前没有以 JARM 单独归属 C2 家族的规则 |
 | TLS Certificate | 证书采集是；分析复用已有观察，无额外连接 | 分析叶证书主题、颁发者、有效期、公钥等元数据 | Cobalt Strike、AsyncRAT / DcRAT、Sliver、QakBot 候选，适用前述规则边界 |
 | HTTP Fingerprint | HTTP 采集是；产品规则复用已有响应 | 分析 HTTP 状态、响应头和内容特征 | 当前产品规则采用 nginx / Apache 的 Server 声明；网页技术识别仍走现有流程 |
 | Protocol Fingerprint | 通常是；已有工业被动接收方式除外，识别复用已有握手 | 根据应用层握手和协议响应识别服务 | 既有协议识别及 OpenSSH 软件声明；不表示已实现各 C2 的私有协议规则 |
@@ -220,16 +253,16 @@ max_stage_seconds = 60
 
 再在控制台「扫描器 → 配置 → JARM 主动采集」启用该扫描器的远程开关。服务识别本身也需启用。JARM 本地和服务端默认均为关闭，远程开启不能覆盖本地禁用；旧服务端未下发该段时保留本地配置。配置在下一任务快照生效。模块模式需要同步更新 service-detection worker，旧 worker 不具备 JARM 采集能力。
 
-参数范围：`concurrency` 1–32、`probe_timeout_seconds` 1–30 秒、`max_stage_seconds` 1–3600 秒。并发以端点计，每端点固定 10 个按原始顺序的探测槽，无重试；沿用 `server_rate_limit` 的每 IP 连接间隔。每连接最多读取 64 KiB，仅解析 ServerHello/拒绝响应，不发送应用层请求；同时受块级总预算、任务剩余预算、取消信号及 64 MiB 结果上限约束。
+参数范围：`concurrency` 1–32、`probe_timeout_seconds` 1–30 秒、`max_stage_seconds` 1–3600 秒。并发以端点计，完整指纹需要 10 个按原始顺序的探测槽；每槽新建 TCP 连接并发送一组 ClientHello，最多尝试一次，不完成应用会话，无重试。预算或取消可使实际执行少于 10 槽；沿用 `server_rate_limit` 的每 IP 连接间隔。每连接最多读取 64 KiB，仅解析 ServerHello/拒绝响应，不发送应用层请求；同时受块级总预算、任务剩余预算、取消信号及 64 MiB 结果上限约束。
 
 只对本次已有 TLS ServerHello 或证书证据的 TCP 端点采集（包括保留服务端证书的失败 mTLS 握手），不按端口号猜测，不跟随 HTTPS 跳转目的站。连接固定到扫描 IP 与端口；任务 `probe_options.server_name` 仅作为经过校验的 SNI，无此项时使用扫描 IP 文本，不执行额外 DNS 解析。
 
-成功指纹要求完整完成 10 个槽且至少一个 ServerHello。显式 TLS 拒绝或尚未收到任何字节时的正常关闭记为空槽；超时、连接异常、截断、畸形或超限响应标为不完整，不生成有效哈希。全部拒绝显示 `no_response`，不发布全零指纹。块级超时或取消会丢弃尚在执行的端点采集，保留基础服务证据和已完成端点；采集失败不会使基础扫描失败。JARM 与单次 ServerHello 的 JA3S 不同，共享指纹只说明 TLS 配置相似，不能单独确认家族或恶意用途。
+成功指纹要求 10 个槽都取得可判定结果，且至少一个槽取得 ServerHello；这不要求 10 次成功或完整的 TLS 握手。显式 TLS 拒绝或尚未收到任何字节时的正常关闭记为空槽；超时、连接异常、截断、畸形或超限响应标为不完整，不生成有效哈希。全部拒绝显示 `no_response`，不发布全零指纹。块级超时或取消会丢弃尚在执行的端点采集，保留基础服务证据和已完成端点；采集失败不会使基础扫描失败。JARM 与单次 ServerHello 的 JA3S 不同，共享指纹只说明 TLS 配置相似，不能单独确认家族或恶意用途。
 
-API 在 `product_identification` 中补充：
+API 字段位置如下：
 
-- `detection_methods[]`：`id`（`jarm` / `tls_certificate` / `http_fingerprint` / `protocol_fingerprint`）、`name`、`active_probe`（采集是否需要主动网络交互）、`additional_probe`（是否额外连接）、`observed`（该次观察是否有此类证据；仅被动协议证据时 `active_probe=false`）、`principle`（稳定原理键）。方式清单不代表四类方式均已采集成功。
-- `jarm`：未采集时为 `null`；否则包含 `status`（`success` / `partial` / `no_response`）、`fingerprint`（不完整或全部拒绝为 `null`）、`expected_probes`、`attempted_probes`、`completed_probes`、`sni`、`field_path`。有效完成数包括明确拒绝，不等同于成功 ServerHello 数。
+- `product_identification.detection_methods[]`：`id`（`jarm` / `tls_certificate` / `http_fingerprint` / `protocol_fingerprint`）、`name`、`active_probe`（采集是否需要主动网络交互）、`additional_probe`（该方式是否需要额外连接）、`observed`（该次观察是否有此类记录；仅被动协议证据时 `active_probe=false`）、`principle`（稳定原理键）。`active_probe` / `additional_probe` 描述采集方式，不代表本次已实际执行。`observed=true` 表示有相应记录，JARM 记录可能只有部分结果；是否得到指纹仍需看 `jarm.status` 与 `fingerprint`。方式清单不代表四类方式均有 C2 产品规则或均已采集成功。
+- `product_identification.jarm`：没有可展示记录时为 `null`，可能是未启用、没有符合条件的端点、取消/预算不足导致记录未保留，或记录未通过格式校验；不能仅凭 `null` 判断从未尝试过连接。存在记录时包含 `status`（`success` / `partial` / `no_response`）、`fingerprint`（不完整或全部拒绝为 `null`）、`expected_probes`、`attempted_probes`、`completed_probes`、`sni`、`field_path`。`attempted_probes` 是已尝试槽数，`completed_probes` 是可判定槽数，包括 ServerHello、明确 TLS 拒绝及未收到任何字节时的正常关闭，不等同于成功 ServerHello 数或完成 TLS 会话数。
 - `products[].evidence[].detection_method` 标明产品规则使用的方式。新字段缺省兼容旧数据，不把历史观察标成已完成 JARM。
 
 搜索、端口当前与历史 API 沿用产品观察时钟携带这些元数据；JARM 不创建虚构产品或自动恶意标签，也未增加 JARM DSL 过滤字段。只有新扫描能获取新 JARM；重放旧数据不会主动连接网络。
