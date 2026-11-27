@@ -138,16 +138,50 @@ request_timeout_seconds = 180
 
 2026-10-27，修复基线 `5cb0bc82eecec854388cdca1189bb60e1536fc02` 的 [Service evidence inference CI](https://github.com/wshijiang/network-mapping/actions/runs/40498195862) 已通过：使用 PostgreSQL 和真实 Elasticsearch **9.5.4** 验证基础端点重建、投影、服务证据及不可变事实；[重新发布 PR](https://github.com/wshijiang/network-mapping/pull/136) 将 `transport_rebuild::tests` 与 `transport_rebuild::recovery_tests` 都纳入该工作流，覆盖模式选择、原地备份、PIT 恢复及真实 ES 重建。测试创建独立合成资源，不操作生产索引。生产迁移仍须事先备份并按实际配置验收；真实设备网络、浏览器视觉与线上部署不在该 CI 验证范围内。
 
-## 扫描威胁线索与自动标签
+## 服务产品识别
 
-服务端使用现有 schema_version=2 的 TLS / HTTPS 原始握手离线匹配，扫描请求数保持为原有探测数量。规则 v1 支持 Cobalt Strike Team Server 默认证书的叶证书 SHA-256 精确匹配，以及 AsyncRAT / DcRAT 的主体、颁发者、自签名状态、9999 年到期和 SHA512-RSA 签名组合。HTTPS 使用首个响应的证书，避免把跳转目的站的证据归给原端口。
+服务识别同时返回应用协议和产品身份。`service` 继续使用 `http`、`https`、`tls`、`ssh` 等协议值；`products` 返回软件产品、组件、版本、识别程度和原始证据。普通服务软件与 C2 产品候选使用相同结构，产品匹配不查询 IOC 库、不依赖威胁情报启用状态，也不增加扫描请求。
 
-资产端口展开区的“威胁线索”显示识别对象、匹配依据和观测时间。原始证据路径、SNI（若探针保留）、规则版本和来源可在技术详情查看。常规协议、服务与技术栈识别继续作为测绘结果展示。握手失败时可能仍取得服务端证书，失败状态保留。
+### 当前支持与判断范围
 
-新扫描结果入库时，命中自动添加 IP 级“威胁”“恶意软件”及“Cobalt Strike”或“AsyncRAT / DcRAT”标签，默认归入“威胁识别”分类，类型为 malicious。同名活动标签沿用现有配置。家族共享模板按系列名称标记；Cobalt Strike 同时具有授权测试用途，标签表示历史观测待复核。
+| 产品 ID | 展示名称 | 依据与结果 |
+| --- | --- | --- |
+| `nginx` | nginx | 首个 HTTP 响应 Server 头声明；`identified`，可提取版本 |
+| `apache_http_server` | Apache HTTP Server | 首个 HTTP 响应 Server 头声明；`identified`，可提取版本 |
+| `openssh` | OpenSSH | SSH 握手的 `server_id.software`；`identified`，可提取版本 |
+| `cobalt_strike` | Cobalt Strike / Team Server | 叶证书 SHA-256 符合公开记录的默认证书；`suspected` |
+| `asyncrat_family` | AsyncRAT / DcRAT | 主体、颁发者、自签名、9999 年到期与 SHA512-RSA 组合；`suspected`，不细分共享模板的具体家族 |
 
-标签沿用资产标签机制，适用于该 IP 的其他端口和历史搜索结果。标签不能替代具体端口证据或直接证明主机感染。重复上报使用幂等关联，写入与扫描回执同事务提交，搜索更新通过 outbox 重试。证据不足、后续未匹配或地址复用时不会自动清除历史标签，管理员可复核移除；再次收到命中会重新添加。
+`identified` 表示服务声明了产品名称，不证明声明可信或存在漏洞。`suspected` 表示部署特征符合已收录规则，不确认服务角色、恶意用途或主机感染。通用 404、自签名、正文中的软件名称以及网页文件 IOC 不独立产生产品身份。QakBot 和 Sliver 尚无正式产品规则。
 
-旧扫描记录在详情读取时可按当前规则重算。自动标签由新结果入库触发，存量记录需重新扫描后产生标签。QakBot 仅完成有限历史抓包候选验证，Sliver 仅验证通用 mTLS 采集行为，当前规则库尚未包含这两类识别规则。
+HTTP/HTTPS 产品声明及 HTTPS 证书使用首次响应，跳转目的站不能覆盖原端口身份。TLS 握手失败前取得的证书可以产生候选，采集仍标记不完整。扫描器在既有大小预算内保留选中服务之外的 HTTP/HTTPS/TLS 补充证据，原始协议选择、网页富化开关和请求次数保持原义。
+
+### 查看与搜索
+
+搜索和资产端口表的「服务」列同时显示协议与产品，候选带黄色「疑似」徽标。展开端口，在「服务识别 → 产品识别」查看规则、证据路径、Host/SNI、观察时间与来源。历史弹窗显示对应原始观察的产品结果。
+
+高级搜索支持产品 ID，以及同一产品上的 ID 与版本组合：
+
+```text
+service = https AND product = cobalt_strike
+product = "nginx@1.26.2"
+product IN (cobalt_strike, asyncrat_family)
+EXISTS(product)
+```
+
+`product != cobalt_strike` 只表示当前结果没有该产品匹配，不能解释为目标正常。产品字段只匹配本地观察；联测结果不会借展示合流获得本地产品身份。
+
+### API 与旧数据
+
+搜索及资产端口、端口历史响应新增：
+
+- `products[]`：`id`、`name`、`component`、`version`、`assessment`、`basis`、`evidence[]`。
+- `product_identification`：`status`（`identified` / `suspected` / `not_matched` / `insufficient_evidence`）、`coverage`（`complete` / `partial`）、`ruleset_revision`、`observed_at`、`stale`、`observation_ref`。
+
+产品规则版本 1。结果按自身服务观察时间更新，后续仅端口观察不会把旧产品刷新成当前证据；较早或旧规则的结果标记 `stale`。相同产品存在不同版本声明时并列保留，不拼接推断版本。
+
+启动会增加 ES 映射。新扫描与执行投影重放生成可搜索产品；旧端口/历史详情只在原始数据确属该次服务观察时即时推断。若需要让全部存量产品进入 `product` 搜索，可在备份后按本文「存储升级与回滚」重建端点投影；不会自动重扫网络或改写原始观察。新前端兼容缺少新字段的服务端，保留旧版证书线索展示；旧 `c2_fingerprint` 字段和指纹过滤暂保留兼容。
+
+产品候选不再自动添加 IP 级「威胁」「恶意软件」或家族标签。既有标签和人工标签保留，可由管理员复核移除；产品识别与 IOC 风险、标签各自独立。
 
 研究来源：[Cobalt Strike 默认证书研究](https://www.recordedfuture.com/research/cobalt-strike-servers)、[AsyncRAT / DcRAT 证书模板研究](https://www.trendmicro.com/content/dam/trendmicro/global/en/research/21/i/ssl-tls-technical-brief/ssl-tls-technical-brief.pdf)。

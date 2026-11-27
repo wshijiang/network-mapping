@@ -50,6 +50,7 @@ pub(crate) enum Field {
     OsStatus,
     OsScore,
     Technology,
+    Product,
     WebStatus,
     Title,
     HttpBody,
@@ -341,12 +342,16 @@ impl ElasticsearchCompiler {
         if predicate.field == Field::Domain && operator == Operator::Exists {
             return Err(SearchSyntaxError::new("字段 domain 不支持 EXISTS", 0, 0));
         }
-        if predicate.field == Field::Technology {
-            let path = "web.technologies";
+        if matches!(predicate.field, Field::Technology | Field::Product) {
+            let path = if predicate.field == Field::Product {
+                "products"
+            } else {
+                "web.technologies"
+            };
+            let id_field = format!("{path}.id");
+            let version_field = format!("{path}.version");
             if operator == Operator::Exists {
-                return Ok(
-                    json!({"nested":{"path":path,"query":{"exists":{"field":"web.technologies.id"}}}}),
-                );
+                return Ok(json!({"nested":{"path":path,"query":{"exists":{"field":id_field}}}}));
             }
             if !matches!(
                 operator,
@@ -361,12 +366,16 @@ impl ElasticsearchCompiler {
                     .split_once('@')
                     .map_or((value.as_str(), None), |(id, v)| (id, Some(v)));
                 if id.is_empty() || version.is_some_and(str::is_empty) {
-                    return Err(SearchSyntaxError::new("tech 使用组件 ID 或 ID@版本", 0, 0));
+                    return Err(SearchSyntaxError::new(
+                        "tech/product 使用组件 ID 或 ID@版本",
+                        0,
+                        0,
+                    ));
                 }
                 let mut filters =
-                    vec![json!({"term":{"web.technologies.id":id.to_ascii_lowercase()}})];
+                    vec![json!({"term":{(id_field.clone()):id.to_ascii_lowercase()}})];
                 if let Some(version) = version {
-                    filters.push(json!({"term":{"web.technologies.version":version}}));
+                    filters.push(json!({"term":{(version_field.clone()):version}}));
                 }
                 terms.push(json!({"bool":{"filter":filters}}));
             }
@@ -719,6 +728,7 @@ fn es_field(field: Field) -> &'static str {
         Field::OsStatus => "os.status",
         Field::OsScore => "os.score",
         Field::Technology => "web.technologies.id",
+        Field::Product => "products.id",
         Field::WebStatus => "web.status",
 
         Field::Title => "title",
@@ -784,6 +794,7 @@ impl Field {
             "os.status" | "service.os.status" => Some(Self::OsStatus),
             "os.score" | "service.os.score" => Some(Self::OsScore),
             "tech" | "web.tech" => Some(Self::Technology),
+            "product" => Some(Self::Product),
             "web.status" => Some(Self::WebStatus),
 
             "title" | "http.title" => Some(Self::Title),
@@ -834,6 +845,7 @@ impl Field {
             Self::OsStatus => "os.status",
             Self::OsScore => "os.score",
             Self::Technology => "tech",
+            Self::Product => "product",
             Self::WebStatus => "web.status",
 
             Self::Title => "title",
@@ -873,6 +885,7 @@ impl Field {
                 | Self::OsStatus
                 | Self::OsScore
                 | Self::Technology
+                | Self::Product
                 | Self::WebStatus
                 | Self::Title
                 | Self::HttpBody
@@ -916,6 +929,7 @@ impl Field {
             | Self::OsStatus
             | Self::OsScore
             | Self::Technology
+            | Self::Product
             | Self::WebStatus
             | Self::Ip
             | Self::Asn
@@ -1747,6 +1761,31 @@ mod tests {
 #[cfg(test)]
 mod web_tests {
     use super::*;
+    #[test]
+    fn product_queries_keep_id_and_version_on_one_product_and_negate_outside_nested() {
+        let ElasticsearchCompilation::Supported(query) =
+            parse_and_compile_elasticsearch("service = https AND product = \"nginx@1.26.2\"")
+                .unwrap()
+        else {
+            panic!("unsupported product query")
+        };
+        let text = query.to_string();
+        assert!(text.contains("products.id"));
+        assert!(text.contains("products.version"));
+        assert!(text.contains("https"));
+        let ElasticsearchCompilation::Supported(query) =
+            parse_and_compile_elasticsearch("product != cobalt_strike").unwrap()
+        else {
+            panic!("unsupported product query")
+        };
+        assert_eq!(
+            query.pointer("/bool/must_not/0/nested/path"),
+            Some(&json!("products"))
+        );
+        assert!(parse_and_compile_elasticsearch("EXISTS(product)").is_ok());
+        assert!(parse_and_compile_elasticsearch("product ~ nginx").is_err());
+    }
+
     #[test]
     fn technology_version_is_correlated_and_negation_is_outside_nested() {
         let ElasticsearchCompilation::Supported(q) =

@@ -2001,6 +2001,108 @@ pub(super) fn live_test_elasticsearch_config() -> crate::config::ElasticsearchCo
 
 #[tokio::test]
 #[ignore = "requires real ES via STORAGE_TEST_CONFIG_PATH or OS_TEST_ELASTICSEARCH_URL"]
+async fn live_elasticsearch_service_products_preserve_clocks_and_query_exact_versions() {
+    let service = ElasticsearchService::new(live_test_elasticsearch_config()).unwrap();
+    let index = format!("nm-test-products-{}", Uuid::new_v4().simple());
+    let context = dns_test_context();
+    let test = async {
+        service
+            .send_json_request(
+                ElasticsearchOperation::IndexAdmin,
+                Method::PUT,
+                &format!("/{index}"),
+                |request| request.json(&scan_endpoint_index_definition(0)),
+            )
+            .await?;
+        let observation = json!({"kind":"service", "ip_address":"192.0.2.1", "port":443,
+        "protocol":"tcp", "service":"https", "observation_key":"product-1",
+        "data":{"schema_version":2,"evidence":[{"module":"https","status":"success","result":{
+            "response":{"headers":{"server":["nginx/1.26.2"]}}
+        }}]}});
+        let successful = endpoint_projection_document(&context, &observation, 1000);
+        let port_only = endpoint_projection_document(
+            &context,
+            &json!({"kind":"port","ip_address":"192.0.2.1","port":443,"protocol":"tcp"}),
+            2000,
+        );
+        let mut older = observation.clone();
+        older["data"]["evidence"][0]["result"]["response"]["headers"]["server"] =
+            json!(["Apache/2.4.65"]);
+        for document in [
+            successful,
+            port_only,
+            endpoint_projection_document(&context, &older, 900),
+        ] {
+            let mut body = String::new();
+            append_projection_update(&mut body, &index, "endpoint", &document)?;
+            let response = service.send_bulk_with_retry("/_bulk", &body, false).await?;
+            if response["errors"] != false {
+                return Err(format!("product projection failed: {response}"));
+            }
+        }
+        let current = service
+            .send_json_request(
+                ElasticsearchOperation::ScanQuery,
+                Method::GET,
+                &format!("/{index}/_doc/endpoint"),
+                |request| request,
+            )
+            .await?;
+        let view = crate::service_products::view(&current["_source"], 2000, false);
+        if view.products[0].id != "nginx"
+            || !view.product_identification.stale
+            || view.product_identification.observed_at != 1000
+            || current["_source"]["service"] != "https"
+        {
+            return Err(format!("product observation clock changed: {current}"));
+        }
+        service
+            .send_json_request(
+                ElasticsearchOperation::IndexAdmin,
+                Method::POST,
+                &format!("/{index}/_refresh"),
+                |request| request,
+            )
+            .await?;
+        for (query, expected) in [
+            ("product = \"nginx@1.26.2\"", 1),
+            ("product = \"nginx@2.4.65\"", 0),
+            ("product = apache_http_server", 0),
+        ] {
+            let crate::handlers::search_dsl::ElasticsearchCompilation::Supported(query) =
+                crate::handlers::search_dsl::parse_and_compile_elasticsearch(query).unwrap()
+            else {
+                panic!("product query unsupported")
+            };
+            let response = service
+                .send_json_request(
+                    ElasticsearchOperation::ScanQuery,
+                    Method::POST,
+                    &format!("/{index}/_search"),
+                    |request| request.json(&json!({"query":query})),
+                )
+                .await?;
+            if response["hits"]["total"]["value"] != expected {
+                return Err(format!("incorrect product query result: {response}"));
+            }
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+    let cleanup = service
+        .send_json_request(
+            ElasticsearchOperation::IndexAdmin,
+            Method::DELETE,
+            &format!("/{index}"),
+            |request| request,
+        )
+        .await;
+    test.unwrap();
+    cleanup.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires real ES via STORAGE_TEST_CONFIG_PATH or OS_TEST_ELASTICSEARCH_URL"]
 async fn live_elasticsearch_preserves_successful_web_evidence_after_failed_probes() {
     let service = ElasticsearchService::new(live_test_elasticsearch_config()).unwrap();
     let index = format!("nm-test-web-projection-{}", Uuid::new_v4().simple());

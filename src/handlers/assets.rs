@@ -61,6 +61,8 @@ struct AssetPortCurrent {
     service_stale: bool,
     os: Option<crate::os_detection::OsInference>,
     web: Option<crate::web_detection::WebInference>,
+    #[serde(flatten)]
+    products: crate::service_products::Products,
     c2_fingerprint: Value,
     c2_fingerprint_stale: bool,
     last_c2_fingerprint: Option<Value>,
@@ -109,6 +111,8 @@ struct AssetObservationHistoryItem {
     data: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     c2_fingerprint: Option<Value>,
+    #[serde(flatten)]
+    products: crate::service_products::Products,
     observed_at: i64,
     execution_id: String,
     task_id: String,
@@ -653,6 +657,15 @@ async fn get_asset_ports_from_elasticsearch(
                 })
                 .flatten();
             AssetPortCurrent {
+                products: crate::service_products::view(
+                    source,
+                    last_seen_at,
+                    legacy_service
+                        && !matches!(
+                            source["task_source"].as_str(),
+                            Some("import" | "federation")
+                        ),
+                ),
                 data: source.get("data").filter(|d| !d.is_null()).cloned(),
                 intel: Default::default(),
                 port: source.get("port").and_then(Value::as_i64).unwrap_or(0) as i32,
@@ -827,6 +840,15 @@ async fn get_asset_history_from_elasticsearch(
         .flatten()
         .filter_map(|hit| Some((hit.get("_id")?.as_str()?, hit.get("_source")?)))
         .map(|(id, source)| AssetObservationHistoryItem {
+            products: crate::service_products::view(
+                source,
+                es_time_ms(source.get("observed_at")).unwrap_or_default(),
+                source["kind"] == "service"
+                    && !matches!(
+                        source["task_source"].as_str(),
+                        Some("import" | "federation")
+                    ),
+            ),
             id: i64::from_str_radix(&id[..id.len().min(15)], 16).unwrap_or_default(),
             kind: source
                 .get("kind")
