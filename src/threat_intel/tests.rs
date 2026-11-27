@@ -1902,6 +1902,64 @@ async fn trusted_iocs_bypass_review_and_confidence_while_ai_is_disabled() {
 
 #[tokio::test]
 #[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
+async fn web_observations_match_published_family_reports_and_keep_expired_evidence() {
+    use chrono::Utc;
+
+    let (pool, c, schema) = database().await;
+    let source = local_source(&pool, false).await;
+    let url = "https://download.example.test/dropper";
+    let hash = "a".repeat(64);
+    let mut redirect = Indicator::simple("url", url);
+    redirect.malware = "QakBot".into();
+    redirect.role = "payload_host".into();
+    let mut javascript = Indicator::simple("sha256", &hash);
+    javascript.malware = "SocGholish".into();
+    javascript.valid_until = Some(Utc::now() - chrono::Duration::days(1));
+    for indicator in [redirect, javascript] {
+        assert!(
+            storage::ingest(&pool, &source, indicator, storage::Origin::Structured, "")
+                .await
+                .unwrap()
+        );
+    }
+
+    let data = json!({"schema_version": 2, "evidence": [
+        {"module": "https", "status": "success", "result": {"response": {
+            "request": {"url": "https://asset.example.test/"},
+            "status_code": 302, "headers": {"location": [url]}
+        }}},
+        {"module": "web_assets", "status": "success", "result": {"js": [
+            {"status": "success", "hash_sha256": hash}
+        ]}}
+    ]});
+    let observed_at = Utc::now().timestamp_millis();
+    let web = observations::annotate_web(
+        &pool,
+        &[(observations::extract(Some(&data)), Some(observed_at))],
+    )
+    .await;
+    let result = json!(web[0]);
+    assert_eq!(result["observed_at"], observed_at);
+    assert_eq!(result["risk"], "malicious");
+    assert_eq!(result["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(result["matches"][0]["observation_basis"], "http_redirect");
+    assert_eq!(result["matches"][0]["payload"]["malware"], "QakBot");
+    assert_eq!(
+        result["expired_matches"][0]["observation_basis"],
+        "javascript_sha256"
+    );
+    assert_eq!(
+        result["expired_matches"][0]["payload"]["malware"],
+        "SocGholish"
+    );
+
+    c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable INTEL_TEST_DATABASE_URL"]
 async fn ai_publication_requires_exact_human_approval_even_for_trusted_source() {
     let (pool, c, schema) = database().await;
     let (source, article, i) = draft(&pool, "evil.example").await;

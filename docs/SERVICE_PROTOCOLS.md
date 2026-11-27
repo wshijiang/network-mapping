@@ -150,4 +150,6 @@ request_timeout_seconds = 180
 
 旧扫描记录在详情读取时可按当前规则重算。自动标签由新结果入库触发，存量记录需重新扫描后产生标签。QakBot 仅完成有限历史抓包候选验证，Sliver 仅验证通用 mTLS 采集行为，当前规则库尚未包含这两类识别规则。
 
+资产端口的「网页情报」提供另一组证据：它使用已接纳的 URL 和文件 SHA-256 IOC 识别来源报告中的软件家族或基础设施角色。详见[网页证据匹配](THREAT_INTELLIGENCE.md#网页证据匹配)。
+
 研究来源：[Cobalt Strike 默认证书研究](https://www.recordedfuture.com/research/cobalt-strike-servers)、[AsyncRAT / DcRAT 证书模板研究](https://www.trendmicro.com/content/dam/trendmicro/global/en/research/21/i/ssl-tls-technical-brief/ssl-tls-technical-brief.pdf)。

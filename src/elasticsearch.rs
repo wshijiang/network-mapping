@@ -4529,6 +4529,7 @@ fn scan_endpoint_index_definition(replicas: u32) -> Value {
                 "observed_at_ms": {"type": "long"},
                 "service_observed_at_ms": {"type": "long"},
                 "service_observation_ref": {"type": "object", "enabled": false},
+                "web_intel_indicators": {"type": "object", "enabled": false},
                 "os": crate::os_detection::mapping(),
             "web": crate::web_detection::mapping(),
                 "c2_fingerprint": service_fingerprint_mapping(),
@@ -4646,6 +4647,9 @@ fn endpoint_projection_document(
     // time (favicon MD5 from stored bytes), so every projection path — live
     // ingest, migration and offline rebuild — produces the same fields.
     let web_assets = crate::web_assets::extract(observation.get("data"));
+    let web_intel_indicators = (is_service
+        && crate::threat_intel::observations::scanner_observation(&context.task_source))
+    .then(|| crate::threat_intel::observations::extract(observation.get("data")));
     let c2 = if kind == "service" {
         scan_service_fingerprint(context, observation, observed_at_ms)
     } else {
@@ -4694,6 +4698,7 @@ fn endpoint_projection_document(
         "observed_at_ms": observed_at_ms,
         "service_observed_at_ms": if is_service { json!(observed_at_ms) } else { Value::Null },
         "service_observation_ref": if is_service { service_observation_reference(context, observation, observed_at_ms) } else { Value::Null },
+        "web_intel_indicators": web_intel_indicators,
         "os": observation.get("os").filter(|value| !value.is_null()).cloned().unwrap_or_else(|| if is_service { json!(crate::os_detection::OsInference::pending(observed_at_ms)) } else { Value::Null }),
         "web": observation.get("web").filter(|value| !value.is_null()).cloned().unwrap_or_else(|| if is_service { json!(crate::web_detection::WebInference::pending(observed_at_ms)) } else { Value::Null }),
         "c2_fingerprint": c2,
@@ -4767,6 +4772,7 @@ fn append_projection_update(
             def tlsSelfSigned = ctx._source.tls_self_signed;
             def serviceObserved = ctx._source.service_observed_at_ms;
             def serviceReference = ctx._source.service_observation_ref;
+            def webIntelIndicators = ctx._source.web_intel_indicators;
             def os = ctx._source.os;
             def web = ctx._source.web;
             def c2 = ctx._source.c2_fingerprint;
@@ -4804,6 +4810,7 @@ fn append_projection_update(
                     ctx._source.tls_self_signed = tlsSelfSigned;
                     ctx._source.service_observed_at_ms = serviceObserved;
                     ctx._source.service_observation_ref = serviceReference;
+                    ctx._source.web_intel_indicators = webIntelIndicators;
                     ctx._source.os = os;
                     ctx._source.web = web;
                 }
@@ -4827,6 +4834,7 @@ fn append_projection_update(
                 ctx._source.tls_self_signed = params.doc.tls_self_signed;
                 ctx._source.service_observed_at_ms = incomingServiceObserved;
                 ctx._source.service_observation_ref = params.doc.service_observation_ref;
+                ctx._source.web_intel_indicators = params.doc.web_intel_indicators;
                 boolean sameEvidence = serviceReference != null && params.doc.service_observation_ref != null && serviceReference.id == params.doc.service_observation_ref.id;
                 ctx._source.os = sameEvidence && os != null && os.status != 'pending' && (params.doc.os == null || params.doc.os.status == 'pending' || os.ruleset_revision >= params.doc.os.ruleset_revision) ? os : params.doc.os;
                 ctx._source.web = sameEvidence && web != null && web.status != 'pending' && (params.doc.web == null || params.doc.web.status == 'pending' || web.ruleset_revision >= params.doc.web.ruleset_revision) ? web : params.doc.web;
@@ -4872,6 +4880,7 @@ fn index_mapping_update() -> Value {
     let mut update = json!({
         "properties": {
             "service_observation_ref": {"type":"object", "enabled":false},
+            "web_intel_indicators": {"type": "object", "enabled": false},
             "os": crate::os_detection::mapping(),
             "web": crate::web_detection::mapping(),
             "c2_fingerprint": service_fingerprint_mapping(),

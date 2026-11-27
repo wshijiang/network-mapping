@@ -50,6 +50,8 @@ struct AssetPortCurrent {
     port: i32,
     data: Option<Value>,
     intel: crate::threat_intel::Annotation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    web_intel: Option<crate::threat_intel::observations::WebIntel>,
     protocol: Option<String>,
     service: Option<String>,
     banner: Option<String>,
@@ -623,7 +625,7 @@ async fn get_asset_ports_from_elasticsearch(
     if total == 0 && fingerprint.is_none() {
         return HttpResponse::NotFound().json(json!({"message": "没有可访问的资产观察记录"}));
     }
-    let mut items = result
+    let (mut items, web_targets): (Vec<_>, Vec<_>) = result
         .pointer("/hits/hits")
         .and_then(Value::as_array)
         .into_iter()
@@ -652,9 +654,21 @@ async fn get_asset_ports_from_elasticsearch(
                         .cloned()
                 })
                 .flatten();
-            AssetPortCurrent {
+            let web_indicators = match source.get("web_intel_indicators") {
+                Some(indicators) => serde_json::from_value(indicators.clone()).unwrap_or_default(),
+                None if legacy_service
+                    && source["task_source"]
+                        .as_str()
+                        .is_some_and(crate::threat_intel::observations::scanner_observation) =>
+                {
+                    crate::threat_intel::observations::extract(source.get("data"))
+                }
+                None => Vec::new(),
+            };
+            let item = AssetPortCurrent {
                 data: source.get("data").filter(|d| !d.is_null()).cloned(),
                 intel: Default::default(),
+                web_intel: None,
                 port: source.get("port").and_then(Value::as_i64).unwrap_or(0) as i32,
                 protocol: source
                     .get("protocol")
@@ -746,18 +760,21 @@ async fn get_asset_ports_from_elasticsearch(
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
-            }
+            };
+            (item, (web_indicators, service_observed_at))
         })
-        .collect::<Vec<_>>();
+        .unzip();
     let keys = items
         .iter()
         .map(|item| crate::threat_intel::endpoint_keys(ip, Some(item.port)))
         .collect::<Vec<_>>();
-    for (item, intel) in items
-        .iter_mut()
-        .zip(crate::threat_intel::annotate(pool, &keys).await)
-    {
+    let (endpoint_intel, web_intel) = tokio::join!(
+        crate::threat_intel::annotate(pool, &keys),
+        crate::threat_intel::observations::annotate_web(pool, &web_targets),
+    );
+    for ((item, intel), web_intel) in items.iter_mut().zip(endpoint_intel).zip(web_intel) {
         item.intel = intel;
+        item.web_intel = web_intel;
     }
     HttpResponse::Ok().json(json!({"success": true, "data": {
         "ip": ip, "items": items, "total": total, "limit": limit, "offset": offset

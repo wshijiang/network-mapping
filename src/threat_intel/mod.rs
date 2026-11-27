@@ -15,6 +15,7 @@ mod imports;
 mod llm;
 mod management;
 mod model;
+pub(crate) mod observations;
 mod parse;
 mod review;
 mod routes;
