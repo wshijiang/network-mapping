@@ -202,6 +202,7 @@ docker compose --env-file docker/.env -f docker/compose.example.yml up -d --forc
 | `NM__TEMPLATES__TEMPLATES_DIRECTORY` | 路径/Glob 字符串 | `/opt/network-mapping/templates/**/*.html` | HTML 模板匹配路径 |
 | `NM__TEMPLATES__TEMPLATES_NAME` | 字符串 | `error.html` | 错误页模板名称 |
 | `NM__FRONTEND__DIRECTORY` | 路径字符串 | `/opt/network-mapping/frontend/dist` | 已构建的前端目录，缺失页面或资源返回 404 |
+| `NM__PRODUCT_RULES__FILE` | 可选路径字符串 | 未设置 | 只读挂载的服务产品 JSON 规则，随进程启动加载。[规则包说明](SERVICE_PRODUCT_RULES.md) |
 | `NM__MAXMIND__DIRECTORY` | 路径字符串 | `/var/lib/network-mapping/maxmind` | 可选 MMDB 数据目录；缺失时相关 IP 情报字段为空 |
 | `NM__SCANNER_DIAGNOSTICS__DIRECTORY` | 路径字符串 | `/var/lib/network-mapping/scanner-diagnostics` | 可写诊断存储；持有独占目录锁，部署限制见[诊断指南](SCANNER_DIAGNOSTICS.md) |
 | `NM__DATA_IMPORT__DIRECTORY` | 路径字符串 | `/var/lib/network-mapping/data-import` | 数据导入 CSV 落盘目录，必须可写；默认位于 server-data 卷 |

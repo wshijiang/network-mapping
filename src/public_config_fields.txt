@@ -97,6 +97,7 @@ monitor.server_error_enabled
 monitor.slow_request_threshold_ms
 monitor.slow_sql_check_interval_seconds
 monitor.slow_sql_threshold_ms
+product_rules.file
 pwd_hash.m
 pwd_hash.p
 pwd_hash.t

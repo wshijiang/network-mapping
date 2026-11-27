@@ -3367,8 +3367,8 @@ fn parse_search_hits(hits: &[Value]) -> Result<Vec<ElasticsearchSearchItem>, Str
             ),
             products: source.products.unwrap_or_default(),
             product_identification: source.product_identification.map(|mut value| {
-                value.stale = value.observed_at < source.last_seen.timestamp_millis()
-                    || value.ruleset_revision != crate::service_products::RULESET_REVISION;
+                value.stale =
+                    value.observed_at < source.last_seen.timestamp_millis() || !value.is_current();
                 value
             }),
             scanner_name: source.scanner_name,
@@ -4864,7 +4864,15 @@ fn append_projection_update(
                 ctx._source.os = sameEvidence && os != null && os.status != 'pending' && (params.doc.os == null || params.doc.os.status == 'pending' || os.ruleset_revision >= params.doc.os.ruleset_revision) ? os : params.doc.os;
                 ctx._source.web = sameEvidence && web != null && web.status != 'pending' && (params.doc.web == null || params.doc.web.status == 'pending' || web.ruleset_revision >= params.doc.web.ruleset_revision) ? web : params.doc.web;
             }
-            boolean replaceProducts = incomingProductIdentification != null && (productIdentification == null || incomingProductIdentification.observed_at >= productIdentification.observed_at);
+            boolean replaceProducts = incomingProductIdentification != null && (
+                productIdentification == null ||
+                incomingProductIdentification.observed_at > productIdentification.observed_at ||
+                (incomingProductIdentification.observed_at == productIdentification.observed_at &&
+                    (productIdentification.ruleset_revision == null ||
+                        incomingProductIdentification.ruleset_revision > productIdentification.ruleset_revision ||
+                        (incomingProductIdentification.ruleset_revision == productIdentification.ruleset_revision &&
+                            (productIdentification.ruleset_sha256 == null ||
+                             incomingProductIdentification.ruleset_sha256 == productIdentification.ruleset_sha256)))));
             ctx._source.products = replaceProducts ? params.doc.products : (products != null ? products : []);
             ctx._source.product_identification = replaceProducts ? incomingProductIdentification : productIdentification;
             // Fingerprint observations have their own clock, which includes

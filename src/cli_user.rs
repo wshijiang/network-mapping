@@ -60,6 +60,9 @@ pub async fn execute(
                 .await
                 .map_err(|error| error as Box<dyn std::error::Error>)
         }
+        ServerCommand::ProductRules { command } => {
+            crate::service_products::execute_rules_command(command).map_err(Into::into)
+        }
     }
 }
 

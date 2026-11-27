@@ -232,7 +232,7 @@ EXISTS(product)
 
 例如 HTTPS 观察中的 `Server: nginx/1.26.2` 可生成产品 `nginx`、版本 `1.26.2`、`basis=service_declaration`，证据路径通常为 `/evidence/0/result/response/headers/server`（实际索引随观察排列变化）。这说明服务端自报了 nginx；证书模板匹配则输出 `suspected`。原始数据已清理时，仍可展示已保存的规则依据，但不能仅凭 `field_path` 取回缺失原文。
 
-当前产品规则版本为 **5**。v2 增加 Sliver 和 QakBot，v3 增加检测方式及 JARM 元数据，v4 规范 Windows OpenSSH 版本，v5 增加 Mythic 和 Empire 管理端。结果按自身服务观察时间更新，较早或旧规则的结果标记 `stale`。相同产品存在不同版本声明时并列保留。
+内置产品规则版本为 **6**。v2 增加 Sliver 和 QakBot，v3 增加检测方式及 JARM 元数据，v4 规范 Windows OpenSSH 版本，v5 增加 Mythic 和 Empire 管理端。v6 将 Sliver、Mythic 和 Empire 条件移入可独立加载的 JSON 规则包，`product_identification.ruleset_sha256` 记录实际使用的文件摘要。结果按自身服务观察时间更新，较早或旧规则的结果标记 `stale`。相同产品存在不同版本声明时并列保留。[规则格式、校验与回放](SERVICE_PRODUCT_RULES.md)
 
 启动会增加 ES 映射。新扫描与执行投影重放生成可搜索产品；旧端口/历史详情只在原始数据确属该次服务观察时即时推断。若需要让全部存量产品进入 `product` 搜索，可在备份后按本文「存储升级与回滚」重建端点投影；不会自动重扫网络或改写原始观察。新前端兼容缺少新字段的服务端，保留旧版证书线索展示；旧 `c2_fingerprint` 字段和指纹过滤暂保留兼容。
 

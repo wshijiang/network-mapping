@@ -5,10 +5,21 @@ use serde_json::{Value, json};
 mod certificate_templates;
 mod detection_methods;
 mod http_management;
+mod rules;
+mod rules_cli;
 use detection_methods::{DetectionMethod, JarmObservation};
+pub(crate) use rules::Stamp as RuleStamp;
+pub(crate) use rules_cli::execute as execute_rules_command;
 
-pub(crate) const RULESET_REVISION: u32 = 5;
 const MAX_EVIDENCE: usize = 8;
+
+pub(crate) fn initialize_rules(path: Option<&std::path::Path>) -> std::io::Result<()> {
+    rules::initialize(path)
+}
+
+pub(crate) fn ruleset_stamp() -> &'static RuleStamp {
+    &rules::active().stamp
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Evidence {
@@ -39,6 +50,8 @@ pub(crate) struct Identification {
     pub status: String,
     pub coverage: String,
     pub ruleset_revision: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ruleset_sha256: Option<String>,
     pub observed_at: i64,
     pub stale: bool,
     pub observation_ref: Option<Value>,
@@ -46,6 +59,14 @@ pub(crate) struct Identification {
     pub detection_methods: Vec<DetectionMethod>,
     #[serde(default)]
     pub jarm: Option<JarmObservation>,
+}
+
+impl Identification {
+    pub(crate) fn is_current(&self) -> bool {
+        let stamp = ruleset_stamp();
+        self.ruleset_revision == stamp.revision
+            && self.ruleset_sha256.as_ref() == Some(&stamp.sha256)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -88,12 +109,22 @@ pub(crate) fn infer(
     observed_at: i64,
     observation_ref: Option<Value>,
 ) -> Products {
+    infer_with_rules(data, observed_at, observation_ref, rules::active())
+}
+
+fn infer_with_rules(
+    data: Option<&Value>,
+    observed_at: i64,
+    observation_ref: Option<Value>,
+    rules: &rules::RuleSet,
+) -> Products {
     let mut result = Products {
         products: Vec::new(),
         product_identification: Identification {
             status: "insufficient_evidence".into(),
             coverage: "partial".into(),
-            ruleset_revision: RULESET_REVISION,
+            ruleset_revision: rules.stamp.revision,
+            ruleset_sha256: Some(rules.stamp.sha256.clone()),
             observed_at,
             stale: false,
             observation_ref,
@@ -122,7 +153,6 @@ pub(crate) fn infer(
         let (name, component) = match hit.family {
             crate::service_fingerprint::COBALT_STRIKE => ("Cobalt Strike", Some("Team Server")),
             crate::service_fingerprint::ASYNCRAT_FAMILY => ("AsyncRAT / DcRAT", None),
-            certificate_templates::SLIVER => ("Sliver", Some("Multiplayer")),
             certificate_templates::QAKBOT => ("QakBot", None),
             _ => continue,
         };
@@ -173,6 +203,11 @@ pub(crate) fn infer(
         inspected = true;
         incomplete |=
             item["truncated"] == true || item["status"].as_str().is_some_and(|s| s != "success");
+        if matches!(module, "tls" | "https") {
+            for product in certificate_templates::candidates(item, module, index, rules) {
+                push(&mut result.products, product);
+            }
+        }
         let (value, path, field) = if module == "ssh" {
             (
                 &item["result"]["server_id"]["software"],
@@ -183,10 +218,10 @@ pub(crate) fn infer(
             let Some((response, path)) = first_http_response(&item["result"]) else {
                 continue;
             };
-            let (candidate, body_incomplete) =
-                http_management::candidate(evidence, index, module, response, path);
+            let (candidates, body_incomplete) =
+                http_management::candidate(evidence, index, module, response, path, rules);
             incomplete |= body_incomplete;
-            if let Some(product) = candidate {
+            for product in candidates {
                 push(&mut result.products, product);
             }
             (&response["headers"]["server"], path, "/headers/server")
@@ -283,8 +318,7 @@ pub(crate) fn view(source: &Value, observed_at: i64, use_raw_data: bool) -> Prod
         .get("product_identification")
         .cloned()
         .and_then(|value| serde_json::from_value::<Identification>(value).ok());
-    let identification =
-        identification.filter(|value| value.ruleset_revision == RULESET_REVISION || !use_raw_data);
+    let identification = identification.filter(|value| value.is_current() || !use_raw_data);
     let mut result = if let Some(identification) = identification {
         Products {
             products: source
@@ -302,7 +336,7 @@ pub(crate) fn view(source: &Value, observed_at: i64, use_raw_data: bool) -> Prod
         )
     };
     result.product_identification.stale = result.product_identification.observed_at < observed_at
-        || result.product_identification.ruleset_revision != RULESET_REVISION;
+        || !result.product_identification.is_current();
     result
 }
 
@@ -335,6 +369,23 @@ mod tests {
         json!({"schema_version":2,"evidence":[{"module":"tls","status":"success","result":{
             "handshake_log":{"server_certificates":{"certificate":{"parsed":leaf}}}
         }}]})
+    }
+
+    #[test]
+    fn same_revision_with_a_different_digest_is_stale_and_recomputed_from_matching_data() {
+        let data = tls_observation(synthetic_sliver_leaf());
+        let mut stored = json!(infer(Some(&data), 1234, None));
+        stored["products"] = json!([]);
+        stored["product_identification"]["ruleset_sha256"] = json!("0".repeat(64));
+        stored["data"] = data;
+
+        let stale = view(&stored, 1234, false);
+        assert!(stale.product_identification.stale);
+        assert!(stale.products.is_empty());
+        let refreshed = view(&stored, 1234, true);
+        assert!(!refreshed.product_identification.stale);
+        assert_eq!(refreshed.products[0].id, "sliver");
+        assert_eq!(refreshed.product_identification.observed_at, 1234);
     }
 
     #[test]
@@ -372,7 +423,7 @@ mod tests {
             );
             assert_eq!(
                 result.product_identification.ruleset_revision,
-                RULESET_REVISION
+                ruleset_stamp().revision
             );
         }
     }
@@ -553,7 +604,7 @@ mod tests {
             assert_eq!(refreshed.product_identification.observed_at, 1234);
             assert_eq!(
                 refreshed.product_identification.ruleset_revision,
-                RULESET_REVISION
+                ruleset_stamp().revision
             );
             assert!(!refreshed.product_identification.stale);
             let without_matching_raw = view(&stored, 1234, false);

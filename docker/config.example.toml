@@ -36,6 +36,10 @@ templates_name = "error.html"
 [frontend]
 directory = "/opt/network-mapping/frontend/dist"
 
+# 默认使用内置服务产品规则。若要使用外部规则包，将文件只读挂载到容器内。
+# [product_rules]
+# file = "/etc/network-mapping/product-rules.json"
+
 [maxmind]
 directory = "/var/lib/network-mapping/maxmind"
 

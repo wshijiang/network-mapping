@@ -10,6 +10,7 @@ pub(super) async fn run(
 ) -> Result<u64, String> {
     reporter.report(ProgressUpdate::phase("[1/6] 检查重建身份与 ES 来源"));
     let target = service.rebuild_target();
+    let product_rules = crate::service_products::ruleset_stamp();
     let previous = load(pool, "elasticsearch_runtime").await?;
     let saved = load(pool, STATE_KEY).await?;
     reporter.report(ProgressUpdate::phase(match mode {
@@ -29,6 +30,9 @@ pub(super) async fn run(
         }
         if run.format_version != FORMAT_VERSION {
             return Err("不支持此重建断点版本".into());
+        }
+        if run.phase != Phase::Complete && run.product_rules.as_ref() != Some(product_rules) {
+            return Err("重建断点的产品规则与当前规则不一致，请使用原程序和原规则配置续跑".into());
         }
         run
     } else {
@@ -112,6 +116,7 @@ pub(super) async fn run(
             target: target.clone(),
             previous_runtime: previous.clone(),
             source,
+            product_rules: Some(product_rules.clone()),
             source_counts: Some(source_counts),
             target_uuids: BTreeMap::new(),
             phase: Phase::Initializing,

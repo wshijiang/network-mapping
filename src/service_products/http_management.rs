@@ -1,126 +1,15 @@
 //! C2 management interface candidates from HTML already collected by the scanner.
 
-use super::{Evidence, Product, bounded};
+use super::{
+    Product,
+    rules::{Context, RuleSet},
+};
 use reqwest::Url;
-use scraper::{Html, Selector};
 use serde_json::Value;
-use std::sync::LazyLock;
 
 const MAX_HTML_BYTES: usize = 64 * 1024;
 const MAX_REDIRECTS: usize = 10;
 const MAX_URL_BYTES: usize = 2048;
-
-static TITLE: LazyLock<Selector> = LazyLock::new(|| selector("head > title"));
-static BASE_HREF: LazyLock<Selector> = LazyLock::new(|| selector("base[href]"));
-static MYTHIC_MANIFEST: LazyLock<Selector> =
-    LazyLock::new(|| selector("head > link[rel=manifest][href='/new/manifest.json']"));
-static MYTHIC_BUNDLE: LazyLock<Selector> =
-    LazyLock::new(|| selector("head > script[src^='/new/static/js/main.'][src$='.js']"));
-static MYTHIC_ROOT: LazyLock<Selector> = LazyLock::new(|| selector("body > div#root"));
-static STARKILLER_ROOT: LazyLock<Selector> = LazyLock::new(|| selector("body > div#app"));
-static STARKILLER_MODULE: LazyLock<Selector> =
-    LazyLock::new(|| selector("script[type=module][src^='/']:not([src^='//'])"));
-static NOSCRIPT: LazyLock<Selector> = LazyLock::new(|| selector("body > noscript"));
-
-fn selector(pattern: &str) -> Selector {
-    Selector::parse(pattern).expect("management page selector is valid")
-}
-
-fn identify(body: &str, probe: &str, field_path: String) -> Option<Product> {
-    // Skip parsing ordinary pages during both ingest and replays.
-    if !body.contains("Mythic") && !body.contains("Starkiller") {
-        return None;
-    }
-    let page = Html::parse_document(body);
-    if page.select(&BASE_HREF).next().is_some() {
-        return None;
-    }
-    let mut titles = page.select(&TITLE);
-    let title = titles.next()?.text().collect::<String>();
-    if titles.next().is_some() {
-        return None;
-    }
-    let (id, name, component, source, markers) = match title.trim() {
-        "Mythic" if page.select(&MYTHIC_ROOT).next().is_some() => {
-            let manifest = page.select(&MYTHIC_MANIFEST).next()?.value().attr("href")?;
-            let bundle = page
-                .select(&MYTHIC_BUNDLE)
-                .filter_map(|script| script.value().attr("src"))
-                .find(|src| {
-                    src.strip_prefix("/new/static/js/main.")
-                        .and_then(|name| name.strip_suffix(".js"))
-                        .is_some_and(|hash| {
-                            hash.len() == 8 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                        })
-                })?;
-            (
-                "mythic",
-                "Mythic",
-                "Web UI",
-                "https://github.com/its-a-feature/Mythic/blob/v3.4.0.61/mythic-react-docker/mythic/public/index.html",
-                vec![
-                    ("manifest", manifest),
-                    ("script", bundle),
-                    ("mount", "#root"),
-                ],
-            )
-        }
-        "Starkiller" if page.select(&STARKILLER_ROOT).next().is_some() => {
-            let script = page
-                .select(&STARKILLER_MODULE)
-                .filter_map(|script| script.value().attr("src"))
-                .find(|src| {
-                    !src.contains('\\') && !src.bytes().any(|byte| byte.is_ascii_control())
-                })?;
-            const BRANDED_NOTICE: &str = "starkiller doesn't work properly without JavaScript";
-            let matched = page.select(&NOSCRIPT).any(|notice| {
-                notice
-                    .text()
-                    .flat_map(str::split_whitespace)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .contains(BRANDED_NOTICE)
-            });
-            if !matched {
-                return None;
-            }
-            (
-                "empire",
-                "Empire",
-                "Starkiller",
-                "https://github.com/BC-SECURITY/Starkiller/blob/v4.0.3/index.html",
-                vec![
-                    ("noscript", BRANDED_NOTICE),
-                    ("mount", "#app"),
-                    ("script", script),
-                ],
-            )
-        }
-        _ => return None,
-    };
-    let details = std::iter::once(("title", title.trim()))
-        .chain(markers)
-        .map(|(key, value)| (key.into(), bounded(value)))
-        .collect();
-    Some(Product {
-        id: id.into(),
-        name: name.into(),
-        component: Some(component.into()),
-        version: None,
-        assessment: "suspected".into(),
-        basis: "http_management_fingerprint".into(),
-        evidence: vec![Evidence {
-            detection_method: Some("http_fingerprint".into()),
-            rule_id: format!("{id}_management_html"),
-            probe: probe.into(),
-            field_path,
-            details,
-            sni: None,
-            http_host: None,
-            source_url: Some(source.into()),
-        }],
-    })
-}
 
 fn header<'a>(response: &'a Value, name: &str) -> Option<&'a str> {
     let value = &response["headers"][name];
@@ -234,14 +123,15 @@ pub(super) fn candidate(
     module: &str,
     response: &Value,
     path: &str,
-) -> (Option<Product>, bool) {
+    rules: &RuleSet,
+) -> (Vec<Product>, bool) {
     let item = &evidence[index];
     let code = response["status_code"].as_u64();
     let (page, probe, field_path) = if item["truncated"] == true {
-        return (None, true);
+        return (Vec::new(), true);
     } else if code.is_some_and(|code| (300..400).contains(&code)) {
         let Some((index, landing)) = same_origin_landing(evidence, response, module) else {
-            return (None, false);
+            return (Vec::new(), false);
         };
         (
             landing,
@@ -250,7 +140,7 @@ pub(super) fn candidate(
         )
     } else {
         if code != Some(200) || item["status"] != "success" {
-            return (None, false);
+            return (Vec::new(), false);
         }
         if !header(response, "content_type").is_some_and(|value| {
             value
@@ -258,7 +148,7 @@ pub(super) fn candidate(
                 .next()
                 .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/html"))
         }) {
-            return (None, false);
+            return (Vec::new(), false);
         }
         (
             response,
@@ -269,26 +159,28 @@ pub(super) fn candidate(
     let Some(body) = page["body"].as_str().filter(|body| {
         page["body_truncated"] != true && !body.trim().is_empty() && body.len() <= MAX_HTML_BYTES
     }) else {
-        return (None, true);
+        return (Vec::new(), true);
     };
-    let mut result = identify(body, probe, field_path);
-    if let Some(product) = &mut result {
-        product.evidence[0].http_host = response
+    let context = Context {
+        probe,
+        field_path: &field_path,
+        http_host: response
             .pointer("/request/host")
             .or_else(|| response.pointer("/request/url/host"))
-            .and_then(Value::as_str)
-            .map(bounded);
-        if probe == "https" {
-            product.evidence[0].sni = sni(response).map(bounded);
-        }
-    }
-    (result, false)
+            .and_then(Value::as_str),
+        sni: if probe == "https" {
+            sni(response)
+        } else {
+            None
+        },
+    };
+    (rules.http_products(body, &context), false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service_products::{RULESET_REVISION, infer, view};
+    use crate::service_products::{infer, ruleset_stamp, view};
     use serde_json::json;
 
     fn mythic(bundle: &str) -> String {
@@ -338,7 +230,7 @@ mod tests {
             assert_eq!(result.product_identification.status, "suspected");
             assert_eq!(
                 result.product_identification.ruleset_revision,
-                RULESET_REVISION
+                ruleset_stamp().revision
             );
             let evidence = &product.evidence[0];
             assert_eq!(

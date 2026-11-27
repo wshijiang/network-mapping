@@ -253,6 +253,7 @@ pub fn inspect_server(raw: &Value) -> ConfigCheck {
         "frontend": FrontendConfig::default(), "maxmind": MaxMindConfig::default(),
         "backup": BackupConfig::default(), "elasticsearch": ElasticsearchConfig::default(),
         "scanner_diagnostics": crate::scanner_diagnostics::DiagnosticsConfig::default(),
+        "product_rules": {"file": null},
         "requests": RequestsConfig::default(), "monitor": MonitorConfig::default(),
         "automatic_target": AutomaticTargetConfig::default(),
         "dns_follow_up": crate::dns_follow_up::DnsFollowUpConfig::default(),

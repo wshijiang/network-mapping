@@ -9,6 +9,7 @@ const OPTIONAL_DEPLOYMENT_STRING_FIELDS: &[&str] = &[
     "elasticsearch.username",
     "elasticsearch.password",
     "elasticsearch.ca_certificate_file",
+    "product_rules.file",
 ];
 
 fn invalid(field: &str, message: &str) -> io::Error {

@@ -7,11 +7,13 @@ use std::sync::LazyLock;
 
 use crate::service_fingerprint::{Match, leaf_certificate, probe_tls};
 
-pub(super) const SLIVER: &str = "sliver";
+use super::{
+    Product,
+    rules::{Context, RuleSet},
+};
+
 pub(super) const QAKBOT: &str = "qakbot";
 const MAX_DN_BYTES: usize = 1024;
-const SLIVER_SOURCE: &str =
-    "https://github.com/BishopFox/sliver/blob/v1.5.42/server/transport/mtls.go";
 const QAKBOT_SOURCE: &str = "https://www.embeeresearch.io/advanced-threat-intel-queries-catching-83-qakbot-servers-with-regex-censys-and-tls-certificates/";
 
 // Deliberately narrower than the published hunting query: full DN shapes must
@@ -30,37 +32,6 @@ fn dn<'a>(leaf: &'a Value, field: &str) -> Option<&'a str> {
     leaf[field]
         .as_str()
         .filter(|value| !value.is_empty() && value.len() <= MAX_DN_BYTES)
-}
-
-fn sliver(leaf: &Value) -> Option<Vec<(&'static str, String)>> {
-    let subject = dn(leaf, "subject_dn")?;
-    let issuer = dn(leaf, "issuer_dn")?;
-    let algorithm = leaf
-        .pointer("/signature/signature_algorithm/name")
-        .or_else(|| leaf.pointer("/signature_algorithm/name"))?
-        .as_str()?;
-    if !subject.eq_ignore_ascii_case("CN=multiplayer")
-        || !issuer.eq_ignore_ascii_case("CN=operators")
-        || leaf.pointer("/signature/self_signed")?.as_bool() != Some(false)
-        || ![
-            "ECDSA-SHA256",
-            "ECDSA-SHA384",
-            "ECDSA-SHA512",
-            "ECDSAWithSHA256",
-            "ECDSAWithSHA384",
-            "ECDSAWithSHA512",
-        ]
-        .iter()
-        .any(|name| algorithm.eq_ignore_ascii_case(name))
-    {
-        return None;
-    }
-    Some(vec![
-        ("subject_dn", subject.into()),
-        ("issuer_dn", issuer.into()),
-        ("self_signed", "false".into()),
-        ("signature_algorithm", algorithm.into()),
-    ])
 }
 
 fn qakbot(leaf: &Value) -> Option<Vec<(&'static str, String)>> {
@@ -99,30 +70,11 @@ pub(super) fn matches(data: Option<&Value>) -> Vec<Match<'_>> {
         let Some((leaf, leaf_path)) = leaf_certificate(tls) else {
             continue;
         };
-        let matched = sliver(leaf)
-            .map(|evidence| {
-                (
-                    SLIVER,
-                    "sliver_multiplayer_certificate",
-                    SLIVER_SOURCE,
-                    evidence,
-                )
-            })
-            .or_else(|| {
-                qakbot(leaf).map(|evidence| {
-                    (
-                        QAKBOT,
-                        "qakbot_historical_certificate_shape",
-                        QAKBOT_SOURCE,
-                        evidence,
-                    )
-                })
-            });
-        if let Some((family, rule_id, source_url, evidence)) = matched {
+        if let Some(evidence) = qakbot(leaf) {
             matches.push(Match {
-                family,
-                rule_id,
-                source_url,
+                family: QAKBOT,
+                rule_id: "qakbot_historical_certificate_shape",
+                source_url: QAKBOT_SOURCE,
                 probe: module,
                 evidence_path: format!("/evidence/{index}/result{path}{leaf_path}"),
                 sni: tls
@@ -140,4 +92,33 @@ pub(super) fn matches(data: Option<&Value>) -> Vec<Match<'_>> {
         }
     }
     matches
+}
+
+pub(super) fn candidates(
+    probe: &Value,
+    module: &str,
+    index: usize,
+    rules: &RuleSet,
+) -> Vec<Product> {
+    let Some((tls, response, path)) = probe_tls(probe, module) else {
+        return Vec::new();
+    };
+    let Some((leaf, leaf_path)) = leaf_certificate(tls) else {
+        return Vec::new();
+    };
+    let field_path = format!("/evidence/{index}/result{path}{leaf_path}");
+    let context = Context {
+        probe: module,
+        field_path: &field_path,
+        sni: tls
+            .pointer("/handshake_log/client_hello/server_name")
+            .and_then(Value::as_str),
+        http_host: response.and_then(|response| {
+            response
+                .pointer("/request/host")
+                .or_else(|| response.pointer("/request/url/host"))
+                .and_then(Value::as_str)
+        }),
+    };
+    rules.tls_products(leaf, &context)
 }
