@@ -235,3 +235,21 @@ API 在 `product_identification` 中补充：
 搜索、端口当前与历史 API 沿用产品观察时钟携带这些元数据；JARM 不创建虚构产品或自动恶意标签，也未增加 JARM DSL 过滤字段。只有新扫描能获取新 JARM；重放旧数据不会主动连接网络。
 
 实现使用固定版本 [netfp 0.2.1](https://docs.rs/netfp/0.2.1/netfp/) 的纯编解码与哈希组件，网络、速率及预算由扫描器控制。算法说明见 [Salesforce JARM](https://github.com/salesforce/jarm)。回归仅使用本地合成 TLS 响应，未探测外部 C2，也不代表已完成各类真实部署验证。
+
+
+### 通过 Web 或服务器 CLI 管理 JARM
+
+Web 入口为「扫描器 → 配置 → JARM 主动采集」，可修改 `enabled`、`concurrency`、`probe_timeout_seconds`、`max_stage_seconds`。管理员通过已有 `GET/PUT /api/scanner/{scanner_id}/configuration` 读写完整运行配置，发布请求需携带 `expectedRevision`；旧版本或并发更新发生冲突时重新加载后再发布。节点本地授权和下一任务边界生效规则不变。
+
+服务器 CLI 读写同一份配置，无需运行 HTTP 或 Elasticsearch，仅需正确的 PostgreSQL 连接配置：
+
+```bash
+# 使用实际扫描器 UUID 替换 <ID>；可在命令前指定 --config /path/to/config.toml。
+network_mapping_server scanner-config show <ID>
+network_mapping_server scanner-config set-jarm <ID> --enabled true --concurrency 4 --probe-timeout-seconds 3 --max-stage-seconds 60 --change-reason "授权资产盘点"
+network_mapping_server scanner-config set-jarm <ID> --enabled false --change-reason "暂停额外 TLS 握手"
+```
+
+`set-jarm` 仅修改给出的字段，保留其他 JARM 参数和网页抓取、端口扫描等配置；不传任何修改字段会报错。参数范围与 Web 相同，`--enabled` 必须显式传 `true` 或 `false`，变更原因最多 500 个字符。每次成功更新都在同一事务中写入新修订、历史与审计；如果 Web 或另一个 CLI 已先修改配置，则报修订冲突并退出，不覆盖并发更新。`show` 可核对当前文档和修订；现有 `set-web-content` 命令继续可用。
+
+两种入口均只能管理服务端运行配置，不能越过扫描节点本地 `service_detection.enabled` / `service_detection.jarm.enabled` 授权。旧 worker 需同步升级后才能实际采集 JARM。

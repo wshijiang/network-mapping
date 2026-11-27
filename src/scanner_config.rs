@@ -812,6 +812,23 @@ mod tests {
 mod jarm_tests {
     use super::*;
     #[test]
+    fn web_request_round_trips_jarm_bounds_and_expected_revision() {
+        let mut document = serde_json::to_value(ScannerRuntimeConfig::default()).unwrap();
+        document["service_detection"]["jarm"] = json!({"enabled":true,"concurrency":8,"probe_timeout_seconds":5,"max_stage_seconds":90});
+        let request: UpdateScannerConfiguration = serde_json::from_value(json!({"expectedRevision":7,"document":document,"changeReason":"controlled collection"})).unwrap();
+        assert_eq!(request.expected_revision, 7);
+        request.document.validate().unwrap();
+        let result = serde_json::to_value(request.document).unwrap();
+        assert_eq!(
+            result["service_detection"]["jarm"],
+            document["service_detection"]["jarm"]
+        );
+        assert_eq!(
+            result["service_detection"]["web_content"],
+            document["service_detection"]["web_content"]
+        );
+    }
+    #[test]
     fn legacy_documents_cannot_implicitly_enable_jarm_and_bounds_are_validated() {
         let mut document = serde_json::to_value(ScannerRuntimeConfig::default()).unwrap();
         document["service_detection"]
