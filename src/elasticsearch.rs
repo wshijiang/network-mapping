@@ -3332,6 +3332,17 @@ fn parse_search_hits(hits: &[Value]) -> Result<Vec<ElasticsearchSearchItem>, Str
                 .ok_or_else(|| "Elasticsearch hit 缺少 _source".to_owned())?,
         )
         .map_err(|error| format!("Elasticsearch hit 解析失败：{error}"))?;
+        let mut products = source.products.unwrap_or_default();
+        let mut product_identification = source.product_identification;
+        crate::service_products::remove_retired_products(
+            &mut products,
+            product_identification.as_mut(),
+        );
+        crate::service_products::mark_xmrig_freshness(
+            &mut products,
+            product_identification.as_ref(),
+            source.last_seen.timestamp_millis(),
+        );
         items.push(ElasticsearchSearchItem {
             ip_address: source.ip,
             port: source.port,
@@ -3365,8 +3376,8 @@ fn parse_search_hits(hits: &[Value]) -> Result<Vec<ElasticsearchSearchItem>, Str
                 source.last_seen.timestamp_millis(),
                 Utc::now().timestamp_millis(),
             ),
-            products: source.products.unwrap_or_default(),
-            product_identification: source.product_identification.map(|mut value| {
+            products,
+            product_identification: product_identification.map(|mut value| {
                 value.stale =
                     value.observed_at < source.last_seen.timestamp_millis() || !value.is_current();
                 value
@@ -4547,6 +4558,7 @@ fn scan_endpoint_index_definition(replicas: u32) -> Value {
                 "c2_fingerprint": service_fingerprint_mapping(),
             "products": crate::service_products::mapping(),
             "product_identification": {"type":"object", "enabled":false},
+            "xmrig_confirmations": {"type":"object", "enabled":false},
                 "last_c2_fingerprint": {"type": "object", "enabled": false},
                 "import_policy": {"type": "keyword"},
                 "asn": {"type": "keyword", "normalizer": "lowercase_normalizer"},
@@ -4596,12 +4608,20 @@ fn scan_service_fingerprint(
     observation: &Value,
     observed_at_ms: i64,
 ) -> Value {
-    let mut result = json!(crate::service_fingerprint::assess(
+    let assessment = crate::service_fingerprint::assess(
         observation.get("data"),
         observed_at_ms,
         &context.task_id,
         &context.execution_id,
-    ));
+    );
+    fingerprint_document(&assessment, observation)
+}
+
+fn fingerprint_document(
+    assessment: &crate::service_fingerprint::Assessment<'_>,
+    observation: &Value,
+) -> Value {
+    let mut result = json!(assessment);
     result["observation_key"] = observation["observation_key"].clone();
     result
 }
@@ -4661,23 +4681,30 @@ fn endpoint_projection_document(
     // time (favicon MD5 from stored bytes), so every projection path — live
     // ingest, migration and offline rebuild — produces the same fields.
     let web_assets = crate::web_assets::extract(observation.get("data"));
-    let product_detection = (kind == "service").then(|| {
-        crate::service_products::infer(
-            observation
-                .get("data")
-                .filter(|_| !matches!(context.task_source.as_str(), "import" | "federation")),
+    let (product_detection, c2) = if kind == "service" {
+        let data = observation.get("data");
+        let assessment = crate::service_fingerprint::assess(
+            data,
+            observed_at_ms,
+            &context.task_id,
+            &context.execution_id,
+        );
+        let product_detection = crate::service_products::infer_with_certificate(
+            data.filter(|_| !matches!(context.task_source.as_str(), "import" | "federation")),
             observed_at_ms,
             Some(service_observation_reference(
                 context,
                 observation,
                 observed_at_ms,
             )),
+            &assessment,
+        );
+        (
+            Some(product_detection),
+            fingerprint_document(&assessment, observation),
         )
-    });
-    let c2 = if kind == "service" {
-        scan_service_fingerprint(context, observation, observed_at_ms)
     } else {
-        Value::Null
+        (None, Value::Null)
     };
     json!({
         "scope_type": "execution",
@@ -4726,6 +4753,7 @@ fn endpoint_projection_document(
         "web": observation.get("web").filter(|value| !value.is_null()).cloned().unwrap_or_else(|| if is_service { json!(crate::web_detection::WebInference::pending(observed_at_ms)) } else { Value::Null }),
         "products": product_detection.as_ref().map(|value| &value.products).cloned().unwrap_or_default(),
         "product_identification": product_detection.as_ref().map(|value| &value.product_identification),
+        "xmrig_confirmations": product_detection.as_ref().map(|value| value.xmrig_confirmations()),
         "c2_fingerprint": c2,
         "last_c2_fingerprint": if c2["status"] == "matched" { &c2 } else { &Value::Null },
         "asn": asn,
@@ -4750,6 +4778,75 @@ fn append_projection_update(
     document: &Value,
 ) -> Result<(), String> {
     const SCRIPT: &str = r#"
+        boolean newerXmrig(def incoming, def previous) {
+            if (incoming == null) return false;
+            if (previous == null) return true;
+            if (incoming.observed_at != previous.observed_at) return incoming.observed_at > previous.observed_at;
+            return incoming.observation_id.compareTo(previous.observation_id) >= 0;
+        }
+        def xmrigRecords(def doc) {
+            if (doc.xmrig_confirmations != null) return doc.xmrig_confirmations;
+            def identification = doc.product_identification;
+            if (identification == null || doc.products == null ||
+                (identification.evaluator_revision != null && identification.evaluator_revision >= 4)) return null;
+            def reference = identification.observation_ref;
+            def key = reference == null || reference.id == null ? '' : reference.id;
+            def records = null;
+            for (def product : doc.products) {
+                if (product.id != 'xmrig') continue;
+                def item = new HashMap(product);
+                item.observation = ['observed_at': identification.observed_at, 'observation_id': key, 'stale': true];
+                def evidence = product.evidence == null || product.evidence.isEmpty() ? null : product.evidence[0];
+                def host = evidence == null ? null : evidence.http_host;
+                if (host == null || host == doc.ip || host == doc.ip + ':' + doc.port ||
+                    host == '[' + doc.ip + ']' || host == '[' + doc.ip + ']:' + doc.port) host = '';
+                else if (host.indexOf(':') > 0) host = host.substring(0, host.indexOf(':'));
+                if (records == null) records = new HashMap();
+                records[host.toLowerCase()] = ['observed_at': identification.observed_at, 'observation_id': key, 'product': item];
+            }
+            return records;
+        }
+        void mergeXmrig(def target, def previous, def previousAttempt, def incoming, def incomingAttempt) {
+            if (target.product_identification == null ||
+                (previous == null && incoming == null && previousAttempt == null && incomingAttempt == null)) return;
+            def records = previous == null ? new HashMap() : new HashMap(previous);
+            if (incoming != null) {
+                for (def entry : incoming.entrySet()) {
+                    if (newerXmrig(entry.getValue(), records[entry.getKey()])) records[entry.getKey()] = entry.getValue();
+                }
+            }
+            // Retain the newest 32 virtual hosts, including nonmatch records
+            // that prevent an older hit from reappearing after a replay.
+            while (records.size() > 32) {
+                def oldest = null;
+                for (def entry : records.entrySet()) {
+                    if (oldest == null || !newerXmrig(entry.getValue(), oldest.getValue()) ||
+                        (entry.getValue().observed_at == oldest.getValue().observed_at &&
+                         entry.getValue().observation_id == oldest.getValue().observation_id &&
+                         entry.getKey().compareTo(oldest.getKey()) < 0)) oldest = entry;
+                }
+                records.remove(oldest.getKey());
+            }
+            def products = new ArrayList();
+            if (target.products != null) {
+                for (def product : target.products) {
+                    if (product.id != 'xmrig') products.add(product);
+                }
+            }
+            def versions = new HashMap();
+            for (def record : records.values()) {
+                if (record.product != null && newerXmrig(record, versions[record.product.version]))
+                    versions[record.product.version] = record;
+            }
+            def orderedVersions = new ArrayList(versions.keySet());
+            Collections.sort(orderedVersions);
+            for (def version : orderedVersions) products.add(versions[version].product);
+            target.products = products;
+            target.xmrig_confirmations = records.isEmpty() ? null : records;
+            def identification = new HashMap(target.product_identification);
+            identification.xmrig_attempt = newerXmrig(incomingAttempt, previousAttempt) ? incomingAttempt : previousAttempt;
+            target.product_identification = identification;
+        }
         boolean newerFingerprint(def incoming, def previous) {
             if (incoming == null) return false;
             if (previous == null) return true;
@@ -4762,6 +4859,9 @@ fn append_projection_update(
         boolean incomingImport = params.doc.task_source == 'import';
         boolean importFill = incomingImport && params.doc.import_policy == 'fill';
         boolean scanAuthoritative = ctx._source.service_observed_at_ms != null && ctx._source.task_source != null && ctx._source.task_source != 'import';
+        def previousXmrig = xmrigRecords(ctx._source);
+        def previousXmrigAttempt = ctx._source.product_identification == null ? null : ctx._source.product_identification.xmrig_attempt;
+        def incomingXmrigAttempt = params.doc.product_identification == null ? null : params.doc.product_identification.xmrig_attempt;
         if (ctx._source.observed_at_ms == null) {
             ctx._source.putAll(params.doc);
         } else if (importFill && scanAuthoritative) {
@@ -4864,15 +4964,19 @@ fn append_projection_update(
                 ctx._source.os = sameEvidence && os != null && os.status != 'pending' && (params.doc.os == null || params.doc.os.status == 'pending' || os.ruleset_revision >= params.doc.os.ruleset_revision) ? os : params.doc.os;
                 ctx._source.web = sameEvidence && web != null && web.status != 'pending' && (params.doc.web == null || params.doc.web.status == 'pending' || web.ruleset_revision >= params.doc.web.ruleset_revision) ? web : params.doc.web;
             }
+            def oldEvaluator = productIdentification == null || productIdentification.evaluator_revision == null ? 0 : productIdentification.evaluator_revision;
+            def incomingEvaluator = incomingProductIdentification == null || incomingProductIdentification.evaluator_revision == null ? 0 : incomingProductIdentification.evaluator_revision;
             boolean replaceProducts = incomingProductIdentification != null && (
                 productIdentification == null ||
                 incomingProductIdentification.observed_at > productIdentification.observed_at ||
                 (incomingProductIdentification.observed_at == productIdentification.observed_at &&
-                    (productIdentification.ruleset_revision == null ||
-                        incomingProductIdentification.ruleset_revision > productIdentification.ruleset_revision ||
-                        (incomingProductIdentification.ruleset_revision == productIdentification.ruleset_revision &&
-                            (productIdentification.ruleset_sha256 == null ||
-                             incomingProductIdentification.ruleset_sha256 == productIdentification.ruleset_sha256)))));
+                    (incomingEvaluator > oldEvaluator ||
+                        (incomingEvaluator == oldEvaluator &&
+                            (productIdentification.ruleset_revision == null ||
+                                incomingProductIdentification.ruleset_revision > productIdentification.ruleset_revision ||
+                                (incomingProductIdentification.ruleset_revision == productIdentification.ruleset_revision &&
+                                    (productIdentification.ruleset_sha256 == null ||
+                                        incomingProductIdentification.ruleset_sha256 == productIdentification.ruleset_sha256)))))));
             ctx._source.products = replaceProducts ? params.doc.products : (products != null ? products : []);
             ctx._source.product_identification = replaceProducts ? incomingProductIdentification : productIdentification;
             // Fingerprint observations have their own clock, which includes
@@ -4880,6 +4984,9 @@ fn append_projection_update(
             ctx._source.c2_fingerprint = newerFingerprint(incomingC2, c2) ? incomingC2 : c2;
             ctx._source.last_c2_fingerprint = newerFingerprint(incomingLastC2, lastC2) ? incomingLastC2 : lastC2;
             if (incomingImport) { ctx._source.tags = tags; }
+        }
+        if (!(importFill && scanAuthoritative)) {
+            mergeXmrig(ctx._source, previousXmrig, previousXmrigAttempt, xmrigRecords(params.doc), incomingXmrigAttempt);
         }
     "#;
     body.push_str(
@@ -4921,6 +5028,7 @@ fn index_mapping_update() -> Value {
             "c2_fingerprint": service_fingerprint_mapping(),
             "products": crate::service_products::mapping(),
             "product_identification": {"type":"object", "enabled":false},
+            "xmrig_confirmations": {"type":"object", "enabled":false},
             "last_c2_fingerprint": {"type": "object", "enabled": false},
             "import_policy": {"type": "keyword"},
             "latitude": {"type": "double"},
@@ -5585,14 +5693,27 @@ mod tests {
     }
 
     #[test]
-    fn search_accepts_legacy_null_products_without_dropping_the_endpoint() {
-        let items = super::parse_search_hits(&[serde_json::json!({"_source": {
+    fn search_accepts_legacy_null_products_and_hides_retired_declarations() {
+        let empty = serde_json::json!({"_source": {
             "ip":"192.0.2.1", "port":443, "service":"https", "last_seen":"2026-11-27T00:00:00Z",
             "products":null
-        }})])
-        .unwrap();
-        assert_eq!(items.len(), 1);
-        assert!(items[0].products.is_empty());
+        }});
+        let mut legacy = empty.clone();
+        legacy["_source"]["products"] = serde_json::json!([{
+            "id":"nginx","name":"nginx","version":"1.26.2","assessment":"identified",
+            "basis":"service_declaration","evidence":[]
+        }]);
+        legacy["_source"]["product_identification"] = serde_json::json!({
+            "status":"identified","coverage":"complete","ruleset_revision":6,
+            "observed_at":1234,"stale":false,"observation_ref":null
+        });
+        let items = super::parse_search_hits(&[empty, legacy]).unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| item.products.is_empty()));
+        let identification = items[1].product_identification.as_ref().unwrap();
+        assert_eq!(identification.status, "insufficient_evidence");
+        assert_eq!(identification.observed_at, 1234);
+        assert!(identification.stale);
     }
 
     #[test]
@@ -5623,6 +5744,13 @@ mod tests {
                 "fingerprint":"41d41d41d41d41d41d41d41d41d41da0bfb9dc5a7a50dfa51c2a70be11dda8"
             }
         }));
+        observation["data"]["evidence"].as_array_mut().unwrap().push(serde_json::json!({
+            "module":"tls","status":"success","result":{"handshake_log":{"server_certificates":{
+                "certificate":{"parsed":{
+                    "fingerprint_sha256":"87f2085c32b6a2cc709b365f55873e207a9caa10bffecf2fd16d3cf9d94d390c"
+                }}
+            }}}
+        }));
         let document = endpoint_projection_document(&context, &observation, 1000);
         assert_eq!(
             document["product_identification"]["jarm"]["completed_probes"],
@@ -5630,9 +5758,16 @@ mod tests {
         );
         assert_eq!(document["products"].as_array().unwrap().len(), 2);
         assert_eq!(document["service"], "https");
-        assert_eq!(document["products"][0]["id"], "mythic");
+        assert_eq!(document["products"][0]["id"], "cobalt_strike");
         assert_eq!(document["products"][0]["assessment"], "suspected");
-        assert_eq!(document["products"][1]["id"], "nginx");
+        assert_eq!(document["products"][1]["id"], "mythic");
+        let legacy = super::scan_service_fingerprint(&context, &observation, 1000);
+        assert_eq!(document["c2_fingerprint"], legacy);
+        assert_eq!(document["last_c2_fingerprint"], legacy);
+        assert_eq!(
+            document["products"][0]["evidence"][0]["field_path"],
+            legacy["matches"][0]["evidence_path"],
+        );
         assert_eq!(document["product_identification"]["observed_at"], 1000);
         assert!(document["product_identification"]["observation_ref"]["id"].is_string());
         context.task_source = "import".into();

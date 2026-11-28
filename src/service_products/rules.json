@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "ruleset_revision": 6,
+  "ruleset_revision": 8,
   "rules": [
     {
       "id": "sliver_multiplayer_certificate",

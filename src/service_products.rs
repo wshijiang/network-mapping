@@ -1,17 +1,23 @@
-//! Product identity from protocol-owned observations. No IOC lookups or network I/O.
+//! C2 and mining attribution from stored service observations.
+use crate::service_fingerprint::{self, Assessment, Status};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 mod certificate_templates;
 mod detection_methods;
 mod http_management;
+mod mining;
 mod rules;
 mod rules_cli;
 use detection_methods::{DetectionMethod, JarmObservation};
+use mining::{Attempt, Confirmation, Declaration, ProductObservation};
 pub(crate) use rules::Stamp as RuleStamp;
 pub(crate) use rules_cli::execute as execute_rules_command;
 
 const MAX_EVIDENCE: usize = 8;
+const EVALUATOR_REVISION: u32 = 4;
+pub(crate) const RETIRED_PRODUCT_IDS: [&str; 3] = ["nginx", "apache_http_server", "openssh"];
 
 pub(crate) fn initialize_rules(path: Option<&std::path::Path>) -> std::io::Result<()> {
     rules::initialize(path)
@@ -34,14 +40,26 @@ pub(crate) struct Evidence {
     pub source_url: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProductCategory {
+    #[default]
+    C2,
+    MiningSoftware,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Product {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub category: ProductCategory,
     pub component: Option<String>,
     pub version: Option<String>,
     pub assessment: String,
     pub basis: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<ProductObservation>,
     pub evidence: Vec<Evidence>,
 }
 
@@ -50,6 +68,8 @@ pub(crate) struct Identification {
     pub status: String,
     pub coverage: String,
     pub ruleset_revision: u32,
+    #[serde(default)]
+    pub evaluator_revision: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ruleset_sha256: Option<String>,
     pub observed_at: i64,
@@ -59,12 +79,15 @@ pub(crate) struct Identification {
     pub detection_methods: Vec<DetectionMethod>,
     #[serde(default)]
     pub jarm: Option<JarmObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xmrig_attempt: Option<Attempt>,
 }
 
 impl Identification {
     pub(crate) fn is_current(&self) -> bool {
         let stamp = ruleset_stamp();
-        self.ruleset_revision == stamp.revision
+        self.evaluator_revision == stamp.evaluator_revision
+            && self.ruleset_revision == stamp.revision
             && self.ruleset_sha256.as_ref() == Some(&stamp.sha256)
     }
 }
@@ -73,6 +96,18 @@ impl Identification {
 pub(crate) struct Products {
     pub products: Vec<Product>,
     pub product_identification: Identification,
+    #[serde(skip)]
+    xmrig_confirmations: BTreeMap<String, Confirmation>,
+}
+
+impl Products {
+    pub(crate) fn xmrig_confirmations(&self) -> Value {
+        if self.xmrig_confirmations.is_empty() {
+            Value::Null
+        } else {
+            json!(self.xmrig_confirmations)
+        }
+    }
 }
 
 fn bounded(text: &str) -> String {
@@ -104,6 +139,26 @@ fn first_http_response(result: &Value) -> Option<(&Value, &'static str)> {
     result.get("response").map(|value| (value, "/response"))
 }
 
+fn record_xmrig(
+    result: &mut Products,
+    host: Option<String>,
+    product: Product,
+    observed_at: i64,
+    observation_id: &str,
+) {
+    let confirmation = result
+        .xmrig_confirmations
+        .entry(host.unwrap_or_default())
+        .or_insert_with(|| Confirmation {
+            observed_at,
+            observation_id: observation_id.to_owned(),
+            product: None,
+        });
+    // The dedicated summary, when present, is processed after base HTTP evidence.
+    confirmation.product = Some(product.clone());
+    push(&mut result.products, product);
+}
+
 pub(crate) fn infer(
     data: Option<&Value>,
     observed_at: i64,
@@ -118,19 +173,48 @@ fn infer_with_rules(
     observation_ref: Option<Value>,
     rules: &rules::RuleSet,
 ) -> Products {
+    let certificate = service_fingerprint::assess(data, observed_at, "", "");
+    evaluate(data, observed_at, observation_ref, rules, &certificate)
+}
+
+pub(crate) fn infer_with_certificate(
+    data: Option<&Value>,
+    observed_at: i64,
+    observation_ref: Option<Value>,
+    certificate: &Assessment<'_>,
+) -> Products {
+    evaluate(
+        data,
+        observed_at,
+        observation_ref,
+        rules::active(),
+        certificate,
+    )
+}
+
+fn evaluate(
+    data: Option<&Value>,
+    observed_at: i64,
+    observation_ref: Option<Value>,
+    rules: &rules::RuleSet,
+    certificate: &Assessment<'_>,
+) -> Products {
     let mut result = Products {
         products: Vec::new(),
         product_identification: Identification {
             status: "insufficient_evidence".into(),
             coverage: "partial".into(),
             ruleset_revision: rules.stamp.revision,
+            evaluator_revision: rules.stamp.evaluator_revision,
             ruleset_sha256: Some(rules.stamp.sha256.clone()),
             observed_at,
             stale: false,
             observation_ref,
             detection_methods: Vec::new(),
             jarm: None,
+            xmrig_attempt: None,
         },
+        xmrig_confirmations: BTreeMap::new(),
     };
     let Some(evidence) = data
         .filter(|data| data["schema_version"] == 2)
@@ -142,17 +226,11 @@ fn infer_with_rules(
     result.product_identification.detection_methods = detection_methods::catalog(evidence);
     result.product_identification.jarm = detection_methods::jarm(evidence);
 
-    // Existing certificate rules are local product rules, independent of intel storage.
-    // Their observations establish deployment candidates, never malicious intent.
-    let certificate = crate::service_fingerprint::assess(data, observed_at, "", "");
-    for hit in certificate
-        .matches
-        .into_iter()
-        .chain(certificate_templates::matches(data))
-    {
+    let historical_matches = certificate_templates::matches(data);
+    for hit in certificate.matches.iter().chain(&historical_matches) {
         let (name, component) = match hit.family {
-            crate::service_fingerprint::COBALT_STRIKE => ("Cobalt Strike", Some("Team Server")),
-            crate::service_fingerprint::ASYNCRAT_FAMILY => ("AsyncRAT / DcRAT", None),
+            service_fingerprint::COBALT_STRIKE => ("Cobalt Strike", Some("Team Server")),
+            service_fingerprint::ASYNCRAT_FAMILY => ("AsyncRAT / DcRAT", None),
             certificate_templates::QAKBOT => ("QakBot", None),
             _ => continue,
         };
@@ -161,6 +239,7 @@ fn infer_with_rules(
             Product {
                 id: hit.family.into(),
                 name: name.into(),
+                category: ProductCategory::C2,
                 component: component.map(str::to_owned),
                 version: None,
                 assessment: "suspected".into(),
@@ -170,15 +249,16 @@ fn infer_with_rules(
                     "certificate_template"
                 }
                 .into(),
+                observation: None,
                 evidence: vec![Evidence {
                     detection_method: Some("tls_certificate".into()),
                     rule_id: hit.rule_id.into(),
                     probe: hit.probe.into(),
-                    field_path: hit.evidence_path,
+                    field_path: hit.evidence_path.clone(),
                     details: hit
                         .evidence
-                        .into_iter()
-                        .map(|(key, value)| (key.into(), bounded(&value)))
+                        .iter()
+                        .map(|(key, value)| ((*key).into(), bounded(value)))
                         .collect(),
                     sni: hit.sni.map(bounded),
                     http_host: hit.http_host.map(bounded),
@@ -188,16 +268,66 @@ fn infer_with_rules(
         );
     }
 
+    let observation_id = result
+        .product_identification
+        .observation_ref
+        .as_ref()
+        .and_then(|reference| reference["id"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let probe_status = mining::probe_status(data);
+    let mut active_declaration = None;
     let mut inspected = false;
     let mut incomplete = data.is_some_and(|data| data["product_evidence_truncated"] == true);
     incomplete |= evidence.len() > 64;
     incomplete |= evidence
         .iter()
         .any(|item| matches!(item["module"].as_str(), Some("tls" | "https")))
-        && certificate.status == crate::service_fingerprint::Status::InsufficientEvidence;
+        && certificate.status == Status::InsufficientEvidence;
     for (index, item) in evidence.iter().take(64).enumerate() {
         let module = item["module"].as_str().unwrap_or_default();
-        if !matches!(module, "http" | "https" | "ssh" | "tls") {
+        if module == "web_assets" {
+            if let Some(response) = item.pointer("/result/xmrig_summary") {
+                inspected = true;
+                incomplete |= mining::incomplete_summary(item, response);
+                let host = mining::host(&response["request"]["host"]);
+                if probe_status.is_some_and(|(probe, status)| {
+                    status != "success" || mining::host(&probe["host"]) != host
+                }) {
+                    continue;
+                }
+                match mining::declaration(
+                    item,
+                    response,
+                    (module, "/xmrig_summary", index),
+                    observed_at,
+                    &observation_id,
+                ) {
+                    Some(Declaration::Xmrig(product)) => {
+                        record_xmrig(&mut result, host, product, observed_at, &observation_id);
+                        active_declaration = Some("matched");
+                    }
+                    Some(Declaration::OtherMiner) => {
+                        // Only a completed dedicated probe can supply a definite
+                        // nonmatch. A root page may describe a different service.
+                        if probe_status.is_some() {
+                            result
+                                .xmrig_confirmations
+                                .entry(host.unwrap_or_default())
+                                .or_insert_with(|| Confirmation {
+                                    observed_at,
+                                    observation_id: observation_id.clone(),
+                                    product: None,
+                                });
+                            active_declaration = Some("not_matched");
+                        }
+                    }
+                    None => {}
+                }
+            }
+            continue;
+        }
+        if !matches!(module, "http" | "https" | "tls") {
             continue;
         }
         inspected = true;
@@ -208,86 +338,52 @@ fn infer_with_rules(
                 push(&mut result.products, product);
             }
         }
-        let (value, path, field) = if module == "ssh" {
-            (
-                &item["result"]["server_id"]["software"],
-                "",
-                "/server_id/software",
-            )
-        } else if matches!(module, "http" | "https") {
-            let Some((response, path)) = first_http_response(&item["result"]) else {
-                continue;
-            };
+        if matches!(module, "http" | "https")
+            && let Some((response, path)) = first_http_response(&item["result"])
+        {
+            incomplete |= response["body_truncated"] == true;
+            if let Some(Declaration::Xmrig(product)) = mining::declaration(
+                item,
+                response,
+                (module, path, index),
+                observed_at,
+                &observation_id,
+            ) {
+                let host = mining::host(&response["request"]["host"]);
+                record_xmrig(&mut result, host, product, observed_at, &observation_id);
+            }
             let (candidates, body_incomplete) =
                 http_management::candidate(evidence, index, module, response, path, rules);
             incomplete |= body_incomplete;
             for product in candidates {
                 push(&mut result.products, product);
             }
-            (&response["headers"]["server"], path, "/headers/server")
-        } else {
-            continue;
-        };
-        let Some(text) = value
-            .as_str()
-            .or_else(|| value.as_array().filter(|values| values.len() == 1)?[0].as_str())
-        else {
-            continue;
-        };
-        // Ordinary software declarations use the protocol-owned header or banner.
-        let declaration = text.split_whitespace().next().unwrap_or_default();
-        let (token, version) = declaration
-            .split_once('/')
-            .map_or((declaration, None), |(name, version)| (name, Some(version)));
-        let (id, name) = match (module, token) {
-            ("http" | "https", "nginx") => ("nginx", "nginx"),
-            ("http" | "https", "Apache") => ("apache_http_server", "Apache HTTP Server"),
-            ("ssh", token) if token.starts_with("OpenSSH_") => ("openssh", "OpenSSH"),
-            _ => continue,
-        };
-        let version = if id == "openssh" {
-            token
-                .strip_prefix("OpenSSH_for_Windows_")
-                .or_else(|| token.strip_prefix("OpenSSH_"))
-        } else {
-            version
-        };
-        push(
-            &mut result.products,
-            Product {
-                id: id.into(),
-                name: name.into(),
-                component: None,
-                version: version
-                    .filter(|v| {
-                        !v.is_empty()
-                            && v.len() <= 80
-                            && v.chars().all(|c| {
-                                c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+')
-                            })
-                    })
-                    .map(str::to_owned),
-                assessment: "identified".into(),
-                basis: "service_declaration".into(),
-                evidence: vec![Evidence {
-                    detection_method: Some(
-                        if module == "ssh" {
-                            "protocol_fingerprint"
-                        } else {
-                            "http_fingerprint"
-                        }
-                        .into(),
-                    ),
-                    rule_id: format!("{id}_service_declaration"),
-                    probe: module.into(),
-                    field_path: format!("/evidence/{index}/result{path}{field}"),
-                    details: vec![("declaration".into(), bounded(text))],
-                    sni: None,
-                    http_host: None,
-                    source_url: None,
-                }],
-            },
-        );
+        }
+    }
+    let attempt_status = match probe_status {
+        Some((_, "success")) => active_declaration.or(Some("invalid_response")),
+        Some((_, status)) => Some(status),
+        None => active_declaration
+            .filter(|status| *status == "matched")
+            .or_else(|| {
+                result
+                    .products
+                    .iter()
+                    .any(|product| product.id == "xmrig")
+                    .then_some("matched")
+            }),
+    };
+    if let Some(status) = attempt_status {
+        inspected = true;
+        incomplete |= !matches!(status, "matched" | "not_matched");
+        let probe = probe_status.map(|(probe, _)| probe);
+        result.product_identification.xmrig_attempt = Some(Attempt {
+            status: status.into(),
+            status_code: probe.and_then(|probe| probe["status_code"].as_u64()?.try_into().ok()),
+            host: probe.and_then(|probe| mining::host(&probe["host"])),
+            observed_at,
+            observation_id,
+        });
     }
     result.product_identification.status = if result
         .products
@@ -312,12 +408,64 @@ fn infer_with_rules(
     result
 }
 
+/// Hide retired software declarations while pre-upgrade projections are being rebuilt.
+pub(crate) fn remove_retired_products(
+    products: &mut Vec<Product>,
+    identification: Option<&mut Identification>,
+) {
+    products.retain(|product| !RETIRED_PRODUCT_IDS.contains(&product.id.as_str()));
+    if let Some(identification) = identification
+        && products.is_empty()
+        && identification.status == "identified"
+    {
+        identification.status = "insufficient_evidence".into();
+        identification.coverage = "partial".into();
+    }
+}
+
+pub(crate) fn mark_xmrig_freshness(
+    products: &mut [Product],
+    identification: Option<&Identification>,
+    observed_at: i64,
+) {
+    let Some(identification) = identification else {
+        return;
+    };
+    let attempt = identification.xmrig_attempt.as_ref();
+    for product in products.iter_mut().filter(|product| product.id == "xmrig") {
+        let observation = product
+            .observation
+            .get_or_insert_with(|| ProductObservation {
+                observed_at: identification.observed_at,
+                observation_id: String::new(),
+                stale: false,
+            });
+        observation.stale = !identification.is_current()
+            || observation.observed_at < observed_at
+            || attempt.is_some_and(|attempt| {
+                (attempt.observed_at, attempt.observation_id.as_str())
+                    > (observation.observed_at, observation.observation_id.as_str())
+            });
+    }
+}
+
 /// Raw fallback is allowed only when it belongs to this exact service observation.
 pub(crate) fn view(source: &Value, observed_at: i64, use_raw_data: bool) -> Products {
     let identification = source
         .get("product_identification")
         .cloned()
         .and_then(|value| serde_json::from_value::<Identification>(value).ok());
+    // Recomputing the latest raw response cannot recover a previous confirmation.
+    // Keep the indexed mining result until the endpoint projection is rebuilt.
+    let retain_indexed_xmrig = use_raw_data
+        && source["xmrig_confirmations"].is_object()
+        && identification
+            .as_ref()
+            .is_some_and(|value| !value.is_current());
+    let indexed_xmrig_attempt = identification
+        .as_ref()
+        .filter(|_| retain_indexed_xmrig)
+        .and_then(|value| value.xmrig_attempt.clone());
     let identification = identification.filter(|value| value.is_current() || !use_raw_data);
     let mut result = if let Some(identification) = identification {
         Products {
@@ -327,6 +475,7 @@ pub(crate) fn view(source: &Value, observed_at: i64, use_raw_data: bool) -> Prod
                 .and_then(|value| serde_json::from_value(value).ok())
                 .unwrap_or_default(),
             product_identification: identification,
+            xmrig_confirmations: BTreeMap::new(),
         }
     } else {
         infer(
@@ -335,16 +484,49 @@ pub(crate) fn view(source: &Value, observed_at: i64, use_raw_data: bool) -> Prod
             source.get("service_observation_ref").cloned(),
         )
     };
+    if retain_indexed_xmrig {
+        let indexed: Vec<Product> = source["products"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|product| product["id"] == "xmrig")
+            .filter_map(|product| serde_json::from_value(product.clone()).ok())
+            .collect();
+        result.products.retain(|product| product.id != "xmrig");
+        result.products.extend(indexed);
+        result.product_identification.xmrig_attempt = indexed_xmrig_attempt;
+    }
+    remove_retired_products(
+        &mut result.products,
+        Some(&mut result.product_identification),
+    );
     result.product_identification.stale = result.product_identification.observed_at < observed_at
         || !result.product_identification.is_current();
+    mark_xmrig_freshness(
+        &mut result.products,
+        Some(&result.product_identification),
+        observed_at,
+    );
+    if retain_indexed_xmrig {
+        for observation in result
+            .products
+            .iter_mut()
+            .filter(|product| product.id == "xmrig")
+            .filter_map(|product| product.observation.as_mut())
+        {
+            observation.stale = true;
+        }
+    }
     result
 }
 
 pub(crate) fn mapping() -> Value {
     json!({"type":"nested", "dynamic":"strict", "properties": {
         "id":{"type":"keyword"}, "name":{"type":"keyword"}, "component":{"type":"keyword"},
+        "category":{"type":"keyword"},
         "version":{"type":"keyword"}, "assessment":{"type":"keyword"}, "basis":{"type":"keyword"},
-        "evidence":{"type":"object", "enabled":false}
+        "evidence":{"type":"object", "enabled":false},
+        "observation":{"type":"object", "enabled":false}
     }})
 }
 
@@ -552,18 +734,19 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_product_and_c2_candidate_share_the_contract_without_iocs() {
+    fn c2_candidates_exclude_ordinary_software_declarations() {
         let data = json!({"schema_version":2,"evidence":[
             {"module":"https","status":"success","result":{"response":{"headers":{"server":["nginx/1.26.2"]}}}},
+            {"module":"http","status":"success","result":{"response":{"headers":{"server":["Apache/2.4.65"]}}}},
+            {"module":"ssh","status":"success","result":{"server_id":{"software":"OpenSSH_for_Windows_9.5"}}},
             {"module":"tls","status":"success","result":{"handshake_log":{"server_certificates":{"certificate":{"parsed":{
                 "fingerprint_sha256":"87f2085c32b6a2cc709b365f55873e207a9caa10bffecf2fd16d3cf9d94d390c"
             }}}}}}
         ]});
         let result = infer(Some(&data), 1234, None);
-        assert_eq!(result.products.len(), 2);
+        assert_eq!(result.products.len(), 1);
+        assert_eq!(result.products[0].id, "cobalt_strike");
         assert_eq!(result.products[0].assessment, "suspected");
-        assert_eq!(result.products[1].id, "nginx");
-        assert_eq!(result.products[1].version.as_deref(), Some("1.26.2"));
         assert_eq!(result.product_identification.status, "suspected");
     }
 
@@ -583,47 +766,45 @@ mod tests {
     }
 
     #[test]
-    fn openssh_release_versions_exclude_windows_platform_markers() {
-        for (software, version) in [
-            ("OpenSSH_for_Windows_9.5", "9.5"),
-            ("OpenSSH_for_Windows_9.5.0.0", "9.5.0.0"),
-            ("OpenSSH_9.5p1 Ubuntu-3", "9.5p1"),
-            ("OpenSSH_9.6", "9.6"),
-        ] {
-            let data = json!({"schema_version":2,"evidence":[{"module":"ssh","status":"success","result":{"server_id":{"software":software}}}]});
-            let inferred = infer(Some(&data), 1234, None);
-            assert_eq!(inferred.products[0].id, "openssh");
-            assert_eq!(inferred.products[0].version.as_deref(), Some(version));
-            assert_eq!(inferred.products[0].evidence[0].details[0].1, software);
-            let mut stored = json!(inferred);
-            stored["data"] = data;
-            stored["product_identification"]["ruleset_revision"] = json!(3);
-            stored["products"][0]["version"] = json!("for_Windows_9.5");
-            let refreshed = view(&stored, 1234, true);
-            assert_eq!(refreshed.products[0].version.as_deref(), Some(version));
-            assert_eq!(refreshed.product_identification.observed_at, 1234);
-            assert_eq!(
-                refreshed.product_identification.ruleset_revision,
-                ruleset_stamp().revision
-            );
-            assert!(!refreshed.product_identification.stale);
-            let without_matching_raw = view(&stored, 1234, false);
-            assert!(without_matching_raw.product_identification.stale);
-            assert_eq!(
-                without_matching_raw.products[0].version.as_deref(),
-                Some("for_Windows_9.5")
-            );
-        }
+    fn old_declarations_disappear_with_or_without_the_original_ssh_observation() {
+        let raw = json!({"schema_version":2,"evidence":[{"module":"ssh","status":"success",
+            "result":{"server_id":{"software":"OpenSSH_for_Windows_9.5"}}}]});
+        let mut stored = json!(infer(Some(&raw), 1234, None));
+        stored["product_identification"]
+            .as_object_mut()
+            .unwrap()
+            .remove("evaluator_revision");
+        stored["product_identification"]["status"] = json!("identified");
+        stored["product_identification"]["coverage"] = json!("complete");
+        stored["products"] = json!([{
+            "id":"openssh","name":"OpenSSH","version":"9.5","assessment":"identified",
+            "basis":"service_declaration","evidence":[]
+        }]);
+        stored["data"] = raw;
+
+        let stale = view(&stored, 2000, false);
+        assert!(stale.products.is_empty());
+        assert!(stale.product_identification.stale);
+        assert_eq!(stale.product_identification.observed_at, 1234);
+        assert_eq!(stale.product_identification.status, "insufficient_evidence");
+        let refreshed = view(&stored, 1234, true);
+        assert!(refreshed.products.is_empty());
+        assert!(!refreshed.product_identification.stale);
+        assert_eq!(refreshed.product_identification.observed_at, 1234);
+        assert_eq!(
+            refreshed.product_identification.status,
+            "insufficient_evidence"
+        );
     }
 
     #[test]
     fn port_only_updates_preserve_product_time_and_do_not_use_unrelated_raw_data() {
-        let raw = json!({"data":{"schema_version":2,"evidence":[{"module":"ssh","result":{"server_id":{"software":"OpenSSH_9.6"}}}]}});
+        let raw = json!({"data":tls_observation(synthetic_sliver_leaf())});
         assert!(view(&raw, 2000, false).products.is_empty());
-        let mut stored = json!(view(&raw, 1000, true));
-        stored["data"] = Value::Null;
+        let stored = json!(view(&raw, 1000, true));
         let result = view(&stored, 2000, false);
-        assert_eq!(result.products[0].id, "openssh");
+        assert_eq!(result.products[0].id, "sliver");
         assert!(result.product_identification.stale);
+        assert_eq!(result.product_identification.observed_at, 1000);
     }
 }

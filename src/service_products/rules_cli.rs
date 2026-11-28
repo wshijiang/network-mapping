@@ -18,6 +18,9 @@ struct Fixture {
     #[serde(default)]
     observed_at: i64,
     expected_rule_ids: BTreeSet<String>,
+    expected_status: Option<String>,
+    expected_coverage: Option<String>,
+    expected_paths: Option<BTreeSet<String>>,
 }
 
 pub(crate) fn execute(command: &ProductRulesCommand) -> io::Result<()> {
@@ -30,6 +33,7 @@ pub(crate) fn execute(command: &ProductRulesCommand) -> io::Result<()> {
     let summary = json!({
         "source": file.as_deref().map_or_else(|| "embedded".into(), |path| path.display().to_string()),
         "ruleset_revision": pack.stamp.revision,
+        "evaluator_revision": pack.stamp.evaluator_revision,
         "ruleset_sha256": pack.stamp.sha256,
         "rules": pack.count()
     });
@@ -94,11 +98,13 @@ fn replay(path: &Path, pack: &rules::RuleSet) -> io::Result<(Vec<Value>, usize)>
         let inferred = infer_with_rules(Some(&fixture.data), fixture.observed_at, None, pack);
         let mut actual = BTreeSet::new();
         let mut hits = Vec::new();
+        let mut paths = BTreeSet::new();
         for product in &inferred.products {
             for evidence in &product.evidence {
                 actual.insert(evidence.rule_id.as_str());
+                paths.insert(evidence.field_path.as_str());
                 hits.push(json!({
-                    "product": product.id, "component": product.component,
+                    "product": product.id, "category": product.category, "component": product.component,
                     "assessment": product.assessment, "rule_id": evidence.rule_id,
                     "path": evidence.field_path
                 }));
@@ -107,14 +113,53 @@ fn replay(path: &Path, pack: &rules::RuleSet) -> io::Result<(Vec<Value>, usize)>
         let passed = actual
             .iter()
             .copied()
-            .eq(fixture.expected_rule_ids.iter().map(String::as_str));
+            .eq(fixture.expected_rule_ids.iter().map(String::as_str))
+            && fixture
+                .expected_status
+                .as_ref()
+                .is_none_or(|status| status == &inferred.product_identification.status)
+            && fixture
+                .expected_coverage
+                .as_ref()
+                .is_none_or(|coverage| coverage == &inferred.product_identification.coverage)
+            && fixture.expected_paths.as_ref().is_none_or(|expected| {
+                paths
+                    .iter()
+                    .copied()
+                    .eq(expected.iter().map(String::as_str))
+            });
         failed += usize::from(!passed);
         report.push(json!({
             "name": fixture.name, "passed": passed,
             "expected_rule_ids": fixture.expected_rule_ids, "actual_rule_ids": actual,
+            "expected_status": fixture.expected_status, "expected_coverage": fixture.expected_coverage,
+            "expected_paths": fixture.expected_paths,
             "status": inferred.product_identification.status, "coverage": inferred.product_identification.coverage,
             "matches": hits
         }));
     }
     Ok((report, failed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn built_in_product_fixtures_replay() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/examples/product-rules-fixtures.json");
+        let (report, failed) = replay(&path, rules::default_rules()).unwrap();
+        assert_eq!(report.len(), 43);
+        let miner = report
+            .iter()
+            .find(|row| row["name"] == "xmrig-active-summary")
+            .unwrap();
+        assert_eq!(miner["matches"][0]["category"], "mining_software");
+        let failures: Vec<_> = report
+            .iter()
+            .filter(|case| case["passed"] != true)
+            .collect();
+        assert_eq!(failed, 0, "{failures:#?}");
+    }
 }

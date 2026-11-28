@@ -350,8 +350,20 @@ impl ElasticsearchCompiler {
             };
             let id_field = format!("{path}.id");
             let version_field = format!("{path}.version");
+            let nested_query = |query: Value| {
+                // Old projections may still contain ordinary software declarations.
+                let query = if predicate.field == Field::Product {
+                    json!({"bool":{
+                        "filter":[query],
+                        "must_not":[{"terms":{"products.id":crate::service_products::RETIRED_PRODUCT_IDS}}]
+                    }})
+                } else {
+                    query
+                };
+                json!({"nested":{"path":path,"query":query}})
+            };
             if operator == Operator::Exists {
-                return Ok(json!({"nested":{"path":path,"query":{"exists":{"field":id_field}}}}));
+                return Ok(nested_query(json!({"exists":{"field":id_field}})));
             }
             if !matches!(
                 operator,
@@ -379,7 +391,7 @@ impl ElasticsearchCompiler {
                 }
                 terms.push(json!({"bool":{"filter":filters}}));
             }
-            let query = json!({"nested":{"path":path,"query":{"bool":{"should":terms,"minimum_should_match":1}}}});
+            let query = nested_query(json!({"bool":{"should":terms,"minimum_should_match":1}}));
             return Ok(if matches!(operator, Operator::NotEq | Operator::NotIn) {
                 json!({"bool":{"must_not":[query]}})
             } else {
@@ -1764,7 +1776,7 @@ mod web_tests {
     #[test]
     fn product_queries_keep_id_and_version_on_one_product_and_negate_outside_nested() {
         let ElasticsearchCompilation::Supported(query) =
-            parse_and_compile_elasticsearch("service = https AND product = \"nginx@1.26.2\"")
+            parse_and_compile_elasticsearch("service = https AND product = \"example_c2@1.26.2\"")
                 .unwrap()
         else {
             panic!("unsupported product query")
@@ -1782,7 +1794,15 @@ mod web_tests {
             query.pointer("/bool/must_not/0/nested/path"),
             Some(&json!("products"))
         );
-        assert!(parse_and_compile_elasticsearch("EXISTS(product)").is_ok());
+        let ElasticsearchCompilation::Supported(exists) =
+            parse_and_compile_elasticsearch("EXISTS(product)").unwrap()
+        else {
+            panic!("unsupported product query")
+        };
+        assert_eq!(
+            exists.pointer("/nested/query/bool/must_not/0/terms/products.id"),
+            Some(&json!(crate::service_products::RETIRED_PRODUCT_IDS))
+        );
         assert!(parse_and_compile_elasticsearch("product ~ nginx").is_err());
         let ElasticsearchCompilation::Supported(query) =
             parse_and_compile_elasticsearch("product IN (mythic, empire)").unwrap()
