@@ -83,12 +83,12 @@ AND last_seen >= now-7d
 ## 3. 语法规则
 
 搜索页会在历史卡片中提示当前可用的字段、运算符和值。输入 `service =`、`tech = v`、
-`tag = "生` 或 `port IN (` 时，可按 ↑ / ↓ 选择候选，再按 → 或 Enter 填入。候选行末
+`tag = "生` 或 `service IN (` 时，可按 ↑ / ↓ 选择候选，再按 → 或 Enter 填入。候选行末
 说明字段和运算符的含义，例如 `port =` 对应「端口等于」。未加引号的值是候选前缀时会
 自动显示匹配项。完整表达式没有待补全内容时显示搜索历史，例如 `tech = vue`。也可在
 末尾按 Ctrl + Space 主动查看值推荐。标有「已观测」的候选来自
 可见端点，其他候选来自标签目录、固定枚举或常用示例。
-观测值仅覆盖高频候选，任意合法值均可直接输入和搜索。详见[字段值推荐接口](#84-字段值推荐)。
+观测值仅覆盖高频候选。端口值和其他未列出的合法值均可直接输入和搜索。详见[字段值推荐接口](#84-字段值推荐)。
 
 ### 3.1 表达式结构
 
@@ -609,7 +609,7 @@ GET /api/search/values?field=service
 
 | 类型 | 观测字段 |
 |---|---|
-| 资产与端点 | `asn`、`country`、`port`、`protocol`、`service`、`source` |
+| 资产与端点 | `asn`、`country`、`protocol`、`service`、`source` |
 | TLS | `tls.mode`、`tls.version`、`tls.cipher`、`tls.self_signed` |
 | 操作系统 | `os.family`、`os.distribution`、`os.version`、`os.confidence`、`os.status`、`os.score` |
 | Web 与产品 | `web.status`、`tech`、`product` |

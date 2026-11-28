@@ -767,6 +767,7 @@ mod tests {
         for invalid in [
             "",
             "field=banner",
+            "field=port",
             "field=web.tech",
             "field=service&scope_id=8",
             "field=service&prefix=h",

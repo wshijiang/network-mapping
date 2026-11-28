@@ -34,7 +34,6 @@ impl TryFrom<String> for SearchValueField {
             Some(
                 field @ (Field::Asn
                 | Field::Country
-                | Field::Port
                 | Field::Protocol
                 | Field::Service
                 | Field::Source
@@ -266,10 +265,6 @@ fn parse_search_values(
     Ok(buckets
         .iter()
         .filter_map(|bucket| match field {
-            Field::Port => bucket["key"]
-                .as_u64()
-                .filter(|port| (1..=65_535).contains(port))
-                .map(|port| port.to_string()),
             Field::OsScore => bucket["key"]
                 .as_u64()
                 .filter(|score| *score <= 100)
@@ -328,6 +323,7 @@ mod tests {
         for invalid in [
             "ip",
             "domain",
+            "port",
             "banner",
             "http.body",
             "scope_id",
@@ -340,11 +336,11 @@ mod tests {
     #[test]
     fn extracts_typed_and_nested_values_without_counts_or_malformed_values() {
         let response = json!({"aggregations":{"values":{"buckets":[
-            {"key":443,"doc_count":42},{"key":0},{"key":65_536},{"key":"80"}
+            {"key":79,"doc_count":42},{"key":0},{"key":101},{"key":"80"}
         ]}}});
         assert_eq!(
-            parse_search_values(SearchValueField(Field::Port), &response).unwrap(),
-            ["443"]
+            parse_search_values(SearchValueField(Field::OsScore), &response).unwrap(),
+            ["79", "0"]
         );
         let response = json!({"aggregations":{"values":{"buckets":[
             {"key":1,"key_as_string":"true"},{"key":0,"key_as_string":"false"}
@@ -389,12 +385,12 @@ mod tests {
         );
         assert_eq!(
             cache
-                .get(("user", 7, SearchValueField(Field::Port)), || async {
-                    Ok(vec!["80".to_owned()])
+                .get(("user", 7, SearchValueField(Field::Protocol)), || async {
+                    Ok(vec!["tcp".to_owned()])
                 })
                 .await
                 .values,
-            ["80"]
+            ["tcp"]
         );
         assert_eq!(
             cache
