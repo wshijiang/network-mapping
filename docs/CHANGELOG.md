@@ -4,6 +4,8 @@
 
 ## 未发布
 
+- **服务产品规则 v8** 在产品结果中加入 XMRig 软件声明及类别字段，支持按产品与版本查询。离线规则回放增加状态、覆盖度和证据路径断言，配套 40 条 C2 与挖矿样本。[产品识别](SERVICE_PROTOCOLS.md#服务产品识别)
+
 - **服务产品规则 v7** 将 `products[]` 收窄为 C2 部署候选，端点投影复用旧 C2 字段的证书判定。搜索与详情在升级后立即过滤 nginx、Apache HTTP Server 和 OpenSSH 的旧产品项。重建可清理索引存量并保留原始证据时间。nginx 与 Apache 继续通过 Web 技术栈查询，OpenSSH 声明保存在 SSH 握手证据中。[服务产品识别](SERVICE_PROTOCOLS.md#服务产品识别)
 
 - **服务产品规则 v6** 将 Sliver、Mythic 和 Empire / Starkiller 条件迁入外部可替换的 JSON 规则包，支持嵌套 `all`、`any`、`none`。新增离线导出、校验和样本回放，启动日志与产品 API 记录规则摘要，端点投影写入和重建续跑核对规则修订号与摘要。[规则包说明](SERVICE_PRODUCT_RULES.md)

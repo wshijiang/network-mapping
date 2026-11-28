@@ -140,12 +140,12 @@ request_timeout_seconds = 180
 
 ## 服务产品识别
 
-`products[]` 保存基于服务证据得出的 C2 部署候选。`service` 保留协议识别结果，`web` 保留 Web 技术栈。旧 `c2_fingerprint` 与新产品结果在端点投影时复用同一次证书判定。
+`products[]` 保存基于服务证据得出的 C2 部署候选和 XMRig 服务声明。`service` 保留协议识别结果，`web` 保留 Web 技术栈。旧 `c2_fingerprint` 与新产品结果在端点投影时复用同一次证书判定。
 
 | 字段 | 表达内容 | 示例 |
 | --- | --- | --- |
 | `service` | 既有应用协议识别结果 | `https`、`tls`、`ssh` |
-| `products[]` | 匹配到的 C2 部署候选，可为空或有多项 | 疑似 Sliver Multiplayer |
+| `products[]` | 匹配到的 C2 候选或挖矿软件声明，可为空或有多项 | 疑似 Sliver Multiplayer、XMRig |
 | `product_identification` | 本次产品规则分析的状态、证据完整程度、规则版本和观察来源；另附检测方式及 JARM 记录 | `suspected`、`coverage=partial`、原始观察时间 |
 
 nginx 和 Apache HTTP Server 分别通过 `tech = nginx` 和 `tech = apache` 查询。OpenSSH 软件声明保留在原始 SSH 握手证据中。旧 `c2_fingerprint` 保留资产筛选和历史兼容。
@@ -183,16 +183,24 @@ QakBot 规则参考 2023 年公开研究的历史证书结构，要求同一叶�
 
 候选只描述观察到的管理界面组件，软件版本留空。规则参考 Mythic **v3.4.0.61** 和 **v4.0.0rc5** 的上游构建页面，以及 Starkiller **v3.6.0** 和 **v4.0.3** 的上游页面模板。回归用这些结构构造本地样本，真实部署上的误报率和未覆盖版本尚待验证。[Mythic v3.4.0.61](https://github.com/its-a-feature/Mythic/blob/v3.4.0.61/mythic-react-docker/mythic/public/index.html) · [Mythic v4.0.0rc5](https://github.com/its-a-feature/Mythic/blob/v4.0.0rc5/mythic-react-docker/mythic/public/index.html) · [Starkiller v3.6.0](https://github.com/BC-SECURITY/Starkiller/blob/v3.6.0/index.html) · [Starkiller v4.0.3](https://github.com/BC-SECURITY/Starkiller/blob/v4.0.3/index.html)
 
+### XMRig 挖矿软件
+
+新版扫描器可在已识别的 HTTP/HTTPS 端点主动获取只读 XMRig 摘要。采集开关在扫描节点的 `[service_detection]` 下设置 `xmrig_summary = true`，并由现有 Web 内容富化开关控制。默认关闭。请求固定到原端点，直接响应通过验证后仅保存用于判断的摘要字段。规则也可以读取旧观察中已有的同类有效响应。[扫描器使用说明](https://github.com/wshijiang/Network-Mapping-Scanner/blob/main/docs/USAGE.md#xmrig-摘要采集)
+
+匹配项为 `id=xmrig`、`category=mining_software`、`basis=service_declaration`。版本来自一致的软件声明，可用 `product = "xmrig@6.24.0"` 查询。判断范围限于端点返回的软件自报信息，软件当前运行状态和资产授权情况需要结合独立证据复核。
+
 ### 查看与搜索
 
-搜索和资产端口表的「服务」列同时显示协议与产品，候选带黄色「疑似」徽标。展开端口，在「服务识别 → C2 产品识别」查看规则、证据路径、Host/SNI、观察时间与来源。历史弹窗显示对应原始观察的产品结果。当前证书证据不足且存在上次命中时，资产端口详情可查看上次证书线索及其观察时间。
+搜索和资产端口表的「服务」列同时显示协议与产品，候选带黄色「疑似」徽标。展开端口，在「服务识别 → 产品识别」查看规则、证据路径、Host/SNI、观察时间与来源。历史弹窗显示对应原始观察的产品结果。当前证书证据不足且存在上次命中时，资产端口详情可查看上次证书线索及其观察时间。
 
-高级搜索支持产品 ID。查询语法保留 `ID@版本`，当前 C2 规则的版本字段为空。
+高级搜索支持产品 ID 和 `ID@版本`。C2 候选的版本字段为空，XMRig 可按服务自报的版本搜索。
 
 ```text
 service = https AND product = cobalt_strike
 product IN (cobalt_strike, asyncrat_family, sliver, qakbot)
 product IN (mythic, empire)
+product = xmrig
+product = "xmrig@6.24.0"
 EXISTS(product)
 ```
 
@@ -202,12 +210,12 @@ EXISTS(product)
 
 搜索及资产端口、端口历史响应新增：
 
-- `products[]`：`id`、`name`、`component`、`version`、`assessment`、`basis`、`evidence[]`。
-- `product_identification` 包含 `status`（`suspected` / `not_matched` / `insufficient_evidence`）、`coverage`（`complete` / `partial`）、`ruleset_revision`、`ruleset_sha256` 和 `evaluator_revision`（旧观察可缺省）、`observed_at`、`stale` 和 `observation_ref`。
+- `products[]`：`id`、`name`、`category`、`component`、`version`、`assessment`、`basis`、`evidence[]`。类别为 `c2` 或 `mining_software`，旧 C2 记录可省略。
+- `product_identification` 包含 `status`（`suspected` / `identified` / `not_matched` / `insufficient_evidence`）、`coverage`（`complete` / `partial`）、`ruleset_revision`、`ruleset_sha256` 和 `evaluator_revision`（旧观察可缺省）、`observed_at`、`stale` 和 `observation_ref`。
 
 `products[]` 是匹配结果，`product_identification` 用于解释匹配和证据状态；它们不会因为有一项为空而互相替代：
 
-- `status=suspected` 表示至少有一个证书或管理页候选。`products[]` 为空时，`not_matched` 表示本次可检查的协议证据未匹配已收录产品规则，`insufficient_evidence` 表示当前证据不足以得出产品匹配结果。
+- `status=suspected` 表示至少有一个 C2 候选。`identified` 表示匹配到软件自报声明且当前没有 C2 候选。`products[]` 为空时，`not_matched` 表示本次可检查的协议证据未匹配已收录产品规则，`insufficient_evidence` 表示当前证据不足以得出产品匹配结果。
 - `coverage=partial` 表示相关协议观察缺失、失败或被截断等情况；`complete` 仅表示当前汇总未发现这些不完整标记，不保证扫描了所有协议、支持所有产品或发现了端点上的全部软件。TLS 证据不全时，可以同时得到 `status=suspected` 和 `coverage=partial`。
 - `ruleset_revision` 和 `ruleset_sha256` 标识实际使用的规则包，`evaluator_revision` 标识服务端内置判定逻辑。`observed_at` 属于原服务观察，重算保留该时间。`stale` 表示该结果早于较新的端点观察，或所用规则包、内置判定逻辑与当前版本不一致。
 - JARM 状态单独保存在 `jarm` 中。得到 JARM 指纹也可能没有任何产品匹配，JARM 成功采集时，C2 候选列表仍可能为空。
@@ -228,7 +236,7 @@ EXISTS(product)
 
 证据路径相对于该次服务观察，实际数组下标随观察排列变化。原始数据已清理时，详情仍可展示保存的规则依据。
 
-内置产品规则版本为 **7**。产品规则 v6 将 Sliver、Mythic 和 Empire 条件移入可独立加载的 JSON 规则包。v7 将输出收窄为 C2 候选，外部规则包沿用原有格式。结果按服务观察时间更新，旧观察或旧规则产生的结果标记为 `stale`。[规则格式、校验与回放](SERVICE_PRODUCT_RULES.md)
+内置产品规则版本为 **8**。产品规则 v6 将 Sliver、Mythic 和 Empire 条件移入可独立加载的 JSON 规则包。v7 将输出收窄为 C2 候选，v8 增加 XMRig 服务声明。外部规则包沿用原有格式。结果按服务观察时间更新，旧观察或旧规则产生的结果标记为 `stale`。[规则格式、校验与回放](SERVICE_PRODUCT_RULES.md)
 
 先升级服务端，再升级控制台。新版服务端立即在搜索与详情中过滤已退役的普通产品 ID。详情在原始数据确属该次服务观察时可即时重算。要从 Elasticsearch 的存量文档中清除旧条目，并统一更新产品状态和规则版本，按 [存储升级与回滚](#存储升级与回滚) 重建端点投影。重建使用原始观察，保留证据时间，无需重新探测。优先使用新索引模式，保留原索引以便回滚。
 
@@ -243,7 +251,7 @@ EXISTS(product)
 | --- | --- | --- | --- |
 | JARM | 是，显式启用后额外最多 10 次 TCP 连接与 ClientHello 探测 | 对 10 组不同 ClientHello 的服务端密码套件、TLS 版本、ALPN 与扩展响应生成 62 个十六进制字符的指纹 | 保存 TLS 配置指纹；当前没有以 JARM 单独归属 C2 家族的规则 |
 | TLS Certificate | 证书采集是；分析复用已有观察，无额外连接 | 分析叶证书主题、颁发者、有效期、公钥等元数据 | Cobalt Strike、AsyncRAT / DcRAT、Sliver、QakBot 候选，适用前述规则边界 |
-| HTTP Fingerprint | HTTP 采集是；产品规则复用已有响应 | 分析 HTTP 状态、响应头和内容特征 | Mythic / Empire 管理页候选 |
+| HTTP Fingerprint | HTTP 采集是；产品规则复用已有响应 | 分析 HTTP 状态、响应头和内容特征 | Mythic / Empire 管理页候选。明确启用 XMRig 摘要采集后也可使用独立只读响应。 |
 | Protocol Fingerprint | 通常是；已有工业被动接收方式除外，识别复用已有握手 | 根据应用层握手和协议响应识别服务 | 既有协议识别，SSH 握手中的软件声明保存在原始证据中 |
 
 JARM 以 TLS 握手响应为依据。证书轮换后，握手响应特征保持一致时，JARM 可以保持稳定。共享反向代理也可能为不同应用返回相同的握手特征。服务端独立记录 JARM 观察，现有家族候选由证书或 HTTP 管理页规则产生。[JARM 原理与样本重合情况](https://github.com/salesforce/jarm#how-jarm-works)

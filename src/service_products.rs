@@ -1,4 +1,4 @@
-//! C2 product candidates from protocol-owned observations.
+//! C2 and mining attribution from stored service observations.
 use crate::service_fingerprint::{self, Assessment, Status};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 mod certificate_templates;
 mod detection_methods;
 mod http_management;
+mod mining;
 mod rules;
 mod rules_cli;
 use detection_methods::{DetectionMethod, JarmObservation};
@@ -13,7 +14,7 @@ pub(crate) use rules::Stamp as RuleStamp;
 pub(crate) use rules_cli::execute as execute_rules_command;
 
 const MAX_EVIDENCE: usize = 8;
-const EVALUATOR_REVISION: u32 = 1;
+const EVALUATOR_REVISION: u32 = 2;
 pub(crate) const RETIRED_PRODUCT_IDS: [&str; 3] = ["nginx", "apache_http_server", "openssh"];
 
 pub(crate) fn initialize_rules(path: Option<&std::path::Path>) -> std::io::Result<()> {
@@ -37,10 +38,20 @@ pub(crate) struct Evidence {
     pub source_url: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProductCategory {
+    #[default]
+    C2,
+    MiningSoftware,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Product {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub category: ProductCategory,
     pub component: Option<String>,
     pub version: Option<String>,
     pub assessment: String,
@@ -188,6 +199,7 @@ fn evaluate(
             Product {
                 id: hit.family.into(),
                 name: name.into(),
+                category: ProductCategory::C2,
                 component: component.map(str::to_owned),
                 version: None,
                 assessment: "suspected".into(),
@@ -224,6 +236,17 @@ fn evaluate(
         && certificate.status == Status::InsufficientEvidence;
     for (index, item) in evidence.iter().take(64).enumerate() {
         let module = item["module"].as_str().unwrap_or_default();
+        if module == "web_assets" {
+            if let Some(response) = item.pointer("/result/xmrig_summary") {
+                inspected = true;
+                if let Some(product) =
+                    mining::xmrig(item, response, module, "/xmrig_summary", index)
+                {
+                    push(&mut result.products, product);
+                }
+            }
+            continue;
+        }
         if !matches!(module, "http" | "https" | "tls") {
             continue;
         }
@@ -238,6 +261,10 @@ fn evaluate(
         if matches!(module, "http" | "https")
             && let Some((response, path)) = first_http_response(&item["result"])
         {
+            incomplete |= response["body_truncated"] == true;
+            if let Some(product) = mining::xmrig(item, response, module, path, index) {
+                push(&mut result.products, product);
+            }
             let (candidates, body_incomplete) =
                 http_management::candidate(evidence, index, module, response, path, rules);
             incomplete |= body_incomplete;
@@ -246,8 +273,14 @@ fn evaluate(
             }
         }
     }
-    result.product_identification.status = if !result.products.is_empty() {
+    result.product_identification.status = if result
+        .products
+        .iter()
+        .any(|product| product.assessment == "suspected")
+    {
         "suspected"
+    } else if !result.products.is_empty() {
+        "identified"
     } else if inspected && !incomplete {
         "not_matched"
     } else {
@@ -313,6 +346,7 @@ pub(crate) fn view(source: &Value, observed_at: i64, use_raw_data: bool) -> Prod
 pub(crate) fn mapping() -> Value {
     json!({"type":"nested", "dynamic":"strict", "properties": {
         "id":{"type":"keyword"}, "name":{"type":"keyword"}, "component":{"type":"keyword"},
+        "category":{"type":"keyword"},
         "version":{"type":"keyword"}, "assessment":{"type":"keyword"}, "basis":{"type":"keyword"},
         "evidence":{"type":"object", "enabled":false}
     }})

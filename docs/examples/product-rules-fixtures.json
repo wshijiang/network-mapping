@@ -1,65 +1,87 @@
 [
   {
     "name": "sliver-leaf",
-    "expected_rule_ids": ["sliver_multiplayer_certificate"],
+    "expected_rule_ids": [
+      "sliver_multiplayer_certificate"
+    ],
     "data": {
       "schema_version": 2,
-      "evidence": [{
-        "module": "tls",
-        "status": "success",
-        "result": {
-          "handshake_log": {
-            "server_certificates": {
-              "certificate": {
-                "parsed": {
-                  "subject_dn": "CN=multiplayer",
-                  "issuer_dn": "CN=operators",
-                  "signature": {
-                    "self_signed": false,
-                    "signature_algorithm": { "name": "ECDSA-SHA256" }
+      "evidence": [
+        {
+          "module": "tls",
+          "status": "success",
+          "result": {
+            "handshake_log": {
+              "server_certificates": {
+                "certificate": {
+                  "parsed": {
+                    "subject_dn": "CN=multiplayer",
+                    "issuer_dn": "CN=operators",
+                    "signature": {
+                      "self_signed": false,
+                      "signature_algorithm": {
+                        "name": "ECDSA-SHA256"
+                      }
+                    }
                   }
                 }
               }
             }
           }
         }
-      }]
+      ]
     }
   },
   {
     "name": "mythic-management-page",
-    "expected_rule_ids": ["mythic_management_html"],
+    "expected_rule_ids": [
+      "mythic_management_html"
+    ],
     "data": {
       "schema_version": 2,
-      "evidence": [{
-        "module": "http",
-        "status": "success",
-        "result": {
-          "response": {
-            "status_code": 200,
-            "headers": { "content_type": ["text/html"] },
-            "body": "<title>Mythic</title><link rel=manifest href=/new/manifest.json><script src=/new/static/js/main.12fdaefe.js></script><div id=root></div>"
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "text/html"
+                ]
+              },
+              "body": "<title>Mythic</title><link rel=manifest href=/new/manifest.json><script src=/new/static/js/main.12fdaefe.js></script><div id=root></div>"
+            }
           }
         }
-      }]
+      ]
     }
   },
   {
     "name": "starkiller-management-page",
-    "expected_rule_ids": ["empire_management_html"],
+    "expected_rule_ids": [
+      "empire_management_html"
+    ],
     "data": {
       "schema_version": 2,
-      "evidence": [{
-        "module": "http",
-        "status": "success",
-        "result": {
-          "response": {
-            "status_code": 200,
-            "headers": { "content_type": ["text/html"] },
-            "body": "<title>Starkiller</title><script type=module src=/assets/index-test.js></script><body><noscript>starkiller doesn't work properly without JavaScript</noscript><div id=app></div></body>"
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "text/html"
+                ]
+              },
+              "body": "<title>Starkiller</title><script type=module src=/assets/index-test.js></script><body><noscript>starkiller doesn't work properly without JavaScript</noscript><div id=app></div></body>"
+            }
           }
         }
-      }]
+      ]
     }
   },
   {
@@ -67,17 +89,1121 @@
     "expected_rule_ids": [],
     "data": {
       "schema_version": 2,
-      "evidence": [{
-        "module": "http",
-        "status": "success",
-        "result": {
-          "response": {
-            "status_code": 200,
-            "headers": { "content_type": ["text/html"] },
-            "body": "<title>Mythic</title><body>Example generic login</body>"
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "text/html"
+                ]
+              },
+              "body": "<title>Mythic</title><body>Example generic login</body>"
+            }
           }
         }
-      }]
+      ]
+    }
+  },
+  {
+    "name": "cobalt-leaf",
+    "expected_rule_ids": [
+      "cobalt_strike_default_certificate"
+    ],
+    "expected_paths": [
+      "/evidence/0/result/handshake_log/server_certificates/certificate/parsed"
+    ],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "tls",
+          "status": "success",
+          "result": {
+            "handshake_log": {
+              "server_certificates": {
+                "certificate": {
+                  "parsed": {
+                    "fingerprint_sha256": "87f2085c32b6a2cc709b365f55873e207a9caa10bffecf2fd16d3cf9d94d390c"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "rat-leaf",
+    "expected_rule_ids": [
+      "asyncrat_family_certificate_template"
+    ],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "tls",
+          "status": "success",
+          "result": {
+            "handshake_log": {
+              "server_certificates": {
+                "certificate": {
+                  "parsed": {
+                    "fingerprint_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "subject_dn": "CN=AsyncRAT Server",
+                    "issuer_dn": "CN=AsyncRAT Server",
+                    "signature": {
+                      "self_signed": true,
+                      "signature_algorithm": {
+                        "name": "SHA512-RSA"
+                      }
+                    },
+                    "validity": {
+                      "end": "9999-12-31T23:59:59Z"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "qakbot-historical-leaf",
+    "expected_rule_ids": [
+      "qakbot_historical_certificate_shape"
+    ],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "tls",
+          "status": "success",
+          "result": {
+            "handshake_log": {
+              "server_certificates": {
+                "certificate": {
+                  "parsed": {
+                    "fingerprint_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "subject_dn": "C=US, OU=Random Research Fixture, CN=sampletest.invalid",
+                    "issuer_dn": "C=US, ST=CA, L=Samplecity, O=Example Research LLC., CN=sampletest.invalid"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "ordinary-self-signed",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "tls",
+          "status": "success",
+          "result": {
+            "handshake_log": {
+              "server_certificates": {
+                "certificate": {
+                  "parsed": {
+                    "fingerprint_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "subject_dn": "CN=portal.example",
+                    "issuer_dn": "CN=portal.example",
+                    "signature": {
+                      "self_signed": true,
+                      "signature_algorithm": {
+                        "name": "SHA512-RSA"
+                      }
+                    },
+                    "validity": {
+                      "end": "9999-12-31T23:59:59Z"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "cobalt-name-different-leaf",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "tls",
+          "status": "success",
+          "result": {
+            "handshake_log": {
+              "server_certificates": {
+                "certificate": {
+                  "parsed": {
+                    "subject_dn": "CN=Major Cobalt Strike",
+                    "fingerprint_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "rat-expiry-mismatch",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "tls",
+          "status": "success",
+          "result": {
+            "handshake_log": {
+              "server_certificates": {
+                "certificate": {
+                  "parsed": {
+                    "fingerprint_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "subject_dn": "CN=AsyncRAT Server",
+                    "issuer_dn": "CN=AsyncRAT Server",
+                    "signature": {
+                      "self_signed": true,
+                      "signature_algorithm": {
+                        "name": "SHA512-RSA"
+                      }
+                    },
+                    "validity": {
+                      "end": "2030-01-01T00:00:00Z"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "rat-issuer-mismatch",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "tls",
+          "status": "success",
+          "result": {
+            "handshake_log": {
+              "server_certificates": {
+                "certificate": {
+                  "parsed": {
+                    "fingerprint_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "subject_dn": "CN=AsyncRAT Server",
+                    "issuer_dn": "CN=unrelated.example",
+                    "signature": {
+                      "self_signed": true,
+                      "signature_algorithm": {
+                        "name": "SHA512-RSA"
+                      }
+                    },
+                    "validity": {
+                      "end": "9999-12-31T23:59:59Z"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "historical-leaf-unrelated-issuer",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "tls",
+          "status": "success",
+          "result": {
+            "handshake_log": {
+              "server_certificates": {
+                "certificate": {
+                  "parsed": {
+                    "fingerprint_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "subject_dn": "C=US, OU=Random Research Fixture, CN=sampletest.invalid",
+                    "issuer_dn": "CN=Ordinary Test CA"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "historical-leaf-mismatched-cn",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "tls",
+          "status": "success",
+          "result": {
+            "handshake_log": {
+              "server_certificates": {
+                "certificate": {
+                  "parsed": {
+                    "fingerprint_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "subject_dn": "C=US, OU=Random Research Fixture, CN=sampletest.invalid",
+                    "issuer_dn": "C=US, ST=CA, L=Samplecity, O=Example Research LLC., CN=other.invalid"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "sliver-incorrect-signature",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "tls",
+          "status": "success",
+          "result": {
+            "handshake_log": {
+              "server_certificates": {
+                "certificate": {
+                  "parsed": {
+                    "subject_dn": "CN=multiplayer",
+                    "issuer_dn": "CN=operators",
+                    "signature": {
+                      "self_signed": false,
+                      "signature_algorithm": {
+                        "name": "SHA512-RSA"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "ordinary-json-with-product-names",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "application/json"
+                ]
+              },
+              "body": "{\"names\":[\"Mythic\",\"Starkiller\",\"Sliver\"]}"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "empire-no-noscript",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "text/html"
+                ]
+              },
+              "body": "<title>Starkiller</title><script type=module src=/assets/index-test.js></script><body><div id=app></div>"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "mythic-no-mount",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "text/html"
+                ]
+              },
+              "body": "<title>Mythic</title><link rel=manifest href=/new/manifest.json><script src=/new/static/js/main.12fdaefe.js></script>"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "mythic-signals-split",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "text/html"
+                ]
+              },
+              "body": "<title>Mythic</title>"
+            }
+          }
+        },
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "text/html"
+                ]
+              },
+              "body": "<link rel=manifest href=/new/manifest.json><script src=/new/static/js/main.12fdaefe.js></script><div id=root></div>"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "mythic-same-origin-landing",
+    "expected_rule_ids": [
+      "mythic_management_html"
+    ],
+    "expected_paths": [
+      "/evidence/1/result/landing/body"
+    ],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "https",
+          "status": "success",
+          "result": {
+            "redirect_response_chain": [
+              {
+                "status_code": 302,
+                "headers": {
+                  "location": [
+                    "/new/"
+                  ]
+                },
+                "request": {
+                  "url": {
+                    "scheme": "https",
+                    "host": "192.0.2.1:8443",
+                    "path": "/"
+                  },
+                  "host": "192.0.2.1:8443"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "module": "web_assets",
+          "status": "success",
+          "result": {
+            "landing": {
+              "status_code": 200,
+              "redirects": [
+                "https://192.0.2.1:8443/new/"
+              ],
+              "url": "https://192.0.2.1:8443/new/",
+              "body": "<title>Mythic</title><link rel=manifest href=/new/manifest.json><script src=/new/static/js/main.12fdaefe.js></script><div id=root></div>",
+              "body_truncated": false
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "mythic-landing-cross-host",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "https",
+          "status": "success",
+          "result": {
+            "redirect_response_chain": [
+              {
+                "status_code": 302,
+                "headers": {
+                  "location": [
+                    "/new/"
+                  ]
+                },
+                "request": {
+                  "url": {
+                    "scheme": "https",
+                    "host": "192.0.2.1:8443",
+                    "path": "/"
+                  },
+                  "host": "192.0.2.1:8443"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "module": "web_assets",
+          "status": "success",
+          "result": {
+            "landing": {
+              "status_code": 200,
+              "redirects": [
+                "https://unrelated.example:8443/new/"
+              ],
+              "url": "https://unrelated.example:8443/new/",
+              "body": "<title>Mythic</title><link rel=manifest href=/new/manifest.json><script src=/new/static/js/main.12fdaefe.js></script><div id=root></div>",
+              "body_truncated": false
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "mythic-landing-cross-port",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "https",
+          "status": "success",
+          "result": {
+            "redirect_response_chain": [
+              {
+                "status_code": 302,
+                "headers": {
+                  "location": [
+                    "/new/"
+                  ]
+                },
+                "request": {
+                  "url": {
+                    "scheme": "https",
+                    "host": "192.0.2.1:8443",
+                    "path": "/"
+                  },
+                  "host": "192.0.2.1:8443"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "module": "web_assets",
+          "status": "success",
+          "result": {
+            "landing": {
+              "status_code": 200,
+              "redirects": [
+                "https://192.0.2.1/new/"
+              ],
+              "url": "https://192.0.2.1/new/",
+              "body": "<title>Mythic</title><link rel=manifest href=/new/manifest.json><script src=/new/static/js/main.12fdaefe.js></script><div id=root></div>",
+              "body_truncated": false
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "mythic-landing-cross-scheme",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "https",
+          "status": "success",
+          "result": {
+            "redirect_response_chain": [
+              {
+                "status_code": 302,
+                "headers": {
+                  "location": [
+                    "/new/"
+                  ]
+                },
+                "request": {
+                  "url": {
+                    "scheme": "https",
+                    "host": "192.0.2.1:8443",
+                    "path": "/"
+                  },
+                  "host": "192.0.2.1:8443"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "module": "web_assets",
+          "status": "success",
+          "result": {
+            "landing": {
+              "status_code": 200,
+              "redirects": [
+                "http://192.0.2.1:8443/new/"
+              ],
+              "url": "http://192.0.2.1:8443/new/",
+              "body": "<title>Mythic</title><link rel=manifest href=/new/manifest.json><script src=/new/static/js/main.12fdaefe.js></script><div id=root></div>",
+              "body_truncated": false
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "mythic-landing-different-sni",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "https",
+          "status": "success",
+          "result": {
+            "redirect_response_chain": [
+              {
+                "status_code": 302,
+                "headers": {
+                  "location": [
+                    "/new/"
+                  ]
+                },
+                "request": {
+                  "url": {
+                    "scheme": "https",
+                    "host": "192.0.2.1:8443",
+                    "path": "/"
+                  },
+                  "host": "192.0.2.1:8443",
+                  "tls_log": {
+                    "handshake_log": {
+                      "client_hello": {
+                        "server_name": "other-vhost.example"
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "module": "web_assets",
+          "status": "success",
+          "result": {
+            "landing": {
+              "status_code": 200,
+              "redirects": [
+                "https://192.0.2.1:8443/new/"
+              ],
+              "url": "https://192.0.2.1:8443/new/",
+              "body": "<title>Mythic</title><link rel=manifest href=/new/manifest.json><script src=/new/static/js/main.12fdaefe.js></script><div id=root></div>",
+              "body_truncated": false
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "mythic-body-truncated",
+    "expected_rule_ids": [],
+    "expected_status": "insufficient_evidence",
+    "expected_coverage": "partial",
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "text/html"
+                ]
+              },
+              "body": "<title>Mythic</title><link rel=manifest href=/new/manifest.json><script src=/new/static/js/main.12fdaefe.js></script><div id=root></div>",
+              "body_truncated": true
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "empire-non-html",
+    "expected_rule_ids": [],
+    "expected_status": "not_matched",
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "text/plain"
+                ]
+              },
+              "body": "<title>Starkiller</title><script type=module src=/assets/index-test.js></script><body><noscript>starkiller doesn't work properly without JavaScript</noscript><div id=app></div></body>"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "cobalt-leaf-before-handshake-error",
+    "expected_rule_ids": [
+      "cobalt_strike_default_certificate"
+    ],
+    "expected_status": "suspected",
+    "expected_coverage": "partial",
+    "observed_at": 1500,
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "tls",
+          "status": "handshake-error",
+          "result": {
+            "handshake_log": {
+              "server_certificates": {
+                "certificate": {
+                  "parsed": {
+                    "fingerprint_sha256": "87f2085c32b6a2cc709b365f55873e207a9caa10bffecf2fd16d3cf9d94d390c"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "tls-missing-leaf",
+    "expected_rule_ids": [],
+    "expected_status": "insufficient_evidence",
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "tls",
+          "status": "handshake-error",
+          "result": {}
+        }
+      ]
+    }
+  },
+  {
+    "name": "jarm-partial-only",
+    "expected_rule_ids": [],
+    "expected_status": "insufficient_evidence",
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "jarm",
+          "status": "partial",
+          "result": {
+            "profile": "salesforce-jarm",
+            "active_probe": true,
+            "expected_probes": 10,
+            "attempted_probes": 5,
+            "completed_probes": 1
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "ssh-ordinary-declaration",
+    "expected_rule_ids": [],
+    "expected_status": "insufficient_evidence",
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "ssh",
+          "status": "success",
+          "result": {
+            "server_id": {
+              "software": "OpenSSH_9.6"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "http-ordinary-server-header",
+    "expected_rule_ids": [],
+    "expected_status": "not_matched",
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "text/html"
+                ],
+                "server": [
+                  "nginx/1.26.2"
+                ]
+              },
+              "body": "<title>Example</title>"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "xmrig-active-summary",
+    "expected_rule_ids": [
+      "xmrig_miner_summary"
+    ],
+    "expected_status": "identified",
+    "expected_coverage": "complete",
+    "expected_paths": [
+      "/evidence/0/result/xmrig_summary/body"
+    ],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "web_assets",
+          "status": "success",
+          "result": {
+            "xmrig_summary": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "application/json"
+                ]
+              },
+              "body": "{\"kind\":\"miner\",\"ua\":\"XMRig/6.24.0 (test)\",\"version\":\"6.24.0\",\"paused\":false,\"algorithms\":[\"rx/0\"],\"hashrate\":{\"total\":[0,null,null]}}"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "xmrig-existing-http-summary",
+    "expected_rule_ids": [
+      "xmrig_miner_summary"
+    ],
+    "expected_status": "identified",
+    "expected_paths": [
+      "/evidence/0/result/response/body"
+    ],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "application/json"
+                ]
+              },
+              "body": "{\"kind\":\"miner\",\"ua\":\"XMRig/6.24.0 (test)\",\"version\":\"6.24.0\",\"paused\":false,\"algorithms\":[\"rx/0\"],\"hashrate\":{\"total\":[0,null,null]}}"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "xmrig-paused-summary",
+    "expected_rule_ids": [
+      "xmrig_miner_summary"
+    ],
+    "expected_status": "identified",
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "application/json"
+                ]
+              },
+              "body": "{\"kind\":\"miner\",\"ua\":\"XMRig/6.24.0 (test)\",\"version\":\"6.24.0\",\"paused\":true,\"algorithms\":[\"rx/0\"],\"hashrate\":{\"total\":[0,null,null]}}"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "xmrig-inconsistent-version",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "application/json"
+                ]
+              },
+              "body": "{\"kind\":\"miner\",\"ua\":\"XMRig/6.24.0 (test)\",\"version\":\"6.23.0\",\"paused\":false,\"algorithms\":[\"rx/0\"],\"hashrate\":{\"total\":[0,null,null]}}"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "xmrig-only-mentioned-by-json-rpc",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "application/json"
+                ]
+              },
+              "body": "{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"software\":\"XMRig\"}}"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "xmrig-summary-truncated",
+    "expected_rule_ids": [],
+    "expected_status": "insufficient_evidence",
+    "expected_coverage": "partial",
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "application/json"
+                ]
+              },
+              "body": "{\"kind\":\"miner\",\"ua\":\"XMRig/6.24.0 (test)\",\"version\":\"6.24.0\",\"paused\":false,\"algorithms\":[\"rx/0\"],\"hashrate\":{\"total\":[0,null,null]}}",
+              "body_truncated": true
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "xmrig-from-redirect-destination",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "application/json"
+                ]
+              },
+              "body": "{\"kind\":\"miner\",\"ua\":\"XMRig/6.24.0 (test)\",\"version\":\"6.24.0\",\"paused\":false,\"algorithms\":[\"rx/0\"],\"hashrate\":{\"total\":[0,null,null]}}"
+            },
+            "redirect_response_chain": [
+              {
+                "status_code": 302
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "xmrig-summary-missing-algorithms",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "application/json"
+                ]
+              },
+              "body": "{\"kind\":\"miner\",\"ua\":\"XMRig/6.24.0 (test)\",\"version\":\"6.24.0\",\"paused\":false,\"algorithms\":[],\"hashrate\":{\"total\":[0,null,null]}}"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "xmrig-summary-invalid-hashrate",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "application/json"
+                ]
+              },
+              "body": "{\"kind\":\"miner\",\"ua\":\"XMRig/6.24.0 (test)\",\"version\":\"6.24.0\",\"paused\":false,\"algorithms\":[\"rx/0\"],\"hashrate\":{\"total\":[-1,0,0]}}"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "ordinary-unauthorized-json",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "http",
+          "status": "success",
+          "result": {
+            "response": {
+              "status_code": 401,
+              "headers": {
+                "content_type": [
+                  "application/json"
+                ]
+              },
+              "body": "{\"error\":\"authorization required\"}"
+            }
+          }
+        }
+      ]
     }
   }
 ]

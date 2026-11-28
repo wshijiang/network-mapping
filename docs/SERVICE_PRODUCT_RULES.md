@@ -2,7 +2,7 @@
 
 [服务产品识别](SERVICE_PROTOCOLS.md#服务产品识别) · [搜索语法](SEARCH_SYNTAX.md)
 
-服务端从规则 v6 起从 JSON 读取 Mythic、Empire / Starkiller 和 Sliver 的匹配条件。使用现有证据类型添加 C2 候选规则时，可以直接替换规则包并重启服务。Cobalt Strike、AsyncRAT / DcRAT 和 QakBot 继续由内置代码判定。内置 v7 收窄为 C2 候选，规则文件格式保持兼容。JARM 继续作为独立 TLS 观察。
+服务端从规则 v6 起从 JSON 读取 Mythic、Empire / Starkiller 和 Sliver 的匹配条件。使用现有证据类型添加 C2 候选规则时，可以直接替换规则包并重启服务。Cobalt Strike、AsyncRAT / DcRAT 和 QakBot 继续由内置代码判定。内置 v7 收窄为 C2 候选，v8 增加内置 XMRig 声明判定。外部规则的证据来源及规则文件格式保持兼容。JARM 继续作为独立 TLS 观察。
 
 ## 导出、校验和启用
 
@@ -76,6 +76,6 @@ file = "product-rules.json"
 
 ## 回放和搜索验证
 
-回放文件是 JSON 数组。每项含 `name`、原始 `data`、`expected_rule_ids` 和可选的 `observed_at`。预期规则 ID 列表按集合比较，未命中用空数组。命令列出候选组件、规则 ID 和原始路径，任何样本不符时返回非零退出码。仓库提供正负样本示例。[回放样本](examples/product-rules-fixtures.json)
+回放文件是 JSON 数组。每项含 `name`、原始 `data`、`expected_rule_ids` 和可选的 `observed_at`、`expected_status`、`expected_coverage`、`expected_paths`。预期规则 ID 列表按集合比较，未命中用空数组。命令列出候选组件、规则 ID 和原始路径，任何样本不符时返回非零退出码。仓库提供正负样本示例。[回放样本](examples/product-rules-fixtures.json)
 
 新扫描使用启动时加载的规则。资产详情在原始证据仍可用时可按新规则重算。搜索读取已保存的投影，存量结果需用同一份规则包重建。重建期间固定进程内规则快照，续跑要求规则版本、摘要和内置判定逻辑版本与断点一致。旧版本已开始的重建应使用原程序完成后再升级。验证新增规则时核对 `product = 产品ID`，删除规则时核对旧候选已从重放后的投影消失。[投影升级与回滚](SERVICE_PROTOCOLS.md#存储升级与回滚)

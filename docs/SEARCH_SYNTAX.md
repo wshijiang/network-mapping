@@ -692,12 +692,13 @@ Web 技术目录现支持 `tech = minio`、`tech = s3`、`tech = gitlab` 和 `te
 
 ## 服务产品
 
-`service` 保持应用协议语义；`product` 查询 `products[]` 中已保存的 C2 部署候选，候选的实际用途仍需复核。`tech` 继续查询 Web 技术栈，例如 `tech = nginx` 和 `tech = apache`。支持 `=`、`!=`、`IN`、`NOT IN`、`EXISTS(product)`，值为产品 ID 或 `ID@版本`。版本条件与 ID 在同一 nested 产品内匹配，当前 C2 候选的版本为空，否定表示没有对应产品，并不表示目标正常。
+`service` 保持应用协议语义；`product` 查询 `products[]` 中已保存的 C2 部署候选和挖矿软件声明，候选的实际用途仍需复核。`tech` 继续查询 Web 技术栈，例如 `tech = nginx` 和 `tech = apache`。支持 `=`、`!=`、`IN`、`NOT IN`、`EXISTS(product)`，值为产品 ID 或 `ID@版本`。版本条件与 ID 在同一 nested 产品内匹配，当前 C2 候选的版本为空，XMRig 可查询自报版本，否定表示没有对应产品，并不表示目标正常。
 
 ```text
 service = https AND product = cobalt_strike
 product IN (sliver, qakbot)
 product IN (mythic, empire)
+product = "xmrig@6.24.0"
 ```
 
 当前产品范围、候选含义、API 字段与存量数据进入搜索的方法见[服务产品识别](SERVICE_PROTOCOLS.md#服务产品识别)。

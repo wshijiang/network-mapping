@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{EVALUATOR_REVISION, Evidence, Product, RETIRED_PRODUCT_IDS, bounded};
+use super::{EVALUATOR_REVISION, Evidence, Product, ProductCategory, RETIRED_PRODUCT_IDS, bounded};
 
 mod expression;
 mod json;
@@ -148,7 +148,7 @@ fn short_text(text: &str, max: usize) -> bool {
 }
 
 fn reserved_product(id: &str) -> bool {
-    matches!(id, "cobalt_strike" | "asyncrat_family" | "qakbot")
+    matches!(id, "cobalt_strike" | "asyncrat_family" | "qakbot" | "xmrig")
         || RETIRED_PRODUCT_IDS.contains(&id)
 }
 
@@ -356,6 +356,7 @@ impl Rule {
         Some(Product {
             id: self.product.id.clone(),
             name: self.product.name.clone(),
+            category: ProductCategory::C2,
             component: self.product.component.clone(),
             version: None,
             assessment: "suspected".into(),

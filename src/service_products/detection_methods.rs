@@ -68,11 +68,12 @@ pub(super) fn catalog(evidence: &[Value]) -> Vec<DetectionMethod> {
                             .is_some()
                 }
                 "http_fingerprint" => {
-                    matches!(module, "http" | "https")
-                        && (item["result"]["response"].is_object()
-                            || item["result"]["redirect_response_chain"]
-                                .as_array()
-                                .is_some_and(|chain| !chain.is_empty()))
+                    (module == "web_assets" && item.pointer("/result/xmrig_summary").is_some())
+                        || (matches!(module, "http" | "https")
+                            && (item["result"]["response"].is_object()
+                                || item["result"]["redirect_response_chain"]
+                                    .as_array()
+                                    .is_some_and(|chain| !chain.is_empty())))
                 }
                 _ => {
                     !matches!(module, "jarm" | "web_assets" | "tls" | "")
@@ -92,7 +93,12 @@ pub(super) fn catalog(evidence: &[Value]) -> Vec<DetectionMethod> {
             id: id.into(),
             name: name.into(),
             active_probe,
-            additional_probe: additional,
+            additional_probe: additional
+                || (id == "http_fingerprint"
+                    && evidence.iter().take(64).any(|item| {
+                        item["module"] == "web_assets"
+                            && item.pointer("/result/xmrig_summary").is_some()
+                    })),
             observed,
             principle: principle.into(),
         }
