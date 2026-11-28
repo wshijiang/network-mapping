@@ -338,6 +338,7 @@ impl Access {
                         | "/api/search/port"
                         | "/api/search/service"
                         | "/api/search/banner"
+                        | "/api/search/values"
                         | "/api/dashboard/overview"
                         | "/api/analysis/distribution"
                         | "/api/analysis/discovery-heatmap"
@@ -541,6 +542,8 @@ mod tests {
         assert!(!scanner.allows_route(&Method::GET, "/api/dns/resolvers"));
         let reader = scoped(READ_ONLY, vec![ReadResults, CreateScan]);
         assert!(reader.allows_route(&Method::POST, "/api/search/v2"));
+        assert!(reader.allows_route(&Method::GET, "/api/search/values"));
+        assert!(!scoped(READ_ONLY, vec![]).allows_route(&Method::GET, "/api/search/values"));
         assert!(reader.allows_route(&Method::GET, "/api/assets/favicon"));
         assert!(!scoped(READ_ONLY, vec![]).allows_route(&Method::GET, "/api/assets/favicon"));
         assert!(!reader.allows_route(&Method::POST, "/api/task/create"));
@@ -551,6 +554,7 @@ mod tests {
         assert!(!auditor.allows_route(&Method::POST, "/api/audit/export"));
         assert!(!auditor.allows_route(&Method::GET, "/api/task/all"));
         assert!(!auditor.allows_route(&Method::GET, "/api/assets/favicon"));
+        assert!(!auditor.allows_route(&Method::GET, "/api/search/values"));
         auditor.policy.as_mut().unwrap().expires_at =
             Some(Utc::now() - chrono::TimeDelta::seconds(1));
         assert!(!auditor.allows_route(&Method::GET, "/api/audit/events"));

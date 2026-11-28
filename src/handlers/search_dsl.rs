@@ -26,7 +26,7 @@ pub(crate) struct Predicate {
     pub(crate) values: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum Field {
     Ip,
     Domain,
@@ -342,13 +342,8 @@ impl ElasticsearchCompiler {
         if predicate.field == Field::Domain && operator == Operator::Exists {
             return Err(SearchSyntaxError::new("字段 domain 不支持 EXISTS", 0, 0));
         }
-        if matches!(predicate.field, Field::Technology | Field::Product) {
-            let path = if predicate.field == Field::Product {
-                "products"
-            } else {
-                "web.technologies"
-            };
-            let id_field = format!("{path}.id");
+        if let Some(path) = predicate.field.nested_search_path() {
+            let id_field = es_field(predicate.field);
             let version_field = format!("{path}.version");
             let nested_query = |query: Value| {
                 // Old projections may still contain ordinary software declarations.
@@ -384,8 +379,7 @@ impl ElasticsearchCompiler {
                         0,
                     ));
                 }
-                let mut filters =
-                    vec![json!({"term":{(id_field.clone()):id.to_ascii_lowercase()}})];
+                let mut filters = vec![json!({"term":{(id_field):id.to_ascii_lowercase()}})];
                 if let Some(version) = version {
                     filters.push(json!({"term":{(version_field.clone()):version}}));
                 }
@@ -716,7 +710,7 @@ fn negative_filter(
     }
 }
 
-fn es_field(field: Field) -> &'static str {
+pub(crate) fn es_field(field: Field) -> &'static str {
     match field {
         Field::Ip => "ip",
         Field::Domain => "domain",
@@ -782,6 +776,18 @@ fn escape_es_wildcard(value: &str) -> String {
 }
 
 impl Field {
+    pub(crate) fn parse_canonical(value: &str) -> Option<Self> {
+        Self::parse(value).filter(|field| field.display_name() == value)
+    }
+
+    pub(crate) fn nested_search_path(self) -> Option<&'static str> {
+        match self {
+            Self::Technology => Some("web.technologies"),
+            Self::Product => Some("products"),
+            _ => None,
+        }
+    }
+
     fn parse(value: &str) -> Option<Self> {
         match value.to_ascii_lowercase().as_str() {
             "ip" | "network" => Some(Self::Ip),

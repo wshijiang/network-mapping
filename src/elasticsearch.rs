@@ -14,9 +14,11 @@ use tokio::sync::{Notify, Semaphore};
 mod domain_discovery;
 mod os_detection;
 mod projection;
+mod search_values;
 mod transport_rebuild;
 mod web_detection;
 use os_detection::service_observation_reference;
+pub(crate) use search_values::SearchValueField;
 use tokio::time::{interval, sleep, timeout};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -182,6 +184,14 @@ pub(crate) enum ScanQueryIndex {
     CurrentEndpoints,
 }
 
+fn asset_search_scope(role: i32, user_id: i32) -> (&'static str, i32) {
+    if role == crate::access::ADMIN {
+        ("global", 0)
+    } else {
+        ("user", user_id)
+    }
+}
+
 #[derive(Clone)]
 pub struct ElasticsearchService {
     inner: Arc<ElasticsearchInner>,
@@ -195,6 +205,7 @@ struct ElasticsearchInner {
     maintenance_run_id: RwLock<Option<String>>,
     bulk_semaphore: Semaphore,
     projection_notify: Notify,
+    search_value_cache: Arc<search_values::SearchValueCache>,
     scan_indices_ready: AtomicBool,
     observation_compatibility_ready: AtomicBool,
 }
@@ -418,6 +429,7 @@ enum ElasticsearchOperation {
     ConflictCheck,
     ProjectionSearch,
     AssetSearch,
+    SearchValues,
     EndpointFilter,
     DomainFilter,
 }
@@ -435,6 +447,7 @@ impl ElasticsearchOperation {
             Self::ConflictCheck => "conflict-check",
             Self::ProjectionSearch => "projection-search",
             Self::AssetSearch => "asset-search",
+            Self::SearchValues => "search-values",
             Self::EndpointFilter => "endpoint-filter",
             Self::DomainFilter => "domain-filter",
         }
@@ -447,6 +460,7 @@ impl ElasticsearchOperation {
             | Self::ConflictCheck
             | Self::ProjectionSearch
             | Self::AssetSearch
+            | Self::SearchValues
             | Self::EndpointFilter
             | Self::DomainFilter => ElasticsearchOperationKind::Query,
             Self::RefreshTags | Self::BulkWrite => ElasticsearchOperationKind::Write,
@@ -505,6 +519,7 @@ impl ElasticsearchService {
                 monitor: RwLock::new(None),
                 bulk_semaphore: Semaphore::new(bulk_max_concurrency),
                 projection_notify: Notify::new(),
+                search_value_cache: Arc::new(search_values::SearchValueCache::default()),
                 scan_indices_ready: AtomicBool::new(false),
                 observation_compatibility_ready: AtomicBool::new(false),
             }),
@@ -2132,11 +2147,7 @@ impl ElasticsearchService {
         offset: i64,
         sort: SearchSort,
     ) -> Result<ElasticsearchSearchPage, String> {
-        let (scope_type, scope_id) = if role == 1 {
-            ("global", 0)
-        } else {
-            ("user", user_id)
-        };
+        let (scope_type, scope_id) = asset_search_scope(role, user_id);
         self.search_with_scope(scope_type, scope_id, filter, limit, offset, sort, false)
             .await
     }

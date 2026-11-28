@@ -178,6 +178,7 @@ pub const WEB_OPERATIONS: &[(&str, &str)] = &[
     ("GET /api/search/network", "读取网段资产搜索"),
     ("GET /api/search/port", "读取端口资产搜索"),
     ("GET /api/search/service", "读取服务类型搜索"),
+    ("GET /api/search/values", "读取搜索字段值推荐"),
     ("GET /api/system/preferences", "读取系统显示偏好"),
     ("GET /api/syslog/backfill", "读取 syslog 回填任务列表"),
     ("GET /api/syslog/statistics", "读取 syslog 转发统计"),
