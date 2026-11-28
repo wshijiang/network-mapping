@@ -126,6 +126,11 @@ pub const ES_OPERATIONS: &[(MonitorService, &str, &str)] = &[
     ),
     (
         MonitorService::ElasticsearchQuery,
+        "search-values",
+        "搜索字段值推荐",
+    ),
+    (
+        MonitorService::ElasticsearchQuery,
         "endpoint-filter",
         "端点筛选",
     ),

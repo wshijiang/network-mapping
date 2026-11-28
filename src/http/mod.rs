@@ -205,6 +205,7 @@ fn assets(cfg: &mut web::ServiceConfig) {
     cfg.service(handlers::search::search_banner);
     cfg.service(handlers::search::elasticsearch_status);
     cfg.service(handlers::search::search_v2);
+    cfg.service(handlers::search::search_values);
     cfg.service(handlers::assets::get_asset_summary);
     cfg.service(handlers::assets::get_asset_ports);
     cfg.service(handlers::assets::get_asset_port_history);

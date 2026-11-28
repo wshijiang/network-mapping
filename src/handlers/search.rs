@@ -7,7 +7,7 @@ use std::str::FromStr;
 use tracing::error;
 
 use crate::admin::UserBaseI;
-use crate::elasticsearch::{ElasticsearchService, SearchSort};
+use crate::elasticsearch::{ElasticsearchService, SearchSort, SearchValueField};
 use crate::handlers::search_dsl::{ElasticsearchCompilation, parse_and_compile_elasticsearch};
 use crate::handlers::tags::AssetTag;
 
@@ -42,6 +42,12 @@ pub struct AdvancedSearchRequest {
     pub offset: Option<i64>,
     pub sort_field: Option<String>,
     pub sort_order: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SearchValuesQuery {
+    field: SearchValueField,
 }
 
 #[derive(Serialize)]
@@ -195,6 +201,20 @@ pub async fn elasticsearch_status(
                 .json(serde_json::json!({"message": "无法读取搜索索引状态"}))
         }
     }
+}
+
+#[get("/api/search/values")]
+pub(crate) async fn search_values(
+    elasticsearch: web::Data<ElasticsearchService>,
+    query: web::Query<SearchValuesQuery>,
+    user: UserBaseI,
+) -> impl Responder {
+    let values = elasticsearch
+        .suggest_search_values(user.role, user.id, query.field)
+        .await;
+    HttpResponse::Ok()
+        .insert_header(("Cache-Control", "private, no-store"))
+        .json(values)
 }
 
 #[post("/api/search/v2")]
@@ -737,6 +757,25 @@ pub async fn search_network(
 #[cfg(test)]
 mod tests {
     use super::{normalize_cidr, pagination};
+
+    #[test]
+    fn field_value_query_is_limited_to_a_canonical_field() {
+        assert!(
+            actix_web::web::Query::<super::SearchValuesQuery>::from_query("field=os.family")
+                .is_ok()
+        );
+        for invalid in [
+            "",
+            "field=banner",
+            "field=web.tech",
+            "field=service&scope_id=8",
+            "field=service&prefix=h",
+        ] {
+            assert!(
+                actix_web::web::Query::<super::SearchValuesQuery>::from_query(invalid).is_err()
+            );
+        }
+    }
 
     #[test]
     fn search_pagination_stays_within_elasticsearch_result_window() {
