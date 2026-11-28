@@ -974,6 +974,89 @@
     }
   },
   {
+    "name": "xmrig-active-observation-truncated",
+    "expected_rule_ids": [],
+    "expected_status": "insufficient_evidence",
+    "expected_coverage": "partial",
+    "expected_paths": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "web_assets",
+          "status": "success",
+          "result": {
+            "xmrig_summary": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "application/json"
+                ]
+              },
+              "body": "{\"kind\":\"miner\",\"ua\":\"XMRig/6.24.0 (test)\",\"version\":\"6.24.0\",\"paused\":false,\"algorithms\":[\"rx/0\"],\"hashrate\":{\"total\":[0,null,null]}}"
+            }
+          },
+          "truncated": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "xmrig-active-observation-failed",
+    "expected_rule_ids": [],
+    "expected_status": "insufficient_evidence",
+    "expected_coverage": "partial",
+    "expected_paths": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "web_assets",
+          "status": "error",
+          "result": {
+            "xmrig_summary": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "application/json"
+                ]
+              },
+              "body": "{\"kind\":\"miner\",\"ua\":\"XMRig/6.24.0 (test)\",\"version\":\"6.24.0\",\"paused\":false,\"algorithms\":[\"rx/0\"],\"hashrate\":{\"total\":[0,null,null]}}"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "xmrig-active-summary-body-truncated",
+    "expected_rule_ids": [],
+    "expected_status": "insufficient_evidence",
+    "expected_coverage": "partial",
+    "expected_paths": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [
+        {
+          "module": "web_assets",
+          "status": "success",
+          "result": {
+            "xmrig_summary": {
+              "status_code": 200,
+              "headers": {
+                "content_type": [
+                  "application/json"
+                ]
+              },
+              "body": "{\"kind\":\"miner\",\"ua\":\"XMRig/6.24.0 (test)\",\"version\":\"6.24.0\",\"paused\":false,\"algorithms\":[\"rx/0\"],\"hashrate\":{\"total\":[0,null,null]}}",
+              "body_truncated": true
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
     "name": "xmrig-existing-http-summary",
     "expected_rule_ids": [
       "xmrig_miner_summary"

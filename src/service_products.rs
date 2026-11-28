@@ -14,7 +14,7 @@ pub(crate) use rules::Stamp as RuleStamp;
 pub(crate) use rules_cli::execute as execute_rules_command;
 
 const MAX_EVIDENCE: usize = 8;
-const EVALUATOR_REVISION: u32 = 2;
+const EVALUATOR_REVISION: u32 = 3;
 pub(crate) const RETIRED_PRODUCT_IDS: [&str; 3] = ["nginx", "apache_http_server", "openssh"];
 
 pub(crate) fn initialize_rules(path: Option<&std::path::Path>) -> std::io::Result<()> {
@@ -239,6 +239,7 @@ fn evaluate(
         if module == "web_assets" {
             if let Some(response) = item.pointer("/result/xmrig_summary") {
                 inspected = true;
+                incomplete |= mining::incomplete_summary(item, response);
                 if let Some(product) =
                     mining::xmrig(item, response, module, "/xmrig_summary", index)
                 {

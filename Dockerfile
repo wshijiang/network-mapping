@@ -54,6 +54,7 @@ COPY templates ./templates
 COPY assets/fonts ./assets/fonts
 COPY docs/OPEN_API.md docs/OPEN_API_MANAGEMENT.md docs/OPEN_API_IMPLEMENTATION.md ./docs/
 COPY docs/open-api/openapi.json ./docs/open-api/openapi.json
+COPY docs/examples/product-rules-fixtures.json ./docs/examples/product-rules-fixtures.json
 
 # Always validate the real sources; correctness never depends on a warm cache.
 RUN cargo fmt --all --check

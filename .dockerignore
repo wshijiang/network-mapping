@@ -15,7 +15,7 @@
 !docker/healthcheck.sh
 !LICENSE
 
-# Only public documents embedded by Rust; never include arbitrary local docs.
+# Allowlist public build documents and the product rules test fixture.
 !docs/
 !docs/OPEN_API.md
 !docs/OPEN_API_MANAGEMENT.md
@@ -23,6 +23,8 @@
 !docs/*.sql
 !docs/open-api/
 !docs/open-api/openapi.json
+!docs/examples/
+!docs/examples/product-rules-fixtures.json
 
 !source/
 !source/database/

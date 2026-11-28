@@ -150,7 +150,7 @@ mod tests {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/examples/product-rules-fixtures.json");
         let (report, failed) = replay(&path, rules::default_rules()).unwrap();
-        assert_eq!(report.len(), 40);
+        assert_eq!(report.len(), 43);
         let miner = report
             .iter()
             .find(|row| row["name"] == "xmrig-active-summary")

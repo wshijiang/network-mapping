@@ -5,6 +5,10 @@ use super::{Evidence, Product, ProductCategory, bounded};
 
 const MAX_SUMMARY_BYTES: usize = 64 * 1024;
 
+pub(super) fn incomplete_summary(item: &Value, response: &Value) -> bool {
+    item["status"] != "success" || item["truncated"] == true || response["body_truncated"] == true
+}
+
 pub(super) fn xmrig(
     item: &Value,
     response: &Value,
@@ -12,11 +16,7 @@ pub(super) fn xmrig(
     path: &str,
     index: usize,
 ) -> Option<Product> {
-    if item["status"] != "success"
-        || item["truncated"] == true
-        || response["body_truncated"] == true
-        || response["status_code"] != 200
-    {
+    if incomplete_summary(item, response) || response["status_code"] != 200 {
         return None;
     }
 
