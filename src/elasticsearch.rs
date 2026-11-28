@@ -290,6 +290,9 @@ struct SearchSource {
     js_md5: Vec<String>,
     os: Option<crate::os_detection::OsInference>,
     web: Option<crate::web_detection::WebInference>,
+    #[serde(default)]
+    products: Option<Vec<crate::service_products::Product>>,
+    product_identification: Option<crate::service_products::Identification>,
     scanner_name: Option<String>,
     last_seen: DateTime<Utc>,
     asn: Option<String>,
@@ -329,6 +332,8 @@ pub(crate) struct ElasticsearchSearchItem {
     pub(crate) js_md5s: Vec<String>,
     pub(crate) os: Option<crate::os_detection::OsInference>,
     pub(crate) web: Option<crate::web_detection::WebInference>,
+    pub(crate) products: Vec<crate::service_products::Product>,
+    pub(crate) product_identification: Option<crate::service_products::Identification>,
     pub(crate) scanner_name: Option<String>,
     pub(crate) scan_time: i64,
     pub(crate) asn: Option<String>,
@@ -378,6 +383,8 @@ impl ElasticsearchSearchItem {
             js_md5s: Vec::new(),
             os: None,
             web: None,
+            products: Vec::new(),
+            product_identification: None,
             scanner_name: None,
             scan_time: 0,
             asn: None,
@@ -3358,6 +3365,12 @@ fn parse_search_hits(hits: &[Value]) -> Result<Vec<ElasticsearchSearchItem>, Str
                 source.last_seen.timestamp_millis(),
                 Utc::now().timestamp_millis(),
             ),
+            products: source.products.unwrap_or_default(),
+            product_identification: source.product_identification.map(|mut value| {
+                value.stale =
+                    value.observed_at < source.last_seen.timestamp_millis() || !value.is_current();
+                value
+            }),
             scanner_name: source.scanner_name,
             scan_time: source.last_seen.timestamp_millis(),
             asn: source.asn,
@@ -4532,6 +4545,8 @@ fn scan_endpoint_index_definition(replicas: u32) -> Value {
                 "os": crate::os_detection::mapping(),
             "web": crate::web_detection::mapping(),
                 "c2_fingerprint": service_fingerprint_mapping(),
+            "products": crate::service_products::mapping(),
+            "product_identification": {"type":"object", "enabled":false},
                 "last_c2_fingerprint": {"type": "object", "enabled": false},
                 "import_policy": {"type": "keyword"},
                 "asn": {"type": "keyword", "normalizer": "lowercase_normalizer"},
@@ -4646,6 +4661,19 @@ fn endpoint_projection_document(
     // time (favicon MD5 from stored bytes), so every projection path — live
     // ingest, migration and offline rebuild — produces the same fields.
     let web_assets = crate::web_assets::extract(observation.get("data"));
+    let product_detection = (kind == "service").then(|| {
+        crate::service_products::infer(
+            observation
+                .get("data")
+                .filter(|_| !matches!(context.task_source.as_str(), "import" | "federation")),
+            observed_at_ms,
+            Some(service_observation_reference(
+                context,
+                observation,
+                observed_at_ms,
+            )),
+        )
+    });
     let c2 = if kind == "service" {
         scan_service_fingerprint(context, observation, observed_at_ms)
     } else {
@@ -4696,6 +4724,8 @@ fn endpoint_projection_document(
         "service_observation_ref": if is_service { service_observation_reference(context, observation, observed_at_ms) } else { Value::Null },
         "os": observation.get("os").filter(|value| !value.is_null()).cloned().unwrap_or_else(|| if is_service { json!(crate::os_detection::OsInference::pending(observed_at_ms)) } else { Value::Null }),
         "web": observation.get("web").filter(|value| !value.is_null()).cloned().unwrap_or_else(|| if is_service { json!(crate::web_detection::WebInference::pending(observed_at_ms)) } else { Value::Null }),
+        "products": product_detection.as_ref().map(|value| &value.products).cloned().unwrap_or_default(),
+        "product_identification": product_detection.as_ref().map(|value| &value.product_identification),
         "c2_fingerprint": c2,
         "last_c2_fingerprint": if c2["status"] == "matched" { &c2 } else { &Value::Null },
         "asn": asn,
@@ -4769,6 +4799,9 @@ fn append_projection_update(
             def serviceReference = ctx._source.service_observation_ref;
             def os = ctx._source.os;
             def web = ctx._source.web;
+            def products = ctx._source.products;
+            def productIdentification = ctx._source.product_identification;
+            def incomingProductIdentification = params.doc.product_identification;
             def c2 = ctx._source.c2_fingerprint;
             def lastC2 = ctx._source.last_c2_fingerprint;
             def incomingC2 = params.doc.c2_fingerprint;
@@ -4831,6 +4864,17 @@ fn append_projection_update(
                 ctx._source.os = sameEvidence && os != null && os.status != 'pending' && (params.doc.os == null || params.doc.os.status == 'pending' || os.ruleset_revision >= params.doc.os.ruleset_revision) ? os : params.doc.os;
                 ctx._source.web = sameEvidence && web != null && web.status != 'pending' && (params.doc.web == null || params.doc.web.status == 'pending' || web.ruleset_revision >= params.doc.web.ruleset_revision) ? web : params.doc.web;
             }
+            boolean replaceProducts = incomingProductIdentification != null && (
+                productIdentification == null ||
+                incomingProductIdentification.observed_at > productIdentification.observed_at ||
+                (incomingProductIdentification.observed_at == productIdentification.observed_at &&
+                    (productIdentification.ruleset_revision == null ||
+                        incomingProductIdentification.ruleset_revision > productIdentification.ruleset_revision ||
+                        (incomingProductIdentification.ruleset_revision == productIdentification.ruleset_revision &&
+                            (productIdentification.ruleset_sha256 == null ||
+                             incomingProductIdentification.ruleset_sha256 == productIdentification.ruleset_sha256)))));
+            ctx._source.products = replaceProducts ? params.doc.products : (products != null ? products : []);
+            ctx._source.product_identification = replaceProducts ? incomingProductIdentification : productIdentification;
             // Fingerprint observations have their own clock, which includes
             // failed service probes, independently of the service summary.
             ctx._source.c2_fingerprint = newerFingerprint(incomingC2, c2) ? incomingC2 : c2;
@@ -4875,6 +4919,8 @@ fn index_mapping_update() -> Value {
             "os": crate::os_detection::mapping(),
             "web": crate::web_detection::mapping(),
             "c2_fingerprint": service_fingerprint_mapping(),
+            "products": crate::service_products::mapping(),
+            "product_identification": {"type":"object", "enabled":false},
             "last_c2_fingerprint": {"type": "object", "enabled": false},
             "import_policy": {"type": "keyword"},
             "latitude": {"type": "double"},
@@ -5539,6 +5585,70 @@ mod tests {
     }
 
     #[test]
+    fn search_accepts_legacy_null_products_without_dropping_the_endpoint() {
+        let items = super::parse_search_hits(&[serde_json::json!({"_source": {
+            "ip":"192.0.2.1", "port":443, "service":"https", "last_seen":"2026-11-27T00:00:00Z",
+            "products":null
+        }})])
+        .unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].products.is_empty());
+    }
+
+    #[test]
+    fn service_products_are_derived_from_raw_protocol_fields_and_imports_do_not_establish_identity()
+    {
+        let mut context = ScanBatchContext {
+            task_id: "product-task".into(),
+            execution_id: "product-execution".into(),
+            user_id: 1,
+            task_source: "manual".into(),
+            scanner_id: "scanner".into(),
+            scanner_name: None,
+            upload_id: "upload".into(),
+            batch_index: 0,
+            is_final: true,
+        };
+        let observation = serde_json::json!({"kind":"service", "ip_address":"192.0.2.1", "port":443,
+        "protocol":"tcp", "service":"https", "observation_key":"service-1", "observed_at":1000,
+        "data":{"schema_version":2,"evidence":[{"module":"https","status":"success","result":{
+            "response":{"status_code":200,"headers":{"server":["nginx/1.26.2"],"content_type":["text/html"]},
+                "body":"<title>Mythic</title><link rel=manifest href=/new/manifest.json><script src=/new/static/js/main.12fdaefe.js></script><div id=root></div>"}
+        }}]}});
+        let mut observation = observation;
+        observation["data"]["evidence"].as_array_mut().unwrap().push(serde_json::json!({
+            "module":"jarm","status":"success","result":{
+                "profile":"salesforce-jarm","active_probe":true,"expected_probes":10,
+                "attempted_probes":10,"completed_probes":10,"probe_statuses":vec!["server_hello";10],
+                "fingerprint":"41d41d41d41d41d41d41d41d41d41da0bfb9dc5a7a50dfa51c2a70be11dda8"
+            }
+        }));
+        let document = endpoint_projection_document(&context, &observation, 1000);
+        assert_eq!(
+            document["product_identification"]["jarm"]["completed_probes"],
+            10
+        );
+        assert_eq!(document["products"].as_array().unwrap().len(), 2);
+        assert_eq!(document["service"], "https");
+        assert_eq!(document["products"][0]["id"], "mythic");
+        assert_eq!(document["products"][0]["assessment"], "suspected");
+        assert_eq!(document["products"][1]["id"], "nginx");
+        assert_eq!(document["product_identification"]["observed_at"], 1000);
+        assert!(document["product_identification"]["observation_ref"]["id"].is_string());
+        context.task_source = "import".into();
+        let imported = endpoint_projection_document(&context, &observation, 1000);
+        assert_eq!(imported["products"], serde_json::json!([]));
+        assert!(imported["product_identification"]["jarm"].is_null());
+        assert_eq!(
+            imported["product_identification"]["status"],
+            "insufficient_evidence"
+        );
+        context.task_source = "federation".into();
+        let federated = endpoint_projection_document(&context, &observation, 1000);
+        assert_eq!(federated["products"], serde_json::json!([]));
+    }
+
+    #[test]
     fn web_asset_fields_exist_in_definition_and_additive_update() {
         let definition = scan_endpoint_index_definition(1);
         let update = index_mapping_update();
@@ -5549,6 +5659,8 @@ mod tests {
             "js_name",
             "js_name_text",
             "js_md5",
+            "products",
+            "product_identification",
         ] {
             assert!(
                 definition

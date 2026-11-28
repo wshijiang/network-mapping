@@ -28,6 +28,10 @@ status_duration = 5                                      # 系统信息采集频
 templates_directory = "templates/**/*.html"
 templates_name = "error.html"
 
+[product_rules]
+# 空字符串使用内置规则；相对路径以本配置文件所在目录为基准。
+file = ""
+
 [frontend]
 # Vite 生产构建目录；相对路径以本配置文件所在目录为基准
 directory = "../network-mapping-vue/dist"

@@ -8,64 +8,9 @@ const DEFAULT_TEAM_SERVER_SHA256: &str =
     "87f2085c32b6a2cc709b365f55873e207a9caa10bffecf2fd16d3cf9d94d390c";
 const RULESET_VERSION: u32 = 1;
 
-/// Asset tags retain the fact that a scan observed a matching certificate.
-/// Recompute from raw evidence so imports cannot supply their own verdict.
-pub(crate) async fn assign_tags(
-    tx: &deadpool_postgres::Transaction<'_>,
-    observations: &[Value],
-) -> Result<(), tokio_postgres::Error> {
-    let mut assignments =
-        std::collections::BTreeMap::<String, std::collections::BTreeSet<&str>>::new();
-    for row in observations.iter().filter(|row| row["kind"] == "service") {
-        let Some(ip) = row["ip_address"]
-            .as_str()
-            .filter(|ip| ip.parse::<std::net::IpAddr>().is_ok())
-        else {
-            continue;
-        };
-        let assessment = assess(row.get("data"), 0, "", "");
-        for hit in assessment.matches {
-            let names = assignments.entry(ip.to_owned()).or_default();
-            names.extend(["威胁", "恶意软件"]);
-            names.insert(match hit.family {
-                COBALT_STRIKE => "Cobalt Strike",
-                ASYNCRAT_FAMILY => "AsyncRAT / DcRAT",
-                _ => continue,
-            });
-        }
-    }
-    if assignments.is_empty() {
-        return Ok(());
-    }
-    // Serialize catalog creation across uploads, including concurrent batches.
-    tx.execute("SELECT pg_advisory_xact_lock(712831926)", &[])
-        .await?;
-    tx.execute(
-        "INSERT INTO asset_tag_category(name,description) VALUES('威胁识别','扫描观测到的威胁特征，待人工复核') ON CONFLICT (LOWER(name)) WHERE is_active DO NOTHING",
-        &[],
-    ).await?;
-    for (ip, names) in assignments {
-        let mut changed = false;
-        for name in names {
-            tx.execute(
-                "INSERT INTO asset_tag(name,kind,description,category_id) SELECT $1,'malicious','历史扫描观测到已收录的威胁证书特征，待复核；详见资产端口威胁线索',id FROM asset_tag_category WHERE is_active AND name='威胁识别' ON CONFLICT (LOWER(name)) WHERE is_active DO NOTHING",
-                &[&name],
-            ).await?;
-            changed |= tx.execute(
-                "INSERT INTO asset_ip_tag(ip_address,tag_id) SELECT $1::TEXT::INET,id FROM asset_tag WHERE is_active AND LOWER(name)=LOWER($2) ON CONFLICT DO NOTHING",
-                &[&ip, &name],
-            ).await? > 0;
-        }
-        if changed {
-            crate::search_projection::enqueue_ip(tx, &ip).await?;
-        }
-    }
-    Ok(())
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum Status {
+pub(crate) enum Status {
     Matched,
     NotMatched,
     InsufficientEvidence,
@@ -73,24 +18,24 @@ enum Status {
 
 #[derive(Serialize)]
 pub(crate) struct Assessment<'a> {
-    status: Status,
+    pub(crate) status: Status,
     ruleset_version: u32,
     observed_at: i64,
     task_id: &'a str,
     execution_id: &'a str,
-    matches: Vec<Match<'a>>,
+    pub(crate) matches: Vec<Match<'a>>,
 }
 
 #[derive(Serialize)]
-struct Match<'a> {
-    family: &'static str,
-    rule_id: &'static str,
-    source_url: &'static str,
-    probe: &'a str,
-    evidence_path: String,
-    sni: Option<&'a str>,
-    http_host: Option<&'a str>,
-    evidence: Vec<(&'static str, String)>,
+pub(crate) struct Match<'a> {
+    pub(crate) family: &'static str,
+    pub(crate) rule_id: &'static str,
+    pub(crate) source_url: &'static str,
+    pub(crate) probe: &'a str,
+    pub(crate) evidence_path: String,
+    pub(crate) sni: Option<&'a str>,
+    pub(crate) http_host: Option<&'a str>,
+    pub(crate) evidence: Vec<(&'static str, String)>,
 }
 
 pub(crate) fn assess<'a>(
@@ -184,7 +129,7 @@ pub(crate) fn assess<'a>(
     }
 }
 
-fn probe_tls<'a>(
+pub(crate) fn probe_tls<'a>(
     probe: &'a Value,
     module: &str,
 ) -> Option<(&'a Value, Option<&'a Value>, &'static str)> {
@@ -214,7 +159,7 @@ fn probe_tls<'a>(
         .or_else(|| result.get("tls").map(|tls| (tls, None, "/tls")))
 }
 
-fn leaf_certificate(tls: &Value) -> Option<(&Value, &'static str)> {
+pub(crate) fn leaf_certificate(tls: &Value) -> Option<(&Value, &'static str)> {
     // zgrab2 TLS logs have used both a single certificate message and a list.
     [
         "/handshake_log/server_certificates/certificate/parsed",
@@ -434,68 +379,5 @@ mod tests {
             json!({"response": {"status_code": 404, "content_length": 0}}),
         );
         assert_eq!(assessment(&data)["status"], "insufficient_evidence");
-    }
-
-    #[tokio::test]
-    #[ignore = "requires disposable FINGERPRINT_TEST_DATABASE_URL"]
-    async fn automatic_tags_are_idempotent_and_rollback_with_the_upload() {
-        let config = std::env::var("FINGERPRINT_TEST_DATABASE_URL")
-            .unwrap()
-            .parse()
-            .unwrap();
-        let pool = deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(
-            config,
-            tokio_postgres::NoTls,
-        ))
-        .build()
-        .unwrap();
-        let mut client = pool.get().await.unwrap();
-        let tx = client.transaction().await.unwrap();
-        tx.batch_execute("
-            CREATE TEMP TABLE asset_tag_category(id BIGSERIAL PRIMARY KEY,name TEXT,description TEXT,is_active BOOLEAN DEFAULT TRUE);
-            CREATE UNIQUE INDEX ON asset_tag_category(LOWER(name)) WHERE is_active;
-            CREATE TEMP TABLE asset_tag(id BIGSERIAL PRIMARY KEY,name TEXT,kind TEXT,description TEXT,category_id BIGINT,is_active BOOLEAN DEFAULT TRUE);
-            CREATE UNIQUE INDEX ON asset_tag(LOWER(name)) WHERE is_active;
-            CREATE TEMP TABLE asset_ip_tag(ip_address INET,tag_id BIGINT,PRIMARY KEY(ip_address,tag_id));
-            CREATE TEMP TABLE search_index_outbox(event_kind TEXT,aggregate_key TEXT,payload JSONB);
-        ").await.unwrap();
-        let data = envelope(
-            "tls",
-            serde_json::json!({"tls":tls(leaf(DEFAULT_TEAM_SERVER_SHA256, "CN=fixture"))}),
-        );
-        let rows =
-            vec![serde_json::json!({"kind":"service","ip_address":"192.0.2.42","data":data})];
-        assign_tags(&tx, &rows).await.unwrap();
-        assign_tags(&tx, &rows).await.unwrap();
-        assert_eq!(
-            tx.query_one("SELECT COUNT(*) FROM asset_ip_tag", &[])
-                .await
-                .unwrap()
-                .get::<_, i64>(0),
-            3
-        );
-        assert_eq!(
-            tx.query_one("SELECT COUNT(*) FROM search_index_outbox", &[])
-                .await
-                .unwrap()
-                .get::<_, i64>(0),
-            1
-        );
-        assign_tags(&tx, &[serde_json::json!({"kind":"service","ip_address":"192.0.2.43","c2_fingerprint":{"status":"matched"}})]).await.unwrap();
-        assert_eq!(
-            tx.query_one("SELECT COUNT(*) FROM asset_ip_tag", &[])
-                .await
-                .unwrap()
-                .get::<_, i64>(0),
-            3
-        );
-        tx.rollback().await.unwrap();
-        assert!(
-            client
-                .query_one("SELECT to_regclass('pg_temp.asset_ip_tag') IS NULL", &[])
-                .await
-                .unwrap()
-                .get::<_, bool>(0)
-        );
     }
 }

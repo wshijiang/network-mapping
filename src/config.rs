@@ -31,6 +31,8 @@ pub struct Config {
     #[serde(default)]
     pub scanner_diagnostics: crate::scanner_diagnostics::DiagnosticsConfig,
     #[serde(default)]
+    pub product_rules: ProductRulesConfig,
+    #[serde(default)]
     pub data_import: crate::data_import::DataImportConfig,
     #[serde(default)]
     pub data_export: crate::data_export::DataExportConfig,
@@ -64,6 +66,12 @@ pub struct Config {
     pub pwd_hash: PasswordHashConfig,
     pub security: SecurityConfig,
     pub email_config: Option<EmailConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductRulesConfig {
+    pub file: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1695,6 +1703,18 @@ impl Config {
 
     fn resolve_paths(&mut self, path: &Path, working_directory: &Path) {
         let config = self;
+        config.product_rules.file = config
+            .product_rules
+            .file
+            .take()
+            .filter(|file| !file.as_os_str().is_empty())
+            .map(|file| {
+                if file.is_relative() {
+                    working_directory.join(path).with_file_name(file)
+                } else {
+                    file
+                }
+            });
         config
             .database
             .resolve_relative_to(&working_directory.join(path), working_directory);
@@ -1842,6 +1862,27 @@ mod tests {
         .chain(extra.iter().copied())
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect()
+    }
+
+    #[test]
+    fn product_rules_file_is_optional_and_resolved_relative_to_configuration() {
+        let (mut config, _) = super::Config::from_env_pairs(environment_pairs(&[])).unwrap();
+        assert!(config.product_rules.file.is_none());
+        config.product_rules.file = Some("rules/local.json".into());
+        config.resolve_paths(Path::new("deploy/config.toml"), Path::new("/example"));
+        assert_eq!(
+            config.product_rules.file.as_deref(),
+            Some(Path::new("/example/deploy/rules/local.json"))
+        );
+        let (config, _) = super::Config::from_env_pairs(environment_pairs(&[(
+            "NM__PRODUCT_RULES__FILE",
+            "/etc/network-mapping/rules.json",
+        )]))
+        .unwrap();
+        assert_eq!(
+            config.product_rules.file.as_deref(),
+            Some(Path::new("/etc/network-mapping/rules.json"))
+        );
     }
 
     #[test]
@@ -2742,10 +2783,38 @@ pub enum ServerCommand {
         #[command(subcommand)]
         command: crate::federation::cli::FederationCommand,
     },
-    /// 扫描器运行时配置 · 网页内容富化（仅需 PostgreSQL，扫描器下次拉取生效）
+    /// 扫描器运行时配置 · 网页内容富化 / JARM（仅需 PostgreSQL，下一任务边界应用）
     ScannerConfig {
         #[command(subcommand)]
         command: crate::scanner_config_cli::ScannerConfigCommand,
+    },
+    /// 本地校验或回放服务产品规则
+    ProductRules {
+        #[command(subcommand)]
+        command: ProductRulesCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProductRulesCommand {
+    /// 输出内置规则包，作为扩展时的起始文件
+    Export,
+    /// 校验并预编译整个规则包
+    Validate {
+        /// 省略时使用内置规则包
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// 可选的上一份规则包，用于核对修订号
+        #[arg(long)]
+        against: Option<PathBuf>,
+    },
+    /// 使用本地原始服务观察检查命中结果
+    Test {
+        /// 省略时使用内置规则包
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        fixtures: PathBuf,
     },
 }
 

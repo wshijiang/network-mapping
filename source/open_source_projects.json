@@ -1,5 +1,5 @@
 {
-  "last_reviewed": "2026-10-26",
+  "last_reviewed": "2026-11-27",
   "projects": [
     {
       "name": "actix-files",
@@ -840,6 +840,16 @@
       "repository": "https://github.com/intlify/vue-i18n",
       "version": "11.2.8",
       "ecosystem": "frontend"
+    },
+    {
+      "name": "netfp",
+      "package": "netfp",
+      "version": "=0.2.1",
+      "ecosystem": "scanner",
+      "license": "MIT",
+      "usage": "JARM TLS ClientHello 编码、ServerHello 解码与指纹哈希；网络和预算由扫描器管理",
+      "homepage": "https://docs.rs/netfp/0.2.1/netfp/",
+      "repository": "https://github.com/pinanek/netfp"
     }
   ]
 }

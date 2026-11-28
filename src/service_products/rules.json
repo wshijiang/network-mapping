@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "ruleset_revision": 6,
+  "rules": [
+    {
+      "id": "sliver_multiplayer_certificate",
+      "product": { "id": "sliver", "name": "Sliver", "component": "Multiplayer" },
+      "source": "tls_leaf",
+      "basis": "certificate_template",
+      "match": {
+        "all": [
+          { "field": "subject_dn", "op": "eq_ignore_ascii_case", "value": "CN=multiplayer" },
+          { "field": "issuer_dn", "op": "eq_ignore_ascii_case", "value": "CN=operators" },
+          { "field": "self_signed", "op": "eq", "value": false },
+          { "field": "signature_algorithm", "op": "in", "values": ["ecdsa_sha256", "ecdsa_sha384", "ecdsa_sha512"] }
+        ]
+      },
+      "references": ["https://github.com/BishopFox/sliver/blob/v1.5.42/server/transport/mtls.go"]
+    },
+    {
+      "id": "mythic_management_html",
+      "product": { "id": "mythic", "name": "Mythic", "component": "Web UI" },
+      "source": "http_management_page",
+      "basis": "http_management_fingerprint",
+      "prefilter": "Mythic",
+      "match": {
+        "all": [
+          { "field": "title", "op": "eq", "value": "Mythic" },
+          { "field": "element_attribute", "selector": "head > link[rel=manifest]", "attribute": "href", "op": "eq", "value": "/new/manifest.json", "evidence_key": "manifest" },
+          { "field": "element_attribute", "selector": "head > script[src]", "attribute": "src", "op": "regex", "value": "\\A/new/static/js/main\\.[[:xdigit:]]{8}\\.js\\z", "evidence_key": "script" },
+          { "field": "element_attribute", "selector": "body > div#root", "attribute": "id", "op": "eq", "value": "root", "evidence_key": "mount" }
+        ]
+      },
+      "references": [
+        "https://github.com/its-a-feature/Mythic/blob/v3.4.0.61/mythic-react-docker/mythic/public/index.html",
+        "https://github.com/its-a-feature/Mythic/blob/v4.0.0rc5/mythic-react-docker/mythic/public/index.html"
+      ]
+    },
+    {
+      "id": "empire_management_html",
+      "product": { "id": "empire", "name": "Empire", "component": "Starkiller" },
+      "source": "http_management_page",
+      "basis": "http_management_fingerprint",
+      "prefilter": "Starkiller",
+      "match": {
+        "all": [
+          { "field": "title", "op": "eq", "value": "Starkiller" },
+          { "field": "element_text", "selector": "body > noscript", "op": "contains", "value": "starkiller doesn't work properly without JavaScript", "evidence_key": "noscript" },
+          { "field": "element_attribute", "selector": "body > div#app", "attribute": "id", "op": "eq", "value": "app", "evidence_key": "mount" },
+          { "field": "element_attribute", "selector": "script[type=module][src]", "attribute": "src", "op": "regex", "value": "\\A/(?:[^/\\\\\\x00-\\x1f\\x7f][^\\\\\\x00-\\x1f\\x7f]*)?\\z", "evidence_key": "script" }
+        ]
+      },
+      "references": [
+        "https://github.com/BC-SECURITY/Starkiller/blob/v4.0.3/index.html",
+        "https://github.com/BC-SECURITY/Starkiller/blob/v3.6.0/index.html"
+      ]
+    }
+  ]
+}

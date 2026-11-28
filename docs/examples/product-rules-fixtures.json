@@ -1,0 +1,83 @@
+[
+  {
+    "name": "sliver-leaf",
+    "expected_rule_ids": ["sliver_multiplayer_certificate"],
+    "data": {
+      "schema_version": 2,
+      "evidence": [{
+        "module": "tls",
+        "status": "success",
+        "result": {
+          "handshake_log": {
+            "server_certificates": {
+              "certificate": {
+                "parsed": {
+                  "subject_dn": "CN=multiplayer",
+                  "issuer_dn": "CN=operators",
+                  "signature": {
+                    "self_signed": false,
+                    "signature_algorithm": { "name": "ECDSA-SHA256" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }]
+    }
+  },
+  {
+    "name": "mythic-management-page",
+    "expected_rule_ids": ["mythic_management_html"],
+    "data": {
+      "schema_version": 2,
+      "evidence": [{
+        "module": "http",
+        "status": "success",
+        "result": {
+          "response": {
+            "status_code": 200,
+            "headers": { "content_type": ["text/html"] },
+            "body": "<title>Mythic</title><link rel=manifest href=/new/manifest.json><script src=/new/static/js/main.12fdaefe.js></script><div id=root></div>"
+          }
+        }
+      }]
+    }
+  },
+  {
+    "name": "starkiller-management-page",
+    "expected_rule_ids": ["empire_management_html"],
+    "data": {
+      "schema_version": 2,
+      "evidence": [{
+        "module": "http",
+        "status": "success",
+        "result": {
+          "response": {
+            "status_code": 200,
+            "headers": { "content_type": ["text/html"] },
+            "body": "<title>Starkiller</title><script type=module src=/assets/index-test.js></script><body><noscript>starkiller doesn't work properly without JavaScript</noscript><div id=app></div></body>"
+          }
+        }
+      }]
+    }
+  },
+  {
+    "name": "same-title-generic-page",
+    "expected_rule_ids": [],
+    "data": {
+      "schema_version": 2,
+      "evidence": [{
+        "module": "http",
+        "status": "success",
+        "result": {
+          "response": {
+            "status_code": 200,
+            "headers": { "content_type": ["text/html"] },
+            "body": "<title>Mythic</title><body>Example generic login</body>"
+          }
+        }
+      }]
+    }
+  }
+]

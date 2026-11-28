@@ -58,6 +58,39 @@ pub struct ServiceDetectionRuntimeConfig {
     /// documents: defaults apply, so upgrades keep enrichment enabled.
     #[serde(default)]
     pub web_content: WebContentRuntimeConfig,
+    #[serde(default)]
+    pub jarm: JarmRuntimeConfig,
+}
+
+/// Optional, bounded Salesforce JARM collection. Ten connections per TLS endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct JarmRuntimeConfig {
+    pub enabled: bool,
+    pub concurrency: usize,
+    pub probe_timeout_seconds: u64,
+    pub max_stage_seconds: u64,
+}
+impl Default for JarmRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            concurrency: 4,
+            probe_timeout_seconds: 3,
+            max_stage_seconds: 60,
+        }
+    }
+}
+impl JarmRuntimeConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=32).contains(&self.concurrency)
+            || !(1..=30).contains(&self.probe_timeout_seconds)
+            || !(1..=3600).contains(&self.max_stage_seconds)
+        {
+            return Err("jarm bounds: concurrency 1..32, probe_timeout_seconds 1..30, max_stage_seconds 1..3600".into());
+        }
+        Ok(())
+    }
 }
 
 /// Server-published bounds for the scanner's web content enrichment pass.
@@ -195,6 +228,7 @@ impl Default for ScannerRuntimeConfig {
                 target_timeout_seconds: 15,
                 max_result_bytes: 65_536,
                 web_content: WebContentRuntimeConfig::default(),
+                jarm: JarmRuntimeConfig::default(),
             },
             dns: DnsRuntimeConfig {
                 enabled: true,
@@ -293,6 +327,7 @@ impl ScannerRuntimeConfig {
             1_048_576,
         )?;
         self.service_detection.web_content.validate()?;
+        self.service_detection.jarm.validate()?;
         check_range(
             "dns.query_timeout_seconds",
             self.dns.query_timeout_seconds,
@@ -769,6 +804,47 @@ mod tests {
     fn rejects_excessive_probe_budget() {
         let mut config = ScannerRuntimeConfig::default();
         config.service_detection.max_probes_per_endpoint = 33;
+        assert!(config.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod jarm_tests {
+    use super::*;
+    #[test]
+    fn web_request_round_trips_jarm_bounds_and_expected_revision() {
+        let mut document = serde_json::to_value(ScannerRuntimeConfig::default()).unwrap();
+        document["service_detection"]["jarm"] = json!({"enabled":true,"concurrency":8,"probe_timeout_seconds":5,"max_stage_seconds":90});
+        let request: UpdateScannerConfiguration = serde_json::from_value(json!({"expectedRevision":7,"document":document,"changeReason":"controlled collection"})).unwrap();
+        assert_eq!(request.expected_revision, 7);
+        request.document.validate().unwrap();
+        let result = serde_json::to_value(request.document).unwrap();
+        assert_eq!(
+            result["service_detection"]["jarm"],
+            document["service_detection"]["jarm"]
+        );
+        assert_eq!(
+            result["service_detection"]["web_content"],
+            document["service_detection"]["web_content"]
+        );
+    }
+    #[test]
+    fn legacy_documents_cannot_implicitly_enable_jarm_and_bounds_are_validated() {
+        let mut document = serde_json::to_value(ScannerRuntimeConfig::default()).unwrap();
+        document["service_detection"]
+            .as_object_mut()
+            .unwrap()
+            .remove("jarm");
+        let mut config: ScannerRuntimeConfig = serde_json::from_value(document).unwrap();
+        assert!(!config.service_detection.jarm.enabled);
+        config.validate().unwrap();
+        config.service_detection.jarm.concurrency = 0;
+        assert!(config.validate().is_err());
+        config.service_detection.jarm.concurrency = 4;
+        config.service_detection.jarm.probe_timeout_seconds = 31;
+        assert!(config.validate().is_err());
+        config.service_detection.jarm.probe_timeout_seconds = 3;
+        config.service_detection.jarm.max_stage_seconds = 3601;
         assert!(config.validate().is_err());
     }
 }

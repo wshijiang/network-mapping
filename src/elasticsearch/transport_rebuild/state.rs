@@ -48,6 +48,8 @@ pub(super) struct Run {
     pub target: Value,
     pub previous_runtime: Option<Value>,
     pub source: Value,
+    #[serde(default)]
+    pub product_rules: Option<crate::service_products::RuleStamp>,
     // Recomputed on resume. Persisting this map made every tag page rewrite a
     // payload proportional to the number of executions.
     #[serde(skip)]

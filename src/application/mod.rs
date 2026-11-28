@@ -57,6 +57,10 @@ pub async fn run(args: Clis) -> io::Result<()> {
         ));
     }
 
+    if let Some(config::ServerCommand::ProductRules { command }) = args.command.as_ref() {
+        return crate::service_products::execute_rules_command(command);
+    }
+
     let (config, config_check) = match args.config_source {
         config::ConfigSource::File => config::Config::from_file_with_check(&args.config)?,
         config::ConfigSource::Env => config::Config::from_env_with_check()?,
@@ -84,6 +88,9 @@ pub async fn run(args: Clis) -> io::Result<()> {
     );
     config_check.emit_startup();
     config.check();
+    if args.command.is_none() && args.reset_admin_password.is_none() {
+        crate::service_products::initialize_rules(config.product_rules.file.as_deref())?;
+    }
     let request_log_config = config.requests.clone();
     let monitor_config = config.monitor.clone();
     let elasticsearch_config = config.elasticsearch.clone();

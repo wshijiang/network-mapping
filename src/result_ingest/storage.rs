@@ -484,9 +484,6 @@ async fn save_scanner_results_inner(
     }
     stage.finish(true);
     if !observation_rows.is_empty() {
-        crate::service_fingerprint::assign_tags(&transaction, &observation_rows)
-            .await
-            .map_err(scanner_result_database_error)?;
         let stage = WriteStage::new("load_asset_tags");
         let addresses = observation_rows
             .iter()

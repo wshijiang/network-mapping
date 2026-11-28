@@ -138,16 +138,164 @@ request_timeout_seconds = 180
 
 2026-10-27，修复基线 `5cb0bc82eecec854388cdca1189bb60e1536fc02` 的 [Service evidence inference CI](https://github.com/wshijiang/network-mapping/actions/runs/40498195862) 已通过：使用 PostgreSQL 和真实 Elasticsearch **9.5.4** 验证基础端点重建、投影、服务证据及不可变事实；[重新发布 PR](https://github.com/wshijiang/network-mapping/pull/136) 将 `transport_rebuild::tests` 与 `transport_rebuild::recovery_tests` 都纳入该工作流，覆盖模式选择、原地备份、PIT 恢复及真实 ES 重建。测试创建独立合成资源，不操作生产索引。生产迁移仍须事先备份并按实际配置验收；真实设备网络、浏览器视觉与线上部署不在该 CI 验证范围内。
 
-## 扫描威胁线索与自动标签
+## 服务产品识别
 
-服务端使用现有 schema_version=2 的 TLS / HTTPS 原始握手离线匹配，扫描请求数保持为原有探测数量。规则 v1 支持 Cobalt Strike Team Server 默认证书的叶证书 SHA-256 精确匹配，以及 AsyncRAT / DcRAT 的主体、颁发者、自签名状态、9999 年到期和 SHA512-RSA 签名组合。HTTPS 使用首个响应的证书，避免把跳转目的站的证据归给原端口。
+仓库已有 `service` 协议识别结果、Web 技术栈，以及旧 `c2_fingerprint` 证书线索。产品名称和版本等线索原先保存在协议原始数据、Web 技术栈或专项 C2 结果中；本次增加通用的服务产品结果结构，便于用同一组字段查看和查询本节列出的普通软件声明与 C2 部署候选。
 
-资产端口展开区的“威胁线索”显示识别对象、匹配依据和观测时间。原始证据路径、SNI（若探针保留）、规则版本和来源可在技术详情查看。常规协议、服务与技术栈识别继续作为测绘结果展示。握手失败时可能仍取得服务端证书，失败状态保留。
+| 字段 | 表达内容 | 示例 |
+| --- | --- | --- |
+| `service` | 既有应用协议识别结果 | `https`、`tls`、`ssh` |
+| `products[]` | 匹配到的产品声明或部署候选，可为空或有多项 | nginx 及其声明版本、疑似 Sliver Multiplayer |
+| `product_identification` | 本次产品规则分析的状态、证据完整程度、规则版本和观察来源；另附检测方式及 JARM 记录 | `identified`、`coverage=partial`、原始观察时间 |
 
-新扫描结果入库时，命中自动添加 IP 级“威胁”“恶意软件”及“Cobalt Strike”或“AsyncRAT / DcRAT”标签，默认归入“威胁识别”分类，类型为 malicious。同名活动标签沿用现有配置。家族共享模板按系列名称标记；Cobalt Strike 同时具有授权测试用途，标签表示历史观测待复核。
+已有 Web 技术栈及其 `tech` 查询继续使用原有识别流程，旧 `c2_fingerprint` 保留兼容；本次没有把全部既有技术目录迁入 `products[]`。`products[]` 的具体范围以本节产品表为准。
 
-标签沿用资产标签机制，适用于该 IP 的其他端口和历史搜索结果。标签不能替代具体端口证据或直接证明主机感染。重复上报使用幂等关联，写入与扫描回执同事务提交，搜索更新通过 outbox 重试。证据不足、后续未匹配或地址复用时不会自动清除历史标签，管理员可复核移除；再次收到命中会重新添加。
+服务端产品规则只分析已保存的协议观察，不查询 IOC 库、不依赖威胁情报开关，也不自行连接目标。扫描器保留基础补充证据不会增加原有探测请求；后文可选的 JARM 采集会额外发起最多 10 次连接与 ClientHello 探测，默认关闭。
 
-旧扫描记录在详情读取时可按当前规则重算。自动标签由新结果入库触发，存量记录需重新扫描后产生标签。QakBot 仅完成有限历史抓包候选验证，Sliver 仅验证通用 mTLS 采集行为，当前规则库尚未包含这两类识别规则。
+### 当前支持与判断范围
+
+| 产品 ID | 展示名称 | 依据与结果 |
+| --- | --- | --- |
+| `nginx` | nginx | 首个 HTTP 响应 Server 头声明；`identified`，可提取版本 |
+| `apache_http_server` | Apache HTTP Server | 首个 HTTP 响应 Server 头声明；`identified`，可提取版本 |
+| `openssh` | OpenSSH | SSH 握手的 `server_id.software`；`identified`，可提取版本 |
+| `cobalt_strike` | Cobalt Strike / Team Server | 叶证书 SHA-256 符合公开记录的默认证书；`suspected` |
+| `asyncrat_family` | AsyncRAT / DcRAT | 主体、颁发者、自签名、9999 年到期与 SHA512-RSA 组合；`suspected`，不细分共享模板的具体家族 |
+| `sliver` | Sliver / Multiplayer | 默认多人管理端的主体、颁发者、非自签名与 ECDSA 签名组合；`suspected`，不表示已发现植入体通信监听器 |
+| `qakbot` | QakBot | 历史证书主体与颁发者的完整结构组合；`suspected`，`basis=historical_certificate_heuristic`，家族归属需复核 |
+| `mythic` | Mythic / Web UI | 管理页标题、挂载节点、manifest 与构建脚本路径组合。`suspected`，`basis=http_management_fingerprint` |
+| `empire` | Empire / Starkiller | 管理页标题、挂载节点、模块脚本与 Starkiller 专属 `noscript` 提示组合。`suspected`，`basis=http_management_fingerprint` |
+
+`identified` 表示服务声明了产品名称，不证明声明可信或存在漏洞。`suspected` 表示证书或管理页特征符合已收录规则，不确认服务角色、恶意用途或主机感染。通用 404、自签名、正文中的软件名称以及网页文件 IOC 不独立产生产品身份。Sliver 目前仅覆盖默认 Multiplayer 管理端证书，不覆盖通用 mTLS、HTTP(S)、DNS 或 WireGuard 植入体监听器。QakBot 仅提供历史证书启发式，不保证适用于当前基础设施或全部变种。
+
+HTTP/HTTPS 产品声明及 HTTPS 证书使用首次响应，跳转目的站不能覆盖原端口身份。管理页规则支持符合下文条件的同源落地页。TLS 握手失败前取得的证书可以产生候选，采集仍标记不完整。扫描器在既有大小预算内保留选中服务之外的 HTTP/HTTPS/TLS 补充证据，这一步只保留已执行探测的结果，不改变原始协议选择，也不另发请求。可选 JARM 的额外连接另见后文。
+
+### Sliver 与 QakBot 的候选边界
+
+Sliver 规则依据上游 v1.5.42 的多人管理端证书生成逻辑：叶证书主体为 `CN=multiplayer`、颁发者为 `CN=operators`，并要求明确的非自签名状态和 ECDSA 签名。只命中名称片段、通用 mTLS 或普通 CA 不产生候选。TLS 握手失败但已保存完整必要证书字段时仍可输出候选，并保留失败状态与 `coverage=partial`。
+
+QakBot 规则参考 2023 年公开研究的历史证书结构，要求同一叶证书上主体包含国家、组织单位和域名 CN，颁发者包含国家、省州、城市、组织和域名 CN；完整字段形状匹配，并额外要求两者的国家与 CN 相同。拒绝常见 `Domain Control Validated` 组织单位、额外 DN 字段、缺失和超长值。该研究提示候选可能误报，因此详情明确标为「历史证书启发式」，不输出已确认家族、服务角色、软件版本或当前恶意活动。
+
+新增规则复用已有原始握手，不需要导入 IOC 或新增扫描器配置，不发送 C2 专属通信或控制消息。只使用叶证书；HTTPS 只使用首次响应的证书，不把链证书、跳转目的站或正文中的产品名字归给源端口。回归使用合成字段及普通/矛盾/不完整证书反例，不代表已完成真实部署或全版本认证。
+
+研究与实现依据：[Sliver 管理端 TLS 配置](https://github.com/BishopFox/sliver/blob/v1.5.42/server/transport/mtls.go)、[Sliver CA 生成](https://github.com/BishopFox/sliver/blob/v1.5.42/server/certs/ca.go)、[Sliver 证书生成](https://github.com/BishopFox/sliver/blob/v1.5.42/server/certs/certs.go)、[QakBot 历史证书研究](https://www.embeeresearch.io/advanced-threat-intel-queries-catching-83-qakbot-servers-with-regex-censys-and-tls-certificates/)。
+
+### Mythic 与 Empire 管理端
+
+自规则 v5 起，服务端在同一个 HTML 响应中匹配上表所列结构。直接响应须为 HTTP 200 `text/html`。首次根路径响应若发生重定向，可复用扫描器已保存的 `web_assets` 落地页。首次 `Location` 须与落地页记录的首个跳转一致，全部跳转须保持协议、主机和端口一致，最终落地页须为 HTTP 200。来源字段须能核对，出现不同 Host/SNI 上下文时跳过落地页。规则检查未标记截断且不超过 64 KiB 的正文。
+
+候选只描述观察到的管理界面组件，软件版本留空。规则参考 Mythic **v3.4.0.61** 和 **v4.0.0rc5** 的上游构建页面，以及 Starkiller **v3.6.0** 和 **v4.0.3** 的上游页面模板。回归用这些结构构造本地样本，真实部署上的误报率和未覆盖版本尚待验证。[Mythic v3.4.0.61](https://github.com/its-a-feature/Mythic/blob/v3.4.0.61/mythic-react-docker/mythic/public/index.html) · [Mythic v4.0.0rc5](https://github.com/its-a-feature/Mythic/blob/v4.0.0rc5/mythic-react-docker/mythic/public/index.html) · [Starkiller v3.6.0](https://github.com/BC-SECURITY/Starkiller/blob/v3.6.0/index.html) · [Starkiller v4.0.3](https://github.com/BC-SECURITY/Starkiller/blob/v4.0.3/index.html)
+
+### 查看与搜索
+
+搜索和资产端口表的「服务」列同时显示协议与产品，候选带黄色「疑似」徽标。展开端口，在「服务识别 → 产品识别」查看规则、证据路径、Host/SNI、观察时间与来源。历史弹窗显示对应原始观察的产品结果。
+
+高级搜索支持产品 ID，以及同一产品上的 ID 与版本组合：
+
+```text
+service = https AND product = cobalt_strike
+product = "nginx@1.26.2"
+product IN (cobalt_strike, asyncrat_family, sliver, qakbot)
+product IN (mythic, empire)
+EXISTS(product)
+```
+
+`product != cobalt_strike` 只表示当前结果没有该产品匹配，不能解释为目标正常。产品字段只匹配本地观察；联测结果不会借展示合流获得本地产品身份。
+
+### API 与旧数据
+
+搜索及资产端口、端口历史响应新增：
+
+- `products[]`：`id`、`name`、`component`、`version`、`assessment`、`basis`、`evidence[]`。
+- `product_identification` 包含 `status`（`identified` / `suspected` / `not_matched` / `insufficient_evidence`）、`coverage`（`complete` / `partial`）、`ruleset_revision`、`ruleset_sha256`（旧观察可缺省）、`observed_at`、`stale` 和 `observation_ref`。
+
+`products[]` 是匹配结果，`product_identification` 用于解释匹配和证据状态；它们不会因为有一项为空而互相替代：
+
+- `status=identified` 表示存在产品声明匹配且无疑似候选。`suspected` 表示至少有证书或管理页候选。`products[]` 为空时，`not_matched` 表示本次可检查的协议证据未匹配已收录产品规则，`insufficient_evidence` 表示当前证据不足以得出产品匹配结果。
+- `coverage=partial` 表示相关协议观察缺失、失败或被截断等情况；`complete` 仅表示当前汇总未发现这些不完整标记，不保证扫描了所有协议、支持所有产品或发现了端点上的全部软件。已看到明确 nginx 声明但 TLS 证据不全时，可以同时得到 `status=identified` 和 `coverage=partial`。
+- `ruleset_revision` 和 `ruleset_sha256` 标识实际使用的规则包。`observed_at` 属于原服务观察，重算保留该时间。`stale` 表示该结果早于较新的端点观察，或规则修订号、摘要与当前规则包不一致。
+- JARM 状态单独保存在 `jarm` 中。得到 JARM 指纹也可能没有任何产品匹配，不能用 `jarm.status=success` 推断产品 `status=identified`。
+
+#### 如何核对识别证据
+
+`products[].evidence[]` 保存规则采用的关键值及其来源位置，不是完整原始报文或抓包文件，也不表示已经确认软件真实身份或恶意用途：
+
+| 字段 | 核对方法 |
+| --- | --- |
+| `rule_id` / `detection_method` | 查看命中的规则及使用的检测方式；旧记录可能缺少检测方式字段 |
+| `probe` | 保存该条依据的采集模块，例如 `https`、`ssh` 或 `web_assets` |
+| `field_path` | 相对于该次服务观察 `data` 对象的 JSON Pointer，不是相对于搜索响应根对象的路径 |
+| `details` | 规则采用的关键字段和值，展示长度受限；完整数据以仍被保留的原始观察为准 |
+| `sni` / `http_host` | 采集时的虚拟主机上下文，不用于重新解析或扩大扫描目标 |
+| `source_url` | 可选的规则实现或研究参考，不是目标响应的下载地址 |
+| `product_identification.observation_ref` | 与上述路径配合，定位证据所属的服务观察 |
+
+例如 HTTPS 观察中的 `Server: nginx/1.26.2` 可生成产品 `nginx`、版本 `1.26.2`、`basis=service_declaration`，证据路径通常为 `/evidence/0/result/response/headers/server`（实际索引随观察排列变化）。这说明服务端自报了 nginx；证书模板匹配则输出 `suspected`。原始数据已清理时，仍可展示已保存的规则依据，但不能仅凭 `field_path` 取回缺失原文。
+
+内置产品规则版本为 **6**。v2 增加 Sliver 和 QakBot，v3 增加检测方式及 JARM 元数据，v4 规范 Windows OpenSSH 版本，v5 增加 Mythic 和 Empire 管理端。v6 将 Sliver、Mythic 和 Empire 条件移入可独立加载的 JSON 规则包，`product_identification.ruleset_sha256` 记录实际使用的文件摘要。结果按自身服务观察时间更新，较早或旧规则的结果标记 `stale`。相同产品存在不同版本声明时并列保留。[规则格式、校验与回放](SERVICE_PRODUCT_RULES.md)
+
+启动会增加 ES 映射。新扫描与执行投影重放生成可搜索产品；旧端口/历史详情只在原始数据确属该次服务观察时即时推断。若需要让全部存量产品进入 `product` 搜索，可在备份后按本文「存储升级与回滚」重建端点投影；不会自动重扫网络或改写原始观察。新前端兼容缺少新字段的服务端，保留旧版证书线索展示；旧 `c2_fingerprint` 字段和指纹过滤暂保留兼容。
+
+产品候选不再自动添加 IP 级「威胁」「恶意软件」或家族标签。既有标签和人工标签保留，可由管理员复核移除；产品识别与 IOC 风险、标签各自独立。
 
 研究来源：[Cobalt Strike 默认证书研究](https://www.recordedfuture.com/research/cobalt-strike-servers)、[AsyncRAT / DcRAT 证书模板研究](https://www.trendmicro.com/content/dam/trendmicro/global/en/research/21/i/ssl-tls-technical-brief/ssl-tls-technical-brief.pdf)。
+
+
+### 检测方式与 JARM 主动采集
+
+| 检测方式 | 是否主动探测 | 基本原理 | 当前用途 |
+| --- | --- | --- | --- |
+| JARM | 是，显式启用后额外最多 10 次 TCP 连接与 ClientHello 探测 | 对 10 组不同 ClientHello 的服务端密码套件、TLS 版本、ALPN 与扩展响应生成 62 个十六进制字符的指纹 | 保存 TLS 配置指纹；当前没有以 JARM 单独归属 C2 家族的规则 |
+| TLS Certificate | 证书采集是；分析复用已有观察，无额外连接 | 分析叶证书主题、颁发者、有效期、公钥等元数据 | Cobalt Strike、AsyncRAT / DcRAT、Sliver、QakBot 候选，适用前述规则边界 |
+| HTTP Fingerprint | HTTP 采集是；产品规则复用已有响应 | 分析 HTTP 状态、响应头和内容特征 | nginx / Apache 的 Server 声明，以及 Mythic / Empire 管理页候选 |
+| Protocol Fingerprint | 通常是；已有工业被动接收方式除外，识别复用已有握手 | 根据应用层握手和协议响应识别服务 | 既有协议识别及 OpenSSH 软件声明；不表示已实现各 C2 的私有协议规则 |
+
+JARM 以 TLS 握手响应为依据。证书轮换后，握手响应特征保持一致时，JARM 可以保持稳定。共享反向代理也可能为不同应用返回相同的握手特征。服务端独立记录 JARM 观察，现有家族候选由证书或 HTTP 管理页规则产生。[JARM 原理与样本重合情况](https://github.com/salesforce/jarm#how-jarm-works)
+
+在扫描器本地 `config.toml` 中明确允许 JARM：
+
+```toml
+[service_detection.jarm]
+enabled = true
+concurrency = 4
+probe_timeout_seconds = 3
+max_stage_seconds = 60
+```
+
+再在控制台「扫描器 → 配置 → JARM 主动采集」启用该扫描器的远程开关。服务识别本身也需启用。JARM 本地和服务端默认均为关闭，远程开启不能覆盖本地禁用；旧服务端未下发该段时保留本地配置。配置在下一任务快照生效。模块模式需要同步更新 service-detection worker，旧 worker 不具备 JARM 采集能力。
+
+参数范围：`concurrency` 1–32、`probe_timeout_seconds` 1–30 秒、`max_stage_seconds` 1–3600 秒。并发以端点计，完整指纹需要 10 个按原始顺序的探测槽；每槽新建 TCP 连接并发送一组 ClientHello，最多尝试一次，不完成应用会话，无重试。预算或取消可使实际执行少于 10 槽；沿用 `server_rate_limit` 的每 IP 连接间隔。每连接最多读取 64 KiB，仅解析 ServerHello/拒绝响应，不发送应用层请求；同时受块级总预算、任务剩余预算、取消信号及 64 MiB 结果上限约束。
+
+只对本次已有 TLS ServerHello 或证书证据的 TCP 端点采集（包括保留服务端证书的失败 mTLS 握手），不按端口号猜测，不跟随 HTTPS 跳转目的站。连接固定到扫描 IP 与端口；任务 `probe_options.server_name` 仅作为经过校验的 SNI，无此项时使用扫描 IP 文本，不执行额外 DNS 解析。
+
+成功指纹要求 10 个槽都取得可判定结果，且至少一个槽取得 ServerHello；这不要求 10 次成功或完整的 TLS 握手。显式 TLS 拒绝或尚未收到任何字节时的正常关闭记为空槽；超时、连接异常、截断、畸形或超限响应标为不完整，不生成有效哈希。全部拒绝显示 `no_response`，不发布全零指纹。块级超时或取消会丢弃尚在执行的端点采集，保留基础服务证据和已完成端点；采集失败不会使基础扫描失败。JARM 与单次 ServerHello 的 JA3S 不同，共享指纹只说明 TLS 配置相似，不能单独确认家族或恶意用途。
+
+API 字段位置如下：
+
+- `product_identification.detection_methods[]`：`id`（`jarm` / `tls_certificate` / `http_fingerprint` / `protocol_fingerprint`）、`name`、`active_probe`（采集是否需要主动网络交互）、`additional_probe`（该方式是否需要额外连接）、`observed`（该次观察是否有此类记录；仅被动协议证据时 `active_probe=false`）、`principle`（稳定原理键）。`active_probe` / `additional_probe` 描述采集方式，不代表本次已实际执行。`observed=true` 表示有相应记录，JARM 记录可能只有部分结果；是否得到指纹仍需看 `jarm.status` 与 `fingerprint`。方式清单不代表四类方式均有 C2 产品规则或均已采集成功。
+- `product_identification.jarm`：没有可展示记录时为 `null`，可能是未启用、没有符合条件的端点、取消/预算不足导致记录未保留，或记录未通过格式校验；不能仅凭 `null` 判断从未尝试过连接。存在记录时包含 `status`（`success` / `partial` / `no_response`）、`fingerprint`（不完整或全部拒绝为 `null`）、`expected_probes`、`attempted_probes`、`completed_probes`、`sni`、`field_path`。`attempted_probes` 是已尝试槽数，`completed_probes` 是可判定槽数，包括 ServerHello、明确 TLS 拒绝及未收到任何字节时的正常关闭，不等同于成功 ServerHello 数或完成 TLS 会话数。
+- `products[].evidence[].detection_method` 标明产品规则使用的方式。新字段缺省兼容旧数据，不把历史观察标成已完成 JARM。
+
+搜索、端口当前与历史 API 沿用产品观察时钟携带这些元数据；JARM 不创建虚构产品或自动恶意标签，也未增加 JARM DSL 过滤字段。只有新扫描能获取新 JARM；重放旧数据不会主动连接网络。
+
+实现使用固定版本 [netfp 0.2.1](https://docs.rs/netfp/0.2.1/netfp/) 的纯编解码与哈希组件，网络、速率及预算由扫描器控制。算法说明见 [Salesforce JARM](https://github.com/salesforce/jarm)。回归仅使用本地合成 TLS 响应，未探测外部 C2，也不代表已完成各类真实部署验证。
+
+
+### 通过 Web 或服务器 CLI 管理 JARM
+
+Web 入口为「扫描器 → 配置 → JARM 主动采集」，可修改 `enabled`、`concurrency`、`probe_timeout_seconds`、`max_stage_seconds`。管理员通过已有 `GET/PUT /api/scanner/{scanner_id}/configuration` 读写完整运行配置，发布请求需携带 `expectedRevision`；旧版本或并发更新发生冲突时重新加载后再发布。节点本地授权和下一任务边界生效规则不变。
+
+服务器 CLI 读写同一份配置，无需运行 HTTP 或 Elasticsearch，仅需正确的 PostgreSQL 连接配置：
+
+```bash
+# 使用实际扫描器 UUID 替换 <ID>；可在命令前指定 --config /path/to/config.toml。
+network_mapping_server scanner-config show <ID>
+network_mapping_server scanner-config set-jarm <ID> --enabled true --concurrency 4 --probe-timeout-seconds 3 --max-stage-seconds 60 --change-reason "授权资产盘点"
+network_mapping_server scanner-config set-jarm <ID> --enabled false --change-reason "暂停额外 TLS 握手"
+```
+
+`set-jarm` 仅修改给出的字段，保留其他 JARM 参数和网页抓取、端口扫描等配置；不传任何修改字段会报错。参数范围与 Web 相同，`--enabled` 必须显式传 `true` 或 `false`，变更原因最多 500 个字符。每次成功更新都在同一事务中写入新修订、历史与审计；如果 Web 或另一个 CLI 已先修改配置，则报修订冲突并退出，不覆盖并发更新。`show` 可核对当前文档和修订；现有 `set-web-content` 命令继续可用。
+
+两种入口均只能管理服务端运行配置，不能越过扫描节点本地 `service_detection.enabled` / `service_detection.jarm.enabled` 授权。旧 worker 需同步升级后才能实际采集 JARM。
+
+Windows OpenSSH 的 `OpenSSH_for_Windows_9.5` 声明输出产品 `openssh`、版本 `9.5`，平台前缀保留在原始声明证据中，`product = "openssh@9.5"` 可与其他平台的同版本一并查询。旧规则详情仅在原始数据属于对应服务观察时回算；存量搜索投影需按前述步骤重放，新规则不会刷新旧观察时间。

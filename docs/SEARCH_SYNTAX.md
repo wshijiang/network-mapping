@@ -689,3 +689,16 @@ web.status = partial
 
 Web 技术目录现支持 `tech = minio`、`tech = s3`、`tech = gitlab` 和 `tech = git`；
 产品身份与协议能力分别判断，证据要求见 [技术目录](WEB_TECHNOLOGY_CATALOG.md)。
+
+## 服务产品
+
+`service` 保持应用协议语义；`product` 查询 `products[]` 中已保存的软件声明匹配或部署候选，不表示已确认恶意软件。原有 `tech` 查询继续针对 Web 技术栈，支持范围与 `product` 不同。支持 `=`、`!=`、`IN`、`NOT IN`、`EXISTS(product)`，值为产品 ID 或 `ID@版本`。版本条件与 ID 在同一 nested 产品内匹配，否定表示没有对应产品，并不表示目标正常。
+
+```text
+service = https AND product = cobalt_strike
+product IN (sliver, qakbot)
+product IN (mythic, empire)
+product = "nginx@1.26.2"
+```
+
+当前产品范围、候选含义、API 字段与存量数据进入搜索的方法见[服务产品识别](SERVICE_PROTOCOLS.md#服务产品识别)。
