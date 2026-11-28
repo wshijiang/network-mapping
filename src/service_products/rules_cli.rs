@@ -30,6 +30,7 @@ pub(crate) fn execute(command: &ProductRulesCommand) -> io::Result<()> {
     let summary = json!({
         "source": file.as_deref().map_or_else(|| "embedded".into(), |path| path.display().to_string()),
         "ruleset_revision": pack.stamp.revision,
+        "evaluator_revision": pack.stamp.evaluator_revision,
         "ruleset_sha256": pack.stamp.sha256,
         "rules": pack.count()
     });

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{Evidence, Product, bounded};
+use super::{EVALUATOR_REVISION, Evidence, Product, RETIRED_PRODUCT_IDS, bounded};
 
 mod expression;
 mod json;
@@ -42,6 +42,7 @@ pub(super) fn initialize(path: Option<&Path>) -> io::Result<()> {
         event = "ProductRulesLoaded",
         source = %path.map_or_else(|| "embedded".into(), |path| path.display().to_string()),
         ruleset_revision = rules.stamp.revision,
+        evaluator_revision = rules.stamp.evaluator_revision,
         ruleset_sha256 = %rules.stamp.sha256,
         rules = rules.count(),
         "服务产品规则已加载"
@@ -52,6 +53,8 @@ pub(super) fn initialize(path: Option<&Path>) -> io::Result<()> {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(crate) struct Stamp {
     pub revision: u32,
+    #[serde(default)]
+    pub evaluator_revision: u32,
     pub sha256: String,
 }
 
@@ -145,10 +148,8 @@ fn short_text(text: &str, max: usize) -> bool {
 }
 
 fn reserved_product(id: &str) -> bool {
-    matches!(
-        id,
-        "cobalt_strike" | "asyncrat_family" | "qakbot" | "nginx" | "apache_http_server" | "openssh"
-    )
+    matches!(id, "cobalt_strike" | "asyncrat_family" | "qakbot")
+        || RETIRED_PRODUCT_IDS.contains(&id)
 }
 
 impl RuleSet {
@@ -179,6 +180,7 @@ impl RuleSet {
         let mut rules = Self {
             stamp: Stamp {
                 revision: file.ruleset_revision,
+                evaluator_revision: EVALUATOR_REVISION,
                 sha256: format!("{:x}", Sha256::digest(bytes)),
             },
             tls: Vec::new(),

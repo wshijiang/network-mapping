@@ -140,15 +140,15 @@ request_timeout_seconds = 180
 
 ## 服务产品识别
 
-仓库已有 `service` 协议识别结果、Web 技术栈，以及旧 `c2_fingerprint` 证书线索。产品名称和版本等线索原先保存在协议原始数据、Web 技术栈或专项 C2 结果中；本次增加通用的服务产品结果结构，便于用同一组字段查看和查询本节列出的普通软件声明与 C2 部署候选。
+`products[]` 保存基于服务证据得出的 C2 部署候选。`service` 保留协议识别结果，`web` 保留 Web 技术栈。旧 `c2_fingerprint` 与新产品结果在端点投影时复用同一次证书判定。
 
 | 字段 | 表达内容 | 示例 |
 | --- | --- | --- |
 | `service` | 既有应用协议识别结果 | `https`、`tls`、`ssh` |
-| `products[]` | 匹配到的产品声明或部署候选，可为空或有多项 | nginx 及其声明版本、疑似 Sliver Multiplayer |
-| `product_identification` | 本次产品规则分析的状态、证据完整程度、规则版本和观察来源；另附检测方式及 JARM 记录 | `identified`、`coverage=partial`、原始观察时间 |
+| `products[]` | 匹配到的 C2 部署候选，可为空或有多项 | 疑似 Sliver Multiplayer |
+| `product_identification` | 本次产品规则分析的状态、证据完整程度、规则版本和观察来源；另附检测方式及 JARM 记录 | `suspected`、`coverage=partial`、原始观察时间 |
 
-已有 Web 技术栈及其 `tech` 查询继续使用原有识别流程，旧 `c2_fingerprint` 保留兼容；本次没有把全部既有技术目录迁入 `products[]`。`products[]` 的具体范围以本节产品表为准。
+nginx 和 Apache HTTP Server 分别通过 `tech = nginx` 和 `tech = apache` 查询。OpenSSH 软件声明保留在原始 SSH 握手证据中。旧 `c2_fingerprint` 保留资产筛选和历史兼容。
 
 服务端产品规则只分析已保存的协议观察，不查询 IOC 库、不依赖威胁情报开关，也不自行连接目标。扫描器保留基础补充证据不会增加原有探测请求；后文可选的 JARM 采集会额外发起最多 10 次连接与 ClientHello 探测，默认关闭。
 
@@ -156,9 +156,6 @@ request_timeout_seconds = 180
 
 | 产品 ID | 展示名称 | 依据与结果 |
 | --- | --- | --- |
-| `nginx` | nginx | 首个 HTTP 响应 Server 头声明；`identified`，可提取版本 |
-| `apache_http_server` | Apache HTTP Server | 首个 HTTP 响应 Server 头声明；`identified`，可提取版本 |
-| `openssh` | OpenSSH | SSH 握手的 `server_id.software`；`identified`，可提取版本 |
 | `cobalt_strike` | Cobalt Strike / Team Server | 叶证书 SHA-256 符合公开记录的默认证书；`suspected` |
 | `asyncrat_family` | AsyncRAT / DcRAT | 主体、颁发者、自签名、9999 年到期与 SHA512-RSA 组合；`suspected`，不细分共享模板的具体家族 |
 | `sliver` | Sliver / Multiplayer | 默认多人管理端的主体、颁发者、非自签名与 ECDSA 签名组合；`suspected`，不表示已发现植入体通信监听器 |
@@ -166,9 +163,9 @@ request_timeout_seconds = 180
 | `mythic` | Mythic / Web UI | 管理页标题、挂载节点、manifest 与构建脚本路径组合。`suspected`，`basis=http_management_fingerprint` |
 | `empire` | Empire / Starkiller | 管理页标题、挂载节点、模块脚本与 Starkiller 专属 `noscript` 提示组合。`suspected`，`basis=http_management_fingerprint` |
 
-`identified` 表示服务声明了产品名称，不证明声明可信或存在漏洞。`suspected` 表示证书或管理页特征符合已收录规则，不确认服务角色、恶意用途或主机感染。通用 404、自签名、正文中的软件名称以及网页文件 IOC 不独立产生产品身份。Sliver 目前仅覆盖默认 Multiplayer 管理端证书，不覆盖通用 mTLS、HTTP(S)、DNS 或 WireGuard 植入体监听器。QakBot 仅提供历史证书启发式，不保证适用于当前基础设施或全部变种。
+`suspected` 表示证书或管理页特征符合已收录规则，服务角色、恶意用途和主机感染情况仍需独立核实。通用 404、自签名、正文中的软件名称以及网页文件 IOC 不独立产生产品身份。Sliver 目前仅覆盖默认 Multiplayer 管理端证书，不覆盖通用 mTLS、HTTP(S)、DNS 或 WireGuard 植入体监听器。QakBot 仅提供历史证书启发式，不保证适用于当前基础设施或全部变种。
 
-HTTP/HTTPS 产品声明及 HTTPS 证书使用首次响应，跳转目的站不能覆盖原端口身份。管理页规则支持符合下文条件的同源落地页。TLS 握手失败前取得的证书可以产生候选，采集仍标记不完整。扫描器在既有大小预算内保留选中服务之外的 HTTP/HTTPS/TLS 补充证据，这一步只保留已执行探测的结果，不改变原始协议选择，也不另发请求。可选 JARM 的额外连接另见后文。
+HTTPS 证书取自首次响应，以保留原端口的证据归属。管理页规则支持符合下文条件的同源落地页。TLS 握手失败前取得的证书可以产生候选，采集仍标记不完整。扫描器在既有大小预算内保留选中服务之外的 HTTP/HTTPS/TLS 补充证据，这一步只保留已执行探测的结果，不改变原始协议选择，也不另发请求。可选 JARM 的额外连接另见后文。
 
 ### Sliver 与 QakBot 的候选边界
 
@@ -188,13 +185,12 @@ QakBot 规则参考 2023 年公开研究的历史证书结构，要求同一叶�
 
 ### 查看与搜索
 
-搜索和资产端口表的「服务」列同时显示协议与产品，候选带黄色「疑似」徽标。展开端口，在「服务识别 → 产品识别」查看规则、证据路径、Host/SNI、观察时间与来源。历史弹窗显示对应原始观察的产品结果。
+搜索和资产端口表的「服务」列同时显示协议与产品，候选带黄色「疑似」徽标。展开端口，在「服务识别 → C2 产品识别」查看规则、证据路径、Host/SNI、观察时间与来源。历史弹窗显示对应原始观察的产品结果。当前证书证据不足且存在上次命中时，资产端口详情可查看上次证书线索及其观察时间。
 
-高级搜索支持产品 ID，以及同一产品上的 ID 与版本组合：
+高级搜索支持产品 ID。查询语法保留 `ID@版本`，当前 C2 规则的版本字段为空。
 
 ```text
 service = https AND product = cobalt_strike
-product = "nginx@1.26.2"
 product IN (cobalt_strike, asyncrat_family, sliver, qakbot)
 product IN (mythic, empire)
 EXISTS(product)
@@ -207,14 +203,14 @@ EXISTS(product)
 搜索及资产端口、端口历史响应新增：
 
 - `products[]`：`id`、`name`、`component`、`version`、`assessment`、`basis`、`evidence[]`。
-- `product_identification` 包含 `status`（`identified` / `suspected` / `not_matched` / `insufficient_evidence`）、`coverage`（`complete` / `partial`）、`ruleset_revision`、`ruleset_sha256`（旧观察可缺省）、`observed_at`、`stale` 和 `observation_ref`。
+- `product_identification` 包含 `status`（`suspected` / `not_matched` / `insufficient_evidence`）、`coverage`（`complete` / `partial`）、`ruleset_revision`、`ruleset_sha256` 和 `evaluator_revision`（旧观察可缺省）、`observed_at`、`stale` 和 `observation_ref`。
 
 `products[]` 是匹配结果，`product_identification` 用于解释匹配和证据状态；它们不会因为有一项为空而互相替代：
 
-- `status=identified` 表示存在产品声明匹配且无疑似候选。`suspected` 表示至少有证书或管理页候选。`products[]` 为空时，`not_matched` 表示本次可检查的协议证据未匹配已收录产品规则，`insufficient_evidence` 表示当前证据不足以得出产品匹配结果。
-- `coverage=partial` 表示相关协议观察缺失、失败或被截断等情况；`complete` 仅表示当前汇总未发现这些不完整标记，不保证扫描了所有协议、支持所有产品或发现了端点上的全部软件。已看到明确 nginx 声明但 TLS 证据不全时，可以同时得到 `status=identified` 和 `coverage=partial`。
-- `ruleset_revision` 和 `ruleset_sha256` 标识实际使用的规则包。`observed_at` 属于原服务观察，重算保留该时间。`stale` 表示该结果早于较新的端点观察，或规则修订号、摘要与当前规则包不一致。
-- JARM 状态单独保存在 `jarm` 中。得到 JARM 指纹也可能没有任何产品匹配，不能用 `jarm.status=success` 推断产品 `status=identified`。
+- `status=suspected` 表示至少有一个证书或管理页候选。`products[]` 为空时，`not_matched` 表示本次可检查的协议证据未匹配已收录产品规则，`insufficient_evidence` 表示当前证据不足以得出产品匹配结果。
+- `coverage=partial` 表示相关协议观察缺失、失败或被截断等情况；`complete` 仅表示当前汇总未发现这些不完整标记，不保证扫描了所有协议、支持所有产品或发现了端点上的全部软件。TLS 证据不全时，可以同时得到 `status=suspected` 和 `coverage=partial`。
+- `ruleset_revision` 和 `ruleset_sha256` 标识实际使用的规则包，`evaluator_revision` 标识服务端内置判定逻辑。`observed_at` 属于原服务观察，重算保留该时间。`stale` 表示该结果早于较新的端点观察，或所用规则包、内置判定逻辑与当前版本不一致。
+- JARM 状态单独保存在 `jarm` 中。得到 JARM 指纹也可能没有任何产品匹配，JARM 成功采集时，C2 候选列表仍可能为空。
 
 #### 如何核对识别证据
 
@@ -230,11 +226,11 @@ EXISTS(product)
 | `source_url` | 可选的规则实现或研究参考，不是目标响应的下载地址 |
 | `product_identification.observation_ref` | 与上述路径配合，定位证据所属的服务观察 |
 
-例如 HTTPS 观察中的 `Server: nginx/1.26.2` 可生成产品 `nginx`、版本 `1.26.2`、`basis=service_declaration`，证据路径通常为 `/evidence/0/result/response/headers/server`（实际索引随观察排列变化）。这说明服务端自报了 nginx；证书模板匹配则输出 `suspected`。原始数据已清理时，仍可展示已保存的规则依据，但不能仅凭 `field_path` 取回缺失原文。
+证据路径相对于该次服务观察，实际数组下标随观察排列变化。原始数据已清理时，详情仍可展示保存的规则依据。
 
-内置产品规则版本为 **6**。v2 增加 Sliver 和 QakBot，v3 增加检测方式及 JARM 元数据，v4 规范 Windows OpenSSH 版本，v5 增加 Mythic 和 Empire 管理端。v6 将 Sliver、Mythic 和 Empire 条件移入可独立加载的 JSON 规则包，`product_identification.ruleset_sha256` 记录实际使用的文件摘要。结果按自身服务观察时间更新，较早或旧规则的结果标记 `stale`。相同产品存在不同版本声明时并列保留。[规则格式、校验与回放](SERVICE_PRODUCT_RULES.md)
+内置产品规则版本为 **7**。产品规则 v6 将 Sliver、Mythic 和 Empire 条件移入可独立加载的 JSON 规则包。v7 将输出收窄为 C2 候选，外部规则包沿用原有格式。结果按服务观察时间更新，旧观察或旧规则产生的结果标记为 `stale`。[规则格式、校验与回放](SERVICE_PRODUCT_RULES.md)
 
-启动会增加 ES 映射。新扫描与执行投影重放生成可搜索产品；旧端口/历史详情只在原始数据确属该次服务观察时即时推断。若需要让全部存量产品进入 `product` 搜索，可在备份后按本文「存储升级与回滚」重建端点投影；不会自动重扫网络或改写原始观察。新前端兼容缺少新字段的服务端，保留旧版证书线索展示；旧 `c2_fingerprint` 字段和指纹过滤暂保留兼容。
+先升级服务端，再升级控制台。新版服务端立即在搜索与详情中过滤已退役的普通产品 ID。详情在原始数据确属该次服务观察时可即时重算。要从 Elasticsearch 的存量文档中清除旧条目，并统一更新产品状态和规则版本，按 [存储升级与回滚](#存储升级与回滚) 重建端点投影。重建使用原始观察，保留证据时间，无需重新探测。优先使用新索引模式，保留原索引以便回滚。
 
 产品候选不再自动添加 IP 级「威胁」「恶意软件」或家族标签。既有标签和人工标签保留，可由管理员复核移除；产品识别与 IOC 风险、标签各自独立。
 
@@ -247,8 +243,8 @@ EXISTS(product)
 | --- | --- | --- | --- |
 | JARM | 是，显式启用后额外最多 10 次 TCP 连接与 ClientHello 探测 | 对 10 组不同 ClientHello 的服务端密码套件、TLS 版本、ALPN 与扩展响应生成 62 个十六进制字符的指纹 | 保存 TLS 配置指纹；当前没有以 JARM 单独归属 C2 家族的规则 |
 | TLS Certificate | 证书采集是；分析复用已有观察，无额外连接 | 分析叶证书主题、颁发者、有效期、公钥等元数据 | Cobalt Strike、AsyncRAT / DcRAT、Sliver、QakBot 候选，适用前述规则边界 |
-| HTTP Fingerprint | HTTP 采集是；产品规则复用已有响应 | 分析 HTTP 状态、响应头和内容特征 | nginx / Apache 的 Server 声明，以及 Mythic / Empire 管理页候选 |
-| Protocol Fingerprint | 通常是；已有工业被动接收方式除外，识别复用已有握手 | 根据应用层握手和协议响应识别服务 | 既有协议识别及 OpenSSH 软件声明；不表示已实现各 C2 的私有协议规则 |
+| HTTP Fingerprint | HTTP 采集是；产品规则复用已有响应 | 分析 HTTP 状态、响应头和内容特征 | Mythic / Empire 管理页候选 |
+| Protocol Fingerprint | 通常是；已有工业被动接收方式除外，识别复用已有握手 | 根据应用层握手和协议响应识别服务 | 既有协议识别，SSH 握手中的软件声明保存在原始证据中 |
 
 JARM 以 TLS 握手响应为依据。证书轮换后，握手响应特征保持一致时，JARM 可以保持稳定。共享反向代理也可能为不同应用返回相同的握手特征。服务端独立记录 JARM 观察，现有家族候选由证书或 HTTP 管理页规则产生。[JARM 原理与样本重合情况](https://github.com/salesforce/jarm#how-jarm-works)
 
@@ -297,5 +293,3 @@ network_mapping_server scanner-config set-jarm <ID> --enabled false --change-rea
 `set-jarm` 仅修改给出的字段，保留其他 JARM 参数和网页抓取、端口扫描等配置；不传任何修改字段会报错。参数范围与 Web 相同，`--enabled` 必须显式传 `true` 或 `false`，变更原因最多 500 个字符。每次成功更新都在同一事务中写入新修订、历史与审计；如果 Web 或另一个 CLI 已先修改配置，则报修订冲突并退出，不覆盖并发更新。`show` 可核对当前文档和修订；现有 `set-web-content` 命令继续可用。
 
 两种入口均只能管理服务端运行配置，不能越过扫描节点本地 `service_detection.enabled` / `service_detection.jarm.enabled` 授权。旧 worker 需同步升级后才能实际采集 JARM。
-
-Windows OpenSSH 的 `OpenSSH_for_Windows_9.5` 声明输出产品 `openssh`、版本 `9.5`，平台前缀保留在原始声明证据中，`product = "openssh@9.5"` 可与其他平台的同版本一并查询。旧规则详情仅在原始数据属于对应服务观察时回算；存量搜索投影需按前述步骤重放，新规则不会刷新旧观察时间。

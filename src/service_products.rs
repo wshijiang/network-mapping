@@ -1,4 +1,5 @@
-//! Product identity from protocol-owned observations. No IOC lookups or network I/O.
+//! C2 product candidates from protocol-owned observations.
+use crate::service_fingerprint::{self, Assessment, Status};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -12,6 +13,8 @@ pub(crate) use rules::Stamp as RuleStamp;
 pub(crate) use rules_cli::execute as execute_rules_command;
 
 const MAX_EVIDENCE: usize = 8;
+const EVALUATOR_REVISION: u32 = 1;
+pub(crate) const RETIRED_PRODUCT_IDS: [&str; 3] = ["nginx", "apache_http_server", "openssh"];
 
 pub(crate) fn initialize_rules(path: Option<&std::path::Path>) -> std::io::Result<()> {
     rules::initialize(path)
@@ -50,6 +53,8 @@ pub(crate) struct Identification {
     pub status: String,
     pub coverage: String,
     pub ruleset_revision: u32,
+    #[serde(default)]
+    pub evaluator_revision: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ruleset_sha256: Option<String>,
     pub observed_at: i64,
@@ -64,7 +69,8 @@ pub(crate) struct Identification {
 impl Identification {
     pub(crate) fn is_current(&self) -> bool {
         let stamp = ruleset_stamp();
-        self.ruleset_revision == stamp.revision
+        self.evaluator_revision == stamp.evaluator_revision
+            && self.ruleset_revision == stamp.revision
             && self.ruleset_sha256.as_ref() == Some(&stamp.sha256)
     }
 }
@@ -118,12 +124,39 @@ fn infer_with_rules(
     observation_ref: Option<Value>,
     rules: &rules::RuleSet,
 ) -> Products {
+    let certificate = service_fingerprint::assess(data, observed_at, "", "");
+    evaluate(data, observed_at, observation_ref, rules, &certificate)
+}
+
+pub(crate) fn infer_with_certificate(
+    data: Option<&Value>,
+    observed_at: i64,
+    observation_ref: Option<Value>,
+    certificate: &Assessment<'_>,
+) -> Products {
+    evaluate(
+        data,
+        observed_at,
+        observation_ref,
+        rules::active(),
+        certificate,
+    )
+}
+
+fn evaluate(
+    data: Option<&Value>,
+    observed_at: i64,
+    observation_ref: Option<Value>,
+    rules: &rules::RuleSet,
+    certificate: &Assessment<'_>,
+) -> Products {
     let mut result = Products {
         products: Vec::new(),
         product_identification: Identification {
             status: "insufficient_evidence".into(),
             coverage: "partial".into(),
             ruleset_revision: rules.stamp.revision,
+            evaluator_revision: rules.stamp.evaluator_revision,
             ruleset_sha256: Some(rules.stamp.sha256.clone()),
             observed_at,
             stale: false,
@@ -142,17 +175,11 @@ fn infer_with_rules(
     result.product_identification.detection_methods = detection_methods::catalog(evidence);
     result.product_identification.jarm = detection_methods::jarm(evidence);
 
-    // Existing certificate rules are local product rules, independent of intel storage.
-    // Their observations establish deployment candidates, never malicious intent.
-    let certificate = crate::service_fingerprint::assess(data, observed_at, "", "");
-    for hit in certificate
-        .matches
-        .into_iter()
-        .chain(certificate_templates::matches(data))
-    {
+    let historical_matches = certificate_templates::matches(data);
+    for hit in certificate.matches.iter().chain(&historical_matches) {
         let (name, component) = match hit.family {
-            crate::service_fingerprint::COBALT_STRIKE => ("Cobalt Strike", Some("Team Server")),
-            crate::service_fingerprint::ASYNCRAT_FAMILY => ("AsyncRAT / DcRAT", None),
+            service_fingerprint::COBALT_STRIKE => ("Cobalt Strike", Some("Team Server")),
+            service_fingerprint::ASYNCRAT_FAMILY => ("AsyncRAT / DcRAT", None),
             certificate_templates::QAKBOT => ("QakBot", None),
             _ => continue,
         };
@@ -174,11 +201,11 @@ fn infer_with_rules(
                     detection_method: Some("tls_certificate".into()),
                     rule_id: hit.rule_id.into(),
                     probe: hit.probe.into(),
-                    field_path: hit.evidence_path,
+                    field_path: hit.evidence_path.clone(),
                     details: hit
                         .evidence
-                        .into_iter()
-                        .map(|(key, value)| (key.into(), bounded(&value)))
+                        .iter()
+                        .map(|(key, value)| ((*key).into(), bounded(value)))
                         .collect(),
                     sni: hit.sni.map(bounded),
                     http_host: hit.http_host.map(bounded),
@@ -194,10 +221,10 @@ fn infer_with_rules(
     incomplete |= evidence
         .iter()
         .any(|item| matches!(item["module"].as_str(), Some("tls" | "https")))
-        && certificate.status == crate::service_fingerprint::Status::InsufficientEvidence;
+        && certificate.status == Status::InsufficientEvidence;
     for (index, item) in evidence.iter().take(64).enumerate() {
         let module = item["module"].as_str().unwrap_or_default();
-        if !matches!(module, "http" | "https" | "ssh" | "tls") {
+        if !matches!(module, "http" | "https" | "tls") {
             continue;
         }
         inspected = true;
@@ -208,95 +235,19 @@ fn infer_with_rules(
                 push(&mut result.products, product);
             }
         }
-        let (value, path, field) = if module == "ssh" {
-            (
-                &item["result"]["server_id"]["software"],
-                "",
-                "/server_id/software",
-            )
-        } else if matches!(module, "http" | "https") {
-            let Some((response, path)) = first_http_response(&item["result"]) else {
-                continue;
-            };
+        if matches!(module, "http" | "https")
+            && let Some((response, path)) = first_http_response(&item["result"])
+        {
             let (candidates, body_incomplete) =
                 http_management::candidate(evidence, index, module, response, path, rules);
             incomplete |= body_incomplete;
             for product in candidates {
                 push(&mut result.products, product);
             }
-            (&response["headers"]["server"], path, "/headers/server")
-        } else {
-            continue;
-        };
-        let Some(text) = value
-            .as_str()
-            .or_else(|| value.as_array().filter(|values| values.len() == 1)?[0].as_str())
-        else {
-            continue;
-        };
-        // Ordinary software declarations use the protocol-owned header or banner.
-        let declaration = text.split_whitespace().next().unwrap_or_default();
-        let (token, version) = declaration
-            .split_once('/')
-            .map_or((declaration, None), |(name, version)| (name, Some(version)));
-        let (id, name) = match (module, token) {
-            ("http" | "https", "nginx") => ("nginx", "nginx"),
-            ("http" | "https", "Apache") => ("apache_http_server", "Apache HTTP Server"),
-            ("ssh", token) if token.starts_with("OpenSSH_") => ("openssh", "OpenSSH"),
-            _ => continue,
-        };
-        let version = if id == "openssh" {
-            token
-                .strip_prefix("OpenSSH_for_Windows_")
-                .or_else(|| token.strip_prefix("OpenSSH_"))
-        } else {
-            version
-        };
-        push(
-            &mut result.products,
-            Product {
-                id: id.into(),
-                name: name.into(),
-                component: None,
-                version: version
-                    .filter(|v| {
-                        !v.is_empty()
-                            && v.len() <= 80
-                            && v.chars().all(|c| {
-                                c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+')
-                            })
-                    })
-                    .map(str::to_owned),
-                assessment: "identified".into(),
-                basis: "service_declaration".into(),
-                evidence: vec![Evidence {
-                    detection_method: Some(
-                        if module == "ssh" {
-                            "protocol_fingerprint"
-                        } else {
-                            "http_fingerprint"
-                        }
-                        .into(),
-                    ),
-                    rule_id: format!("{id}_service_declaration"),
-                    probe: module.into(),
-                    field_path: format!("/evidence/{index}/result{path}{field}"),
-                    details: vec![("declaration".into(), bounded(text))],
-                    sni: None,
-                    http_host: None,
-                    source_url: None,
-                }],
-            },
-        );
+        }
     }
-    result.product_identification.status = if result
-        .products
-        .iter()
-        .any(|product| product.assessment == "suspected")
-    {
+    result.product_identification.status = if !result.products.is_empty() {
         "suspected"
-    } else if !result.products.is_empty() {
-        "identified"
     } else if inspected && !incomplete {
         "not_matched"
     } else {
@@ -310,6 +261,21 @@ fn infer_with_rules(
     }
     .into();
     result
+}
+
+/// Hide retired software declarations while pre-upgrade projections are being rebuilt.
+pub(crate) fn remove_retired_products(
+    products: &mut Vec<Product>,
+    identification: Option<&mut Identification>,
+) {
+    products.retain(|product| !RETIRED_PRODUCT_IDS.contains(&product.id.as_str()));
+    if let Some(identification) = identification
+        && products.is_empty()
+        && identification.status == "identified"
+    {
+        identification.status = "insufficient_evidence".into();
+        identification.coverage = "partial".into();
+    }
 }
 
 /// Raw fallback is allowed only when it belongs to this exact service observation.
@@ -335,6 +301,10 @@ pub(crate) fn view(source: &Value, observed_at: i64, use_raw_data: bool) -> Prod
             source.get("service_observation_ref").cloned(),
         )
     };
+    remove_retired_products(
+        &mut result.products,
+        Some(&mut result.product_identification),
+    );
     result.product_identification.stale = result.product_identification.observed_at < observed_at
         || !result.product_identification.is_current();
     result
@@ -552,18 +522,19 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_product_and_c2_candidate_share_the_contract_without_iocs() {
+    fn c2_candidates_exclude_ordinary_software_declarations() {
         let data = json!({"schema_version":2,"evidence":[
             {"module":"https","status":"success","result":{"response":{"headers":{"server":["nginx/1.26.2"]}}}},
+            {"module":"http","status":"success","result":{"response":{"headers":{"server":["Apache/2.4.65"]}}}},
+            {"module":"ssh","status":"success","result":{"server_id":{"software":"OpenSSH_for_Windows_9.5"}}},
             {"module":"tls","status":"success","result":{"handshake_log":{"server_certificates":{"certificate":{"parsed":{
                 "fingerprint_sha256":"87f2085c32b6a2cc709b365f55873e207a9caa10bffecf2fd16d3cf9d94d390c"
             }}}}}}
         ]});
         let result = infer(Some(&data), 1234, None);
-        assert_eq!(result.products.len(), 2);
+        assert_eq!(result.products.len(), 1);
+        assert_eq!(result.products[0].id, "cobalt_strike");
         assert_eq!(result.products[0].assessment, "suspected");
-        assert_eq!(result.products[1].id, "nginx");
-        assert_eq!(result.products[1].version.as_deref(), Some("1.26.2"));
         assert_eq!(result.product_identification.status, "suspected");
     }
 
@@ -583,47 +554,45 @@ mod tests {
     }
 
     #[test]
-    fn openssh_release_versions_exclude_windows_platform_markers() {
-        for (software, version) in [
-            ("OpenSSH_for_Windows_9.5", "9.5"),
-            ("OpenSSH_for_Windows_9.5.0.0", "9.5.0.0"),
-            ("OpenSSH_9.5p1 Ubuntu-3", "9.5p1"),
-            ("OpenSSH_9.6", "9.6"),
-        ] {
-            let data = json!({"schema_version":2,"evidence":[{"module":"ssh","status":"success","result":{"server_id":{"software":software}}}]});
-            let inferred = infer(Some(&data), 1234, None);
-            assert_eq!(inferred.products[0].id, "openssh");
-            assert_eq!(inferred.products[0].version.as_deref(), Some(version));
-            assert_eq!(inferred.products[0].evidence[0].details[0].1, software);
-            let mut stored = json!(inferred);
-            stored["data"] = data;
-            stored["product_identification"]["ruleset_revision"] = json!(3);
-            stored["products"][0]["version"] = json!("for_Windows_9.5");
-            let refreshed = view(&stored, 1234, true);
-            assert_eq!(refreshed.products[0].version.as_deref(), Some(version));
-            assert_eq!(refreshed.product_identification.observed_at, 1234);
-            assert_eq!(
-                refreshed.product_identification.ruleset_revision,
-                ruleset_stamp().revision
-            );
-            assert!(!refreshed.product_identification.stale);
-            let without_matching_raw = view(&stored, 1234, false);
-            assert!(without_matching_raw.product_identification.stale);
-            assert_eq!(
-                without_matching_raw.products[0].version.as_deref(),
-                Some("for_Windows_9.5")
-            );
-        }
+    fn old_declarations_disappear_with_or_without_the_original_ssh_observation() {
+        let raw = json!({"schema_version":2,"evidence":[{"module":"ssh","status":"success",
+            "result":{"server_id":{"software":"OpenSSH_for_Windows_9.5"}}}]});
+        let mut stored = json!(infer(Some(&raw), 1234, None));
+        stored["product_identification"]
+            .as_object_mut()
+            .unwrap()
+            .remove("evaluator_revision");
+        stored["product_identification"]["status"] = json!("identified");
+        stored["product_identification"]["coverage"] = json!("complete");
+        stored["products"] = json!([{
+            "id":"openssh","name":"OpenSSH","version":"9.5","assessment":"identified",
+            "basis":"service_declaration","evidence":[]
+        }]);
+        stored["data"] = raw;
+
+        let stale = view(&stored, 2000, false);
+        assert!(stale.products.is_empty());
+        assert!(stale.product_identification.stale);
+        assert_eq!(stale.product_identification.observed_at, 1234);
+        assert_eq!(stale.product_identification.status, "insufficient_evidence");
+        let refreshed = view(&stored, 1234, true);
+        assert!(refreshed.products.is_empty());
+        assert!(!refreshed.product_identification.stale);
+        assert_eq!(refreshed.product_identification.observed_at, 1234);
+        assert_eq!(
+            refreshed.product_identification.status,
+            "insufficient_evidence"
+        );
     }
 
     #[test]
     fn port_only_updates_preserve_product_time_and_do_not_use_unrelated_raw_data() {
-        let raw = json!({"data":{"schema_version":2,"evidence":[{"module":"ssh","result":{"server_id":{"software":"OpenSSH_9.6"}}}]}});
+        let raw = json!({"data":tls_observation(synthetic_sliver_leaf())});
         assert!(view(&raw, 2000, false).products.is_empty());
-        let mut stored = json!(view(&raw, 1000, true));
-        stored["data"] = Value::Null;
+        let stored = json!(view(&raw, 1000, true));
         let result = view(&stored, 2000, false);
-        assert_eq!(result.products[0].id, "openssh");
+        assert_eq!(result.products[0].id, "sliver");
         assert!(result.product_identification.stale);
+        assert_eq!(result.product_identification.observed_at, 1000);
     }
 }

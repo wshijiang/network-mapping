@@ -2014,27 +2014,43 @@ async fn live_elasticsearch_service_products_preserve_clocks_and_query_exact_ver
                 |request| request.json(&scan_endpoint_index_definition(0)),
             )
             .await?;
-        let observation = json!({"kind":"service", "ip_address":"192.0.2.1", "port":443,
-        "protocol":"tcp", "service":"https", "observation_key":"product-1",
+        let mut observation = json!({"kind":"service", "ip_address":"192.0.2.1","port":443,
+        "protocol":"tcp","service":"https","observation_key":"product-1",
         "data":{"schema_version":2,"evidence":[{"module":"https","status":"success","result":{
-            "response":{"headers":{"server":["nginx/1.26.2"]}}
-        }}]}});
+            "response":{"headers":{"server":["nginx/1.26.2"]},"body":""}
+        }},{"module":"tls","status":"success","result":{"handshake_log":{"server_certificates":{
+            "certificate":{"parsed":{
+                "fingerprint_sha256":"87f2085c32b6a2cc709b365f55873e207a9caa10bffecf2fd16d3cf9d94d390c"
+            }}
+        }}}}]}});
+        observation["web"] = json!(crate::web_detection::infer(
+            Some("https"), None, observation.get("data"), 443, 1000, None,
+        ));
         let successful = endpoint_projection_document(&context, &observation, 1000);
         let port_only = endpoint_projection_document(
             &context,
             &json!({"kind":"port","ip_address":"192.0.2.1","port":443,"protocol":"tcp"}),
             2000,
         );
-        let mut older = observation.clone();
-        older["data"]["evidence"][0]["result"]["response"]["headers"]["server"] =
-            json!(["Apache/2.4.65"]);
-        for document in [
-            successful,
-            port_only,
-            endpoint_projection_document(&context, &older, 900),
+        let mut legacy = successful.clone();
+        legacy["products"] = json!([{
+            "id":"nginx","name":"nginx","version":"1.26.2","assessment":"identified",
+            "basis":"service_declaration","evidence":[]
+        }]);
+        legacy["product_identification"]["status"] = json!("identified");
+        legacy["product_identification"]
+            .as_object_mut()
+            .unwrap()
+            .remove("evaluator_revision");
+        for (id, document) in [
+            ("endpoint", &legacy),
+            ("retired-only", &legacy),
+            ("endpoint", &successful),
+            ("endpoint", &port_only),
+            ("endpoint", &endpoint_projection_document(&context, &observation, 900)),
         ] {
             let mut body = String::new();
-            append_projection_update(&mut body, &index, "endpoint", &document)?;
+            append_projection_update(&mut body, &index, id, document)?;
             let response = service.send_bulk_with_retry("/_bulk", &body, false).await?;
             if response["errors"] != false {
                 return Err(format!("product projection failed: {response}"));
@@ -2049,7 +2065,9 @@ async fn live_elasticsearch_service_products_preserve_clocks_and_query_exact_ver
             )
             .await?;
         let view = crate::service_products::view(&current["_source"], 2000, false);
-        if view.products[0].id != "nginx"
+        if current["_source"]["products"].as_array().map(Vec::len) != Some(1)
+            || view.products.first().map(|product| product.id.as_str()) != Some("cobalt_strike")
+            || current["_source"]["last_c2_fingerprint"]["matches"][0]["family"] != "cobalt_strike"
             || !view.product_identification.stale
             || view.product_identification.observed_at != 1000
             || current["_source"]["service"] != "https"
@@ -2065,9 +2083,13 @@ async fn live_elasticsearch_service_products_preserve_clocks_and_query_exact_ver
             )
             .await?;
         for (query, expected) in [
-            ("product = \"nginx@1.26.2\"", 1),
-            ("product = \"nginx@2.4.65\"", 0),
-            ("product = apache_http_server", 0),
+            ("product = cobalt_strike", 1),
+            ("product = \"cobalt_strike@1.0\"", 0),
+            ("product = \"nginx@1.26.2\"", 0),
+            ("product != nginx", 2),
+            ("product IN (nginx, cobalt_strike)", 1),
+            ("EXISTS(product)", 1),
+            ("tech = \"nginx@1.26.2\"", 2),
         ] {
             let crate::handlers::search_dsl::ElasticsearchCompilation::Supported(query) =
                 crate::handlers::search_dsl::parse_and_compile_elasticsearch(query).unwrap()
