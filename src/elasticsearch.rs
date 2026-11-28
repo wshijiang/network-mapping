@@ -3338,6 +3338,11 @@ fn parse_search_hits(hits: &[Value]) -> Result<Vec<ElasticsearchSearchItem>, Str
             &mut products,
             product_identification.as_mut(),
         );
+        crate::service_products::mark_xmrig_freshness(
+            &mut products,
+            product_identification.as_ref(),
+            source.last_seen.timestamp_millis(),
+        );
         items.push(ElasticsearchSearchItem {
             ip_address: source.ip,
             port: source.port,
@@ -4553,6 +4558,7 @@ fn scan_endpoint_index_definition(replicas: u32) -> Value {
                 "c2_fingerprint": service_fingerprint_mapping(),
             "products": crate::service_products::mapping(),
             "product_identification": {"type":"object", "enabled":false},
+            "xmrig_confirmations": {"type":"object", "enabled":false},
                 "last_c2_fingerprint": {"type": "object", "enabled": false},
                 "import_policy": {"type": "keyword"},
                 "asn": {"type": "keyword", "normalizer": "lowercase_normalizer"},
@@ -4747,6 +4753,7 @@ fn endpoint_projection_document(
         "web": observation.get("web").filter(|value| !value.is_null()).cloned().unwrap_or_else(|| if is_service { json!(crate::web_detection::WebInference::pending(observed_at_ms)) } else { Value::Null }),
         "products": product_detection.as_ref().map(|value| &value.products).cloned().unwrap_or_default(),
         "product_identification": product_detection.as_ref().map(|value| &value.product_identification),
+        "xmrig_confirmations": product_detection.as_ref().map(|value| value.xmrig_confirmations()),
         "c2_fingerprint": c2,
         "last_c2_fingerprint": if c2["status"] == "matched" { &c2 } else { &Value::Null },
         "asn": asn,
@@ -4771,6 +4778,75 @@ fn append_projection_update(
     document: &Value,
 ) -> Result<(), String> {
     const SCRIPT: &str = r#"
+        boolean newerXmrig(def incoming, def previous) {
+            if (incoming == null) return false;
+            if (previous == null) return true;
+            if (incoming.observed_at != previous.observed_at) return incoming.observed_at > previous.observed_at;
+            return incoming.observation_id.compareTo(previous.observation_id) >= 0;
+        }
+        def xmrigRecords(def doc) {
+            if (doc.xmrig_confirmations != null) return doc.xmrig_confirmations;
+            def identification = doc.product_identification;
+            if (identification == null || doc.products == null ||
+                (identification.evaluator_revision != null && identification.evaluator_revision >= 4)) return null;
+            def reference = identification.observation_ref;
+            def key = reference == null || reference.id == null ? '' : reference.id;
+            def records = null;
+            for (def product : doc.products) {
+                if (product.id != 'xmrig') continue;
+                def item = new HashMap(product);
+                item.observation = ['observed_at': identification.observed_at, 'observation_id': key, 'stale': true];
+                def evidence = product.evidence == null || product.evidence.isEmpty() ? null : product.evidence[0];
+                def host = evidence == null ? null : evidence.http_host;
+                if (host == null || host == doc.ip || host == doc.ip + ':' + doc.port ||
+                    host == '[' + doc.ip + ']' || host == '[' + doc.ip + ']:' + doc.port) host = '';
+                else if (host.indexOf(':') > 0) host = host.substring(0, host.indexOf(':'));
+                if (records == null) records = new HashMap();
+                records[host.toLowerCase()] = ['observed_at': identification.observed_at, 'observation_id': key, 'product': item];
+            }
+            return records;
+        }
+        void mergeXmrig(def target, def previous, def previousAttempt, def incoming, def incomingAttempt) {
+            if (target.product_identification == null ||
+                (previous == null && incoming == null && previousAttempt == null && incomingAttempt == null)) return;
+            def records = previous == null ? new HashMap() : new HashMap(previous);
+            if (incoming != null) {
+                for (def entry : incoming.entrySet()) {
+                    if (newerXmrig(entry.getValue(), records[entry.getKey()])) records[entry.getKey()] = entry.getValue();
+                }
+            }
+            // Retain the newest 32 virtual hosts, including nonmatch records
+            // that prevent an older hit from reappearing after a replay.
+            while (records.size() > 32) {
+                def oldest = null;
+                for (def entry : records.entrySet()) {
+                    if (oldest == null || !newerXmrig(entry.getValue(), oldest.getValue()) ||
+                        (entry.getValue().observed_at == oldest.getValue().observed_at &&
+                         entry.getValue().observation_id == oldest.getValue().observation_id &&
+                         entry.getKey().compareTo(oldest.getKey()) < 0)) oldest = entry;
+                }
+                records.remove(oldest.getKey());
+            }
+            def products = new ArrayList();
+            if (target.products != null) {
+                for (def product : target.products) {
+                    if (product.id != 'xmrig') products.add(product);
+                }
+            }
+            def versions = new HashMap();
+            for (def record : records.values()) {
+                if (record.product != null && newerXmrig(record, versions[record.product.version]))
+                    versions[record.product.version] = record;
+            }
+            def orderedVersions = new ArrayList(versions.keySet());
+            Collections.sort(orderedVersions);
+            for (def version : orderedVersions) products.add(versions[version].product);
+            target.products = products;
+            target.xmrig_confirmations = records.isEmpty() ? null : records;
+            def identification = new HashMap(target.product_identification);
+            identification.xmrig_attempt = newerXmrig(incomingAttempt, previousAttempt) ? incomingAttempt : previousAttempt;
+            target.product_identification = identification;
+        }
         boolean newerFingerprint(def incoming, def previous) {
             if (incoming == null) return false;
             if (previous == null) return true;
@@ -4783,6 +4859,9 @@ fn append_projection_update(
         boolean incomingImport = params.doc.task_source == 'import';
         boolean importFill = incomingImport && params.doc.import_policy == 'fill';
         boolean scanAuthoritative = ctx._source.service_observed_at_ms != null && ctx._source.task_source != null && ctx._source.task_source != 'import';
+        def previousXmrig = xmrigRecords(ctx._source);
+        def previousXmrigAttempt = ctx._source.product_identification == null ? null : ctx._source.product_identification.xmrig_attempt;
+        def incomingXmrigAttempt = params.doc.product_identification == null ? null : params.doc.product_identification.xmrig_attempt;
         if (ctx._source.observed_at_ms == null) {
             ctx._source.putAll(params.doc);
         } else if (importFill && scanAuthoritative) {
@@ -4906,6 +4985,9 @@ fn append_projection_update(
             ctx._source.last_c2_fingerprint = newerFingerprint(incomingLastC2, lastC2) ? incomingLastC2 : lastC2;
             if (incomingImport) { ctx._source.tags = tags; }
         }
+        if (!(importFill && scanAuthoritative)) {
+            mergeXmrig(ctx._source, previousXmrig, previousXmrigAttempt, xmrigRecords(params.doc), incomingXmrigAttempt);
+        }
     "#;
     body.push_str(
         &serde_json::to_string(&json!({"update": {
@@ -4946,6 +5028,7 @@ fn index_mapping_update() -> Value {
             "c2_fingerprint": service_fingerprint_mapping(),
             "products": crate::service_products::mapping(),
             "product_identification": {"type":"object", "enabled":false},
+            "xmrig_confirmations": {"type":"object", "enabled":false},
             "last_c2_fingerprint": {"type": "object", "enabled": false},
             "import_policy": {"type": "keyword"},
             "latitude": {"type": "double"},

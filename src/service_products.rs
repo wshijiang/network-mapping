@@ -2,6 +2,7 @@
 use crate::service_fingerprint::{self, Assessment, Status};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 mod certificate_templates;
 mod detection_methods;
@@ -10,11 +11,12 @@ mod mining;
 mod rules;
 mod rules_cli;
 use detection_methods::{DetectionMethod, JarmObservation};
+use mining::{Attempt, Confirmation, Declaration, ProductObservation};
 pub(crate) use rules::Stamp as RuleStamp;
 pub(crate) use rules_cli::execute as execute_rules_command;
 
 const MAX_EVIDENCE: usize = 8;
-const EVALUATOR_REVISION: u32 = 3;
+const EVALUATOR_REVISION: u32 = 4;
 pub(crate) const RETIRED_PRODUCT_IDS: [&str; 3] = ["nginx", "apache_http_server", "openssh"];
 
 pub(crate) fn initialize_rules(path: Option<&std::path::Path>) -> std::io::Result<()> {
@@ -56,6 +58,8 @@ pub(crate) struct Product {
     pub version: Option<String>,
     pub assessment: String,
     pub basis: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<ProductObservation>,
     pub evidence: Vec<Evidence>,
 }
 
@@ -75,6 +79,8 @@ pub(crate) struct Identification {
     pub detection_methods: Vec<DetectionMethod>,
     #[serde(default)]
     pub jarm: Option<JarmObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xmrig_attempt: Option<Attempt>,
 }
 
 impl Identification {
@@ -90,6 +96,18 @@ impl Identification {
 pub(crate) struct Products {
     pub products: Vec<Product>,
     pub product_identification: Identification,
+    #[serde(skip)]
+    xmrig_confirmations: BTreeMap<String, Confirmation>,
+}
+
+impl Products {
+    pub(crate) fn xmrig_confirmations(&self) -> Value {
+        if self.xmrig_confirmations.is_empty() {
+            Value::Null
+        } else {
+            json!(self.xmrig_confirmations)
+        }
+    }
 }
 
 fn bounded(text: &str) -> String {
@@ -119,6 +137,26 @@ fn first_http_response(result: &Value) -> Option<(&Value, &'static str)> {
         return Some((first, "/redirect_response_chain/0"));
     }
     result.get("response").map(|value| (value, "/response"))
+}
+
+fn record_xmrig(
+    result: &mut Products,
+    host: Option<String>,
+    product: Product,
+    observed_at: i64,
+    observation_id: &str,
+) {
+    let confirmation = result
+        .xmrig_confirmations
+        .entry(host.unwrap_or_default())
+        .or_insert_with(|| Confirmation {
+            observed_at,
+            observation_id: observation_id.to_owned(),
+            product: None,
+        });
+    // The dedicated summary, when present, is processed after base HTTP evidence.
+    confirmation.product = Some(product.clone());
+    push(&mut result.products, product);
 }
 
 pub(crate) fn infer(
@@ -174,7 +212,9 @@ fn evaluate(
             observation_ref,
             detection_methods: Vec::new(),
             jarm: None,
+            xmrig_attempt: None,
         },
+        xmrig_confirmations: BTreeMap::new(),
     };
     let Some(evidence) = data
         .filter(|data| data["schema_version"] == 2)
@@ -209,6 +249,7 @@ fn evaluate(
                     "certificate_template"
                 }
                 .into(),
+                observation: None,
                 evidence: vec![Evidence {
                     detection_method: Some("tls_certificate".into()),
                     rule_id: hit.rule_id.into(),
@@ -227,6 +268,15 @@ fn evaluate(
         );
     }
 
+    let observation_id = result
+        .product_identification
+        .observation_ref
+        .as_ref()
+        .and_then(|reference| reference["id"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let probe_status = mining::probe_status(data);
+    let mut active_declaration = None;
     let mut inspected = false;
     let mut incomplete = data.is_some_and(|data| data["product_evidence_truncated"] == true);
     incomplete |= evidence.len() > 64;
@@ -240,10 +290,39 @@ fn evaluate(
             if let Some(response) = item.pointer("/result/xmrig_summary") {
                 inspected = true;
                 incomplete |= mining::incomplete_summary(item, response);
-                if let Some(product) =
-                    mining::xmrig(item, response, module, "/xmrig_summary", index)
-                {
-                    push(&mut result.products, product);
+                let host = mining::host(&response["request"]["host"]);
+                if probe_status.is_some_and(|(probe, status)| {
+                    status != "success" || mining::host(&probe["host"]) != host
+                }) {
+                    continue;
+                }
+                match mining::declaration(
+                    item,
+                    response,
+                    (module, "/xmrig_summary", index),
+                    observed_at,
+                    &observation_id,
+                ) {
+                    Some(Declaration::Xmrig(product)) => {
+                        record_xmrig(&mut result, host, product, observed_at, &observation_id);
+                        active_declaration = Some("matched");
+                    }
+                    Some(Declaration::OtherMiner) => {
+                        // Only a completed dedicated probe can supply a definite
+                        // nonmatch. A root page may describe a different service.
+                        if probe_status.is_some() {
+                            result
+                                .xmrig_confirmations
+                                .entry(host.unwrap_or_default())
+                                .or_insert_with(|| Confirmation {
+                                    observed_at,
+                                    observation_id: observation_id.clone(),
+                                    product: None,
+                                });
+                            active_declaration = Some("not_matched");
+                        }
+                    }
+                    None => {}
                 }
             }
             continue;
@@ -263,8 +342,15 @@ fn evaluate(
             && let Some((response, path)) = first_http_response(&item["result"])
         {
             incomplete |= response["body_truncated"] == true;
-            if let Some(product) = mining::xmrig(item, response, module, path, index) {
-                push(&mut result.products, product);
+            if let Some(Declaration::Xmrig(product)) = mining::declaration(
+                item,
+                response,
+                (module, path, index),
+                observed_at,
+                &observation_id,
+            ) {
+                let host = mining::host(&response["request"]["host"]);
+                record_xmrig(&mut result, host, product, observed_at, &observation_id);
             }
             let (candidates, body_incomplete) =
                 http_management::candidate(evidence, index, module, response, path, rules);
@@ -273,6 +359,31 @@ fn evaluate(
                 push(&mut result.products, product);
             }
         }
+    }
+    let attempt_status = match probe_status {
+        Some((_, "success")) => active_declaration.or(Some("invalid_response")),
+        Some((_, status)) => Some(status),
+        None => active_declaration
+            .filter(|status| *status == "matched")
+            .or_else(|| {
+                result
+                    .products
+                    .iter()
+                    .any(|product| product.id == "xmrig")
+                    .then_some("matched")
+            }),
+    };
+    if let Some(status) = attempt_status {
+        inspected = true;
+        incomplete |= !matches!(status, "matched" | "not_matched");
+        let probe = probe_status.map(|(probe, _)| probe);
+        result.product_identification.xmrig_attempt = Some(Attempt {
+            status: status.into(),
+            status_code: probe.and_then(|probe| probe["status_code"].as_u64()?.try_into().ok()),
+            host: probe.and_then(|probe| mining::host(&probe["host"])),
+            observed_at,
+            observation_id,
+        });
     }
     result.product_identification.status = if result
         .products
@@ -312,12 +423,49 @@ pub(crate) fn remove_retired_products(
     }
 }
 
+pub(crate) fn mark_xmrig_freshness(
+    products: &mut [Product],
+    identification: Option<&Identification>,
+    observed_at: i64,
+) {
+    let Some(identification) = identification else {
+        return;
+    };
+    let attempt = identification.xmrig_attempt.as_ref();
+    for product in products.iter_mut().filter(|product| product.id == "xmrig") {
+        let observation = product
+            .observation
+            .get_or_insert_with(|| ProductObservation {
+                observed_at: identification.observed_at,
+                observation_id: String::new(),
+                stale: false,
+            });
+        observation.stale = !identification.is_current()
+            || observation.observed_at < observed_at
+            || attempt.is_some_and(|attempt| {
+                (attempt.observed_at, attempt.observation_id.as_str())
+                    > (observation.observed_at, observation.observation_id.as_str())
+            });
+    }
+}
+
 /// Raw fallback is allowed only when it belongs to this exact service observation.
 pub(crate) fn view(source: &Value, observed_at: i64, use_raw_data: bool) -> Products {
     let identification = source
         .get("product_identification")
         .cloned()
         .and_then(|value| serde_json::from_value::<Identification>(value).ok());
+    // Recomputing the latest raw response cannot recover a previous confirmation.
+    // Keep the indexed mining result until the endpoint projection is rebuilt.
+    let retain_indexed_xmrig = use_raw_data
+        && source["xmrig_confirmations"].is_object()
+        && identification
+            .as_ref()
+            .is_some_and(|value| !value.is_current());
+    let indexed_xmrig_attempt = identification
+        .as_ref()
+        .filter(|_| retain_indexed_xmrig)
+        .and_then(|value| value.xmrig_attempt.clone());
     let identification = identification.filter(|value| value.is_current() || !use_raw_data);
     let mut result = if let Some(identification) = identification {
         Products {
@@ -327,6 +475,7 @@ pub(crate) fn view(source: &Value, observed_at: i64, use_raw_data: bool) -> Prod
                 .and_then(|value| serde_json::from_value(value).ok())
                 .unwrap_or_default(),
             product_identification: identification,
+            xmrig_confirmations: BTreeMap::new(),
         }
     } else {
         infer(
@@ -335,12 +484,39 @@ pub(crate) fn view(source: &Value, observed_at: i64, use_raw_data: bool) -> Prod
             source.get("service_observation_ref").cloned(),
         )
     };
+    if retain_indexed_xmrig {
+        let indexed: Vec<Product> = source["products"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|product| product["id"] == "xmrig")
+            .filter_map(|product| serde_json::from_value(product.clone()).ok())
+            .collect();
+        result.products.retain(|product| product.id != "xmrig");
+        result.products.extend(indexed);
+        result.product_identification.xmrig_attempt = indexed_xmrig_attempt;
+    }
     remove_retired_products(
         &mut result.products,
         Some(&mut result.product_identification),
     );
     result.product_identification.stale = result.product_identification.observed_at < observed_at
         || !result.product_identification.is_current();
+    mark_xmrig_freshness(
+        &mut result.products,
+        Some(&result.product_identification),
+        observed_at,
+    );
+    if retain_indexed_xmrig {
+        for observation in result
+            .products
+            .iter_mut()
+            .filter(|product| product.id == "xmrig")
+            .filter_map(|product| product.observation.as_mut())
+        {
+            observation.stale = true;
+        }
+    }
     result
 }
 
@@ -349,7 +525,8 @@ pub(crate) fn mapping() -> Value {
         "id":{"type":"keyword"}, "name":{"type":"keyword"}, "component":{"type":"keyword"},
         "category":{"type":"keyword"},
         "version":{"type":"keyword"}, "assessment":{"type":"keyword"}, "basis":{"type":"keyword"},
-        "evidence":{"type":"object", "enabled":false}
+        "evidence":{"type":"object", "enabled":false},
+        "observation":{"type":"object", "enabled":false}
     }})
 }
 

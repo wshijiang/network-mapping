@@ -361,6 +361,7 @@ impl Rule {
             version: None,
             assessment: "suspected".into(),
             basis: self.basis.name().into(),
+            observation: None,
             evidence: vec![Evidence {
                 detection_method: Some(method.into()),
                 rule_id: self.id.clone(),

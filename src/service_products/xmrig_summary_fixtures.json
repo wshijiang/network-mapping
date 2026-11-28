@@ -1,0 +1,10 @@
+[
+  {"name":"released version","expected":"xmrig","body":{"kind":"miner","version":"6.24.0","ua":"XMRig/6.24.0","paused":false,"algorithms":["rx/0"],"hashrate":{"total":[1,null,0]}}},
+  {"name":"paused miner","expected":"xmrig","body":{"kind":"miner","version":"6.24.0","ua":"xmrig/6.24.0 (example)","paused":true,"algorithms":["rx/0"],"hashrate":{"total":[null,null,null]}}},
+  {"name":"another miner","expected":"other","body":{"kind":"miner","version":"1.2.3","ua":"OtherMiner/1.2.3","paused":false,"algorithms":["rx/0"],"hashrate":{"total":[0,0,0]}}},
+  {"name":"mismatched version","expected":"invalid","body":{"kind":"miner","version":"6.24.0","ua":"XMRig/6.25.0","paused":false,"algorithms":["rx/0"],"hashrate":{"total":[1,0,0]}}},
+  {"name":"unverified version suffix","expected":"invalid","body":{"kind":"miner","version":"6.24.0-dev","ua":"XMRig/6.24.0-dev","paused":false,"algorithms":["rx/0"],"hashrate":{"total":[1,0,0]}}},
+  {"name":"no reported algorithms","expected":"invalid","body":{"kind":"miner","version":"6.24.0","ua":"XMRig/6.24.0","paused":false,"algorithms":[],"hashrate":{"total":[1,0,0]}}},
+  {"name":"negative hashrate","expected":"invalid","body":{"kind":"miner","version":"6.24.0","ua":"XMRig/6.24.0","paused":false,"algorithms":["rx/0"],"hashrate":{"total":[-1,0,0]}}},
+  {"name":"invalid product token","expected":"invalid","body":{"kind":"miner","version":"6.24.0","ua":"XMRig?/6.24.0","paused":false,"algorithms":["rx/0"],"hashrate":{"total":[1,0,0]}}}
+]

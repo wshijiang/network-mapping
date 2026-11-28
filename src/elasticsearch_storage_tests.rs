@@ -1999,6 +1999,278 @@ pub(super) fn live_test_elasticsearch_config() -> crate::config::ElasticsearchCo
     }
 }
 
+fn xmrig_observation(key: &str, host: &str, status: &str, identity: Option<(&str, &str)>) -> Value {
+    let mut observation = json!({
+        "kind":"service", "ip_address":"192.0.2.1", "port":443,
+        "protocol":"tcp", "service":"http", "observation_key":key,
+        "data":{
+            "schema_version":2,
+            "xmrig_probe":{"status":status,"host":host},
+            "evidence":[{"module":"http","status":"success","result":{
+                "response":{"status_code":200,"headers":{"content_type":"text/html"},"body":"<html>Ordinary service</html>"}
+            }}]
+        }
+    });
+    if let Some((name, version)) = identity {
+        observation["data"]["evidence"].as_array_mut().unwrap().push(json!({
+            "module":"web_assets","status":"success","result":{"xmrig_summary":{
+                "status_code":200, "request":{"host":host}, "headers":{"content_type":"application/json"},
+                "body":json!({"kind":"miner","ua":format!("{name}/{version}"),"version":version,
+                    "paused":false,"algorithms":["rx/0"],"hashrate":{"total":[0,null,null]}}).to_string()
+            }}
+        }));
+    }
+    observation
+}
+
+#[test]
+fn xmrig_projection_distinguishes_attempts_and_host_scoped_confirmations() {
+    let context = dns_test_context();
+    let failed = xmrig_observation("timeout", "inventory.example", "timeout", None);
+    let document = endpoint_projection_document(&context, &failed, 1000);
+    assert_eq!(
+        document["product_identification"]["xmrig_attempt"]["status"],
+        "timeout"
+    );
+    assert_eq!(
+        document["product_identification"]["status"],
+        "insufficient_evidence"
+    );
+    assert!(document["xmrig_confirmations"].is_null());
+
+    let mut mismatched = xmrig_observation(
+        "mismatch",
+        "inventory.example",
+        "success",
+        Some(("OtherMiner", "6.24.0")),
+    );
+    mismatched["data"]["xmrig_probe"]["host"] = json!("other.example");
+    let document = endpoint_projection_document(&context, &mismatched, 2000);
+    assert_eq!(
+        document["product_identification"]["xmrig_attempt"]["status"],
+        "invalid_response"
+    );
+    assert!(document["xmrig_confirmations"].is_null());
+
+    mismatched["data"]["xmrig_probe"]["host"] = json!("inventory.example");
+    let document = endpoint_projection_document(&context, &mismatched, 2000);
+    assert_eq!(
+        document["product_identification"]["xmrig_attempt"]["status"],
+        "not_matched"
+    );
+    let confirmation = &document["xmrig_confirmations"]["inventory.example"];
+    assert_eq!(confirmation["observed_at"], 2000);
+    assert!(confirmation["product"].is_null());
+}
+
+#[tokio::test]
+#[ignore = "requires real ES via STORAGE_TEST_CONFIG_PATH or OS_TEST_ELASTICSEARCH_URL"]
+async fn live_elasticsearch_xmrig_retains_history_and_merges_confirmations_out_of_order() {
+    let service = ElasticsearchService::new(live_test_elasticsearch_config()).unwrap();
+    let index = format!("nm-test-xmrig-{}", Uuid::new_v4().simple());
+    let context = dns_test_context();
+    service
+        .send_json_request(
+            ElasticsearchOperation::IndexAdmin,
+            Method::PUT,
+            &format!("/{index}"),
+            |request| request.json(&scan_endpoint_index_definition(0)),
+        )
+        .await
+        .unwrap();
+    let host = "inventory.example";
+    let test = async {
+        let mut baseline = endpoint_projection_document(
+            &context,
+            &xmrig_observation("first", host, "success", Some(("XMRig", "6.24.0"))),
+            1000,
+        );
+        // An index written by the previous evaluator carries only products.
+        baseline["product_identification"]["evaluator_revision"] = json!(3);
+        baseline["product_identification"]
+            .as_object_mut()
+            .unwrap()
+            .remove("xmrig_attempt");
+        baseline["xmrig_confirmations"] = Value::Null;
+        baseline["products"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("observation");
+        service
+            .send_json_request(
+                ElasticsearchOperation::IndexAdmin,
+                Method::PUT,
+                &format!("/{index}/_doc/endpoint"),
+                |request| request.json(&baseline),
+            )
+            .await?;
+        let mut bulk = String::new();
+        for (key, at, scope, status, identity, version, stale, attempt) in [
+            (
+                "timeout",
+                3000,
+                host,
+                "timeout",
+                None,
+                Some("6.24.0"),
+                true,
+                "timeout",
+            ),
+            (
+                "newer-confirmation",
+                2000,
+                host,
+                "success",
+                Some(("XMRig", "6.25.0")),
+                Some("6.25.0"),
+                true,
+                "timeout",
+            ),
+            (
+                "other-host",
+                4000,
+                "other.example",
+                "success",
+                Some(("OtherMiner", "1.0.0")),
+                Some("6.25.0"),
+                true,
+                "not_matched",
+            ),
+            (
+                "confirmed",
+                5000,
+                host,
+                "success",
+                Some(("XMRig", "6.26.0")),
+                Some("6.26.0"),
+                false,
+                "matched",
+            ),
+            (
+                "confirmed-absent",
+                6000,
+                host,
+                "success",
+                Some(("OtherMiner", "1.0.0")),
+                None,
+                false,
+                "not_matched",
+            ),
+            (
+                "old-replay",
+                5500,
+                host,
+                "success",
+                Some(("XMRig", "6.26.0")),
+                None,
+                false,
+                "not_matched",
+            ),
+        ] {
+            let document = endpoint_projection_document(
+                &context,
+                &xmrig_observation(key, scope, status, identity),
+                at,
+            );
+            append_projection_update(&mut bulk, &index, "endpoint", &document)?;
+            let response = service
+                .send_bulk_with_retry("/_bulk?refresh=true", &bulk, false)
+                .await?;
+            if response["errors"] != false {
+                return Err(format!("XMRig projection failed: {response}"));
+            }
+            bulk.clear();
+            let result = service
+                .send_json_request(
+                    ElasticsearchOperation::ScanQuery,
+                    Method::GET,
+                    &format!("/{index}/_doc/endpoint"),
+                    |request| request,
+                )
+                .await?;
+            let source = &result["_source"];
+            let observed_at = source["observed_at_ms"]
+                .as_i64()
+                .ok_or("absent endpoint timestamp")?;
+            let view = crate::service_products::view(source, observed_at, false);
+            let product = view.products.iter().find(|product| product.id == "xmrig");
+            if product.and_then(|product| product.version.as_deref()) != version
+                || product
+                    .and_then(|product| product.observation.as_ref())
+                    .is_some_and(|observation| observation.stale)
+                    != stale
+                || view
+                    .product_identification
+                    .xmrig_attempt
+                    .as_ref()
+                    .map(|row| row.status.as_str())
+                    != Some(attempt)
+            {
+                return Err(format!("incorrect XMRig details after {key}: {source}"));
+            }
+            if key == "timeout" {
+                let mut previous_rules = source.clone();
+                previous_rules["product_identification"]["ruleset_revision"] = json!(7);
+                let recomputed = crate::service_products::view(&previous_rules, observed_at, true);
+                let retained = recomputed.products.iter().any(|product| {
+                    product.id == "xmrig"
+                        && product.version.as_deref() == Some("6.24.0")
+                        && product.observation.as_ref().is_some_and(|row| row.stale)
+                });
+                if !retained {
+                    return Err("rule recomputation lost the indexed XMRig confirmation".into());
+                }
+            }
+            let query = version.map_or("product = xmrig".to_owned(), |version| {
+                format!(r#"product = "xmrig@{version}""#)
+            });
+            let crate::handlers::search_dsl::ElasticsearchCompilation::Supported(filter) =
+                crate::handlers::search_dsl::parse_and_compile_elasticsearch(&query).unwrap()
+            else {
+                return Err(format!("unsupported query {query}"));
+            };
+            let result = service
+                .send_json_request(
+                    ElasticsearchOperation::ScanQuery,
+                    Method::POST,
+                    &format!("/{index}/_search"),
+                    |request| request.json(&json!({"query": filter})),
+                )
+                .await?;
+            if result["hits"]["total"]["value"] != if version.is_some() { 1 } else { 0 } {
+                return Err(format!(
+                    "incorrect XMRig search result after {key}: {result}"
+                ));
+            }
+            let hits = result["hits"]["hits"]
+                .as_array()
+                .ok_or("absent search hits")?;
+            let hits = super::parse_search_hits(hits)?;
+            if hits.first().is_some_and(|hit| {
+                hit.products[0]
+                    .observation
+                    .as_ref()
+                    .is_some_and(|row| row.stale)
+                    != stale
+            }) {
+                return Err(format!("incorrect XMRig search freshness after {key}"));
+            }
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+    let cleanup = service
+        .send_json_request(
+            ElasticsearchOperation::IndexAdmin,
+            Method::DELETE,
+            &format!("/{index}"),
+            |request| request,
+        )
+        .await;
+    test.unwrap();
+    cleanup.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires real ES via STORAGE_TEST_CONFIG_PATH or OS_TEST_ELASTICSEARCH_URL"]
 async fn live_elasticsearch_service_products_preserve_clocks_and_query_exact_versions() {
